@@ -1,0 +1,82 @@
+```python
+import numpy as np
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+        # Initialize the state
+        self.state = {'target_block': None, 'last_action': None}
+    
+    def act(self, observation):
+        observation_wall_locations = observation['wall_locations']
+        observation_agent_locations = observation['agent_locations']
+        observation_block_locations = observation['block_locations']
+        observation_agent_inventory = observation['agent_inventory']
+        observation_agent_inventory_colors = observation['agent_inventory_colors']
+        observation_block_colors = observation['block_colors']
+        observation_time = observation['time']
+        observation_terminal = observation['terminal']
+        observation_agent_id = observation['agent_id']
+        
+        if observation_terminal:
+            self.state = {'target_block': None, 'last_action': None}
+        
+        # Get agent's current position
+        agent_pos = observation_agent_locations[observation_agent_id]
+        
+        # Find first 3 blocks
+        red_blocks = []
+        for i, color in enumerate(observation_block_colors):
+            # if np.all(color == np.array([255, 0, 0])):
+            red_blocks.append((observation_block_locations[i], i))
+            if i == 2:
+                break
+        
+        # If no red blocks or inventory has a block, try to interact
+        if len(red_blocks) == 0 or observation_agent_inventory[observation_agent_id] == 1:
+            return 5  # interact action
+        
+        # If no target or target was collected, find the nearest red block
+        if self.state['target_block'] is None or self.state['target_block'] not in [b[1] for b in red_blocks]:
+            if red_blocks:
+                # Find the closest red block
+                distances = [np.sum(np.abs(agent_pos - block_pos)) for block_pos, _ in red_blocks]
+                closest_idx = np.argmin(distances)
+                self.state['target_block'] = red_blocks[closest_idx][1]
+                target_pos = red_blocks[closest_idx][0]
+            else:
+                # No red blocks, move randomly
+                return np.random.randint(self.num_actions)
+        else:
+            # Continue moving toward the current target
+            target_idx = [b[1] for b in red_blocks].index(self.state['target_block'])
+            target_pos = red_blocks[target_idx][0]
+        
+        # Simple heuristic: move in the direction that reduces distance to target
+        dx = target_pos[1] - agent_pos[1]  # x-distance
+        dy = target_pos[0] - agent_pos[0]  # y-distance
+        
+        # If at the target position, interact
+        if dx == 0 and dy == 0:
+            return 5  # interact
+        
+        # Prioritize the larger distance first
+        if abs(dx) > abs(dy):
+            if dx > 0:
+                return 1  # move right
+            elif dx < 0:
+                return 2  # move left
+        else:
+            if dy > 0:
+                return 3  # move down
+            elif dy < 0:
+                return 4  # move up
+        
+        # Fallback
+        return 0  # stay
+```
+
+This code block defines an agent that follows a path to collect all red blocks in the environment. The FSM agent initializes a path when it starts or when a new episode begins. Then, it follows the path step by step, executing actions to move towards and collect the red blocks. Once the entire path is completed, the agent will either stay in place or perform a random action, depending on whether the episode has ended or not.

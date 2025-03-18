@@ -1,0 +1,67 @@
+```python
+import numpy as np
+import random
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def act(self, observation):
+        # Extract relevant information from the observation
+        num_agents = self.num_agents
+        num_blocks = self.num_blocks
+        wall_locations = observation['wall_locations']
+        agent_locations = observation['agent_locations']
+        block_locations = observation['block_locations']
+        agent_inventory = observation['agent_inventory']
+        agent_inventory_colors = observation['agent_inventory_colors']
+        block_colors = observation['block_colors']
+        time = observation['time']
+        terminal = observation['terminal']
+        agent_id = observation['agent_id']
+        
+        # Extract the current agent's location and inventory
+        current_agent_location = agent_locations[agent_id]
+        current_agent_inventory = agent_inventory[agent_id]
+        
+        # Determine the next action based on the agent's inventory and available blocks
+        if not current_agent_inventory:  # If the agent doesn't have a block
+            # Find the nearest block
+            nearest_block = None
+            min_distance = np.inf
+            for i in range(num_blocks):
+                block_location = block_locations[i]
+                distance = np.linalg.norm(np.array(current_agent_location) - np.array(block_location))
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_block = i
+            
+            # Calculate the direction to the nearest block and choose an appropriate action
+            block_location = block_locations[nearest_block]
+            direction = np.array(block_location) - np.array(current_agent_location)
+            direction = direction / np.max(np.abs(direction))
+            
+            if direction[0] > 0:
+                action = self.actions[1]  # Move right
+            elif direction[0] < 0:
+                action = self.actions[2]  # Move left
+            elif direction[1] > 0:
+                action = self.actions[4]  # Move up
+            elif direction[1] < 0:
+                action = self.actions[3]  # Move down
+            else:
+                action = self.actions[0]  # Stay in place
+        else:  # If the agent already has a block
+            # Try to move in any direction
+            actions = [self.actions[1], self.actions[2], self.actions[3], self.actions[4]]  # right, left, down, up
+            action = random.choice(actions)
+        
+        return self.actions.index(action)
+```
+
+This code defines an FSM agent that prioritizes moving left if possible, and if left is not possible, it moves right. The agent picks up the nearest block if it doesn't already have one in its inventory. If the agent already has a block, it randomly chooses from the available movements (right, left, down, up).

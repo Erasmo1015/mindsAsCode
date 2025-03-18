@@ -1,0 +1,45 @@
+```python
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    '''
+    Your helper functions for decision-making go here
+    '''
+        
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        - agent_id: int
+        '''
+
+        agent_id = observation['agent_id']
+        agent_location = observation['agent_locations'][agent_id]
+        block_locations = observation['block_locations']
+        agent_inventory = observation['agent_inventory'][agent_id]
+
+        # L-shape pattern
+        # First move right, then move down
+        if observation['time'] % 2 == 0:
+            action = 1  # right
+        else:
+            action = 3  # down
+
+        return action
+
+    def get_action_name(self, action: int) -> str:
+        return self.action_to_name[action]
+```

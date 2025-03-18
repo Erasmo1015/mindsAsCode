@@ -1,0 +1,19 @@
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+
+    def act(self, observation) -> int:
+        # Placeholder implementation for behavior 6: Stay in place
+        action = 0  # stay
+
+        ## DON'T CHANGE ANYTHING BELOW HERE
+        assert action in range(self.num_actions)
+        return action
+```

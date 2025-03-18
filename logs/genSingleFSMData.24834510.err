@@ -1,0 +1,60 @@
+2025-03-13 15:16:28.924908: W external/xla/xla/service/platform_util.cc:205] unable to create StreamExecutor for CUDA:0: CUDA error: : CUDA_ERROR_ECC_UNCORRECTABLE: uncorrectable ECC error encountered
+Traceback (most recent call last):
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 935, in backends
+    backend = _init_backend(platform)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 1021, in _init_backend
+    backend = registration.factory()
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 713, in factory
+    return xla_client.make_c_api_client(plugin_name, updated_options, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jaxlib/xla_client.py", line 207, in make_c_api_client
+    return _xla.get_c_api_client(plugin_name, options, distributed_client)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jaxlib.xla_extension.XlaRuntimeError: INTERNAL: no supported devices found for platform CUDA
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/mmfs1/gscratch/socialrl/kjha/automaticity/main.py", line 1, in <module>
+    from environment import AutomaticityEnv, state_to_image
+  File "/mmfs1/gscratch/socialrl/kjha/automaticity/environment.py", line 13, in <module>
+    color_key = jax.random.PRNGKey(1)
+                ^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/random.py", line 246, in PRNGKey
+    return _return_prng_keys(True, _key('PRNGKey', seed, impl))
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/random.py", line 198, in _key
+    return prng.random_seed(seed, impl=impl)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/prng.py", line 529, in random_seed
+    seeds_arr = jnp.asarray(np.int64(seeds))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5820, in asarray
+    return array(a, dtype=dtype, copy=bool(copy), order=order, device=device)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/numpy/lax_numpy.py", line 5653, in array
+    out_array: Array = lax_internal._convert_element_type(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 612, in _convert_element_type
+    return convert_element_type_p.bind(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/core.py", line 463, in bind
+    return self.bind_with_trace(prev_trace, args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/lax/lax.py", line 3254, in _convert_element_type_bind_with_trace
+    operand = core.Primitive.bind_with_trace(convert_element_type_p, trace, args, params)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/core.py", line 468, in bind_with_trace
+    return trace.process_primitive(self, args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/core.py", line 954, in process_primitive
+    return primitive.impl(*args, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mmfs1/gscratch/socialrl/kjha/miniconda3/envs/llm/lib/python3.12/site-packages/jax/_src/dispatch.py", line 89, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+RuntimeError: Unable to initialize backend 'cuda': INTERNAL: no supported devices found for platform CUDA (you may need to uninstall the failing plugin package, or set JAX_PLATFORMS=cpu to skip this backend.)
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.

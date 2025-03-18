@@ -1,0 +1,37 @@
+ When fleshing out the logic, please use a comment above each line explaining the purpose of the following line. Referencing specific behaviors above will help us verify your approach. Code readability and understanding are key, so be as clear and concise as possible. Ensure that the agent can only move in 4 cardinal directions (up, down, left, right) and does not exceed the boundaries of the grid. Also ensure that the agent can only move if the next cell is not filled by a wall or occupied by another agent. The agent should avoid unnecessary movements and only move when necessary. Use modular programming to keep your code clean and manageable.
+
+```python
+# Initialize the agent class using the provided code skeleton
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    # Your helper functions for decision-making go here
+    def get_next_action(self, observation):
+        # Get the current agent's location
+        agent_location = observation['agent_locations'][observation['agent_id']]
+        wall_locations = observation['wall_locations']
+        agent_locations = observation['agent_locations']
+        
+        # Define the four cardinal directions (right, left, down, up)
+        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        direction_to_action = {(1, 0): 1, (-1, 0): 2, (0, 1): 3, (0, -1): 4}
+        
+        # Check each cardinal direction for a valid move
+        for dr, dc in directions:
+            nr, nc = agent_location[0] + dr, agent_location[1] + dc
+            # Check if the new position is valid (not a wall, not occupied by another agent)
+            if (nr, nc) not in wall_locations and all(agli != (nr, nc) for agli in agent_locations):
+                return direction_to_action[(dr, dc)]
+        
+        # If no valid move is found, stay in place
+        return 0
+        
+    def act(self, observation) -> int:
+        return self.get_next_action(observation)
+```

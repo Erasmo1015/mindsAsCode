@@ -1,0 +1,22 @@
+
+
+1. Always move right.
+2. Wander randomly without any specific direction.
+3. Always pick up the nearest block.
+4. Move in a vertical line (up and down).
+5. Bounce off walls without moving beyond them.
+6. Stay in place.
+7. Always pick up red blocks.
+8. Only pick up the first block encountered.
+9. Move towards the farthest block each time.
+10. Follow a clockwise square pattern.
+11. SnakE through the grid (right, up, left, down).
+12. Collect blocks of a specific color.
+13. Move left if possible, otherwise right.
+14. Move in an L-shape pattern.
+15. Oscillate between two points.
+16. Follow a path to collect all blocks of a specific color.
+17. Create a spiral movement pattern.
+18. Move diagonally towards blocks.
+19. Return to a specific location when possible.
+20. Maximize the number of blocks collected frontally.

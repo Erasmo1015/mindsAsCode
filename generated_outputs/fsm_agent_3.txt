@@ -1,0 +1,53 @@
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def nearest_block(self, observation, agent_id):
+        agent_location = observation["agent_locations"][agent_id]
+        block_locations = observation["block_locations"]
+        min_distance = float('inf')
+        nearest_block_index = -1
+        
+        for i, block_location in enumerate(block_locations):
+            distance = np.linalg.norm(np.array(agent_location) - np.array(block_location))
+            if distance < min_distance:
+                min_distance = distance
+                nearest_block_index = i
+        
+        return nearest_block_index
+    
+    def act(self, observation) -> int:
+        agent_id = observation["agent_id"]
+        nearest_block_index = self.nearest_block(observation, agent_id)
+        
+        if nearest_block_index == -1:
+            # No blocks left to pick up, stay in place
+            return 0
+        else:
+            # Pick up the nearest block
+            block_locations = observation["block_locations"]
+            nearest_block_location = block_locations[nearest_block_index]
+            agent_location = observation["agent_locations"][agent_id]
+            
+            # Determine the direction towards the nearest block
+            if nearest_block_location[0] > agent_location[0]:
+                return 1  # Move right
+            elif nearest_block_location[0] < agent_location[0]:
+                return 2  # Move left
+            elif nearest_block_location[1] > agent_location[1]:
+                return 3  # Move down
+            else:
+                return 4  # Move up
+
+        ## DON'T CHANGE ANYTHING BELOW HERE
+        assert action in range(self.num_actions)
+        return action
+```

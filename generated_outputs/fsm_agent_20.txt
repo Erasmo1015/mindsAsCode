@@ -1,0 +1,53 @@
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+        
+
+    def act(self, observation) -> int:
+        wall_locations = observation['wall_locations']
+        agent_locations = observation['agent_locations']
+        block_locations = observation['block_locations']
+        agent_inventory = observation['agent_inventory']
+        agent_inventory_colors = observation['agent_inventory_colors']
+        block_colors = observation['block_colors']
+        time = observation['time']
+        terminal = observation['terminal']
+        agent_id = observation['agent_id']
+        
+        # Find the nearest block
+        nearest_block = None
+        shortest_distance = float('inf')
+        for block in block_locations:
+            distance = np.linalg.norm(np.array(block) - np.array(agent_locations[agent_id]))
+            if distance < shortest_distance:
+                shortest_distance = distance
+                nearest_block = block
+        
+        if nearest_block is not None:
+            # Find the direction towards the nearest block
+            direction = np.array(nearest_block) - np.array(agent_locations[agent_id])
+            direction = np.sign(direction)
+            if np.allclose(direction, np.array([1, 0])):
+                return 1
+            elif np.allclose(direction, np.array([-1, 0])):
+                return 2
+            elif np.allclose(direction, np.array([0, 1])):
+                return 3
+            elif np.allclose(direction, np.array([0, -1])):
+                return 4
+            else:  # If the agent is already facing the nearest block
+                if agent_inventory[agent_id] == -1:
+                    return 0  # Stay
+                else:
+                    return 5  # Interact
+        else:
+            return 0  # Stay if no blocks are available
+
+```
