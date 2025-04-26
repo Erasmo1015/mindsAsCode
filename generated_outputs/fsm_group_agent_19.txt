@@ -1,0 +1,74 @@
+
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def get_closest_block(self, agent_pos, block_positions, agent_inventory):
+        distances = [np.linalg.norm(np.array(agent_pos) - np.array(block_pos)) for block_pos in block_positions]
+        closest_block_idx = np.argmin(distances)
+        closest_block_pos = block_positions[closest_block_idx]
+        closest_block_dist = distances[closest_block_idx]
+
+        # Check if the closest block is already carried by an agent
+        for i, inventory in enumerate(agent_inventory):
+            if inventory and np.array_equal(closest_block_pos, block_positions[i]):
+                return i, closest_block_pos
+
+        return closest_block_idx, closest_block_pos
+
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        '''
+
+        action = [-1] * self.num_agents
+        for i in range(self.num_agents):
+            if observation['agent_inventory'][i]:
+                # Find the closest block to drop off
+                _, closest_block_pos = self.get_closest_block(observation['agent_locations'][i], observation['block_locations'], observation['agent_inventory'])
+                if np.array_equal(observation['agent_locations'][i], closest_block_pos):
+                    # Drop off the block
+                    action[i] = 5  # Interact
+                else:
+                    # Move towards the block
+                    move_vector = np.array(closest_block_pos) - np.array(observation['agent_locations'][i])
+                    if move_vector[0] > 0:
+                        action[i] = 3  # down
+                    elif move_vector[0] < 0:
+                        action[i] = 4  # up
+                    elif move_vector[1] > 0:
+                        action[i] = 1  # right
+                    elif move_vector[1] < 0:
+                        action[i] = 2  # left
+            else:
+                # Find the closest block to pick up
+                closest_block_idx, _ = self.get_closest_block(observation['agent_locations'][i], observation['block_locations'], observation['agent_inventory'])
+                closest_block_pos = observation['block_locations'][closest_block_idx]
+                move_vector = np.array(closest_block_pos) - np.array(observation['agent_locations'][i])
+                if move_vector[0] > 0:
+                    action[i] = 3  # down
+                elif move_vector[0] < 0:
+                    action[i] = 4  # up
+                elif move_vector[1] > 0:
+                    action[i] = 1  # right
+                elif move_vector[1] < 0:
+                    action[i] = 2  # left
+
+        return action
+```

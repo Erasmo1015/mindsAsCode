@@ -200,7 +200,7 @@ class AgentExecutionFramework:
             return self._execution_namespace['_AGENT_INSTANCE']
             
         except Exception as e:
-            traceback.print_exc()
+            # traceback.print_exc()
             raise RuntimeError(f"Agent compilation failed: {str(e)}") from e
 
     def execute_agent(
@@ -215,5 +215,5 @@ class AgentExecutionFramework:
         try:
             return agent.act(observation)
         except Exception as e:
-            traceback.print_exc()
+            # traceback.print_exc()
             raise RuntimeError(f"Agent execution failed: {str(e)}") from e

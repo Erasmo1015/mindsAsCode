@@ -1,0 +1,54 @@
+            
+ ```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def get_direction(self, agent_pos, target_pos):
+        """
+        Returns the direction to move to reach the target position from the agent's current position.
+        """
+        dx = target_pos[0] - agent_pos[0]
+        dy = target_pos[1] - agent_pos[1]
+        if abs(dx) > abs(dy):
+            return 1 if dx > 0 else 2
+        else:
+            return 3 if dy > 0 else 4
+
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        '''
+        action = []
+        for i in range(self.num_agents):
+            agent_pos = observation['agent_locations'][i]
+            target_pos = None
+            closest_distance = float('inf')
+
+            for j in range(len(observation['block_locations'])):
+                block_pos = observation['block_locations'][j]
+                distance = abs(block_pos[0] - agent_pos[0]) + abs(block_pos[1] - agent_pos[1])
+                if distance < closest_distance:
+                    closest_distance = distance
+                    target_pos = block_pos
+
+            direction = self.get_direction(agent_pos, target_pos)
+            action.append(direction)
+
+        return action
+```

@@ -1,0 +1,56 @@
+This environment simulates potentially multiple agents interacting in a grid world filled with colored blocks and walls. The world is a square grid (default 10×10) with walls on the perimeter. There are also walls scattered across the interior 6x6 region. Multiple agents, each represented by a distinct color (red, blue, green, etc.), navigate this space alongside colored blocks that can be picked up and transported.
+
+Agents can perform six basic actions: staying in place, moving in any of the four cardinal directions (up, down, left, right), or interacting with blocks. If agents walk onto a grid cell that a colored block is on and they don’t have an item in their inventory, that block is automatically added to their inventory. If they press the interact button, they stay in place, but remove the item they had from their inventory.  Importantly, agents can't occupy the same space or swap positions, and they're limited to carrying one block at a time. If you don’t have an item in your inventory, this is represented by your inventory being equal to -1. If you are holding a block and try walking onto a cell where another block is, you will remain in the same place with the same block in your inventory (equivalent of a stay action).
+
+Each agent receives detailed information about the environment's state, including the positions of all walls, agents, and blocks, as well as information about what blocks are being carried by which agents. The environment can be visualized with walls as gray squares, agents as colored circles, and blocks as colored triangles. When an agent is carrying a block, this is represented by a small triangle of the block's color appearing inside the agent's circle. Episodes typically run for a maximum of 100 timesteps, though this can be configured.
+
+Here is what the code skeleton looks like:
+
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    '''
+    Your helper functions for decision-making go here
+    '''
+        
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        '''
+
+        # TODO: Implement the agent's decision-making logic here
+        # This is a placeholder implementation that returns a random action
+        action = np.random.randint(self.num_actions, size=self.num_agents)
+
+
+
+        ## DON'T CHANGE ANYTHING BELOW HERE
+        for a in action:
+            assert a in range(self.num_actions)
+        return action
+
+
+Generate 20 novel, interesting, and unique group behaviors that could be built off the provided code skeleton. Make sure to include a mix of behaviors that are simple, complex, and everything in between, assuming the FSMAgent class produces actions for each agent in a single output at each timestep.
+
+Return your answer in the following format:
+1. behavior 1
+2. behavior 2
+3. behavior 3
+
+Your answer here:

@@ -8,6 +8,7 @@ import cv2
 import imageio
 import jax
 import jax.numpy as jnp
+from functools import partial
 
 # generate 20 random colors
 color_key = jax.random.PRNGKey(1)
@@ -109,8 +110,9 @@ class AutomaticityEnv:
         
         return self.get_observation(state), state
     
-    def step(self, state: State, actions: List[Tuple[int, int, int]]) -> Tuple[Dict[str, np.ndarray], State]:
+    def step(self, state: State, actions: List[int]) -> Tuple[Dict[str, np.ndarray], State]:
         if len(actions) != self.num_agents:
+            breakpoint()
             raise ValueError("Must provide actions for all agents")
         
         # Calculate new positions for all agents
@@ -227,141 +229,57 @@ class AutomaticityEnv:
         return obs_list
         
 
-def state_to_image(state: Dict[str, np.ndarray], size: int) -> np.ndarray:
+def state_to_image(state: Dict[str, np.ndarray], size: int, tile_size: int = 10) -> np.ndarray:
     """Convert a state into a RGB numpy array with shape (H, W, 3)."""
     # Create a blank white canvas
-    image = np.ones((size * 50, size * 50, 3), dtype=np.uint8) * 255
+    image = np.ones((size * tile_size, size * tile_size, 3), dtype=np.uint8) * 255
     
-    # Draw grid lines
+    # Draw grid lines (thinner)
     for i in range(size + 1):
-        image[i * 50 - 1:i * 50 + 1, :] = [0, 0, 0]  # horizontal lines
-        image[:, i * 50 - 1:i * 50 + 1] = [0, 0, 0]  # vertical lines
+        # Draw single-pixel grid lines
+        image[min(i * tile_size, image.shape[0] - 1), :] = [200, 200, 200]  # horizontal lines
+        image[:, min(i * tile_size, image.shape[1] - 1)] = [200, 200, 200]  # vertical lines
     
     # Draw walls (gray) (jax array of num_walls x 2)
     for wall in state['wall_locations']:
         x, y = wall
-        image[y*50:(y+1)*50, x*50:(x+1)*50] = [128, 128, 128]
+        image[y*tile_size:(y+1)*tile_size, x*tile_size:(x+1)*tile_size] = [128, 128, 128]
     
-    # Draw blocks (colored triangles) (jax array of num_blocks x 2)
+    # Draw blocks (colored squares centered in cells) (jax array of num_blocks x 2)
     for idx, block in enumerate(state['block_locations']):
         x, y = block
         color = state['block_colors'][idx]
-        # Create triangle coordinates
-        triangle_pts = np.array([
-            [(x+0.5)*50, (y+0.2)*50],  # top
-            [(x+0.2)*50, (y+0.8)*50],  # bottom left
-            [(x+0.8)*50, (y+0.8)*50]   # bottom right
-        ], dtype=np.int32)
-        # Fill triangle with the block's color
-        cv2.fillPoly(image, [triangle_pts], color=color.tolist())
+        # Create centered square coordinates (smaller than the cell)
+        block_size = int(tile_size * 0.6)  # 60% of tile size
+        offset = (tile_size - block_size) // 2  # Center the block
+        square_x1, square_y1 = x*tile_size + offset, y*tile_size + offset
+        square_x2, square_y2 = square_x1 + block_size, square_y1 + block_size
+        # Fill square with the block's color
+        image[square_y1:square_y2, square_x1:square_x2] = color.tolist()
     
     # Draw agents (colored circles) (jax array of num_agents x 2)
     for idx, agent in enumerate(state['agent_locations']):
         x, y = agent
-        center = (int((x+0.5)*50), int((y+0.5)*50))
+        center = (int((x+0.5)*tile_size), int((y+0.5)*tile_size))
         # Draw agent circle with the agent's color
         agent_color = agent_colors[idx % len(agent_colors)]
-        cv2.circle(image, center, 20, color=agent_color.tolist(), thickness=-1)
+        radius = max(2, tile_size // 5)  # Scale radius with tile size
+        cv2.circle(image, center, radius, color=agent_color.tolist(), thickness=-1)
         
-        # If agent has an item, draw small triangle inside with the block's color
+        # If agent has an item, draw small square inside with the block's color
         if state['agent_inventory'][idx] != -1:
-            small_triangle_pts = np.array([
-                [center[0], center[1]-10],      # top
-                [center[0]-10, center[1]+10],   # bottom left
-                [center[0]+10, center[1]+10]    # bottom right
-            ], dtype=np.int32)
+            small_square_size = max(2, tile_size // 5)
+            small_x1 = center[0] - small_square_size//2
+            small_y1 = center[1] - small_square_size//2
+            small_x2 = center[0] + small_square_size//2
+            small_y2 = center[1] + small_square_size//2
             # Use the color from agent's inventory (jax array of num_agents x 3)
             block_color = state['agent_inventory_colors'][idx]
-            cv2.fillPoly(image, [small_triangle_pts], color=block_color.tolist())
-    
-    return image
-
-
-
-def state_to_image_jit(state: Dict[str, jnp.ndarray], size: int) -> jnp.ndarray:
-    """Convert a state into a RGB numpy array with shape (H, W, 3) using JAX for JIT compatibility.
-    Uses vectorized operations for better performance."""
-    tile_size = 12
-    img_size = size * tile_size
-    
-    # Start with white background
-    image = jnp.ones((img_size, img_size, 3), dtype=jnp.uint8) * 255
-    
-    # Draw grid lines
-    for i in range(size + 1):
-        # Create grid line masks
-        h_mask = point_in_rect(0, img_size, i*tile_size-1, i*tile_size+1)
-        v_mask = point_in_rect(i*tile_size-1, i*tile_size+1, 0, img_size)
-        
-        # Apply grid lines
-        image = fill_coords(image, h_mask, jnp.array([0, 0, 0]))
-        image = fill_coords(image, v_mask, jnp.array([0, 0, 0]))
-    
-    # Draw walls (gray)
-    def draw_wall(i, img):
-        wall = state['wall_locations'][i]
-        x, y = wall[0], wall[1]
-        wall_mask = point_in_rect(x*tile_size, (x+1)*tile_size, y*tile_size, (y+1)*tile_size)
-        return fill_coords(img, wall_mask, jnp.array([128, 128, 128], dtype=jnp.uint8))
-    
-    image = jax.lax.fori_loop(0, len(state['wall_locations']), draw_wall, image)
-    
-    # Draw blocks (colored triangles)
-    def draw_block(i, img):
-        block_loc = state['block_locations'][i]
-        color = state['block_colors'][i]
-        x, y = block_loc[0], block_loc[1]
-        
-        # Create triangle points (normalized coordinates within cell)
-        top = (x + 0.5, y + 0.2)
-        bottom_left = (x + 0.2, y + 0.8)
-        bottom_right = (x + 0.8, y + 0.8)
-        
-        # Create triangle mask
-        triangle_mask = point_in_triangle(top, bottom_left, bottom_right)
-        return fill_coords(img, triangle_mask, color)
-    
-    image = jax.lax.fori_loop(0, len(state['block_locations']), draw_block, image)
-    
-    # Draw agents (colored circles)
-    def draw_agent(i, img):
-        agent_loc = state['agent_locations'][i]
-        x, y = agent_loc[0], agent_loc[1]
-        agent_color = agent_colors[i % len(agent_colors)]
-        
-        # Create circle mask
-        center_x, center_y = (x + 0.5), (y + 0.5)
-        radius = 0.4  # 20px / 50px = 0.4 in normalized coordinates
-        
-        def circle_mask(px, py):
-            return ((px - center_x)**2 + (py - center_y)**2) <= radius**2
-        
-        # Apply agent color
-        img = fill_coords(img, circle_mask, agent_color)
-        
-        # Draw inventory triangle if agent has item
-        has_item = state['agent_inventory'][i] != -1
-        
-        def draw_inventory():
-            inventory_color = state['agent_inventory_colors'][i]
-            
-            # Small triangle inside the circle (normalized coordinates)
-            tri_top = (center_x, center_y - 0.2)
-            tri_bl = (center_x - 0.2, center_y + 0.2)
-            tri_br = (center_x + 0.2, center_y + 0.2)
-            
-            # Create triangle mask
-            tri_mask = point_in_triangle(tri_top, tri_bl, tri_br)
-            return fill_coords(img, tri_mask, inventory_color)
-        
-        return jax.lax.cond(has_item, draw_inventory, lambda: img)
-    
-    image = jax.lax.fori_loop(0, len(state['agent_locations']), draw_agent, image)
+            image[small_y1:small_y2, small_x1:small_x2] = block_color.tolist()
     
     return image
 
 def point_in_rect(xmin, xmax, ymin, ymax):
-    """Returns a function that tests if a point is within a rectangle."""
     def fn(x, y):
         return jnp.logical_and(
             jnp.logical_and(x >= xmin, x <= xmax),
@@ -369,58 +287,150 @@ def point_in_rect(xmin, xmax, ymin, ymax):
         )
     return fn
 
-def point_in_triangle(a, b, c):
-    """Returns a function that tests if a point is within a triangle."""
-    a, b, c = jnp.array(a), jnp.array(b), jnp.array(c)
+def point_in_circle(cx, cy, r):
     def fn(x, y):
-        # Create a mesh grid of points
-        y_indices, x_indices = jnp.meshgrid(jnp.arange(x.shape[0]), jnp.arange(x.shape[1]), indexing='ij')
-        # Convert to normalized coordinates
-        yf = y_indices / x.shape[0]
-        xf = x_indices / x.shape[1]
-        
-        # Vectorized barycentric coordinate calculation
-        v0 = c - a
-        v1 = b - a
-        
-        # For each point in the grid
-        points = jnp.stack([xf.ravel(), yf.ravel()], axis=1)
-        v2 = points - a
-        
-        # Compute dot products
-        dot00 = jnp.dot(v0, v0)
-        dot01 = jnp.dot(v0, v1)
-        dot11 = jnp.dot(v1, v1)
-        
-        # Vectorized dot products for all points
-        dot02 = jnp.dot(v2, v0)
-        dot12 = jnp.dot(v2, v1)
-        
-        # Compute barycentric coordinates
-        inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01)
-        u = (dot11 * dot02 - dot01 * dot12) * inv_denom
-        v = (dot00 * dot12 - dot01 * dot02) * inv_denom
-        
-        # Check if point is in triangle
-        mask = jnp.logical_and(
-            jnp.logical_and(u >= 0, v >= 0),
-            (u + v) <= 1
-        )
-        
-        return mask.reshape(x.shape)
+        return ((x - cx) ** 2 + (y - cy) ** 2) <= r ** 2
     return fn
 
 def fill_coords(img, fn, color):
-    """Fill pixels in the image according to a mask function."""
-    # Create coordinate grid
-    y_indices, x_indices = jnp.meshgrid(jnp.arange(img.shape[0]), jnp.arange(img.shape[1]), indexing='ij')
-    # Normalize coordinates to [0, 1] range
-    yf = y_indices / img.shape[0]
-    xf = x_indices / img.shape[1]
-    
-    # Apply mask function
+    y, x = jnp.meshgrid(jnp.arange(img.shape[0]), jnp.arange(img.shape[1]), indexing='ij')
+    yf = (y + 0.5) / img.shape[0]
+    xf = (x + 0.5) / img.shape[1]
     mask = fn(xf, yf)
-    mask = jnp.expand_dims(mask, axis=-1)
+    return jnp.where(mask[:, :, None], color, img)
+
+
+def state_to_image_jit(state, img_size, size, tile_size=10):
+    """Convert a state into a RGB numpy array with shape (H, W, 3) using JAX for JIT compatibility."""
     
-    # Fill pixels where mask is True
-    return jnp.where(mask, color, img)
+    # Create a blank white canvas
+    image = jnp.ones((img_size, img_size, 3), dtype=jnp.uint8) * 255
+    
+    # Draw grid lines
+    grid_color = jnp.array([200, 200, 200], dtype=jnp.uint8)
+    
+    # Fix grid lines by making them thicker and properly scaled
+    for i in range(size + 1):
+        # Calculate normalized position for grid lines
+        pos = i / size
+        # Make lines thicker for visibility
+        thickness = 0.01  # Adjust thickness as needed
+        
+        # Horizontal lines
+        fn = point_in_rect(0, 1, pos - thickness, pos + thickness)
+        image = fill_coords(image, fn, grid_color)
+        
+        # Vertical lines
+        fn = point_in_rect(pos - thickness, pos + thickness, 0, 1)
+        image = fill_coords(image, fn, grid_color)
+    
+    # Draw walls (gray)
+    wall_color = jnp.array([128, 128, 128], dtype=jnp.uint8)
+    
+    def draw_wall(carry, wall):
+        img = carry
+        x, y = wall[0] / size, wall[1] / size
+        fn = point_in_rect(x, x + 1/size, y, y + 1/size)
+        return fill_coords(img, fn, wall_color), None
+    
+    # Apply draw_wall to each wall location
+    image, _ = jax.lax.scan(
+        draw_wall,
+        image,
+        state['wall_locations']
+    )
+
+    # Draw blocks (colored squares centered in cells)
+    def draw_block(carry, block_data):
+        img = carry
+        block, color = block_data
+        x, y = block[0] / size, block[1] / size
+        
+        # Create centered square
+        block_size = 0.6 / size  # 60% of tile size
+        offset = (1/size - block_size) / 2  # Center the block
+        fn = point_in_rect(
+            x + offset, x + offset + block_size,
+            y + offset, y + offset + block_size
+        )
+        return fill_coords(img, fn, color).astype(jnp.uint8), None
+    
+    # Apply draw_block to each block
+    image, _ = jax.lax.scan(
+        draw_block,
+        image,
+        (state['block_locations'], state['block_colors'])
+    )
+    
+    # Draw agents (colored circles)
+    def draw_agent(carry, i):
+        img = carry
+        agent = state['agent_locations'][i]
+        x, y = (agent[0] + 0.5) / size, (agent[1] + 0.5) / size
+        
+        # Get agent color
+        agent_color = agent_colors[i % len(agent_colors)]
+        
+        # Draw agent circle
+        radius = max(0.02, 0.2 / size)  # Scale radius with tile size
+        fn = point_in_circle(x, y, radius)
+        img = fill_coords(img, fn, agent_color).astype(jnp.uint8)
+        
+        # If agent has an item, draw small square inside with the block's color
+        has_item = state['agent_inventory'][i] != -1
+        
+        def draw_inventory(img_with_agent):
+            inventory_color = state['agent_inventory_colors'][i]
+            
+            # Small square inside the circle
+            small_square_size = max(0.02, 0.1 / size)
+            fn = point_in_rect(
+                x - small_square_size/2, x + small_square_size/2,
+                y - small_square_size/2, y + small_square_size/2
+            )
+            return fill_coords(img_with_agent, fn, inventory_color).astype(jnp.uint8)
+        
+        # Only draw inventory if agent has an item
+        img = jax.lax.cond(
+            has_item,
+            draw_inventory,
+            lambda x: x,
+            img
+        )
+        return img.astype(jnp.uint8), None
+    
+    # Apply draw_agent to each agent using scan
+    image, _ = jax.lax.scan(
+        draw_agent,
+        image,
+        jnp.arange(len(state['agent_locations']))
+    )
+    
+    return image
+
+if __name__ == "__main__":
+    num_agents = 10
+    tile_size = 8
+    grid_size = 10
+
+    env = AutomaticityEnv(num_agents=num_agents, size=grid_size, max_steps=100, num_blocks=10, num_walls=20)
+    obs, state = env.reset()
+    obs = obs[0]
+    obs = jax.tree.map(lambda x: jnp.array(x), obs)
+    
+    # Test the original function
+    image = state_to_image(obs, grid_size, tile_size=tile_size)
+    plt.figure(figsize=(8, 8))
+    plt.subplot(1, 2, 1)
+    plt.title("Original")
+    plt.imshow(image)
+    
+    # Test the JIT-compatible function
+    jitted_render = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+    img_size = grid_size * tile_size
+    jit_image = jitted_render(obs, img_size, grid_size, tile_size)
+    plt.subplot(1, 2, 2)
+    plt.title("JIT")
+    plt.imshow(jit_image)
+    
+    plt.savefig("environment_comparison.png")

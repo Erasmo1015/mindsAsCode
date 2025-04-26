@@ -1,0 +1,3 @@
+For this failed code, do you know what the source of the error is? Do you know what your code is missing and what you need to change? Please improve your code to model the logic of the agent's decision making for all the experiences. Please implement the code following the template. Feel free to implement the helper functions you need.
+
+You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action and action distribution. If the code is too long, try to refactor it to be shorter. Only return one instance of the new code, no other text explaining the code or changes you made.

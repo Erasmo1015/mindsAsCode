@@ -172,3 +172,8 @@ cython_debug/
 
 jax-r1
 data/*
+*.csv
+logs/*
+baselines/BC/*
+baselines/FSM/*
+baselines/ToMnet/*

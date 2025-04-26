@@ -1,0 +1,73 @@
+
+
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        '''
+        
+        # Implement Block Sorter behavior (agents sort blocks by color)
+        action = np.zeros(self.num_agents, dtype=int)
+        
+        for agent_idx in range(self.num_agents):
+            if observation['agent_inventory'][agent_idx] == -1:
+                # Agent is not carrying a block, find the nearest block and try to pick it up
+                block_distances = np.linalg.norm(observation['agent_locations'][agent_idx] - observation['block_locations'], axis=1)
+                nearest_block_idx = np.argmin(block_distances)
+                nearest_block_location = observation['block_locations'][nearest_block_idx]
+                
+                # Check if the nearest block is in the same row or column as the agent
+                if observation['agent_locations'][agent_idx, 0] == nearest_block_location[0]:
+                    # Same row, move left or right
+                    if nearest_block_location[1] > observation['agent_locations'][agent_idx, 1]:
+                        action[agent_idx] = 1  # right
+                    else:
+                        action[agent_idx] = 2  # left
+                elif observation['agent_locations'][agent_idx, 1] == nearest_block_location[1]:
+                    # Same column, move up or down
+                    if nearest_block_location[0] > observation['agent_locations'][agent_idx, 0]:
+                        action[agent_idx] = 3  # down
+                    else:
+                        action[agent_idx] = 4  # up
+            else:
+                # Agent is carrying a block, move it to a target location
+                target_location = None
+                for target_idx in range(self.num_agents):
+                    if target_idx != agent_idx and observation['agent_inventory'][target_idx] == -1:
+                        target_location = observation['agent_locations'][target_idx]
+                        break
+                if target_location is not None:
+                    # Move towards the target location
+                    if target_location[0] > observation['agent_locations'][agent_idx, 0]:
+                        action[agent_idx] = 3  # down
+                    elif target_location[0] < observation['agent_locations'][agent_idx, 0]:
+                        action[agent_idx] = 4  # up
+                    elif target_location[1] > observation['agent_locations'][agent_idx, 1]:
+                        action[agent_idx] = 1  # right
+                    elif target_location[1] < observation['agent_locations'][agent_idx, 1]:
+                        action[agent_idx] = 2  # left
+                else:
+                    # No empty inventory found, stay in place
+                    action[agent_idx] = 0  # stay
+        
+        return action
+```

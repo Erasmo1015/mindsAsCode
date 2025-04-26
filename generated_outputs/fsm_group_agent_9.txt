@@ -1,0 +1,93 @@
+
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def find_shortest_path(self, start, goal, walls):
+        # Simple A* pathfinding algorithm
+        open_set = [start]
+        came_from = {}
+        g_score = {start: 0}
+        f_score = {start: self.heuristic(start, goal)}
+        
+        while open_set:
+            current = min(open_set, key=lambda x: f_score[x])
+            if current == goal:
+                return self.reconstruct_path(came_from, current)
+            
+            open_set.remove(current)
+            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if neighbor in walls:
+                    continue
+                tentative_g_score = g_score[current] + 1
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + self.heuristic(neighbor, goal)
+                    open_set.append(neighbor)
+        return None
+    
+    def heuristic(self, a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    
+    def reconstruct_path(self, came_from, current):
+        path = []
+        while current in came_from:
+            path.append(current)
+            current = came_from[current]
+        path.reverse()
+        return path
+    
+    def act(self, observation) -> int:
+        wall_locations = observation['wall_locations']
+        agent_locations = observation['agent_locations']
+        block_locations = observation['block_locations']
+        agent_inventory = observation['agent_inventory']
+        agent_inventory_colors = observation['agent_inventory_colors']
+        block_colors = observation['block_colors']
+        time = observation['time']
+        terminal = observation['terminal']
+
+        # Behavior 9: Pathfinder
+        actions = []
+        for i in range(self.num_agents):
+            if agent_inventory[i] == -1:  # If the agent doesn't have a block
+                if time < 20:  # Initially, agents will explore a bit
+                    action = np.random.randint(4)  # Random movement
+                else:
+                    # Find the closest block or goal location
+                    goal = (np.random.randint(6, 9), np.random.randint(6, 9))  # Random goal inside the 6x6 grid
+                    # Convert agent location to tuple to ensure it's hashable
+                    agent_pos = tuple(agent_locations[i])
+                    # Convert wall locations to tuples if they aren't already
+                    wall_tuples = [tuple(wall) for wall in wall_locations]
+                    path = self.find_shortest_path(agent_pos, goal, wall_tuples)
+                    if path and len(path) > 0 and tuple(path[0]) not in wall_tuples:
+                        # Calculate direction vector
+                        dx = path[0][0] - agent_pos[0]
+                        dy = path[0][1] - agent_pos[1]
+                        # Find the corresponding action index
+                        for a_idx, (adx, ady, _) in enumerate(self.actions):
+                            if (adx, ady) == (dx, dy):
+                                action = a_idx
+                                break
+                        else:
+                            action = 0  # Default to stay if no matching action
+                    else:
+                        action = np.random.randint(4)  # If no path, random movement
+                actions.append(action)
+            else:
+                actions.append(0)  # If holding a block, stay in place (action 0)
+        
+        return actions
+
+```

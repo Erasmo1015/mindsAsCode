@@ -21,10 +21,11 @@ tensor_parallel_size = max(1, torch.cuda.device_count())
 sampling_params = SamplingParams(max_tokens=5000, temperature=1.0)
 print(f"Loading model")
 llm = LLM(
-    "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
     tensor_parallel_size=tensor_parallel_size,
     dtype=torch.bfloat16,
-    gpu_memory_utilization=0.55
+    gpu_memory_utilization=0.55,
+    trust_remote_code=True
 )
 print(f"Warming up model")
 llm.generate("This is me warming up the model", sampling_params=sampling_params)
@@ -64,22 +65,11 @@ while i  < n_iterations:
     # Extract generated text
     generated_text = outputs[0].outputs[0].text
     
-    # Find the text after "</think>\n"
     think_marker = "class FSMAgent:"
     if think_marker in generated_text:
         # text_to_append = generated_text.split(think_marker, 1)[1]
         text_to_append = generated_text
 
-        # try:
-        #     fsm_agent = framework.compile_agent(text_to_append, num_agents=num_agents, num_blocks=num_blocks)
-        #     obs, state = env.reset()
-        #     action = fsm_agent.act(obs)
-        #     obs, state = env.step(action)
-        # except Exception as e: # making sure generation can execute
-        #     breakpoint()
-        #     print(f"Error: {e}")
-        #     current_prompt = current_prompt + f"\n Ran into the following error with your last response: {e}\nDon't repeat this mistake and try again to make the FSM code. \n"
-        #     continue
         current_prompt = base_prompt
         # Save the current state
         output_file = os.path.join(output_dir, f"fsm_agent_{i+1}.txt")

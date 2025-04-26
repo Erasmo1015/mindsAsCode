@@ -1,0 +1,68 @@
+            
+```python
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def closest_block(self, agent_pos, block_locations):
+        distances = np.sqrt((block_locations[:, 0] - agent_pos[0]) ** 2 + (block_locations[:, 1] - agent_pos[1]) ** 2)
+        return np.argmin(distances)
+    
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        '''
+
+        action = np.zeros(self.num_agents, dtype=int)
+        for i in range(self.num_agents):
+            agent_pos = observation['agent_locations'][i]
+            if observation['agent_inventory'][i] == -1:
+                # Agent is not carrying a block, find the closest block
+                closest_block_idx = self.closest_block(agent_pos, observation['block_locations'])
+                block_pos = observation['block_locations'][closest_block_idx]
+                if block_pos[0] > agent_pos[0]:
+                    action[i] = 3  # down
+                elif block_pos[0] < agent_pos[0]:
+                    action[i] = 4  # up
+                elif block_pos[1] > agent_pos[1]:
+                    action[i] = 1  # right
+                elif block_pos[1] < agent_pos[1]:
+                    action[i] = 2  # left
+                else:
+                    action[i] = 0  # stay
+            else:
+                # Agent is carrying a block, find the closest block
+                closest_block_idx = self.closest_block(agent_pos, observation['block_locations'])
+                block_pos = observation['block_locations'][closest_block_idx]
+                if block_pos[0] > agent_pos[0]:
+                    action[i] = 3  # down
+                elif block_pos[0] < agent_pos[0]:
+                    action[i] = 4  # up
+                elif block_pos[1] > agent_pos[1]:
+                    action[i] = 1  # right
+                elif block_pos[1] < agent_pos[1]:
+                    action[i] = 2  # left
+                else:
+                    action[i] = 5  # interact
+        
+        ## DON'T CHANGE ANYTHING BELOW HERE
+        for a in action:
+            assert a in range(self.num_actions)
+        return action
+```

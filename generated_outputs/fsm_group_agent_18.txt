@@ -1,0 +1,61 @@
+
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+    
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - wall_locations: Array of wall coordinates (num_walls, 2)
+        - agent_locations: Array of agent coordinates (num_agents, 2)
+        - block_locations: Array of block coordinates (num_blocks, 2)
+        - agent_inventory: Array indicating if each agent has a block (num_agents)
+        - agent_inventory_colors: Array of colors for blocks in inventory (num_agents, 3)
+        - block_colors: Array of colors for blocks in environment (num_blocks, 3)
+        - time: int
+        - terminal: bool
+        '''
+        action = np.zeros(self.num_agents, dtype=int)
+        for i in range(self.num_agents):
+            # Check if agent has a block
+            if observation['agent_inventory'][i] == 1:
+                # Find the block location
+                block_index = np.where(observation['agent_inventory_colors'][i] == observation['block_colors'])[0]
+                if block_index.size > 0:
+                    block_location = observation['block_locations'][block_index[0]]
+                    # Check if the block is on the same location as the agent
+                    if np.array_equal(observation['agent_locations'][i], block_location):
+                        # Interact with the block
+                        action[i] = 5  # interact action
+                    else:
+                        # Move towards the block
+                        dx = block_location[0] - observation['agent_locations'][i][0]
+                        dy = block_location[1] - observation['agent_locations'][i][1]
+                        if abs(dx) > abs(dy):
+                            if dx > 0:
+                                action[i] = 1  # right
+                            else:
+                                action[i] = 2  # left
+                        else:
+                            if dy > 0:
+                                action[i] = 3  # down
+                            else:
+                                action[i] = 4  # up
+            else:
+                # If agent does not have a block, check if there's a block nearby
+                block_indices = np.where(np.sum(np.abs(observation['agent_locations'][i] - observation['block_locations']), axis=1) == 1)[0]
+                if block_indices.size > 0:
+                    action[i] = 5  # interact action
+                else:
+                    # Move randomly if no block is nearby
+                    action[i] = np.random.randint(4)  # random move (0: right, 1: left, 2: down, 3: up)
+        return action
+```

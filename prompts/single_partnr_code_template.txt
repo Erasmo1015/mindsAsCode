@@ -1,0 +1,43 @@
+Please implement code to model the logic of the agent's behavior as demonstrated by the experiences. Here is the template for the agent's FSM class. Please implement the FSM code for an agent following the template. The code needs to be directly runnable on the inputs of state and return the action as provided in the experiences. The available tools and description on how they are used have been provided prior.
+
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int=1, num_blocks: int=1):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks  # irrelevant, can ignore
+    
+    '''
+    Your helper functions for decision-making go here
+    '''
+        
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - tool_list: List of tools available to the agent
+        - tool_descriptions: Description of how each tool is used
+        - scene_graph: Scene graph of the environment, dictionary mapping
+            - object_class string (i.e. furnitutre, objects) to dictionary mapping
+                - room string (i.e. living_room_1, bathroom_1, etc.) if object_class is "furniture" to list of 
+                    - object_id string (i.e. table_21, chair_32, etc.)
+                - object_id string (i.e. "plate_container_2", "vase_1" etc.) if object_class is "objects" to list of 
+                    - object_base string (i.e "table_14", "table_21")
+        - agent_state: String describing the state of the agent
+        '''
+
+        # TODO: Implement the agent's decision-making logic here
+        # This is a placeholder implementation that returns a random action.
+        tool = 'Navigate'
+        target = 'table_21'
+
+
+        ## DON'T CHANGE ANYTHING BELOW HERE
+        return (tool, target, None)
+```
+Please implement the FSM code to model the logic of the agent's behavior as demonstrated by the experiences. Please implement the code following the template. Feel free to implement the helper functions you need. 
+You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action (tool, target, None). Let's think step by step.
+
+
+Your code here:
+

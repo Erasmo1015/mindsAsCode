@@ -11,16 +11,20 @@ import os
 from flax.serialization import msgpack_serialize
 from tqdm import tqdm
 
-def initialize_agent_list(agent_id_list, num_agents=1, num_blocks=1):
+def initialize_agent_list(agent_id_list, num_agents=1, num_blocks=1, group=False):
     framework = AgentExecutionFramework()
     agent_list = []
+    if group:
+        extension = "_group"
+    else:
+        extension = ""
     for i in agent_id_list:
-        with open(f"generated_outputs/fsm_agent_{i+1}.txt", "r") as f:
+        with open(f"generated_outputs/fsm{extension}_agent_{i+1}.txt", "r") as f:
             agent_code = f.read()
         agent_list.append(framework.compile_agent(agent_code, num_agents=num_agents, num_blocks=num_blocks))
     return agent_list
 
-def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=20):
+def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=20, group=False):
     '''
     agent list should be a list of compiled agents
     '''
@@ -40,8 +44,11 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
             assert len(obs[0]['agent_inventory']) >= num_agents
         except:
             breakpoint()
-
-        actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
+        if group:
+            actions = agent_list[agent_id].act(obs[0])  # all agents follow group planner
+        else:
+            actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
+        assert len(actions) == num_agents
         
         obs, next_state = env.step(state, actions)
         state_list.append(state)
@@ -66,28 +73,29 @@ def convert_state_to_serializable_dict(state, agent_id, num_blocks):
 def convert_state_list_to_serializable_list(state_list, agent_id, num_blocks):
     return [convert_state_to_serializable_dict(state, agent_id, num_blocks) for state in state_list]
 
-def generate_dataset(agent_list, num_datapoints_per_agent=100, num_steps=100, num_agents=1, num_block_steps=2, num_walls_steps=2):
-    assert len(agent_list) >= num_agents
+def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, num_block_steps=2, num_walls_steps=2, group=False):
+
     # Create directory if it doesn't exist
     os.makedirs(f"data/agent_num{num_agents}", exist_ok=True)
-    for num_blocks_i in tqdm(range(2, 22, num_block_steps)):
-        for num_walls_i in tqdm(range(2, 22, num_walls_steps)):
+    for num_blocks_i in range(2, 22, num_block_steps):
+        agent_list = initialize_agent_list(range(20), num_agents=num_agents, num_blocks=num_blocks_i, group=group)
+        assert len(agent_list) >= num_agents
+        for num_walls_i in range(2, 22, num_walls_steps):
             # Lists to collect data for this agent
             all_states = []
             all_actions = []
             all_agent_ids = []
             for agent_id in tqdm(range(len(agent_list))):
 
-
                 # print(f"Generating dataset for agent {agent_id}, num_blocks={num_blocks_i}, num_walls={num_walls_i}, num_steps={num_steps}, num_datapoints={num_datapoints_per_agent}")
                 agent_states = []
                 agent_actions = []
                 agent_agent_ids = []
-                for datapoint in tqdm(range(num_datapoints_per_agent)):               
+                for datapoint in range(num_datapoints_per_agent):               
                     state_list, action_list, env = generate_trajectory(
                         agent_id, agent_list, seed=datapoint, 
-                        num_agents=1, num_steps=num_steps, 
-                        num_blocks=num_blocks_i, num_walls=num_walls_i
+                        num_agents=num_agents, num_steps=num_steps, 
+                        num_blocks=num_blocks_i, num_walls=num_walls_i, group=group
                     )
                     
                     # Convert state_list to serializable dictionaries
@@ -137,7 +145,7 @@ def generate_dataset(agent_list, num_datapoints_per_agent=100, num_steps=100, nu
             # Stack all data for this agent
             # For states, we need to be careful with the tree structure
             stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *all_states)  # (num_agents, num_datapoints/agent, num_steps, *state_shapes)
-            stacked_actions = jnp.stack(all_actions, axis=0)  # (num_agents, num_datapoints/agent, num_steps, 1)
+            stacked_actions = jnp.stack(all_actions, axis=0)  # (num_agents, num_datapoints/agent, num_steps, num_agents)
             stacked_agent_ids = jnp.stack(all_agent_ids, axis=0)  # (num_agents, num_datapoints/agent, num_steps)
             
             # Create dataset dictionary
@@ -149,20 +157,23 @@ def generate_dataset(agent_list, num_datapoints_per_agent=100, num_steps=100, nu
             
             # Serialize and save
             serialized_data = msgpack_serialize(dataset)
-            with open(f"data/num_blocks{num_blocks_i}/num_walls{num_walls_i}/gt_fsm_traj_data_{num_agents}agents.msgpack", "wb") as f:
+            if group:
+                extension = "_group"
+            else:
+                extension = ""
+            with open(f"data/num_blocks{num_blocks_i}/num_walls{num_walls_i}/gt_fsm{extension}_traj_data_{num_agents}agents.msgpack", "wb") as f:
                 f.write(serialized_data)
             
             print(f"Saved dataset for blocks={num_blocks_i}, walls={num_walls_i}")
 
 if __name__ == "__main__":
-    num_agents = 10  # number of agents
-    num_datapoints_per_agent = 3  # number of trajectories to generate per agent
+    num_agents = 4  # number of agents
+    num_datapoints_per_agent = 100  # number of trajectories to generate per agent
     num_steps = 100  # trajectory length
     num_block_steps = 2  # number of blocks to increment by
     num_walls_steps = 2  # number of walls to increment by
-    agent_list = initialize_agent_list(range(num_agents))
 
-    generate_dataset(agent_list, num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps)
+    generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=True)
 
 
     # state_list, action_list, env = generate_trajectory(0, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=1)
