@@ -71,7 +71,7 @@ def parse_args():
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -79,7 +79,7 @@ def parse_args():
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
-    if args.baseline_model not in ["ToMnet", 'BC', 'TT', 'AutoToM', 'FSM']:
+    if args.baseline_model not in ["ToMnet", 'BC', 'TT', 'AutoToM', 'FSM', 'NLLM']:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     return args
@@ -233,31 +233,58 @@ def eval_thoughtTrace(args, dataloader, model):
 def eval_autoToM(args, dataloader, model):
     num_correct = 0
     num_total = 0
-    for i in range(args.num_epochs):
+    for i in tqdm(range(args.num_epochs)):
         datapoint = next(dataloader)
 
-        for a in range(args.num_agents_to_sample):
-            data = jax.tree.map(lambda x: x[a, 0, :15], datapoint)
+        for a in tqdm(range(args.num_agents_to_sample)):
+            data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)
             states = data['states']
             actions = data['actions']  # (20, 1)  # 20 timesteps, 1 action
             agent_ids = data['agent_ids']
-            tries = 0
-            while tries < 6:
-                try:
-                    predicted_final_action, predicted_probs = model.predict_action(states, actions, agent_ids)
-                    final_action_prob = predicted_probs[actions[-1, 0]]
-                    if final_action_prob >= np.max(predicted_probs):
-                        num_correct += 1
-                    break  # end loop if prediction is successful
-                except Exception as e:
-                    print(f"Error: {e}")
-                    tries += 1
-            num_total += 1
-            if tries == 6:
-                print(f"Failed to make a prediction for agent {a}")
+            for agent_id in range(actions.shape[1]):
+                tries = 0
+                gt_action = actions[-1, agent_id]
+                while tries < 6:
+                    try:
+                        predicted_final_action, predicted_probs = model.predict_action(states, actions, agent_id=agent_id)
+                        final_action_prob = predicted_probs[gt_action]
+                        if final_action_prob >= np.max(predicted_probs):
+                            num_correct += 1
+                        break  # end loop if prediction is successful
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        tries += 1
+                num_total += 1
+        
+    print(f"Accuracy: {num_correct / num_total}")
+    return num_correct / num_total
 
+def eval_naive_llm(args, dataloader, model):
+    num_correct = 0
+    num_total = 0
+    for i in tqdm(range(args.num_epochs)):
+        datapoint = next(dataloader)
 
-
+        for a in tqdm(range(args.num_agents_to_sample)):
+            data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)
+            states = data['states']
+            actions = data['actions']  # (20, 1)  # 20 timesteps, 1 action
+            agent_ids = data['agent_ids']
+            for agent_id in range(actions.shape[1]):
+                tries = 0
+                gt_action = actions[-1, agent_id]
+                while tries < 6:
+                    try:
+                        predicted_probs = model.predict_action(states, actions, agent_id=agent_id)
+                        final_action_prob = predicted_probs[gt_action]
+                        if final_action_prob >= np.max(predicted_probs):
+                            num_correct += 1
+                        break  # end loop if prediction is successful
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        tries += 1
+                num_total += 1
+        
     print(f"Accuracy: {num_correct / num_total}")
     return num_correct / num_total
 
@@ -585,6 +612,11 @@ def main():
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
         model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group)
         eval_fn = eval_fsm
+    elif args.baseline_model == 'NLLM':
+        from baselines.basic_LLM import NaiveLLMReasoner
+        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
+        model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False)
+        eval_fn = eval_naive_llm
     elif args.baseline_model == "ToMnet":
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
         model, states = load_tomnet_models(args)

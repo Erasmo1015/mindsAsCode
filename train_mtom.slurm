@@ -29,11 +29,15 @@ module load gcc/10.2.0
 baseline_model=$1
 seed=$2
 lr=$3
-
+group=$4
 
 
 # Run the main command and capture its exit status
-python train_baselines.py --baseline_model $baseline_model --num_epochs 10000 --num_agents_to_sample 3 --num_datapoints_per_agent_to_sample 3 --seed $seed --learning_rate $lr
+if [ $group == "True" ]; then
+    python train_baselines.py --baseline_model $baseline_model --num_epochs 1000 --num_agents_to_sample 3 --num_datapoints_per_agent_to_sample 3 --seed $seed --learning_rate $lr --group True --num_agents 4
+else
+    python train_baselines.py --baseline_model $baseline_model --num_epochs 1000 --num_agents_to_sample 3 --num_datapoints_per_agent_to_sample 3 --seed $seed --learning_rate $lr
+fi
 EXIT_CODE=$?
 
 # If the job failed (non-zero exit code), resubmit it

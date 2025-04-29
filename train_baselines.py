@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 import random
+import pickle
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
@@ -492,8 +493,8 @@ def main():
         epoch_losses.append(loss)
         print(f"Epoch {epoch+1}/{args.num_epochs}, Loss: {loss:.4f}")
         
-        # Save checkpoint every 1000 epochs
-        if (epoch + 1) % 1000 == 0:
+        # Save checkpoint every 100 epochs
+        if (epoch + 1) % 100 == 0:
             checkpoint = {
                 'params': train_state.params,
                 'batch_stats': train_state.batch_stats,
@@ -569,3 +570,35 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # args = parse_args()
+    # dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, overfit=args.overfit)
+    
+    # obs_traj = []
+    # act_traj = []
+    # for num_dat in range(25):
+    #     batch = next(dataloader)
+    #     obs = batch['states'].reshape(-1, *batch['states'].shape[-3:])
+    #     act = batch['actions'].reshape(-1, *batch['actions'].shape[-1:])
+    #     obs_traj.append(obs)
+    #     act_traj.append(act)
+    # obs_traj = jnp.concatenate(obs_traj, axis=0)
+    # act_traj = jnp.concatenate(act_traj, axis=0)
+    # # Save trajectories to pickle file
+    # save_dict = {
+    #     'observations': np.array(obs_traj),
+    #     'actions': np.array(act_traj)
+    # }
+    
+    # # Create directory if it doesn't exist
+    # save_dir = 'data/trajectories'
+    # os.makedirs(save_dir, exist_ok=True)
+    
+    # # Save with descriptive filename including num agents and datapoints
+    # save_path = os.path.join(save_dir, f'dummy_trajectory.pkl')
+    
+    # with open(save_path, 'wb') as f:
+    #     pickle.dump(save_dict, f)
+        
+    # print(f"Saved trajectories to {save_path}")
+
+

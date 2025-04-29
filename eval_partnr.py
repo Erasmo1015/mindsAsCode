@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -165,32 +165,27 @@ def eval_thoughtTrace(args, dataloader, model):
 def eval_autoToM(args, dataloader, model):
     num_correct = 0
     num_total = 0
-    for i in range(args.num_epochs):
+    for i in tqdm(range(args.num_epochs)):
         datapoint = next(dataloader)
-
-        for a in range(args.num_agents_to_sample):
-            data = jax.tree.map(lambda x: x[a, 0, :15], datapoint)
-            states = data['states']
-            actions = data['actions']  # (20, 1)  # 20 timesteps, 1 action
-            agent_ids = data['agent_ids']
-            tries = 0
+        states, actions = datapoint
+        agent_ids = [0] * len(states)
+        tries = 0
+        succeeded = False
+        breakpoint()
+        for timepoint in range(len(actions)):
+            gt_action = actions[timepoint]
             while tries < 6:
                 try:
-                    predicted_final_action, predicted_probs = model.predict_action(states, actions, agent_ids)
-                    final_action_prob = predicted_probs[actions[-1, 0]]
+                    predicted_final_action, predicted_probs = model.predict_action(states, actions, agent_id=agent_id)
+                    final_action_prob = predicted_probs[gt_action]
                     if final_action_prob >= np.max(predicted_probs):
                         num_correct += 1
                     break  # end loop if prediction is successful
                 except Exception as e:
+                    print(f"Error: {e}")
                     tries += 1
             num_total += 1
-            if tries == 6:
-                print(f"Failed to make a prediction for agent {a}")
-
-
-
-    print(f"Accuracy: {num_correct / num_total}")
-    return num_correct / num_total
+            
 
 def eval_fsm(args, dataloader, model):
     num_correct = 0
@@ -204,7 +199,7 @@ def eval_fsm(args, dataloader, model):
         succeeded = False
         while tries < 6:
             # try:
-            predicted_final_action = model.predict_action(states, actions, agent_ids)
+            predicted_final_action = model.predict_action(states, actions)
             if predicted_final_action is not None:
                 succeeded = True
                 num_successes += 1
@@ -384,7 +379,7 @@ def main():
         model = ThoughtTrace(n_hypothesis=args.n_hypothesis, model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
         eval_fn = eval_thoughtTrace
     elif args.baseline_model == "AutoToM":
-        from baselines.AutoToM.autoToM import AutoToM
+        from baselines.AutoToM.partnr_autoToM import AutoToM
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
         model = AutoToM(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
         eval_fn = eval_autoToM

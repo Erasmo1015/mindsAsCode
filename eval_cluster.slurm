@@ -31,4 +31,4 @@ model_arch=$2
 n_hypothesis=$3
 
 # Run the main command and capture its exit status
-python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 5 --num_agents_to_sample 3 --num_datapoints_per_agent_to_sample 3
+python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --num_epochs 10 --num_agents_to_sample 5 --num_datapoints_per_agent_to_sample 1 --group True

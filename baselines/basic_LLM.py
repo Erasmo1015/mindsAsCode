@@ -16,10 +16,10 @@ import traceback
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
-class FSMReasoner:
+class NaiveLLMReasoner:
     def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", tensor_parallel_size: int = 1, device: str = "cuda", 
                  dtype: str = "float16", gpu_memory_utilization: float = 0.55, num_hypothesis: int = 4,
-                 max_model_len: int = 2048, quantization: str = None, group: bool = False):
+                 max_model_len: int = 2048, quantization: str = None, group: bool = False, partnr: bool = False):
         self.model_name = model_name
         self.tensor_parallel_size = tensor_parallel_size
         self.device = device
@@ -39,23 +39,17 @@ class FSMReasoner:
         self.name_to_action = {v: k for k, v in self.action_to_name.items()}
 
         self.group = group
-        if not group:
-            self.dataset_name = "single_agent_dataset"
-            prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/infer_single_fsm.txt"
-            code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/single_code_template.txt"
+        if partnr:
+            prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/basic_llm_partnr.txt"
         else:
+            prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/basic_llm.txt"
+        if group:
             self.dataset_name = "group_agent_dataset"
-            prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/infer_group_fsm.txt"
-            code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/group_code_template.txt"
-        refinement_1_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/refinement_1.txt"
-        refinement_2_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/refinement_2.txt"
-        refinement_3_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/refinement_3.txt"
+        else:
+            self.dataset_name = "single_agent_dataset"
 
         self.base_prompt = open(prompt_path, "r").read()
-        self.code_template = open(code_template_path, "r").read()
-        self.refinement_1 = open(refinement_1_path, "r").read()
-        self.refinement_2 = open(refinement_2_path, "r").read()
-        self.refinement_3 = open(refinement_3_path, "r").read()
+        self.partnr = partnr
 
 
         # Convert dtype string to torch dtype
@@ -105,7 +99,7 @@ class FSMReasoner:
         # # Load model and tokenizer from transformers
         # self.llm = pipeline("text-generation", model=self.model_name, device=self.device)
     
-    def convert_state_to_text(self, state):
+    def grid_convert_state_to_text(self, state):
         text = ""
         text += f"The agents' inventory is {state['agent_inventory']}.\n"
         text += f"The agents' inventory colors are {state['agent_inventory_colors']}.\n"
@@ -115,12 +109,12 @@ class FSMReasoner:
         text += f"The wall locations are {state['wall_locations']}.\n"
         return text
     
-    def convert_states_actions_to_text(self, states, actions):
+    def grid_convert_states_actions_to_text(self, states, actions):
         state_strings = []
         action_strings = []
         for i in range(actions.shape[0]):
             state = jax.tree.map(lambda x: x[i], states)
-            state_string = self.convert_state_to_text(state)
+            state_string = self.grid_convert_state_to_text(state)
             action = [self.action_to_name[a] for a in actions[i]]
             state_strings.append(f"{i+1}. State: {state_string}.")
             action_string = f"{i+1}."
@@ -131,16 +125,46 @@ class FSMReasoner:
         state_action_strings.append(state_strings[-1])
         return "\n-------\n".join(state_action_strings)
     
-    def predict_action(self, states, actions, training=False, episode_id=0):
+    def partnr_convert_state_to_text(self, state):
+        text = ""
+        text += f"Scene Graph: {state['scene_graph']}\n"
+        text += f"Agent State: {state['agent_state']}\n"
+        return text
+    
+    def partnr_convert_states_actions_to_text(self, states, actions):
+        state_strings = []
+        action_strings = []
+        tools = set()
+        tool_descriptions = ""
+        for i in range(len(actions)):
+            state = states[i]
+            action = actions[i]
+            state_string = self.partnr_convert_state_to_text(state)
+            state_strings.append(state_string)
+            action_string = f"{i+1}. Agent 0 Action: {action}"
+            action_strings.append(action_string)
+            tools = tools.union(set(state['tool_list']))
+            tool_descriptions += state['tool_descriptions']
+        state_action_strings = [f"{s} {a}" for s, a in zip(state_strings[:-2], action_strings[:-2])]
+        state_action_strings.append(state_strings[-1])
+        return "\n-------\n".join(state_action_strings), tools, tool_descriptions
+    
+    def predict_action(self, states, actions, training=False, episode_id=0, agent_id=0):
         episode_name = f"{self.dataset_name}_{episode_id}"
-        state_action_text = self.convert_states_actions_to_text(states, actions)
-        prompt = f"{self.base_prompt}\n{state_action_text}\n{self.code_template}"
+        if self.partnr:
+            state_action_text, tools, tool_descriptions = self.partnr_convert_states_actions_to_text(states, actions)
+        else:
+            state_action_text = self.grid_convert_states_actions_to_text(states, actions)
+
+
+        prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take next?"
+        if not self.partnr:
+            prompt += f" Choose from the following options: {self.action_to_name.values()}. Your answer should be in the following format: \nAction: <action>\n Your answer:"
+        else:
+            prompt += f" Here is a description of what each tool is and how to use them: Tools: {tools}\n Tool Descriptions: {tool_descriptions}. Your answer should be formatted appropriately. Your answer:"
         full_prompt = prompt
 
-        framework = AgentExecutionFramework()
-        num_agents = 1 if not self.group else 4
-        num_blocks = states['block_locations'].shape[1]
-        agents = []
+
         log_prob_hypothesis_list = []
         final_action_pred_list = []
         
@@ -185,86 +209,43 @@ class FSMReasoner:
             # Batch generate with vLLM
             vllm_outputs = self.llm.generate(formatted_prompts, self.sampling_params)
             outputs = [output.outputs[0].text for output in vllm_outputs]
-        
-        # Process each hypothesis
-        for hypothesis_id, agent_code in enumerate(outputs):
-            # Define generate_response and revise_response functions based on model type
-            if self.use_openai:
-                def generate_response(prompt):
-                    response = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=1.0,
-                        max_tokens=2000
-                    )
-                    return response.choices[0].message.content
 
-                def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
-                    revised = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=1.0,
-                        max_tokens=2000
-                    )
-                    return revised.choices[0].message.content
-            else:
-                # vLLM implementation for generate_response
-                def generate_response(prompt):
-                    outputs = self.llm.generate([prompt], self.sampling_params)
-                    return outputs[0].outputs[0].text
-
-                # vLLM implementation for revise_response
-                def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
-                    outputs = self.llm.generate([prompt], self.sampling_params)
-                    return outputs[0].outputs[0].text
-
-            agent = None
-            error = None
-            trial = 0
-            num_trials = 5
-            while trial < num_trials:
+        for output in outputs:
+            success = False
+            retries = 0
+            while not success and retries < 5:
                 try:
-                    agent = framework.compile_agent(agent_code, num_agents, num_blocks)
-
-                    log_prob_hypothesis = 0
-                    # p(script | states, actions) = p(action | states, script) * prior(script)
-                    for timestep in range(actions.shape[0] - 1):  
-                        state = jax.tree.map(lambda x: x[timestep], states)
-                        if not self.group:
-                            gt_action = actions[timestep][0]
-                            proposed_action, proposed_pi = agent.act(state)
-                            proposed_pi = np.exp(proposed_pi + 1e-10) / np.sum(np.exp(proposed_pi + 1e-10))
-                            log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_action], 1e-10, 1))
-                        else:
-                            gt_actions = actions[timestep]
-                            proposed_actions, proposed_pis = agent.act(state)
-                            for a in proposed_actions:
-                                assert a in range(6), "an action in proposed_actions is not an integer in range(num_actions)"
-                            for i in range(len(proposed_actions)):
-                                proposed_pi = np.exp(proposed_pis[i] + 1e-10) / np.sum(np.exp(proposed_pis[i] + 1e-10))
-                                log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_actions[i]], 1e-10, 1))
-                    
-                    final_state = jax.tree.map(lambda x: x[-1], states)
-                    final_action, final_pi = agent.act(final_state)
-
-                    agents.append(agent)
-                    log_prob_hypothesis_list.append(log_prob_hypothesis)
-                    final_action_pred_list.append(final_pi)  # time t
-                    break
+                    if not self.partnr:
+                        for action in self.action_to_name.values():
+                            if action.lower() in output.lower():
+                                final_action_pred_list.append(self.name_to_action[action])
+                                break
+                    else:
+                        final_action_pred_list.append(output)
+                    log_prob_hypothesis_list.append(1)
+                    success = True
                 except Exception as e:
-                    # print(f"Error compiling agent {hypothesis_id}: {e}")
-                    trial += 1
-                    full_traceback = traceback.format_exc()
-                    if trial == num_trials:
-                        # print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
-                        # print(full_traceback)
-                        break
-                    agent_code = revise_response(agent_code, full_traceback)
-            if agent is None:
+                    print(f"Error: {e}")
+                    print(f"Output: {output}")
+                    # Regenerate response for this output
+                    if self.use_openai:
+                        response = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=[{"role": "system", "content": "You are a helpful assistant."}, 
+                                    {'role': 'user', 'content': full_prompt}],
+                            temperature=1.0,
+                            max_tokens=2000
+                        )
+                        output = response.choices[0].message.content
+                    else:
+                        vllm_output = self.llm.generate([full_prompt], self.sampling_params)
+                        output = vllm_output[0].outputs[0].text
+                    retries += 1
+            
+            if not success:
                 continue
-        
+
+
         if len(log_prob_hypothesis_list) == 0:
             return None
 
@@ -274,23 +255,23 @@ class FSMReasoner:
         log_prob_hypothesis_list = np.exp(log_prob_hypothesis_list)
         log_prob_hypothesis_list = log_prob_hypothesis_list / np.sum(log_prob_hypothesis_list)  # (num_hypothesis,)
 
-        if not self.group:
-            final_action_pred_list = np.array(final_action_pred_list) + 1e-6
-            final_action_pred_list = np.clip(final_action_pred_list, 1e-6, 1)
-            final_action_pred_list = final_action_pred_list / np.sum(final_action_pred_list, axis=1, keepdims=True)
-
-            res_pi = np.sum(log_prob_hypothesis_list * final_action_pred_list.T, axis=1)  # (num_actions,)
+        if self.partnr:
+            # For partnr, randomly sample prediction based on probabilities
+            idx = np.random.choice(np.arange(len(log_prob_hypothesis_list)), p=log_prob_hypothesis_list)
+            final_pred = final_action_pred_list[idx]
+            return final_pred
         else:
-            final_action_pred_list = np.array(final_action_pred_list) + 1e-6
-            final_action_pred_list = np.clip(final_action_pred_list, 1e-6, 1)
-            final_action_pred_list = final_action_pred_list / np.sum(final_action_pred_list, axis=-1, keepdims=True)   # (num_hypothesis, num_agents, num_actions)
-            # Reshape log_prob_hypothesis_list to (num_hypothesis, 1, 1) for broadcasting
-            weights = log_prob_hypothesis_list[:, np.newaxis, np.newaxis]
-            # Multiply and sum across hypotheses in one operation
-            res_pi = np.sum(weights * final_action_pred_list, axis=0)  # (num_agents, num_actions)
+            # Initialize distribution over all possible actions
+            res_pi = np.zeros(len(self.action_to_name))  # (num_actions,)
             
+            # Aggregate predictions weighted by their log probabilities
+            for action_pred, prob in zip(final_action_pred_list, log_prob_hypothesis_list):
+                res_pi[action_pred] += prob
+                
+            # Normalize to ensure valid probability distribution
+            res_pi = res_pi / np.sum(res_pi)
 
-        return res_pi
+            return res_pi
             
         
         
