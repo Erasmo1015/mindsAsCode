@@ -86,7 +86,7 @@ class NaiveLLMReasoner:
                 vllm_kwargs["quantization"] = quantization
                 
             self.llm = LLM(**vllm_kwargs)
-            self.sampling_params = SamplingParams(temperature=1.0, max_tokens=2000)
+            self.sampling_params = SamplingParams(temperature=1.0, max_tokens=10)
         
         # Keep transformers implementation (commented out)
         # self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -146,7 +146,7 @@ class NaiveLLMReasoner:
             tools = tools.union(set(state['tool_list']))
             tool_descriptions += state['tool_descriptions']
         state_action_strings = [f"{s} {a}" for s, a in zip(state_strings[:-2], action_strings[:-2])]
-        state_action_strings.append(state_strings[-1])
+        state_action_strings.append(state_strings[-2])
         return "\n-------\n".join(state_action_strings), tools, tool_descriptions
     
     def predict_action(self, states, actions, training=False, episode_id=0, agent_id=0):
@@ -170,7 +170,7 @@ class NaiveLLMReasoner:
         
         # Prepare all prompts for batch inference
         formatted_prompts = []
-        for hypothesis_id in range(self.num_hypothesis):
+        for hypothesis_id in range(1):
             messages = [{"role": "system", "content": "You are a helpful assistant."}, {'role': 'user', 'content': full_prompt}]
             
             # Format messages for vLLM or OpenAI
@@ -202,13 +202,14 @@ class NaiveLLMReasoner:
                     model=self.model_name,
                     messages=prompt,
                     temperature=1.0,
-                    max_tokens=2000
+                    max_tokens=10,
+                    stop=["<|user|>", "<|system|>"] # Stop at next user/system message
                 )
-                outputs.append(response.choices[0].message.content)
+                outputs.append(response.choices[0].message.content.split("<|assistant|>\n")[-1].strip())
         else:
             # Batch generate with vLLM
             vllm_outputs = self.llm.generate(formatted_prompts, self.sampling_params)
-            outputs = [output.outputs[0].text for output in vllm_outputs]
+            outputs = [output.outputs[0].text.split("<|assistant|>\n")[-1].strip() for output in vllm_outputs]
 
         for output in outputs:
             success = False
@@ -225,22 +226,8 @@ class NaiveLLMReasoner:
                     log_prob_hypothesis_list.append(1)
                     success = True
                 except Exception as e:
-                    print(f"Error: {e}")
-                    print(f"Output: {output}")
-                    # Regenerate response for this output
-                    if self.use_openai:
-                        response = self.client.chat.completions.create(
-                            model=self.model_name,
-                            messages=[{"role": "system", "content": "You are a helpful assistant."}, 
-                                    {'role': 'user', 'content': full_prompt}],
-                            temperature=1.0,
-                            max_tokens=2000
-                        )
-                        output = response.choices[0].message.content
-                    else:
-                        vllm_output = self.llm.generate([full_prompt], self.sampling_params)
-                        output = vllm_output[0].outputs[0].text
                     retries += 1
+                break
             
             if not success:
                 continue

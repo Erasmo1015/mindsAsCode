@@ -232,10 +232,12 @@ class FSMReasoner:
                     # p(script | states, actions) = p(action | states, script) * prior(script)
                     for timestep in range(actions.shape[0] - 1):  
                         state = jax.tree.map(lambda x: x[timestep], states)
+                        if len(state['agent_locations']) == 1:
+                            state['agent_id'] = 0
                         if not self.group:
                             gt_action = actions[timestep][0]
                             proposed_action, proposed_pi = agent.act(state)
-                            proposed_pi = np.exp(proposed_pi + 1e-10) / np.sum(np.exp(proposed_pi + 1e-10))
+                            proposed_pi = np.exp(np.array(proposed_pi) + 1e-10) / np.sum(np.exp(np.array(proposed_pi) + 1e-10))
                             log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_action], 1e-10, 1))
                         else:
                             gt_actions = actions[timestep]
@@ -243,10 +245,12 @@ class FSMReasoner:
                             for a in proposed_actions:
                                 assert a in range(6), "an action in proposed_actions is not an integer in range(num_actions)"
                             for i in range(len(proposed_actions)):
-                                proposed_pi = np.exp(proposed_pis[i] + 1e-10) / np.sum(np.exp(proposed_pis[i] + 1e-10))
+                                proposed_pi = np.exp(np.array(proposed_pis[i]) + 1e-10) / np.sum(np.exp(np.array(proposed_pis[i]) + 1e-10))
                                 log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_actions[i]], 1e-10, 1))
                     
                     final_state = jax.tree.map(lambda x: x[-1], states)
+                    if len(final_state['agent_locations']) == 1:
+                        final_state['agent_id'] = 0
                     final_action, final_pi = agent.act(final_state)
 
                     agents.append(agent)
@@ -254,9 +258,10 @@ class FSMReasoner:
                     final_action_pred_list.append(final_pi)  # time t
                     break
                 except Exception as e:
-                    # print(f"Error compiling agent {hypothesis_id}: {e}")
+                    print(f"Error compiling agent {hypothesis_id}: {e}")
                     trial += 1
                     full_traceback = traceback.format_exc()
+                    print(full_traceback)
                     if trial == num_trials:
                         # print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
                         # print(full_traceback)

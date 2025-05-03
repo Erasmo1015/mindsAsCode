@@ -65,8 +65,8 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--n_hypothesis', type=int, default=2, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -171,20 +171,22 @@ def eval_autoToM(args, dataloader, model):
         agent_ids = [0] * len(states)
         tries = 0
         succeeded = False
-        breakpoint()
-        for timepoint in range(len(actions)):
-            gt_action = actions[timepoint]
-            while tries < 6:
-                try:
-                    predicted_final_action, predicted_probs = model.predict_action(states, actions, agent_id=agent_id)
-                    final_action_prob = predicted_probs[gt_action]
-                    if final_action_prob >= np.max(predicted_probs):
-                        num_correct += 1
-                    break  # end loop if prediction is successful
-                except Exception as e:
-                    print(f"Error: {e}")
-                    tries += 1
-            num_total += 1
+
+        gt_action = actions[-2][0]
+        
+        while tries < 6:
+            try:
+                predicted_final_action, predicted_probs, choices = model.predict_action(states, actions, agent_id=0, episode_id=i)
+                gt_id = choices.index(gt_action)
+                max_prob = np.max(predicted_probs)
+                if predicted_probs[gt_id] == max_prob:
+                    num_correct += 1
+                break  # end loop if prediction is successful
+            except Exception as e:
+                print(f"Error: {e}")
+                tries += 1
+        num_total += 1
+    return num_correct / num_total
             
 
 def eval_fsm(args, dataloader, model):
@@ -197,7 +199,7 @@ def eval_fsm(args, dataloader, model):
         agent_ids = [0] * len(states)
         tries = 0
         succeeded = False
-        while tries < 6:
+        while tries < 5:
             # try:
             predicted_final_action = model.predict_action(states, actions)
             if predicted_final_action is not None:
@@ -215,16 +217,19 @@ def eval_fsm(args, dataloader, model):
                 num_total += 1
         else:
             if not args.group:
-                gt_action = actions[-2]
-                correct_action = True
-                for aid in range(len(gt_action)):
-                    ga = gt_action[aid]
-                    pa = predicted_final_action[aid]
-                    if ga != pa:
-                        correct_action = False
-                        break
-                if correct_action:
+                gt_action = actions[-2][0]
+                predicted_final_action = predicted_final_action[0]
+                # correct_action = True
+                if gt_action == predicted_final_action:
                     num_correct += 1
+                # for aid in range(len(gt_action)):
+                #     ga = gt_action[aid]
+                #     pa = predicted_final_action[aid]
+                #     if ga  pa:
+                #         correct_action = False
+                #         break
+                # if correct_action:
+                #     num_correct += 1
                 num_total += 1
             else:
                 gt_final_action = actions[-1]
@@ -373,6 +378,26 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
 
+    # Create CSV path
+    csv_path = f"baselines/{args.baseline_model}/partnr_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp.csv"
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    
+    # Check if CSV exists and determine starting epoch
+    start_epoch = 0
+    if os.path.exists(csv_path):
+        existing_df = pd.read_csv(csv_path)
+        # Filter for the current configuration
+        matching_rows = existing_df[
+            (existing_df['model'] == args.baseline_model) & 
+            (existing_df['group'] == args.group) & 
+            (existing_df['num_agents_evaluated'] == args.num_agents_to_sample) & 
+            (existing_df['datapoints_per_agent'] == args.num_datapoints_per_agent_to_sample)
+        ]
+        if len(matching_rows) > 0:
+            # Get the highest epoch completed
+            start_epoch = matching_rows['epoch'].max() + 1
+            print(f"Resuming from epoch {start_epoch}")
+
     if args.baseline_model == "TT":
         from baselines.thoughtTrace import ThoughtTrace
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
@@ -398,31 +423,39 @@ def main():
     else:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
-    res = eval_fn(args, dataloader, model)
-    # Create results dictionary
-    results = {
-        'model': [args.baseline_model],
-        'accuracy': [res],
-        'group': [args.group],
-        'num_agents_evaluated': [args.num_agents_to_sample],
-        'datapoints_per_agent': [args.num_datapoints_per_agent_to_sample], 
-        'num_epochs': [args.num_epochs],
-        'llm_model': [args.model_name] if args.baseline_model in ['TT', 'AutoToM', 'FSM'] else ['N/A'],
-        'num_hypothesis': [args.n_hypothesis] if args.baseline_model in ['TT', 'FSM'] else ['N/A']
-    }
-
-    # Convert to dataframe
-    df = pd.DataFrame(results)
-
-    # Create directory if it doesn't exist
-    csv_path = f"baselines/{args.baseline_model}/accuracy_{args.baseline_model}_{args.n_hypothesis}hyp.csv"
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-
-    # Append or create CSV file
-    if os.path.exists(csv_path):
-        df.to_csv(csv_path, mode='a', header=False, index=False)
-    else:
-        df.to_csv(csv_path, index=False)
+    # Run evaluation for each epoch and save results after each epoch
+    all_results = []
+    for epoch in range(start_epoch, args.num_epochs):
+        print(f"Running epoch {epoch}/{args.num_epochs}")
+        res = eval_fn(args, dataloader, model)
+        
+        # Create results dictionary for this epoch
+        result = {
+            'model': args.baseline_model,
+            'accuracy': res,
+            'group': args.group,
+            'num_agents_evaluated': args.num_agents_to_sample,
+            'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
+            'epoch': epoch,
+            'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM'] else 'N/A',
+            'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'FSM'] else 'N/A'
+        }
+        all_results.append(result)
+        
+        # Save results after each epoch
+        df = pd.DataFrame(all_results)
+        if os.path.exists(csv_path):
+            # Read existing data
+            existing_df = pd.read_csv(csv_path)
+            # Append new results
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            # Save combined results
+            combined_df.to_csv(csv_path, index=False)
+        else:
+            # Create new CSV file
+            df.to_csv(csv_path, index=False)
+        
+        print(f"Saved results for epoch {epoch}")
 
 if __name__ == "__main__":
     main()

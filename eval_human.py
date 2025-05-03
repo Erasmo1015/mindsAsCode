@@ -31,6 +31,8 @@ import optax
 from flax.training import train_state
 from flax import struct
 import pandas as pd
+from human_dataloader import load_and_stack_data
+
 
 from baselines.ToMnet import ToMNet
 from baselines.BC import BCNet
@@ -56,8 +58,8 @@ def parse_args():
         default=False,
         help="Whether to use joint-planner data."
     )
-    parser.add_argument('--num_agents_to_sample', type=int, default=1, help='Number of agents to sample from the dataset.')
-    parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=1, help='Number of datapoints per agent to sample from the dataset.')
+    parser.add_argument('--num_agents_to_sample', type=int, default=3, help='Number of agents to sample from the dataset.')
+    parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=3, help='Number of datapoints per agent to sample from the dataset.')
     parser.add_argument('--num_agents', type=int, default=20, help='Number of agents in the dataset.')
     parser.add_argument('--num_datapoints_per_agent', type=int, default=100, help='Number of datapoints per agent in the dataset.')
     parser.add_argument('--num_steps', type=int, default=100, help='Number of steps in the dataset.')
@@ -67,10 +69,10 @@ def parse_args():
 
     parser.add_argument('--as_images', type=bool, default=False, help='Whether to load the data as images.')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer.')
-    parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
+    parser.add_argument('--num_epochs', type=int, default=33, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=2, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
@@ -92,135 +94,80 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     data_path = args.data_path
     as_images = args.as_images
 
+    data_folder = f"{data_path}/human_data"
+    human_dataloader = load_and_stack_data(data_folder)
+    human_data = None
+    for j in range(epoch+1):
+        human_data = next(human_dataloader)
+    current_data_loaded = epoch
+
     i = epoch
     while True:
-        if not overfit:
-            i += 1
-            num_blocks = random.choice(list(range(2, 10, 2)))
-            num_walls = random.choice(list(range(2, 22, 2)))
-        else:
-            num_blocks = 2
-            num_walls = 2
-        
-
-        data_folder = f"{data_path}/num_blocks{num_blocks}/num_walls{num_walls}"
-        extension = "_group" if args.group else ""
-        data_file = f"{data_folder}/gt_fsm{extension}_traj_data_{args.num_agents}agents.msgpack"
-        # print(f"Loading data from {data_file}")
-
-        # Load data in chunks to reduce memory usage
-        with open(data_file, "rb") as f:
-            serialized_data = f.read()
-            
-        # Create target structure with correct shapes
-        action_target = jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, 1))
-        agent_id_target = jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps))
-        state_target = {
-            'agent_id': agent_id_target,
-            'agent_locations': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, 1, 2)),
-            'agent_inventory': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, 1)),
-            'agent_inventory_colors': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, 1, 3)),
-            'block_colors': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, num_blocks, 3)),
-            'block_locations': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, num_blocks, 2)),
-            'time': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps)),
-            'terminal': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps)),
-            'wall_locations': jnp.zeros((20, args.num_datapoints_per_agent, args.num_steps, num_walls + 2 * (args.env_size * 2 - 1) + 2, 2)),
+        '''
+        actions is (num_agents to sample, num_datapoints per agent, traj_length, 1)
+        agent ids is (num_agents_to_sample, num_datapoints per_agent, traj_length) where each value for agent is the task number
+        states is (num_agents_to_sample, num_datapoints per_agent, traj_length, *state_shape)
+        '''
+        human_states = human_data[0]
+        # Add two dimensions of length 1 to each leaf in human_states
+        human_states = jax.tree.map(
+            lambda x: x[None, None, :, ...] if isinstance(x, (jnp.ndarray, np.ndarray)) else x,
+            human_states
+        )
+        human_actions = human_data[1][None, None, :, None]
+        human_agent_id = jnp.array([human_data[2]])[None, None, :] # (1, 1, 1)
+        # Repeat agent_id to match length of human_actions
+        human_agent_id = jnp.repeat(human_agent_id, human_actions.shape[2], axis=2)  # (1, 1, traj_length)
+        sampled_states = human_states
+        sampled_data = {
+            'states': sampled_states,
+            'actions': human_actions,
+            'agent_ids': human_agent_id,
         }
-        target = {
-            'states': state_target,
-            'actions': action_target,
-            'agent_ids': agent_id_target,
-        }
-            
-        loaded_data = flax.serialization.from_bytes(target, serialized_data)
-        del serialized_data  # Free memory immediately
 
-        # Validate shapes match target
-        for key in target['states'].keys():
-            if loaded_data['states'][key].shape != target['states'][key].shape:
-                continue
-        # print(f"Loaded data from {data_file}")
-                
-        # Sample only what we need
-        if overfit:
-            agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=0, maxval=1)
-        else:
-            agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=0, maxval=loaded_data['states']['agent_locations'].shape[0])
-        
-        # print("Agent indices:", agent_indices.tolist())  # Convert to Python list for printing
-            
-        # agent_indices = jnp.array([8])
-        # if not overfit:
-        i += 1
-        if training:  # for creating held out set
-            batch_floor = 0
-            batch_limit = int(loaded_data['states']['agent_locations'].shape[1] * 0.8)
-        else:
-            batch_floor = int(loaded_data['states']['agent_locations'].shape[1] * 0.8)
-            batch_limit = loaded_data['states']['agent_locations'].shape[1]
-
-
-        batch_indices = jax.random.randint(jax.random.PRNGKey(i), (num_datapoints_per_agent_to_sample,), minval=batch_floor, maxval=batch_limit)
-
-        # if not overfit:
-        i += 1
-        # breakpoint()
-        
-        # Process data in smaller chunks to reduce memory usage
-        sampled_data = {}
-        sampled_data['actions'] = loaded_data['actions'][agent_indices][:, batch_indices][:, :, :args.num_steps//2]
-        sampled_data['agent_ids'] = loaded_data['agent_ids'][agent_indices][:, batch_indices][:, :, :args.num_steps//2]
-        
-        # Process states separately to reduce peak memory usage
-        sampled_states = {}
-        for key in loaded_data['states']:
-            sampled_states[key] = loaded_data['states'][key][agent_indices][:, batch_indices][:, :, :args.num_steps//2]
-
-        # Free memory
-        del loaded_data
-        
         # Reshape all arrays to (-1, *original_shape[3:])
         reshaped_state = jax.tree.map(
             lambda x: jnp.array(x).reshape(-1, *x.shape[3:]) if (isinstance(x, jnp.ndarray) or isinstance(x, np.ndarray)) else x,
             sampled_states
         )
-        
         # Process images in smaller batches to reduce memory usage
         batch_size = 100  # Process images in smaller batches
         num_samples = reshaped_state['agent_locations'].shape[0]
         all_images = []
-        
-        for start_idx in range(0, num_samples, batch_size):
-            end_idx = min(start_idx + batch_size, num_samples)
-            batch_indices = jnp.arange(start_idx, end_idx)
-            
-            batch_state = jax.tree.map(lambda x: x[batch_indices] if isinstance(x, (jnp.ndarray, np.ndarray)) else x, reshaped_state)
-            
-            def convert_to_image(index, stacked_state):
-                indexed_state = jax.tree.map(lambda x: x[index], stacked_state)
-                img_size = args.env_size * 8
-                tile_size = 8
-                grid_size = args.env_size
-                img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
-                render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)
-                return render_fn(indexed_state)
-            
-            batch_images = jax.vmap(convert_to_image, in_axes=(0, None))(jnp.arange(len(batch_indices)), batch_state)
-            all_images.append(batch_images)
-        
-        # Concatenate all batches
-        stacked_images = jnp.concatenate(all_images, axis=0)
-        
-        # Free memory
-        del reshaped_state, all_images
-        
+
         if as_images:
-            sampled_data['states'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, args.num_steps//2, *stacked_images.shape[1:])
+        
+            for start_idx in range(0, num_samples, batch_size):
+                end_idx = min(start_idx + batch_size, num_samples)
+                batch_indices = jnp.arange(start_idx, end_idx)
+                
+                batch_state = jax.tree.map(lambda x: x[batch_indices] if isinstance(x, (jnp.ndarray, np.ndarray)) else x, reshaped_state)
+                
+                def convert_to_image(index, stacked_state):
+                    indexed_state = jax.tree.map(lambda x: x[index], stacked_state)
+                    img_size = args.env_size * 8
+                    tile_size = 8
+                    grid_size = args.env_size
+                    img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+                    render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)
+                    return render_fn(indexed_state)
+                
+                batch_images = jax.vmap(convert_to_image, in_axes=(0, None))(jnp.arange(len(batch_indices)), batch_state)
+                all_images.append(batch_images)
+            
+            # Concatenate all batches
+            stacked_images = jnp.concatenate(all_images, axis=0)
+
+            del reshaped_state, all_images
+
+            sampled_data['states'] = stacked_images[None, None]
         else:
             sampled_data['states'] = sampled_states
 
         yield sampled_data
         del sampled_data
+        human_data = next(human_dataloader)
+        current_data_loaded += 1
 
 def eval_thoughtTrace(args, dataloader, model):
     for i in range(args.num_epochs):
@@ -599,11 +546,7 @@ def main():
     random.seed(args.seed)
 
     # Create CSV path
-    if args.group:
-        group_extension = "_group"
-    else:
-        group_extension = ""
-    csv_path = f"baselines/{args.baseline_model}/grid_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}.csv"
+    csv_path = f"baselines/{args.baseline_model}/human_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp.csv"
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
     # Check if CSV exists and determine starting epoch
@@ -665,6 +608,7 @@ def main():
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     # Run evaluation for each epoch and save results after each epoch
+    all_results = []
     for epoch in tqdm(range(start_epoch, args.num_epochs)):
         print(f"Running epoch {epoch}/{args.num_epochs}")
         res = eval_fn(args, dataloader, model, episode_id=epoch)
@@ -680,13 +624,17 @@ def main():
             'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A',
             'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'FSM', 'NLLM'] else 'N/A'
         }
+        all_results.append(result)
         
-        # Create single-row dataframe for this epoch's result
-        df = pd.DataFrame([result])
-        
+        # Save results after each epoch
+        df = pd.DataFrame(all_results)
         if os.path.exists(csv_path):
-            # Read existing data and append new row
-            df.to_csv(csv_path, mode='a', header=False, index=False)
+            # Read existing data
+            existing_df = pd.read_csv(csv_path)
+            # Append new results
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            # Save combined results
+            combined_df.to_csv(csv_path, index=False)
         else:
             # Create new CSV file
             df.to_csv(csv_path, index=False)

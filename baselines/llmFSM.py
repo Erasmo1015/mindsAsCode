@@ -14,6 +14,8 @@ from agent import AgentExecutionFramework
 from vllm import LLM, SamplingParams
 import traceback
 
+openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+
 class FSMReasoner:
     def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", tensor_parallel_size: int = 1, device: str = "cuda", 
                  dtype: str = "float16", gpu_memory_utilization: float = 0.55, num_hypothesis: int = 4,
@@ -46,7 +48,6 @@ class FSMReasoner:
         self.refinement_2 = open(refinement_2_path, "r").read()
         self.refinement_3 = open(refinement_3_path, "r").read()
 
-
         # Convert dtype string to torch dtype
         torch_dtype = torch.float16
         if dtype == "bfloat16":
@@ -54,23 +55,34 @@ class FSMReasoner:
         elif dtype == "float32":
             torch_dtype = torch.float32
 
-        # Load model using vLLM with optimized settings
-        vllm_kwargs = {
-            "model": model_name,
-            "tensor_parallel_size": tensor_parallel_size,
-            "gpu_memory_utilization": gpu_memory_utilization,
-            "dtype": torch.bfloat16,
-            "trust_remote_code": True,
-            "max_num_batched_tokens": 40000,
-            # "max_model_len": max_model_len,
-        }
-        
-        # Add quantization if specified
-        if quantization:
-            vllm_kwargs["quantization"] = quantization
+        # Check if model is a GPT model
+        if "gpt" in model_name.lower():
+            # Override with specified GPT model
+            self.model_name = model_name
+            # Use OpenAI API instead of vLLM
+            import openai
+            openai.api_key = openai_api_key
+            self.client = openai.OpenAI(api_key=openai_api_key)
+            self.use_openai = True
+        else:
+            self.use_openai = False
+            # Load model using vLLM with optimized settings
+            vllm_kwargs = {
+                "model": model_name,
+                "tensor_parallel_size": tensor_parallel_size,
+                "gpu_memory_utilization": gpu_memory_utilization,
+                "dtype": torch.bfloat16,
+                "trust_remote_code": True,
+                "max_num_batched_tokens": 40000,
+                # "max_model_len": max_model_len,
+            }
             
-        self.llm = LLM(**vllm_kwargs)
-        self.sampling_params = SamplingParams(temperature=1.0, max_tokens=2000)
+            # Add quantization if specified
+            if quantization:
+                vllm_kwargs["quantization"] = quantization
+            
+            self.llm = LLM(**vllm_kwargs)
+            self.sampling_params = SamplingParams(temperature=1.0, max_tokens=2000)
         
         # Keep transformers implementation (commented out)
         # self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -124,8 +136,10 @@ class FSMReasoner:
         for hypothesis_id in range(self.num_hypothesis):
             messages = [{"role": "system", "content": "You are a helpful assistant."}, {'role': 'user', 'content': full_prompt}]
             
-            # Format messages for vLLM
-            if "llama" in self.model_name.lower():
+            # Format messages for vLLM or OpenAI
+            if hasattr(self, 'use_openai') and self.use_openai:
+                formatted_prompt = messages
+            elif "llama" in self.model_name.lower():
                 # Format for Llama models
                 formatted_prompt = ""
                 for msg in messages:
@@ -142,37 +156,57 @@ class FSMReasoner:
                 
             formatted_prompts.append(formatted_prompt)
         
-        # Batch generate with vLLM
-        outputs = self.llm.generate(formatted_prompts, self.sampling_params)
+        # Generate responses for each hypothesis
+        if hasattr(self, 'use_openai') and self.use_openai:
+            # Process each hypothesis individually with OpenAI API
+            outputs = []
+            for prompt in formatted_prompts:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=prompt,
+                    temperature=1.0,
+                    max_tokens=2000
+                )
+                outputs.append(response.choices[0].message.content)
+        else:
+            # Batch generate with vLLM
+            vllm_outputs = self.llm.generate(formatted_prompts, self.sampling_params)
+            outputs = [output.outputs[0].text for output in vllm_outputs]
         
         # Process each hypothesis
-        for hypothesis_id, output in enumerate(outputs):
-            agent_code = output.outputs[0].text
-            
-            # Generate with transformers (commented out)
-            # def generate_response(prompt):
-            #     inputs = self.llm_tokenizer(prompt, return_tensors="pt").to(self.llm_model.device)
-            #     outputs = self.llm_model.generate(
-            #         **inputs,
-            #         max_new_tokens=1000,
-            #         temperature=1.0,
-            #         pad_token_id=self.llm_tokenizer.eos_token_id
-            #     )
-            #     response = self.llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
-            #     response = response[len(prompt):]  # remove the prompt from the response
-            #     return response
-            
-            # vLLM implementation for generate_response
-            def generate_response(prompt):
-                outputs = self.llm.generate([prompt], self.sampling_params)
-                return outputs[0].outputs[0].text
+        for hypothesis_id, agent_code in enumerate(outputs):
+            # Define generate_response and revise_response functions based on model type
+            if hasattr(self, 'use_openai') and self.use_openai:
+                def generate_response(prompt):
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=1.0,
+                        max_tokens=2000
+                    )
+                    return response.choices[0].message.content
 
-            # vLLM implementation for revise_response
-            def revise_response(response, error_message):
-                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
-                outputs = self.llm.generate([prompt], self.sampling_params)
-                return outputs[0].outputs[0].text
-    
+                def revise_response(response, error_message):
+                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                    revised = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=1.0,
+                        max_tokens=2000
+                    )
+                    return revised.choices[0].message.content
+            else:
+                # vLLM implementation for generate_response
+                def generate_response(prompt):
+                    outputs = self.llm.generate([prompt], self.sampling_params)
+                    return outputs[0].outputs[0].text
+
+                # vLLM implementation for revise_response
+                def revise_response(response, error_message):
+                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                    outputs = self.llm.generate([prompt], self.sampling_params)
+                    return outputs[0].outputs[0].text
+            
             agent = None
             error = None
             trial = 0

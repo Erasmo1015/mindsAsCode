@@ -76,10 +76,10 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
             num_blocks = random.choice(list(range(2, 22, 2)))
             num_walls = random.choice(list(range(2, 22, 2)))
         else:
-            # num_blocks = random.choice(list(range(2, 22, 2)))
-            # num_walls = random.choice(list(range(2, 22, 2)))
-            num_blocks = 2
-            num_walls = 2
+            num_blocks = random.choice(list(range(2, 22, 2)))
+            num_walls = random.choice(list(range(2, 22, 2)))
+            # num_blocks = 2
+            # num_walls = 2
             
         data_folder = f"{data_path}/num_blocks{num_blocks}/num_walls{num_walls}"
         if args.group:
@@ -584,21 +584,30 @@ if __name__ == "__main__":
     # obs_traj = jnp.concatenate(obs_traj, axis=0)
     # act_traj = jnp.concatenate(act_traj, axis=0)
     # # Save trajectories to pickle file
-    # save_dict = {
-    #     'observations': np.array(obs_traj),
-    #     'actions': np.array(act_traj)
-    # }
+    # # Convert to numpy arrays
+    # obs_array = np.array(obs_traj)
+    # act_array = np.array(act_traj)
     
-    # # Create directory if it doesn't exist
+    # Create directory if it doesn't exist
     # save_dir = 'data/trajectories'
     # os.makedirs(save_dir, exist_ok=True)
     
-    # # Save with descriptive filename including num agents and datapoints
-    # save_path = os.path.join(save_dir, f'dummy_trajectory.pkl')
+    # Save with descriptive filename including num agents and datapoints
+    # save_path = os.path.join(save_dir, f'dummy_trajectory.npz')
     
-    # with open(save_path, 'wb') as f:
-    #     pickle.dump(save_dict, f)
+    # # Save arrays using npz format
+    # np.savez(save_path, 
+    #          observations=obs_array,
+    #          actions=act_array)
         
     # print(f"Saved trajectories to {save_path}")
 
+
+    # Load trajectories from npz file
+    # data = np.load(save_path)
+    # observations = data['observations']
+    # actions = data['actions']
+
+    # print(observations.shape)
+    # print(actions.shape)
 

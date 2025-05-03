@@ -29,6 +29,45 @@ module load gcc/10.2.0
 llm_model=$1
 model_arch=$2
 n_hypothesis=$3
+group=$4
+
+if [ "$model_arch" = "BC" ]; then
+    n_agents_to_sample=3
+    n_datapoints_per_agent_to_sample=3
+    as_images=True
+    num_epochs=33
+else
+    n_agents_to_sample=1
+    n_datapoints_per_agent_to_sample=1
+    as_images=False
+    num_epochs=100
+fi
+
+echo "model_arch: $model_arch"
+echo "n_hypothesis: $n_hypothesis"
+echo "llm_model: $llm_model"
+echo "group: $group"
+echo "n_agents_to_sample: $n_agents_to_sample"
+echo "n_datapoints_per_agent_to_sample: $n_datapoints_per_agent_to_sample"
+echo "as_images: $as_images"
+echo "num_epochs: $num_epochs"
+
 
 # Run the main command and capture its exit status
-python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --num_epochs 10 --num_agents_to_sample 5 --num_datapoints_per_agent_to_sample 1 --group True
+if [ "$group" = "True" ]; then
+    python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --num_epochs $num_epochs --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample --group True --as_images $as_images
+else
+    python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs $num_epochs --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample --as_images $as_images
+    # python eval_partnr.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 100 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 1 --group False
+    # python eval_human.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 120 --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample
+fi
+EXIT_CODE=$?
+
+# If the job failed (non-zero exit code), resubmit it
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "Job failed with exit code $EXIT_CODE. Requeuing..."
+    # Submit the same script again
+    sbatch $0 $llm_model $model_arch $n_hypothesis $group
+    exit $EXIT_CODE
+fi
+

@@ -1,4 +1,4 @@
-You are a robot viewing agents acting in an object-centric environment. Your goal is to model the behavior of the agents as a finite state machine (FSM) code in python. You will be provided experiences in the format of (state, action) tuples.
+You are a robot viewing agents acting in an object-centric environment. Your goal is to model the behavior of another agent. You will be provided experiences in the format of (state, action) tuples.
 
 This environment simulates potentially multiple agents interacting in a house with many possible tasks.
 
