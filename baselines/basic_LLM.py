@@ -86,7 +86,7 @@ class NaiveLLMReasoner:
                 vllm_kwargs["quantization"] = quantization
                 
             self.llm = LLM(**vllm_kwargs)
-            self.sampling_params = SamplingParams(temperature=1.0, max_tokens=10)
+            self.sampling_params = SamplingParams(temperature=0.75, max_tokens=10)
         
         # Keep transformers implementation (commented out)
         # self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -112,13 +112,13 @@ class NaiveLLMReasoner:
     def grid_convert_states_actions_to_text(self, states, actions):
         state_strings = []
         action_strings = []
-        for i in range(actions.shape[0]):
+        for i in range(actions.shape[0]):  # (num_timesteps, num_agents)
             state = jax.tree.map(lambda x: x[i], states)
             state_string = self.grid_convert_state_to_text(state)
-            action = [self.action_to_name[a] for a in actions[i]]
+            action = [self.action_to_name[int(a)] for a in actions[i]]
             state_strings.append(f"{i+1}. State: {state_string}.")
             action_string = f"{i+1}."
-            for aid, a in enumerate(action):
+            for aid, a in enumerate(action):    # (num_agents,)
                 action_string += f" Agent {aid}'s Action: {a}, "
             action_strings.append(action_string)
         state_action_strings = [f"{s} {a}" for s, a in zip(state_strings[:-1], action_strings[:-1])]
@@ -144,24 +144,26 @@ class NaiveLLMReasoner:
             action_string = f"{i+1}. Agent 0 Action: {action}"
             action_strings.append(action_string)
             tools = tools.union(set(state['tool_list']))
-            tool_descriptions += state['tool_descriptions']
+            tool_descriptions = state['tool_descriptions']
         state_action_strings = [f"{s} {a}" for s, a in zip(state_strings[:-2], action_strings[:-2])]
         state_action_strings.append(state_strings[-2])
         return "\n-------\n".join(state_action_strings), tools, tool_descriptions
     
-    def predict_action(self, states, actions, training=False, episode_id=0, agent_id=0):
+    def predict_action(self, states, actions, training=False, episode_id=0, agent_id=0, timestep=None):
         episode_name = f"{self.dataset_name}_{episode_id}"
         if self.partnr:
             state_action_text, tools, tool_descriptions = self.partnr_convert_states_actions_to_text(states, actions)
         else:
             state_action_text = self.grid_convert_states_actions_to_text(states, actions)
 
-
-        prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take next?"
+        if timestep is not None:
+            prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
+        else:
+            prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take next?"
         if not self.partnr:
             prompt += f" Choose from the following options: {self.action_to_name.values()}. Your answer should be in the following format: \nAction: <action>\n Your answer:"
         else:
-            prompt += f" Here is a description of what each tool is and how to use them: Tools: {tools}\n Tool Descriptions: {tool_descriptions}. Your answer should be formatted appropriately. Your answer:"
+            prompt += f" Here is a description of what each tool is and how to use them: Tools: {tools}\n Tool Descriptions: {tool_descriptions}. What tool will agent {agent_id} use next? Your answer should be in the following format: \nAction: <tool_name>\n For example, if the tool is 'clean', your answer should be: \nAction: clean\n If the tool is 'wait', your answer should be: \nAction: wait\n Only respond with the tool name, not any other text. Your answer:"
         full_prompt = prompt
 
 
@@ -201,7 +203,7 @@ class NaiveLLMReasoner:
                 response = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=prompt,
-                    temperature=1.0,
+                    temperature=0.75,
                     max_tokens=10,
                     stop=["<|user|>", "<|system|>"] # Stop at next user/system message
                 )
@@ -214,17 +216,22 @@ class NaiveLLMReasoner:
         for output in outputs:
             success = False
             retries = 0
-            while not success and retries < 5:
+            while not success and retries < 1:
                 try:
                     if not self.partnr:
                         for action in self.action_to_name.values():
                             if action.lower() in output.lower():
                                 final_action_pred_list.append(self.name_to_action[action])
                                 break
+                            success = True
                     else:
-                        final_action_pred_list.append(output)
+                        for tool in tools:
+                            if tool.lower() in output.lower():
+                                final_action_pred_list.append(tool)
+                                break
+                            success = True
                     log_prob_hypothesis_list.append(1)
-                    success = True
+                    
                 except Exception as e:
                     retries += 1
                 break

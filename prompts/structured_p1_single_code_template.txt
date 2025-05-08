@@ -1,0 +1,27 @@
+A finite-state machine (FSM) or finite-state automaton (FSA, plural: automata), finite automaton, or simply a state machine, is a mathematical model of computation. It is an abstract machine that can be in exactly one of a finite number of states at any given time. The FSM can change from one state to another in response to some inputs; the change from one state to another is called a transition. An FSM is defined by a list of its states, its initial state, and the inputs that trigger each transition. Finite-state machines are of two types—deterministic finite-state machines and non-deterministic finite-state machines. For any non-deterministic finite-state machine, an equivalent deterministic one can be constructed.
+
+The behavior of state machines can be observed in many agent behaviors that follow predetermined sequences of actions based on environmental states and events. Simple examples are: an agent collecting resources that moves toward resources when they are visible and returns to base when inventory is full; an agent following another agent that transitions between pursuit and waiting states based on line of sight; an agent building structures that cycles through gathering materials, moving to build location, and placing blocks in sequence; an agent solving puzzles that systematically tries different actions until finding the solution pattern.
+
+Here is an example of a finite state machine (FSM) for an agent that collects blocks and returns them to a base location:
+
+States:
+1. SEARCH - Agent searches for nearest uncollected block
+2. COLLECT - Agent moves toward and collects target block 
+3. RETURN - Agent returns to base location to deposit block
+4. DEPOSIT - Agent deposits block at base
+
+Transitions:
+- SEARCH -> COLLECT: When agent sees an uncollected block
+- COLLECT -> RETURN: When agent has collected block in inventory
+- RETURN -> DEPOSIT: When agent reaches base location
+- DEPOSIT -> SEARCH: After depositing block
+
+The FSM maintains its current state and transitions between states based on observations of the environment (block locations, inventory status, etc). Each state has associated actions and logic for determining the next action and state transition.
+
+This is just one example - FSMs can model many different types of systematic agent behaviors by defining appropriate states and transition rules based on environmental conditions.
+
+Predict a high level description of the agent's internal states and transitions of the FSM for the given task. Return your answer in paragraph format.
+
+Your answer:
+
+

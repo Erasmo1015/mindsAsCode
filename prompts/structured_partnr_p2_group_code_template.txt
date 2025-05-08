@@ -1,0 +1,49 @@
+A finite-state machine (FSM) or finite-state automaton (FSA, plural: automata), finite automaton, or simply a state machine, is a mathematical model of computation. It is an abstract machine that can be in exactly one of a finite number of states at any given time. The FSM can change from one state to another in response to some inputs; the change from one state to another is called a transition. An FSM is defined by a list of its states, its initial state, and the inputs that trigger each transition. Finite-state machines are of two types—deterministic finite-state machines and non-deterministic finite-state machines. For any non-deterministic finite-state machine, an equivalent deterministic one can be constructed.
+
+The behavior of state machines can be observed in many agent behaviors that follow predetermined sequences of actions based on environmental states and events. Simple examples are: an agent collecting resources that moves toward resources when they are visible and returns to base when inventory is full; an agent following another agent that transitions between pursuit and waiting states based on line of sight; an agent building structures that cycles through gathering materials, moving to build location, and placing blocks in sequence; an agent solving puzzles that systematically tries different actions until finding the solution pattern.
+
+The FSM maintains its current state and transitions between states based on observations of the environment (block locations, inventory status, etc). Each state has associated actions and logic for determining the next action and state transition.
+
+FSMs can model many different types of systematic agent behaviors by defining appropriate states and transition rules based on environmental conditions.
+
+Please implement code to model the logic of the agents' behavior as demonstrated by the experiences. Here is the template for the agent's FSM class. Please implement the FSM code for an agent following the template. The code needs to be directly runnable on the inputs of state and return an array of actions, with each one corresponding to an agent. The available tools and description on how they are used have been provided prior.
+
+```python
+import numpy as np
+
+class FSMAgent:
+    def __init__(self, num_agents: int=1, num_blocks: int=1):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks  # irrelevant, can ignore
+    
+    '''
+    Your helper functions for decision-making go here
+    '''
+        
+    def act(self, observation) -> int:
+        '''
+        observation is a dictionary with the following keys:
+        - tool_list: List of tools available to the agent
+        - tool_descriptions: Description of how each tool is used
+        - scene_graph: Scene graph of the environment, dictionary mapping
+            - object_class string (i.e. furnitutre, objects) to dictionary mapping
+                - room string (i.e. living_room_1, bathroom_1, etc.) if object_class is "furniture" to list of 
+                    - object_id string (i.e. table_21, chair_32, etc.)
+                - object_id string (i.e. "plate_container_2", "vase_1" etc.) if object_class is "objects" to list of 
+                    - object_base string (i.e "table_14", "table_21")
+        - agent_state: String describing the state of the agent
+        '''
+
+        # TODO: Implement the agent's decision-making logic here
+        # This is a placeholder implementation that returns a random action.
+        tools = ['Navigate', 'Interact', 'Rearrange']  # each tool corresponds to a different agent
+        
+
+
+        ## DON'T CHANGE ANYTHING BELOW HERE
+        return tools
+```
+Please implement the FSM code to model the logic of the joint planner governing the group of agents' behavior as demonstrated by the experiences. Please implement the code following the template. Feel free to implement the helper functions you need. 
+You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return a list of tools, with each one corresponding to an agent. Let's think step by step.
+
+Your code here:

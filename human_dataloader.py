@@ -121,7 +121,7 @@ def load_and_stack_data(directory: str='./data/human_data'):
                             stacked_state_trajectory = jax.tree.map(lambda *x: jnp.stack(x), *curr_state_trajectory)
                             stacked_action_trajectory = jnp.stack(curr_action_trajectory)
                             agent_id = task_list.index(task)
-                            yield stacked_state_trajectory, stacked_action_trajectory, agent_id
+                            yield stacked_state_trajectory, stacked_action_trajectory, agent_id, file, task
                             del stacked_state_trajectory, stacked_action_trajectory
                             del agent_id
                             # all_state_trajectories.append(stacked_state_trajectory)

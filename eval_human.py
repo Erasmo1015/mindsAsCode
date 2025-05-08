@@ -32,7 +32,7 @@ from flax.training import train_state
 from flax import struct
 import pandas as pd
 from human_dataloader import load_and_stack_data
-
+import traceback
 
 from baselines.ToMnet import ToMNet
 from baselines.BC import BCNet
@@ -58,8 +58,8 @@ def parse_args():
         default=False,
         help="Whether to use joint-planner data."
     )
-    parser.add_argument('--num_agents_to_sample', type=int, default=3, help='Number of agents to sample from the dataset.')
-    parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=3, help='Number of datapoints per agent to sample from the dataset.')
+    parser.add_argument('--num_agents_to_sample', type=int, default=1, help='Number of agents to sample from the dataset.')
+    parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=1, help='Number of datapoints per agent to sample from the dataset.')
     parser.add_argument('--num_agents', type=int, default=20, help='Number of agents in the dataset.')
     parser.add_argument('--num_datapoints_per_agent', type=int, default=100, help='Number of datapoints per agent in the dataset.')
     parser.add_argument('--num_steps', type=int, default=100, help='Number of steps in the dataset.')
@@ -69,15 +69,23 @@ def parse_args():
 
     parser.add_argument('--as_images', type=bool, default=False, help='Whether to load the data as images.')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer.')
-    parser.add_argument('--num_epochs', type=int, default=33, help='Number of training epochs.')
+    parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
+    parser.add_argument('--bootstrap', action='store_true', help='Whether to use bootstrapping for hypothesis evaluation')
+    parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage approach for FSM reasoning')
+    parser.add_argument('--structured', type=str, default="False", choices=["False", "p1", "p2"], 
+                        help='Structured prompting type for FSM reasoning: False, p1, or p2')
+    parser.add_argument('--rejuvenation', type=bool, default=False, help='Whether to use rejuvenation for FSM.')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=-10.0, help='Threshold for rejuvenation.')
+    parser.add_argument('--max_rejuvenation_attempts', type=int, default=5, help='Maximum number of rejuvenation attempts.')
+    parser.add_argument('--top_k', type=int, default=0, help='If > 0, only average over the top k most likely hypotheses.')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
@@ -98,7 +106,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     human_dataloader = load_and_stack_data(data_folder)
     human_data = None
     for j in range(epoch+1):
-        human_data = next(human_dataloader)
+        human_data, human_actions, agent_id, filename, task = next(human_dataloader)
     current_data_loaded = epoch
 
     i = epoch
@@ -106,16 +114,16 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         '''
         actions is (num_agents to sample, num_datapoints per agent, traj_length, 1)
         agent ids is (num_agents_to_sample, num_datapoints per_agent, traj_length) where each value for agent is the task number
-        states is (num_agents_to_sample, num_datapoints per_agent, traj_length, *state_shape)
+        states is (num_agents_to_sample, num_datapoints per agent, traj_length, *state_shape)
         '''
-        human_states = human_data[0]
+        human_states = human_data
         # Add two dimensions of length 1 to each leaf in human_states
         human_states = jax.tree.map(
             lambda x: x[None, None, :, ...] if isinstance(x, (jnp.ndarray, np.ndarray)) else x,
             human_states
         )
-        human_actions = human_data[1][None, None, :, None]
-        human_agent_id = jnp.array([human_data[2]])[None, None, :] # (1, 1, 1)
+        human_actions = human_actions[None, None, :, None]
+        human_agent_id = jnp.array([agent_id])[None, None, :] # (1, 1, 1)
         # Repeat agent_id to match length of human_actions
         human_agent_id = jnp.repeat(human_agent_id, human_actions.shape[2], axis=2)  # (1, 1, traj_length)
         sampled_states = human_states
@@ -123,6 +131,8 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
             'states': sampled_states,
             'actions': human_actions,
             'agent_ids': human_agent_id,
+            'filename': filename,
+            'task': task
         }
 
         # Reshape all arrays to (-1, *original_shape[3:])
@@ -136,7 +146,6 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         all_images = []
 
         if as_images:
-        
             for start_idx in range(0, num_samples, batch_size):
                 end_idx = min(start_idx + batch_size, num_samples)
                 batch_indices = jnp.arange(start_idx, end_idx)
@@ -166,7 +175,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
 
         yield sampled_data
         del sampled_data
-        human_data = next(human_dataloader)
+        human_data, human_actions, agent_id, filename, task = next(human_dataloader)
         current_data_loaded += 1
 
 def eval_thoughtTrace(args, dataloader, model):
@@ -187,7 +196,15 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
     datapoint = next(dataloader)
 
     for a in tqdm(range(args.num_agents_to_sample)):
-        data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)
+        # Extract filename and task before tree_map
+        data = {}
+        # Apply tree_map only to array data, not to filename and task
+        for key, value in datapoint.items():
+            if key in ['filename', 'task']:
+                data[key] = value  # Keep these as is
+            else:
+                data[key] = jax.tree.map(lambda x: x[a, -1, :15], value)
+                
         states = data['states']
         actions = data['actions']  # (20, n)  # 20 timesteps, n agent actions
         agent_ids = data['agent_ids']
@@ -224,7 +241,15 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
     datapoint = next(dataloader)
 
     for a in tqdm(range(args.num_agents_to_sample)):
-        data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)
+        # Extract filename and task before tree_map
+        data = {}
+        # Apply tree_map only to array data, not to filename and task
+        for key, value in datapoint.items():
+            if key in ['filename', 'task']:
+                data[key] = value  # Keep these as is
+            else:
+                data[key] = jax.tree.map(lambda x: x[a, -1, :15], value)
+                
         states = data['states']
         actions = data['actions']  # (20, 1)  # 20 timesteps, 1 action
         agent_ids = data['agent_ids']
@@ -239,7 +264,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                     num_correct += 1
                 # break   # end loop if prediction is successful
             except Exception as e:
-                print(f"Error: {e}")
+                # print(f"Error: {e}")
                 full_traceback = traceback.format_exc()
                 print(full_traceback)
                 tries += 1
@@ -254,12 +279,25 @@ def eval_fsm(args, dataloader, model, episode_id: int = 0):
     # Process just one datapoint (one epoch) at a time
     datapoint = next(dataloader)
     
+    # Create a list to store per-file, per-task results
+    detailed_results = []
+    filename = datapoint.get('filename', 'unknown')
+    task = datapoint.get('task', 'unknown')
+    
     for a in tqdm(range(args.num_agents_to_sample)):
         if args.group:
             num_total += 4
         else:
             num_total += 1
-        data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)  # last datapoint, 20 timesteps for each agent
+        # Extract filename and task before tree_map
+        data = {}
+        # Apply tree_map only to array data, not to filename and task
+        for key, value in datapoint.items():
+            if key in ['filename', 'task']:
+                data[key] = value  # Keep these as is
+            else:
+                data[key] = jax.tree.map(lambda x: x[a, -1, :15], value)
+        
         states = data['states']
         actions = data['actions']  # (20, 1)  # 20 timesteps, 1 action
         agent_ids = data['agent_ids']
@@ -275,10 +313,26 @@ def eval_fsm(args, dataloader, model, episode_id: int = 0):
             gt_final_action = actions[-1]
             for aid in tqdm(range(len(gt_final_action))):
                 final_action_prob = predicted_final_action[aid, gt_final_action[aid]]
-                if final_action_prob >= np.max(predicted_final_action[aid]):  # only count a success if the model succeesfully made a prediction
+                is_correct = final_action_prob >= np.max(predicted_final_action[aid])
+                if is_correct:  # only count a success if the model successfully made a prediction
                     num_correct += 1
-        except:
-            continue
+                
+                # Store detailed result
+                detailed_results.append({
+                    'filename': filename,
+                    'task': task,
+                    'agent_id': int(agent_ids[-1, aid]) if len(agent_ids.shape) > 1 else int(agent_ids[-1]),
+                    'correct': int(is_correct),
+                    'gt_action': int(gt_final_action[aid]),
+                    'pred_action': int(np.argmax(predicted_final_action[aid])),
+                    'confidence': float(np.max(predicted_final_action[aid]))
+                })
+                
+        except Exception as e:
+            # print(f"Error: {e}")
+            full_traceback = traceback.format_exc()
+            print(full_traceback)
+            exit(1)
 
     del datapoint
         
@@ -287,10 +341,11 @@ def eval_fsm(args, dataloader, model, episode_id: int = 0):
         # if num_successes > 0:
         #     print(f"Successful Prediction Accuracy: {num_correct / num_successes}")
         print(f"Total Accuracy: {num_correct / num_total}")
-        return num_correct / num_total
+        return num_correct / num_total, detailed_results
     else:
         print("No valid predictions were made")
-        return 0.0
+        return 0.0, detailed_results
+            
             
 
 def load_tomnet_models(args):
@@ -510,8 +565,9 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
 
         def single_agent_acc(action_ps, gt_final_action):
             def single_action_acc(action_p, gt_final_action):
-                action_pred = jnp.argmax(action_p, axis=-1)
-                return action_pred == gt_final_action
+                # action_pred = jnp.argmax(action_p, axis=-1)
+                max_prob = jnp.max(action_p, axis=-1)
+                return action_p[gt_final_action] == max_prob
             action_accs = jax.vmap(single_action_acc, in_axes=(0, 0))(action_ps, gt_final_action)
             return jnp.sum(action_accs)
 
@@ -525,6 +581,117 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
     return accuracy
     
 
+def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
+    """Evaluate FSM with bootstrapping for different numbers of hypotheses."""
+    max_hypotheses = args.n_hypothesis  # Maximum number of hypotheses to consider
+    results = {n: {'correct': 0, 'total': 0, 'program_length': 0} for n in range(1, max_hypotheses + 1)}
+    
+    # Process just one datapoint (one epoch) at a time
+    datapoint = next(dataloader)
+    
+    # Create a list to store per-file, per-task results for each hypothesis count
+    detailed_results = {n: [] for n in range(1, max_hypotheses + 1)}
+    filename = datapoint.get('filename', 'unknown')
+    task = datapoint.get('task', 'unknown')
+    
+    for a in tqdm(range(args.num_agents_to_sample)):
+        if args.group:
+            num_agents_per_sample = 4
+        else:
+            num_agents_per_sample = 1
+        
+        # Extract filename and task before tree_map
+        data = {}
+        # Apply tree_map only to array data, not to filename and task
+        for key, value in datapoint.items():
+            if key in ['filename', 'task']:
+                data[key] = value  # Keep these as is
+            else:
+                data[key] = jax.tree.map(lambda x: x[a, -1, :15], value)
+        
+        states = data['states']
+        actions = data['actions']  # (15, num_agents_per_sample)
+        agent_ids = data['agent_ids']
+        
+        try:
+            # Enable bootstrapping
+            model.bootstrap = True
+            if args.rejuvenation:
+                bootstrap_predictions = model.predict_action_with_rejuvenation(
+                    states, actions, agent_ids, episode_id=episode_id, 
+                    max_hypotheses=max_hypotheses,
+                    rejuvenation_threshold=args.rejuvenation_threshold,
+                    max_rejuvenation_attempts=args.max_rejuvenation_attempts,
+                    top_k=args.top_k
+                )
+            else:
+                bootstrap_predictions = model.predict_action_with_bootstrap(
+                    states, actions, agent_ids, episode_id=episode_id, 
+                    max_hypotheses=max_hypotheses,
+                    top_k=args.top_k
+                )
+                
+            if bootstrap_predictions is None:
+                continue
+                
+            gt_final_action = actions[-1]
+            
+            # Get the number of available hypotheses
+            num_available_hyp = len(bootstrap_predictions)
+            
+            # Evaluate each bootstrap prediction (for each number of hypotheses)
+            for n_hyp in range(1, max_hypotheses + 1):
+                results[n_hyp]['total'] += num_agents_per_sample
+                
+                # If we have this hypothesis result available, use it
+                # Otherwise, use the last available hypothesis result
+                hyp_idx = min(n_hyp, num_available_hyp) - 1  # Convert to 0-indexed
+                prediction, program_length = bootstrap_predictions[hyp_idx]
+                results[n_hyp]['program_length'] += program_length
+                
+                if len(prediction.shape) == 1:
+                    prediction = prediction.reshape(1, -1)
+                
+                for aid in range(len(gt_final_action)):
+                    final_action_prob = prediction[aid, gt_final_action[aid]]
+                    is_correct = final_action_prob >= np.max(prediction[aid])
+                    if is_correct:
+                        results[n_hyp]['correct'] += 1
+                    
+                    # Store detailed result for this hypothesis count
+                    detailed_results[n_hyp].append({
+                        'filename': filename,
+                        'task': task,
+                        'agent_id': int(agent_ids[-1, aid]) if len(agent_ids.shape) > 1 else int(agent_ids[-1]),
+                        'correct': int(is_correct),
+                        'gt_action': int(gt_final_action[aid]),
+                        'pred_action': int(np.argmax(prediction[aid])),
+                        'confidence': float(np.max(prediction[aid])),
+                        'program_length': program_length
+                    })
+                        
+        except Exception as e:
+            full_traceback = traceback.format_exc()
+            print(full_traceback)
+            continue
+
+    # Calculate accuracies and average program lengths for each number of hypotheses
+    accuracies = {}
+    program_lengths = {}
+    for n_hyp in results:
+        if results[n_hyp]['total'] > 0:
+            accuracies[n_hyp] = results[n_hyp]['correct'] / results[n_hyp]['total']
+            program_lengths[n_hyp] = results[n_hyp]['program_length'] / results[n_hyp]['total']
+        else:
+            accuracies[n_hyp] = 0.0
+            program_lengths[n_hyp] = 0.0
+    
+    # Print results
+    for n_hyp, acc in accuracies.items():
+        print(f"Hypotheses: {n_hyp}, Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), Avg Program Length: {program_lengths[n_hyp]:.1f}")
+    
+    # Return the full dictionary of accuracies, program lengths, and detailed results
+    return accuracies, program_lengths, detailed_results
 
 def main():
     """Main function to eval baseline models."""
@@ -545,8 +712,27 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    # Create CSV path
-    csv_path = f"baselines/{args.baseline_model}/human_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp.csv"
+    # Create CSV path for bootstrap results
+    if args.group:
+        group_extension = "_group"
+    else:
+        group_extension = ""
+        
+    two_stage_extension = "_two_stage" if args.two_stage else ""
+    structured_extension = f"_structured_{args.structured}" if args.structured != "False" else ""
+    rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
+
+    if args.bootstrap and args.baseline_model == "FSM":
+        if args.top_k > 0:
+            csv_path = f"baselines/{args.baseline_model}/human_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+            detailed_csv_path = f"baselines/{args.baseline_model}/human_bootstrap_detailed_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+        else:
+            csv_path = f"baselines/{args.baseline_model}/human_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+            detailed_csv_path = f"baselines/{args.baseline_model}/human_bootstrap_detailed_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+    else:
+        csv_path = f"baselines/{args.baseline_model}/human_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        detailed_csv_path = f"baselines/{args.baseline_model}/human_detailed_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+    
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
     # Check if CSV exists and determine starting epoch
@@ -554,14 +740,29 @@ def main():
     if os.path.exists(csv_path):
         existing_df = pd.read_csv(csv_path)
         # Filter for the current configuration
-        matching_rows = existing_df[
-            (existing_df['model'] == args.baseline_model) & 
-            (existing_df['group'] == args.group) & 
-            (existing_df['num_agents_evaluated'] == args.num_agents_to_sample) & 
-            (existing_df['datapoints_per_agent'] == args.num_datapoints_per_agent_to_sample) &
-            (existing_df['llm_model'] == args.model_name) &
-            (existing_df['num_hypothesis'] == args.n_hypothesis)
+        filter_conditions = [
+            (existing_df['model'] == args.baseline_model),
+            (existing_df['group'] == args.group),
+            (existing_df['num_agents_evaluated'] == args.num_agents_to_sample),
+            (existing_df['datapoints_per_agent'] == args.num_datapoints_per_agent_to_sample),
+            (existing_df['llm_model'] == args.model_name)
         ]
+        
+        # Add optional filter conditions if columns exist
+        if 'top_k' in existing_df.columns:
+            filter_conditions.append(existing_df['top_k'] == args.top_k)
+        if 'two_stage' in existing_df.columns:
+            filter_conditions.append(existing_df['two_stage'] == args.two_stage)
+        if 'structured' in existing_df.columns:
+            filter_conditions.append(existing_df['structured'].astype(str) == args.structured)
+        if 'rejuvenation' in existing_df.columns:
+            filter_conditions.append(existing_df['rejuvenation'] == args.rejuvenation)
+        if 'num_hypothesis' in existing_df.columns:
+            filter_conditions.append(existing_df['num_hypothesis'] == args.n_hypothesis)
+        
+        # Apply all filter conditions
+        matching_rows = existing_df[np.logical_and.reduce(filter_conditions)]
+        
         if len(matching_rows) > 0:
             # Get the highest epoch completed
             start_epoch = matching_rows['epoch'].max() + 1
@@ -580,8 +781,14 @@ def main():
     elif args.baseline_model == "FSM":
         from baselines.inferFSM import FSMReasoner
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
-        model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group)
-        eval_fn = eval_fsm
+        model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+                           dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
+                           num_hypothesis=20, group=args.group, two_stage=args.two_stage,
+                           structured=args.structured)
+        if args.bootstrap:
+            eval_fn = eval_fsm_bootstrap
+        else:
+            eval_fn = eval_fsm
     elif args.baseline_model == 'NLLM':
         from baselines.basic_LLM import NaiveLLMReasoner
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
@@ -594,7 +801,7 @@ def main():
             print("No ToMnet models found. Please train models first.")
             return
         def eval_fn(a, d, m, episode_id):
-            return eval_bc(a, d, m, states, episode_id)
+            return eval_mtom(a, d, m, states)
             
     elif args.baseline_model == "BC":
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
@@ -608,36 +815,97 @@ def main():
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     # Run evaluation for each epoch and save results after each epoch
-    all_results = []
     for epoch in tqdm(range(start_epoch, args.num_epochs)):
         print(f"Running epoch {epoch}/{args.num_epochs}")
-        res = eval_fn(args, dataloader, model, episode_id=epoch)
         
-        # Create results dictionary for this epoch
-        result = {
-            'model': args.baseline_model,
-            'accuracy': res,
-            'group': args.group,
-            'num_agents_evaluated': args.num_agents_to_sample,
-            'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
-            'epoch': epoch,
-            'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A',
-            'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'FSM', 'NLLM'] else 'N/A'
-        }
-        all_results.append(result)
-        
-        # Save results after each epoch
-        df = pd.DataFrame(all_results)
-        if os.path.exists(csv_path):
-            # Read existing data
-            existing_df = pd.read_csv(csv_path)
-            # Append new results
-            combined_df = pd.concat([existing_df, df], ignore_index=True)
-            # Save combined results
-            combined_df.to_csv(csv_path, index=False)
+        if args.bootstrap and args.baseline_model == "FSM":
+            accuracies, program_lengths, detailed_results = eval_fn(args, dataloader, model, episode_id=epoch)
+            
+            # Create results for each hypothesis count
+            for n_hyp, accuracy in accuracies.items():
+                result = {
+                    'model': args.baseline_model,
+                    'accuracy': accuracy,
+                    'group': args.group,
+                    'num_agents_evaluated': args.num_agents_to_sample,
+                    'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
+                    'epoch': epoch,
+                    'llm_model': args.model_name,
+                    'num_hypothesis': n_hyp,
+                    'two_stage': args.two_stage,
+                    'structured': args.structured,
+                    'rejuvenation': args.rejuvenation,
+                    'top_k': args.top_k,
+                    'program_length': program_lengths[n_hyp]
+                }
+                
+                # Create single-row dataframe for this result
+                df = pd.DataFrame([result])
+                
+                if os.path.exists(csv_path) and epoch >= start_epoch:
+                    # Read existing data and append new row
+                    df.to_csv(csv_path, mode='a', header=False, index=False)
+                else:
+                    # Create new CSV file or overwrite for first epoch
+                    df.to_csv(csv_path, index=False)
+                
+                # Save detailed results for this hypothesis count
+                if detailed_results and n_hyp in detailed_results:
+                    detailed_df = pd.DataFrame(detailed_results[n_hyp])
+                    detailed_df['epoch'] = epoch
+                    detailed_df['num_hypothesis'] = n_hyp
+                    detailed_df['model'] = args.baseline_model
+                    detailed_df['llm_model'] = args.model_name
+                    
+                    if os.path.exists(detailed_csv_path) and epoch >= start_epoch:
+                        # Read existing data and append new rows
+                        detailed_df.to_csv(detailed_csv_path, mode='a', header=False, index=False)
+                    else:
+                        # Create new CSV file
+                        detailed_df.to_csv(detailed_csv_path, index=False)
         else:
-            # Create new CSV file
-            df.to_csv(csv_path, index=False)
+            res, detailed_results = eval_fn(args, dataloader, model, episode_id=epoch) if args.baseline_model == "FSM" else (eval_fn(args, dataloader, model, episode_id=epoch), [])
+            
+            # Create results dictionary for this epoch
+            result = {
+                'model': args.baseline_model,
+                'accuracy': res,
+                'group': args.group,
+                'num_agents_evaluated': args.num_agents_to_sample,
+                'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
+                'epoch': epoch,
+                'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A',
+                'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'FSM', 'NLLM'] else 'N/A',
+                'two_stage': args.two_stage if args.baseline_model == 'FSM' else False,
+                'structured': args.structured if args.baseline_model == 'FSM' else "False",
+                'top_k': args.top_k if args.baseline_model == 'FSM' else 0,
+                'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'FSM' else 0
+            }
+            
+            # Create single-row dataframe for this epoch's result
+            df = pd.DataFrame([result])
+            
+            if os.path.exists(csv_path):
+                # Read existing data and append new row
+                df.to_csv(csv_path, mode='a', header=False, index=False)
+            else:
+                # Create new CSV file
+                df.to_csv(csv_path, index=False)
+            
+            # Save detailed results if available
+            if detailed_results and args.baseline_model == "FSM":
+                detailed_df = pd.DataFrame(detailed_results)
+                detailed_df['epoch'] = epoch
+                detailed_df['num_hypothesis'] = args.n_hypothesis
+                detailed_df['model'] = args.baseline_model
+                detailed_df['llm_model'] = args.model_name
+                
+                if os.path.exists(detailed_csv_path):
+                    # Read existing data and append new rows
+                    detailed_df.to_csv(detailed_csv_path, mode='a', header=False, index=False)
+                else:
+                    # Create new CSV file
+                    detailed_df.to_csv(detailed_csv_path, index=False)
         
         print(f"Saved results for epoch {epoch}")
     os.environ['CURRENT_MODEL_NAME'] = ''
