@@ -157,9 +157,11 @@ class NaiveLLMReasoner:
             state_action_text = self.grid_convert_states_actions_to_text(states, actions)
 
         if timestep is not None:
-            prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
+            # prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
+            prompt = f"{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
         else:
-            prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take next?"
+            # prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take next?"
+            prompt = f"{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
         if not self.partnr:
             prompt += f" Choose from the following options: {self.action_to_name.values()}. Your answer should be in the following format: \nAction: <action>\n Your answer:"
         else:

@@ -70,8 +70,8 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--n_hypothesis', type=int, default=25, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct or deepseek-ai/DeepSeek-V2-Lite
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -645,8 +645,13 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 
                 for aid in range(len(gt_final_action)):
                     final_action_prob = prediction[aid, gt_final_action[aid]]
-                    if final_action_prob >= np.max(prediction[aid]):
-                        results[n_hyp]['correct'] += 1
+                    # Count number of actions with max probability
+                    max_prob = np.max(prediction[aid])
+                    num_max_actions = np.sum(prediction[aid] == max_prob)
+                    
+                    # If final action has max probability, add fractional correct count
+                    if final_action_prob == max_prob:
+                        results[n_hyp]['correct'] += 1.0 / num_max_actions
                         
         except Exception as e:
             continue
@@ -699,9 +704,9 @@ def main():
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
     
     if args.bootstrap and args.baseline_model == "FSM":
-        csv_path = f"baselines/{args.baseline_model}/new_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+        csv_path = f"baselines/{args.baseline_model}/fixed_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else:
-        csv_path = f"baselines/{args.baseline_model}/grid_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"baselines/{args.baseline_model}/fixed_grid_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     

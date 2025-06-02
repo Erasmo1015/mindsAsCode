@@ -85,10 +85,12 @@ fi
 
 # Run the main command and capture its exit status
 if [ "$group" = "True" ]; then
-    python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag
+    python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --bootstrap
+    # python eval_specific_fsms.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --bootstrap
 else
     # Add structured, two_stage, and rejuvenation flags if they are True
     python eval_baselines.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag
+    # python eval_specific_fsms.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag
     # python eval_partnr.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 100 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 1 --group False
     # python eval_human.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 120 --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample
 fi

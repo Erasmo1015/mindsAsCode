@@ -35,6 +35,8 @@ import pandas as pd
 from baselines.ToMnet import ToMNet
 from baselines.BC import BCNet
 
+import time
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train baseline models for automaticity.")
@@ -70,7 +72,7 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=4, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--n_hypothesis', type=int, default=25, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
@@ -252,6 +254,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         num_future_steps = args.num_steps_to_predict
         num_correct = 0
         num_total = 0
+        total_prediction_time = 0
+        num_predictions = 0
         
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
@@ -307,6 +311,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                 if step_idx >= gt_future_actions.shape[0]:
                     break
                 
+                step_prediction_start = time.time()
                 # For each agent in the environment
                 for agent_id in range(num_env_agents):
                     num_total += 1
@@ -318,8 +323,18 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                         pred_actions = initial_actions_traj
                     else:
                         # Subsequent predictions use updated trajectory with previous predictions
-                        pred_states = jax.tree.map(lambda x: jnp.concatenate([x[:15], updated_states[:step_idx]], axis=0), 
-                                                  initial_states_traj)
+                        # Process each updated state individually to get observations
+                        updated_obs = []
+                        for t in range(step_idx):
+                            obs_t = env.get_observation(updated_states[t])[0]
+                            updated_obs.append(obs_t)
+                        
+                        # Stack observations into a sequence
+                        stacked_obs = jax.tree.map(lambda *xs: jnp.stack(xs), *updated_obs)
+                        
+                        # Concatenate with initial trajectory
+                        pred_states = jax.tree.map(lambda x, y: jnp.concatenate([x[:15], y], axis=0), 
+                                                  initial_states_traj, stacked_obs)
                         pred_actions = jnp.concatenate([initial_actions_traj, 
                                                        jnp.array(action_history[:step_idx])], axis=0)
                     
@@ -335,6 +350,10 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
+                
+                step_prediction_time = time.time() - step_prediction_start
+                total_prediction_time += step_prediction_time
+                num_predictions += 1
                 
                 # Collect actions for all agents to update environment
                 action_to_take_in_env_list = []
@@ -365,8 +384,10 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
+        avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         print(f"AutoToM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
-        return accuracy
+        print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
+        return accuracy, avg_prediction_time
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -392,7 +413,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                     continue
         
         print(f"Accuracy: {num_correct / num_total}")
-        return num_correct / num_total
+        return num_correct / num_total, 0.0  # Return 0.0 as placeholder for avg_prediction_time
 
 def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
     if args.multi_step_eval:
@@ -400,6 +421,8 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         num_future_steps = args.num_steps_to_predict
         num_correct = 0
         num_total = 0
+        total_prediction_time = 0
+        num_predictions = 0
         
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
@@ -455,6 +478,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                 if step_idx >= gt_future_actions.shape[0]:
                     break
                 
+                step_prediction_start = time.time()
                 # For each agent in the environment
                 for agent_id in range(num_env_agents):
                     num_total += 1
@@ -466,8 +490,18 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                         pred_actions = initial_actions_traj
                     else:
                         # Subsequent predictions use updated trajectory with previous predictions
-                        pred_states = jax.tree.map(lambda x: jnp.concatenate([x[:15], updated_states[:step_idx]], axis=0), 
-                                                  initial_states_traj)
+                        # Process each updated state individually to get observations
+                        updated_obs = []
+                        for t in range(step_idx):
+                            obs_t = env.get_observation(updated_states[t])[0]
+                            updated_obs.append(obs_t)
+                        
+                        # Stack observations into a sequence
+                        stacked_obs = jax.tree.map(lambda *xs: jnp.stack(xs), *updated_obs)
+                        
+                        # Concatenate with initial trajectory
+                        pred_states = jax.tree.map(lambda x, y: jnp.concatenate([x[:15], y], axis=0), 
+                                                  initial_states_traj, stacked_obs)
                         pred_actions = jnp.concatenate([initial_actions_traj, 
                                                        jnp.array(action_history[:step_idx])], axis=0)
                     
@@ -486,6 +520,10 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
+                
+                step_prediction_time = time.time() - step_prediction_start
+                total_prediction_time += step_prediction_time
+                num_predictions += 1
                 
                 # Collect actions for all agents to update environment
                 action_to_take_in_env_list = []
@@ -516,8 +554,10 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
+        avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         print(f"NLLM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
-        return accuracy
+        print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
+        return accuracy, avg_prediction_time
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -786,13 +826,18 @@ def load_bc_models(args):
     }
     return model, stacked_state
 
+
+img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
 def eval_bc(args, dataloader, model, states, episode_id: int = 0):
     """Evaluate BC models."""
+    
     if args.multi_step_eval:
         # --- Multi-Step Evaluation Logic ---
         num_future_steps = args.num_steps_to_predict
         num_correct = 0
         num_total = 0
+        total_prediction_time = 0
+        num_predictions = 0
         
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
@@ -843,11 +888,27 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
                 agent_id=-1
             )
             
+            # Convert initial states to images for BC model
+            initial_states_images = []
+            for t in range(15):
+                state_t = jax.tree.map(lambda x: x[t], initial_states_traj)
+                img_size = args.env_size * 8
+                tile_size = 8
+                grid_size = args.env_size
+                
+                # img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+                try:
+                    image_t = img_gen_fn(state_t, img_size, grid_size, tile_size)
+                    initial_states_images.append(image_t)
+                except Exception as e:
+                    print(f"Error generating image for state {state_t} at time {t}: {e}")
+            
+            initial_states_images = jnp.stack(initial_states_images)
+            
             # Simulate future steps
             for step_idx in range(num_future_steps):
                 if step_idx >= gt_future_actions.shape[0]:
                     break
-                
                 # For each agent in the environment
                 for agent_id in range(num_env_agents):
                     num_total += 1
@@ -855,19 +916,29 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
                     # Create a trajectory for this specific prediction
                     if step_idx == 0:
                         # First prediction uses the initial trajectory
-                        pred_states = initial_states_traj
+                        pred_states_images = initial_states_images
                         pred_actions = initial_actions_traj
                     else:
-                        # Subsequent predictions use updated trajectory with previous predictions
-                        pred_states = jax.tree.map(lambda x: jnp.concatenate([x[:15], updated_states[:step_idx]], axis=0), 
-                                                  initial_states_traj)
-                        pred_actions = jnp.concatenate([initial_actions_traj, 
-                                                       jnp.array(action_history[:step_idx])], axis=0)
+                        # Convert updated states to images
+                        updated_states_images = []
+                        for t in range(step_idx):
+                            state_t = updated_states[t]
+                            img_size = args.env_size * 8
+                            tile_size = 8
+                            grid_size = args.env_size
+                            
+                            obs = jax.tree.map(lambda x: jnp.array(x), env.get_observation(state_t)[0])
+                            image_t = img_gen_fn(obs, img_size, grid_size, tile_size)
+                            updated_states_images.append(image_t)
+                        
+                        # Concatenate with initial images
+                        pred_states_images = jnp.concatenate([initial_states_images, jnp.stack(updated_states_images)], axis=0)
+                        pred_actions = jnp.concatenate([initial_actions_traj, jnp.array(action_history[:step_idx])], axis=0)
                     
                     # Get model prediction for this step and agent
                     try:
                         # Reshape for batch prediction
-                        pred_states_batch = jnp.expand_dims(pred_states, axis=0)  # Add batch dimension
+                        pred_states_batch = jnp.expand_dims(pred_states_images, axis=0)  # Add batch dimension
                         pred_actions_batch = jnp.expand_dims(pred_actions, axis=0)  # Add batch dimension
                         
                         # Apply model to get predictions
@@ -896,12 +967,16 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
                 
+
+                num_predictions += 1
+                
                 # Collect actions for all agents to update environment
                 action_to_take_in_env_list = []
+                step_prediction_start = time.time()
                 for agent_id in range(num_env_agents):
                     try:
                         # Reshape for batch prediction
-                        pred_states_batch = jnp.expand_dims(pred_states, axis=0)
+                        pred_states_batch = jnp.expand_dims(pred_states_images, axis=0)
                         pred_actions_batch = jnp.expand_dims(pred_actions, axis=0)
                         
                         # Apply model to get predictions
@@ -928,6 +1003,9 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
                         action_to_take_in_env_list.append(gt_action)
                         print(f"Using ground truth for agent {agent_id}, step {step_idx} due to error: {e}")
                 
+                
+                step_prediction_time = time.time() - step_prediction_start
+                total_prediction_time += step_prediction_time
                 # Store actions for next iteration
                 if step_idx == 0:
                     action_history = [action_to_take_in_env_list]
@@ -945,8 +1023,10 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
                     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
+        avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         print(f"BC Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
-        return accuracy
+        print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
+        return accuracy, avg_prediction_time
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -993,7 +1073,12 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         num_future_steps = args.num_steps_to_predict
         
         # Track results for each hypothesis count
-        results = {n: {'correct': 0, 'total': 0, 'program_length': 0} for n in range(1, max_hypotheses + 1)}
+        results = {n: {'correct': 0, 'total': 0, 'program_length': 0, 
+                       'first_step_correct': 0, 'first_step_total': 0} for n in range(1, max_hypotheses + 1)}
+        
+        # Add timing measurements
+        total_prediction_time = 0  # <-- This will now accumulate action prediction time
+        num_predictions = 0
         
         # Initialize environment (parameters will be set per datapoint)
         # Env params that are usually fixed or can be default
@@ -1032,6 +1117,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             agent_probs = None
             agent_codes = None
             
+            # Hypothesis generation time is NOT used for avg_prediction_time anymore
             if args.rejuvenation:
                 compiled_agents, agent_probs, agent_codes = model.predict_action_with_rejuvenation(
                     initial_states_traj, initial_actions_traj, episode_id=episode_id,
@@ -1048,6 +1134,8 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
                     return_compiled_agents=True
                 )
+                
+            num_predictions += 1
 
             if not compiled_agents or not agent_probs:
                 print(f"Sample {a_idx}: No hypotheses generated, skipping.")
@@ -1105,11 +1193,12 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     terminal=False,
                     agent_id=-1
                 )
+                current_obs = env.get_observation(current_sim_state_pytree)[0]
                 
                 # Track correct predictions for this hypothesis count
                 step_correct = 0
                 step_total = 0
-                
+                action_time_per_step = time.time()
                 # Simulate future steps
                 for step_idx in range(num_future_steps):
                     if step_idx >= gt_future_actions.shape[0]:
@@ -1122,16 +1211,33 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     
                     # Aggregate predictions from the filtered hypotheses
                     all_hyp_pis = []
+
+                    # --- Start timing action prediction ---
+                    step_prediction_start = time.time()
+                    
                     for hyp_idx, hyp_agent in enumerate(curr_agents):
                         hyp_prob = curr_probs[hyp_idx]
-                        _, proposed_pi_for_hyp = hyp_agent.act(agent_input_state_for_act)
-                        
-                        if args.group:
-                            # proposed_pi_for_hyp is a list of np.arrays. Stack them.
-                            all_hyp_pis.append(np.array(proposed_pi_for_hyp) * hyp_prob) # (num_env_agents, num_actions)
-                        else:
-                            all_hyp_pis.append(np.array(proposed_pi_for_hyp) * hyp_prob) # (num_actions,)
-                    
+                        try:
+                            _, proposed_pi_for_hyp = hyp_agent.act(current_obs)
+                            
+                            if args.group:
+                                # proposed_pi_for_hyp is a list of np.arrays. Stack them.
+                                all_hyp_pis.append(np.array(proposed_pi_for_hyp) * hyp_prob) # (num_env_agents, num_actions)
+                            else:
+                                all_hyp_pis.append(np.array(proposed_pi_for_hyp) * hyp_prob) # (num_actions,)
+                        except Exception as e:
+                            # print(f"Error in hypothesis {hyp_idx} agent.act(): {e}. Using uniform distribution.")
+                            # Create uniform distribution as fallback
+                            if args.group:
+                                # Create uniform distribution for each agent (shape: num_env_agents, 6)
+                                uniform_pi = np.ones((num_env_agents, 6)) / 6
+                                all_hyp_pis.append(uniform_pi * hyp_prob)
+                            else:
+                                # Create uniform distribution for single agent (shape: 6)
+                                uniform_pi = np.ones(6) / 6
+                                all_hyp_pis.append(uniform_pi * hyp_prob)
+
+
                     # Sum weighted pis
                     final_predicted_pi_for_step = np.sum(np.array(all_hyp_pis), axis=0)
                     
@@ -1142,32 +1248,67 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     else:
                         action_index = np.argmax(final_predicted_pi_for_step) # scalar
                         action_to_take_in_env_list = [action_index]
-                    
+                    # --- End timing action prediction ---
+                    step_prediction_time = time.time() - step_prediction_start
+                    total_prediction_time += step_prediction_time
+                    num_predictions += len(action_to_take_in_env_list)
                     # Compare with ground truth for this step
                     gt_action_this_step = gt_future_actions[step_idx] # (num_env_agents,) or (1,)
                     
-                    for aid in range(num_env_agents):
-                        predicted_action_for_agent = action_to_take_in_env_list[aid]
-                        gt_action_for_agent = gt_action_this_step[aid] if args.group else gt_action_this_step[0]
-                        if predicted_action_for_agent == gt_action_for_agent:
-                            step_correct += 1
+                    # for aid in range(num_env_agents):
+                    #     predicted_action_for_agent = action_to_take_in_env_list[aid]
+                    #     gt_action_for_agent = gt_action_this_step[aid] if args.group else gt_action_this_step[0]
+                    #     breakpoint()
+                    #     if predicted_action_for_agent == gt_action_for_agent:
+                    #         step_correct += 1
+                    #         # Track first step accuracy separately
+                    #         if step_idx == 0:
+                    #             results[n_hyp]['first_step_correct'] += 1
+                    if not args.group:
+                        max_prob = np.max(final_predicted_pi_for_step)
+                        # count number of actions with max probability
+                        num_max_actions = np.sum(final_predicted_pi_for_step == max_prob)
+                        gt_prob = final_predicted_pi_for_step[gt_action_this_step[0]]  
+                        if max_prob == gt_prob:
+                            step_correct += 1 / num_max_actions
+                            if step_idx == 0:
+                                results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
+                    else:
+                        for aid in range(num_env_agents):
+                            max_action_prob = np.max(final_predicted_pi_for_step[aid])
+                            # count number of actions with max probability  
+                            num_max_actions = np.sum(final_predicted_pi_for_step[aid] == max_action_prob)
+                            gt_action_prob = final_predicted_pi_for_step[aid, gt_action_this_step[aid]]
+                            if max_action_prob == gt_action_prob:
+                                step_correct += 1 / num_max_actions
+                                if step_idx == 0:
+                                    results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
                     
-                    # Simulate environment step
-                    try:
-                        # env.step expects a list of actions, one per agent in the env
-                        _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
-                        current_sim_state_pytree = next_env_state_pytree
-                    except Exception as e:
-                        print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
-                        break # Stop simulation for this sample if env step fails
+                    
+                    # Track first step total separately
+                    if step_idx == 0:
+                        results[n_hyp]['first_step_total'] += num_env_agents
+                    
+                    current_obs = jax.tree.map(lambda x: x[14+step_idx+1], data_sample['states'])
+                    # # Simulate environment step
+                    # try:
+                    #     # env.step expects a list of actions, one per agent in the env
+                    #     next_obs, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
+                    #     current_sim_state_pytree = next_env_state_pytree
+                    #     current_obs = next_obs[0]
+                    # except Exception as e:
+                    #     print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
+                    #     break # Stop simulation for this sample if env step fails
                 
                 # Update results for this hypothesis count
                 results[n_hyp]['correct'] += step_correct
                 results[n_hyp]['total'] += step_total
-        
+
         # Calculate accuracies and average program lengths for each number of hypotheses
         accuracies = {}
+        first_step_accuracies = {}
         program_lengths = {}
+        action_times = {}
         for n_hyp in results:
             if results[n_hyp]['total'] > 0:
                 accuracies[n_hyp] = results[n_hyp]['correct'] / results[n_hyp]['total']
@@ -1175,16 +1316,27 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             else:
                 accuracies[n_hyp] = 0.0
                 program_lengths[n_hyp] = 0.0
+                
+            # Calculate first step accuracy
+            if results[n_hyp]['first_step_total'] > 0:
+                first_step_accuracies[n_hyp] = results[n_hyp]['first_step_correct'] / results[n_hyp]['first_step_total']
+            else:
+                first_step_accuracies[n_hyp] = 0.0
+        
+        # Calculate average prediction time
+        avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         
         # Print results
         for n_hyp, acc in accuracies.items():
-            print(f"Hypotheses: {n_hyp}, Multi-Step Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), Avg Program Length: {program_lengths[n_hyp]:.1f}")
+            print(f"Hypotheses: {n_hyp}, Multi-Step Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), First Step Accuracy: {first_step_accuracies[n_hyp]:.4f}, Avg Program Length: {program_lengths[n_hyp]:.1f}")
+        print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
         
-        # Return the full dictionary of accuracies and program lengths
-        return accuracies, program_lengths
+        # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
+        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies
         
     else:
         # --- Original Single-Step Bootstrap Evaluation Logic ---
+        # This part remains unchanged as it's already measuring single-step accuracy
         max_hypotheses = args.n_hypothesis  # Maximum number of hypotheses to consider
         results = {n: {'correct': 0, 'total': 0, 'program_length': 0} for n in range(1, max_hypotheses + 1)}
         
@@ -1241,8 +1393,13 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     
                     for aid in range(len(gt_final_action)):
                         final_action_prob = prediction[aid, gt_final_action[aid]]
-                        if final_action_prob >= np.max(prediction[aid]):
-                            results[n_hyp]['correct'] += 1
+                        # Count number of actions with max probability
+                        max_prob = np.max(prediction[aid])
+                        num_max_actions = np.sum(prediction[aid] == max_prob)
+                        
+                        # If final action has max probability, add fractional correct count
+                        if final_action_prob == max_prob:
+                            results[n_hyp]['correct'] += 1.0 / num_max_actions
                             
             except Exception as e:
                 continue
@@ -1302,11 +1459,11 @@ def main():
     
     if args.baseline_model == "FSM" and args.bootstrap:
         if args.multi_step_eval:
-            csv_path = f"baselines/{args.baseline_model}/results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}.csv"
+            csv_path = f"baselines/{args.baseline_model}/fixed2_results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
         else: # Single-step FSM bootstrap
-            csv_path = f"baselines/{args.baseline_model}/results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+            csv_path = f"baselines/{args.baseline_model}/fixed2_results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else: # Non-bootstrap FSM or other models
-        csv_path = f"baselines/{args.baseline_model}/results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"baselines/{args.baseline_model}/fixed2_results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -1345,10 +1502,10 @@ def main():
 
                 elif 'num_hypothesis' in existing_df.columns : # For non-FSM bootstrap models like TT, NLLM
                     filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))
-
+                
                 matching_rows = existing_df[np.logical_and.reduce(filter_conditions)]
                 
-                if not matching_rows.empty:
+                if len(matching_rows) > 0:
                     start_epoch = matching_rows['epoch'].max() + 1
                     print(f"Resuming from epoch {start_epoch}")
         except pd.errors.EmptyDataError:
@@ -1387,14 +1544,14 @@ def main():
         model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False) # Assuming partnr=False for this context
         eval_fn = eval_naive_llm
     elif args.baseline_model == "ToMnet":
-        dataloader = make_dataloader(args, as_images=True, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model, states = load_tomnet_models(args)
         if not states['params']: # Check if any models were loaded
             print("No ToMnet models found or loaded. Please train models first or check paths.")
             return
         eval_fn = lambda a, d, m, s, ep_id: eval_mtom(a, d, m, s) # eval_mtom uses 'states'
     elif args.baseline_model == "BC":
-        dataloader = make_dataloader(args, as_images=True, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model, states = load_bc_models(args)
         if not states['params']: # Check if any models were loaded
             print("No BC models found or loaded. Please train models first or check paths.")
@@ -1411,10 +1568,18 @@ def main():
 
         if args.baseline_model == "FSM" and args.bootstrap:
             # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
-            accuracies_dict, program_lengths_dict = eval_fn(args, dataloader, model, episode_id=epoch)
+            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
+                    # Check if existing CSV has avg_prediction_time column
+                    include_prediction_time = True
+                    if os.path.exists(csv_path):
+                        try:
+                            existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                            include_prediction_time = 'avg_prediction_time' in existing_cols
+                        except:
+                            pass
 
                     result = {
                         'model': args.baseline_model,
@@ -1431,11 +1596,26 @@ def main():
                         'top_k': args.top_k,
                         'program_length': program_lengths_dict.get(n_hyp, 0.0),
                         'multi_step_eval': True,
-                        'num_steps_predicted': args.num_steps_to_predict
+                        'num_steps_predicted': args.num_steps_to_predict,
+                        'first_step_accuracy': first_step_accuracies_dict.get(n_hyp, 0.0)
                     }
+                    
+                    # Only include avg_prediction_time if it's in the existing CSV
+                    if include_prediction_time:
+                        result['avg_prediction_time'] = avg_prediction_time
+                        
                     results_to_save.append(result)
             else: # Single-step FSM bootstrap
                 for n_hyp, accuracy_val in accuracies_dict.items():
+                    # Check if existing CSV has avg_prediction_time column
+                    include_prediction_time = True
+                    # if os.path.exists(csv_path):
+                    #     try:
+                    #         existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                    #         include_prediction_time = 'avg_prediction_time' in existing_cols
+                    #     except:
+                    #         pass
+                            
                     result = {
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
@@ -1453,13 +1633,27 @@ def main():
                         'multi_step_eval': False,
                         'num_steps_predicted': 1
                     }
+                    
+                    # Only include avg_prediction_time if it's in the existing CSV
+                    if include_prediction_time:
+                        result['avg_prediction_time'] = avg_prediction_time
+                        
                     results_to_save.append(result)
         else: # Other models or non-bootstrap FSM
             if args.baseline_model in ["ToMnet", "BC"]:
-                current_accuracy = eval_fn(args, dataloader, model, states, episode_id=epoch)
+                current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, states, epoch)
             else:
-                current_accuracy = eval_fn(args, dataloader, model, episode_id=epoch)
+                current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
 
+            # Check if existing CSV has avg_prediction_time column
+            include_prediction_time = True
+            if os.path.exists(csv_path):
+                try:
+                    existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                    include_prediction_time = 'avg_prediction_time' in existing_cols
+                except:
+                    pass
+                    
             result = {
                 'model': args.baseline_model,
                 'accuracy': current_accuracy,
@@ -1477,11 +1671,35 @@ def main():
                 'multi_step_eval': False, # Assuming these are single-step
                 'num_steps_predicted': 1  # Assuming these are single-step
             }
+            
+            # Only include avg_prediction_time if it's in the existing CSV
+            if include_prediction_time:
+                result['avg_prediction_time'] = avg_prediction_time
+                
             results_to_save.append(result)
 
         if results_to_save:
             df = pd.DataFrame(results_to_save)
-            if os.path.exists(csv_path) and start_epoch <= epoch : # Append if file exists and we are not re-writing old epochs
+            
+            # Check if we need to match columns with existing CSV
+            if os.path.exists(csv_path):
+                try:
+                    existing_df = pd.read_csv(csv_path)
+                    if not existing_df.empty:
+                        # Get columns from existing CSV
+                        existing_cols = existing_df.columns.tolist()
+                        
+                        # Ensure our new dataframe has the same columns in the same order
+                        for col in existing_cols:
+                            if col not in df.columns:
+                                df[col] = None  # Add missing columns with None values
+                        
+                        # Reorder columns to match existing CSV
+                        df = df[existing_cols]
+                except Exception as e:
+                    print(f"Error matching columns with existing CSV: {e}")
+            
+            if os.path.exists(csv_path) and start_epoch <= epoch: # Append if file exists and we are not re-writing old epochs
                  # Check if header is needed
                 try:
                     header_needed = pd.read_csv(csv_path, nrows=0).empty

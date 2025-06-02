@@ -4,7 +4,7 @@
 #SBATCH --mail-user=kj@cs.washington.edu
 
 #SBATCH --account=socialrl
-#SBATCH --partition=ckpt-all
+#SBATCH --partition=gpu-l40
 #SBATCH --constraint=a40|a100|l40|l40s
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4

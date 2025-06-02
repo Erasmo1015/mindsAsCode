@@ -35,6 +35,10 @@ class FSMReasoner:
         self.group = group
         if not group:
             self.dataset_name = "single_agent_dataset"
+        else:
+            self.dataset_name = "group_agent_dataset"
+        if not group:
+            # self.dataset_name = "single_agent_dataset"
             prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/infer_partnr_single.txt"
             if structured == "p1":
                 code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_partnr_single_code_template.txt"
@@ -44,7 +48,7 @@ class FSMReasoner:
             else:
                 code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/single_partnr_code_template.txt"
         else:
-            self.dataset_name = "group_agent_dataset"
+            # self.dataset_name = "group_agent_dataset"
             prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/infer_partnr_single.txt"
             if structured == "p1":
                 code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_partnr_group_code_template.txt"
@@ -359,7 +363,7 @@ High-level description:"""
             agent = None
             error = None
             trial = 0
-            num_trials = 5
+            num_trials = 2
             while trial < num_trials:
                 try:
                     agent = framework.compile_agent(agent_code, num_agents)
@@ -375,7 +379,7 @@ High-level description:"""
                         for i in range(1):  # just take tool use for now
                             pa = proposed_actions[i]
                             ga = gt_actions[i]
-                            log_prob_hypothesis += (ga == pa)  # did we get the sub part of the action right?
+                            log_prob_hypothesis += (ga.lower() == pa.lower())  # did we get the sub part of the action right?
                     
                     final_state = states[-2]
                     final_action = agent.act(final_state)
@@ -388,6 +392,7 @@ High-level description:"""
                 except Exception as e:
                     trial += 1
                     full_traceback = traceback.format_exc()
+                    # print(full_traceback)
                     if trial == num_trials:
                         break
                     agent_code = revise_response(agent_code, full_traceback)
@@ -642,7 +647,7 @@ High-level description:"""
             agent = None
             error = None
             trial = 0
-            num_trials = 5
+            num_trials = 2
             while trial < num_trials:
                 try:
                     agent = framework.compile_agent(agent_code, num_agents)
@@ -882,7 +887,7 @@ High-level description:"""
             # Try to compile and evaluate the agent
             agent = None
             trial = 0
-            num_trials = 3
+            num_trials = 2
             
             while trial < num_trials:
                 try:
@@ -898,9 +903,10 @@ High-level description:"""
                         proposed_actions = agent.act(state)
                         
                         for i in range(1):  # just take tool use for now
+                            # breakpoint()
                             pa = proposed_actions[i]
                             ga = gt_actions[i]
-                            log_prob_hypothesis += (ga == pa)  # did we get the sub part of the action right?
+                            log_prob_hypothesis += (ga.lower() == pa.lower())  # did we get the sub part of the action right?
                     
                     # Get final prediction
                     final_state = states[-2]
@@ -924,6 +930,7 @@ High-level description:"""
                 except Exception as e:
                     trial += 1
                     full_traceback = traceback.format_exc()
+                    # print(full_tsraceback)
                     if trial == num_trials:
                         break
                     agent_code = revise_response(agent_code, full_traceback)

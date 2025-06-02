@@ -274,7 +274,7 @@ def eval_fsm(args, dataloader, model, episode_id: int = 0):
                     if final_action_prob >= np.max(predicted_final_action[aid]):  # only count a success if the model succeesfully made 
                         num_correct += 1
     except Exception as e:
-        # print(f"Error: {e}")
+        print(f"Error: {e}")
         pass
 
     print(f"Total Accuracy: {num_correct / num_total}")
@@ -427,7 +427,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         if bootstrap_results is None:
             return {n: 0.0 for n in range(1, max_hypotheses + 1)}, {n: 0.0 for n in range(1, max_hypotheses + 1)}
             
-        gt_final_action = actions[-2][0] if not args.group else actions[-1]
+        gt_final_action = actions[-2][0] if not args.group else actions[-2][0]
         
         # Get the number of available hypotheses
         num_available_hyp = len(bootstrap_results)
@@ -441,23 +441,41 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             hyp_idx = min(n_hyp, num_available_hyp) - 1  # Convert to 0-indexed
             prediction, program_length = bootstrap_results[hyp_idx]
             results[n_hyp]['program_length'] += program_length
+
+            # breakpoint()
             
-            if not args.group:
-                if prediction == gt_final_action:
+            if not args.group or True:
+                prediction = prediction[0]
+                # breakpoint()
+                # print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
+                if prediction.lower() == gt_final_action.lower():
                     results[n_hyp]['correct'] += 1
             else:
-                if len(prediction.shape) == 1:
-                    prediction = prediction.reshape(1, -1)
+                for p in prediction:
+                    if type(p) == str:
+                        # print(f"p: {p}, gt_final_action: {gt_final_action}")
+                        if p.lower() == gt_final_action.lower():
+                            results[n_hyp]['correct'] += 1
+                            break
+                    # else:
+                    #     if p.lower() == gt_final_action.lower():
+                    #         results[n_hyp]['correct'] += 1
+                    #         break
+            #     if len(prediction.shape) == 1:
+            #         prediction = prediction.reshape(1, -1)
                 
-                for aid in range(len(gt_final_action)):
-                    final_action_prob = prediction[aid, gt_final_action[aid]]
-                    if final_action_prob >= np.max(prediction[aid]):
-                        results[n_hyp]['correct'] += 1
+            #     for aid in range(len(gt_final_action)):
+            #         breakpoint()
+            #         final_action_prob = prediction[aid, gt_final_action[aid]]
+                    
+            #         if final_action_prob >= np.max(prediction[aid]):
+            #             results[n_hyp]['correct'] += 1
                     
     except Exception as e:
         print(f"Error: {e}")
-        full_traceback = traceback.format_exc()
-        print(full_traceback)
+        # full_traceback = traceback.format_exc()
+        # print(full_traceback)
+        # breakpoint()
     
     # Calculate accuracies and average program lengths for each number of hypotheses
     accuracies = {}
@@ -506,9 +524,9 @@ def main():
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
         
     if args.bootstrap and args.baseline_model == "FSM":
-        csv_path = f"baselines/{args.baseline_model}/partnr_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+        csv_path = f"baselines/{args.baseline_model}/partnr2_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else:
-        csv_path = f"baselines/{args.baseline_model}/partnr_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"baselines/{args.baseline_model}/partnr2_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -540,7 +558,7 @@ def main():
         # Apply all filter conditions
         matching_rows = existing_df[np.logical_and.reduce(filter_conditions)]
         
-        if len(matching_rows) > 0 and not args.bootstrap:
+        if len(matching_rows) > 0:
             # Get the highest epoch completed
             start_epoch = matching_rows['epoch'].max() + 1
             print(f"Resuming from epoch {start_epoch}")

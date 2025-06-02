@@ -371,7 +371,7 @@ High-level description:"""
             agent = None
             error = None
             trial = 0
-            num_trials = 5
+            num_trials = 2
             while trial < num_trials:
                 try:
                     agent = framework.compile_agent(agent_code, num_agents, num_blocks)
@@ -409,6 +409,7 @@ High-level description:"""
                     trial += 1
                     full_traceback = traceback.format_exc()
                     if trial == num_trials:
+                        print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
                         break
                     agent_code = revise_response(agent_code, full_traceback)
         
@@ -688,7 +689,7 @@ High-level description:"""
             # Try to compile and evaluate the agent
             agent = None
             trial = 0
-            num_trials = 5
+            num_trials = 2
             
             while trial < num_trials:
                 try:
@@ -741,6 +742,7 @@ High-level description:"""
                     trial += 1
                     full_traceback = traceback.format_exc()
                     if trial == num_trials:
+                        print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
                         break
                     agent_code = revise_response(agent_code, full_traceback)
         
@@ -1040,7 +1042,7 @@ High-level description:"""
             agent = None
             error = None
             trial = 0
-            num_trials = 5
+            num_trials = 2
             while trial < num_trials:
                 try:
                     agent = framework.compile_agent(agent_code, num_agents, num_blocks)
@@ -1080,7 +1082,7 @@ High-level description:"""
                     full_traceback = traceback.format_exc()
                     # print(full_traceback)
                     if trial == num_trials:
-                        # print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
+                        print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
                         # print(full_traceback)
                         break
                     agent_code = revise_response(agent_code, full_traceback)
