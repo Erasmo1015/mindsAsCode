@@ -1,4 +1,4 @@
-from environment import AutomaticityEnv, state_to_image
+from environment import AutomaticityEnv, state_to_image_jit
 from agent import AgentExecutionFramework
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,12 +24,22 @@ def initialize_agent_list(agent_id_list, num_agents=1, num_blocks=1, group=False
         agent_list.append(framework.compile_agent(agent_code, num_agents=num_agents, num_blocks=num_blocks))
     return agent_list
 
+def initialize_hand_designed_agent_list(num_agents=1, num_blocks=1, group=False):
+    framework = AgentExecutionFramework()
+    agent_list = []
+    files = os.listdir("generated_outputs/hand_designed")
+    for i in range(len(files)):
+        with open(f"generated_outputs/hand_designed/{files[i]}", "r") as f:
+            agent_code = f.read()
+        agent_list.append(framework.compile_agent(agent_code, num_agents=num_agents, num_blocks=num_blocks))
+    return agent_list
+
 def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=20, group=False):
     '''
     agent list should be a list of compiled agents
     '''
     assert len(agent_list) >= num_agents
-    env = AutomaticityEnv(num_agents=num_agents, size=10, max_steps=num_steps, num_blocks=num_blocks, num_walls=num_walls)
+    env = AutomaticityEnv(num_agents=num_agents, size=7, max_steps=num_steps, num_blocks=num_blocks, num_walls=num_walls)
     key = jrandom.PRNGKey(seed)
     np.random.seed(seed)
 
@@ -50,9 +60,11 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
             actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
         assert len(actions) == num_agents
         
-        obs, next_state = env.step(state, actions)
-        state_list.append(state)
+        next_obs, next_state = env.step(state, actions)
+
+        state_list.append(obs[0])
         action_list.append(actions)
+        obs = next_obs
         state = next_state
     return state_list, action_list, env
 
@@ -167,17 +179,35 @@ def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, 
             print(f"Saved dataset for blocks={num_blocks_i}, walls={num_walls_i}")
 
 if __name__ == "__main__":
-    num_agents = 4  # number of agents
+    num_agents = 1  # number of agents
     num_datapoints_per_agent = 100  # number of trajectories to generate per agent
     num_steps = 100  # trajectory length
     num_block_steps = 2  # number of blocks to increment by
     num_walls_steps = 2  # number of walls to increment by
 
-    generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=True)
+    # generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=True)
 
 
-    # state_list, action_list, env = generate_trajectory(0, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=1)
-    # # Create frames list for RGB arrays
+
+    agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=1)
+
+
+    state_list, action_list, env = generate_trajectory(0, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=1)
+    # Create frames list for RGB arrays
+    stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *state_list)
+
+    def convert_to_image(index, stacked_state):
+        indexed_state = jax.tree.map(lambda x: x[index], stacked_state)
+        tile_size = 14
+        grid_size = 7
+        img_size = grid_size * tile_size
+
+        img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+        render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)
+        return render_fn(indexed_state)
+    
+    frames = jax.vmap(convert_to_image, in_axes=(0, None))(jnp.arange(len(action_list)), stacked_states)
     # frames = [state_to_image(s, env.size) for s in state_list]
-    # # Save frames as GIF using imageio with loop=0 for infinite looping
-    # imageio.mimsave('environment_simulation.gif', frames, fps=5, loop=0)
+    # Save frames as GIF using imageio with loop=0 for infinite looping
+    imageio.mimsave('environment_simulation.gif', frames, fps=5, loop=0)
+    print("Saved GIF")

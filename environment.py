@@ -155,6 +155,23 @@ class AutomaticityEnv:
                         new_pos = current_pos  # Stay in current position
                         break
             
+            # Check if new position has a block that's not being carried
+            for block_idx, block_pos in enumerate(new_blocks):
+                if block_idx in carried_blocks:
+                    continue  # Skip blocks that are already being carried
+                
+                if np.array_equal(new_pos, block_pos):
+                    if new_inventory[agent_idx] == -1:
+                        # Agent picks up the block
+                        new_inventory[agent_idx] = 1
+                        new_inventory_colors[agent_idx] = new_block_colors[block_idx]
+                        carried_blocks[block_idx] = agent_idx
+                    else:
+                        # Can't move onto block if inventory is full
+                        new_pos = current_pos
+                    break
+            
+            
             # Handle interact action
             if action[2] == 1:  # Interact button pressed
                 if new_inventory[agent_idx] != -1:
@@ -174,22 +191,7 @@ class AutomaticityEnv:
                 not (0 <= new_pos[0] < self.size and 0 <= new_pos[1] < self.size)):
                 new_pos = current_pos
             
-            # Check if new position has a block that's not being carried
-            for block_idx, block_pos in enumerate(new_blocks):
-                if block_idx in carried_blocks:
-                    continue  # Skip blocks that are already being carried
-                
-                if np.array_equal(new_pos, block_pos):
-                    if new_inventory[agent_idx] == -1:
-                        # Agent picks up the block
-                        new_inventory[agent_idx] = 1
-                        new_inventory_colors[agent_idx] = new_block_colors[block_idx]
-                        carried_blocks[block_idx] = agent_idx
-                    else:
-                        # Can't move onto block if inventory is full
-                        new_pos = current_pos
-                    break
-            
+
             new_locations.append(new_pos)
         
         # Update positions of carried blocks to match their carriers
