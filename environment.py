@@ -11,22 +11,29 @@ import jax.numpy as jnp
 from functools import partial
 
 # generate 20 random colors
-color_key = jax.random.PRNGKey(1)
-block_colors = jax.random.randint(color_key, (100, 3), 0, 256)
-# shuffle the colors
-shuffle_key = jax.random.PRNGKey(2)
-block_colors = jax.random.permutation(shuffle_key, block_colors)
+# Define block colors to alternate between green, blue, purple, orange, pink and cyan
+block_colors = jnp.array([
+    [0, 255, 0],     # green
+    [0, 0, 255],     # blue
+    [128, 0, 128],   # purple 
+    [255, 192, 203], # pink
+    [0, 255, 255],   # cyan
+])
+
+# Repeat the pattern to get 100 colors
+block_colors = jnp.tile(block_colors, (20,1))[:100]
+
 agent_colors = jnp.array([
-    [255, 0, 0],    # red
-    [0, 0, 255],    # blue 
-    [0, 255, 0],    # green
-    [255, 255, 0],  # yellow
-    [128, 0, 128],  # purple
-    [255, 165, 0],  # orange
-    [165, 42, 42],  # brown
-    [255, 192, 203],# pink
-    [128, 128, 128],# gray
-    [0, 255, 255]   # cyan
+    [255, 0, 0],     # red
+    [0, 0, 255],     # blue 
+    [0, 255, 0],     # green
+    [255, 255, 0],   # yellow
+    [128, 0, 128],   # purple
+    [255, 165, 0],   # orange
+    [165, 42, 42],   # brown
+    [255, 192, 203], # pink
+    [128, 128, 128], # gray
+    [0, 255, 255]    # cyan
 ])
 
 
@@ -128,7 +135,9 @@ class AutomaticityEnv:
             if inv != -1:
                 # Find the block this agent is carrying
                 for block_idx, block_color in enumerate(new_block_colors):
-                    if np.array_equal(block_color, new_inventory_colors[agent_idx]):
+                    color_match = np.array_equal(block_color, new_inventory_colors[agent_idx])
+                    location_match = np.array_equal(new_blocks[block_idx], state.agent_locations[agent_idx])
+                    if color_match and location_match:
                         carried_blocks[block_idx] = agent_idx
                         break
         

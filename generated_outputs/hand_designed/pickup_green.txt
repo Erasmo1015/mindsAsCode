@@ -1,0 +1,131 @@
+```python
+import numpy as np
+
+class FSMAgent:
+    # Define states as class constants
+    FIND_GREEN = 0
+    MOVE_TO_CORNER = 1
+    
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        # Add interact action (0, 0, 1) - last digit indicates interact button
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+        # Initialize state
+        self.current_state = self.FIND_GREEN
+        # Define corner positions
+        self.corner_positions = np.array([[1, 1], [1, 2], [2, 1], [2, 2]])
+        self.target_pos = None
+        
+    def manhattan_distance(self, pos1, pos2):
+        """Calculate Manhattan distance between two positions"""
+        return np.abs(pos1[0] - pos2[0]) + np.abs(pos1[1] - pos2[1])
+
+    def is_in_corner(self, pos):
+        """Check if a position is in the 2x2 corner area"""
+        return any(np.array_equal(pos, corner) for corner in self.corner_positions)
+
+    def find_closest_green_block(self, agent_pos, block_locations, block_colors):
+        """Find the closest green block not in the corner area"""
+        green_blocks = []
+        for i, (color, pos) in enumerate(zip(block_colors, block_locations)):
+            if np.array_equal(color, [0, 255, 0]) and not self.is_in_corner(pos):
+                green_blocks.append(pos)
+        
+        if not green_blocks:
+            return None
+            
+        # Convert to numpy array for vectorized operations
+        green_blocks = np.array(green_blocks)
+        distances = np.array([self.manhattan_distance(agent_pos, block_pos) for block_pos in green_blocks])
+        closest_idx = np.argmin(distances)
+        return green_blocks[closest_idx]
+
+    def find_empty_corner_position(self, block_locations):
+        """Find the first empty position in the 2x2 corner area"""
+        for corner_pos in self.corner_positions:
+            if not any(np.array_equal(corner_pos, block_pos) for block_pos in block_locations):
+                return corner_pos
+        return None
+
+    def get_next_action_towards_target(self, current_pos, target_pos, block_locations, has_block):
+        """Get the next action to move towards a target position"""
+        diff = target_pos - current_pos
+        
+        # List of possible moves in priority order
+        moves = []
+        # Prioritize moving horizontally first
+        if diff[0] < 0:
+            moves.append(([-1, 0], 2))  # left
+        elif diff[0] > 0:
+            moves.append(([1, 0], 1))   # right
+        if diff[1] < 0:
+            moves.append(([0, -1], 4))  # up
+        elif diff[1] > 0:
+            moves.append(([0, 1], 3))   # down
+
+        # Try each move in priority order
+        for offset, action in moves:
+            new_pos = current_pos + offset
+            # When carrying a block, we can't move into spaces with blocks
+            if has_block and any(np.array_equal(new_pos, block_pos) for block_pos in block_locations):
+                continue
+            return action
+
+        return 0  # stay if no valid moves
+
+    def act(self, observation) -> int:
+        '''
+        FSM implementation with two states:
+        - FIND_GREEN: Find and move to closest green block not in corner
+        - MOVE_TO_CORNER: Move block to empty position in 2x2 corner area
+        '''
+        agent_pos = np.array(observation['agent_locations'][observation['agent_id']])
+        block_locations = observation['block_locations']
+        block_colors = observation['block_colors']
+        inventory_idx = observation['agent_inventory'][observation['agent_id']]
+        has_block = inventory_idx != -1
+
+        # First check if we have a non-green block and drop it immediately
+        if has_block and not np.array_equal(observation['agent_inventory_colors'][observation['agent_id']], [0, 255, 0]):
+            return 5  # Drop non-green block
+
+        if self.current_state == self.FIND_GREEN:
+            if has_block:
+                # If we have a block, switch to moving it to corner
+                self.current_state = self.MOVE_TO_CORNER
+                return self.act(observation)
+            
+            # Find closest green block not in corner
+            target_block_pos = self.find_closest_green_block(agent_pos, block_locations, block_colors)
+            if target_block_pos is None:
+                return 0  # No more green blocks to move
+            
+            return self.get_next_action_towards_target(agent_pos, target_block_pos, block_locations, has_block)
+
+
+        else:  # MOVE_TO_CORNER state
+            if not has_block:
+                # If we don't have a block anymore, go back to finding green blocks
+                self.current_state = self.FIND_GREEN
+                return self.act(observation)
+            
+            # Find empty corner position
+            if self.target_pos is None:
+                self.target_pos = self.find_empty_corner_position(block_locations)
+                if self.target_pos is None:
+                    # No empty corner positions, drop the block
+                    return 5
+            
+            
+            
+            # If we're at the target position, drop the block
+            if np.array_equal(agent_pos, self.target_pos):
+                return 5
+            
+            return self.get_next_action_towards_target(agent_pos, self.target_pos, block_locations, has_block)
+
+        return 0  # default action is to stay
+```

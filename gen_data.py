@@ -27,7 +27,7 @@ def initialize_agent_list(agent_id_list, num_agents=1, num_blocks=1, group=False
 def initialize_hand_designed_agent_list(num_agents=1, num_blocks=1, group=False):
     framework = AgentExecutionFramework()
     agent_list = []
-    files = os.listdir("generated_outputs/hand_designed")
+    files = sorted(os.listdir("generated_outputs/hand_designed"))
     for i in range(len(files)):
         with open(f"generated_outputs/hand_designed/{files[i]}", "r") as f:
             agent_code = f.read()
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=1)
 
 
-    state_list, action_list, env = generate_trajectory(0, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=1)
+    state_list, action_list, env = generate_trajectory(2, agent_list, seed=42, num_agents=1, num_steps=100, num_blocks=8, num_walls=1)
     # Create frames list for RGB arrays
     stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *state_list)
 
