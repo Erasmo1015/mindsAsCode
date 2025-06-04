@@ -21,7 +21,7 @@ Make sure to log in to your hugginface account and follow instructions on their 
 
 ## Designing agents by hand
 
-The folder `generated_outputs/hand_designed' is where I have .txt files of different agent types. 
+The folder ```generated_outputs/hand_designed''' is where I have .txt files of different agent types. 
 
 I run them in the file gen_data.py, which will automatically save a gif of the selected agent.
 
