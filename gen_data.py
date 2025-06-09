@@ -195,10 +195,10 @@ if __name__ == "__main__":
 
 
 
-    agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=1)
+    agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=3)
 
 
-    state_list, action_list, env = generate_trajectory(hand_designed_id, agent_list, seed=42, num_agents=1, num_steps=100, num_blocks=8, num_walls=1)
+    state_list, action_list, env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=100, num_blocks=3, num_walls=1)
     # Create frames list for RGB arrays
     stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *state_list)
 
