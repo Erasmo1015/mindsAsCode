@@ -1,0 +1,535 @@
+```python
+import numpy as np
+
+class FSMAgent:
+    # Define states as class constants
+    MOVE_TO_ROW_START = 0
+    SCAN_ROW = 1
+    PICKUP_BLOCK = 2
+    MOVE_TO_RIGHT = 3
+    
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
+        self.num_agents = num_agents
+        self.num_blocks = num_blocks
+        self.num_actions = num_actions
+        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
+        
+        # Initialize cleaning state
+        self.current_state = self.MOVE_TO_ROW_START
+        self.current_row = 1  # Start from row 1
+        self.grid_size = 7
+        self.target_block = None
+        self.target_position = None
+        
+        # print(f"JANITOR: Starting rightmost cleaning at row {self.current_row} (will start from rightmost position)")
+    
+    def get_blocks_in_row(self, row, block_locations):
+        """Get ALL blocks in the specified row"""
+        blocks_in_row = []
+        for i, block_pos in enumerate(block_locations):
+            if block_pos[1] == row:
+                blocks_in_row.append((i, block_pos))
+        return blocks_in_row
+    
+    def has_interior_wall_in_row(self, row, wall_locations):
+        """Check if there are any interior walls in the given row"""
+        for wall_pos in wall_locations:
+            if wall_pos[1] == row and 1 <= wall_pos[0] <= self.grid_size - 2:
+                return True
+        return False
+    
+    def get_rightmost_interior_wall_in_row(self, row, wall_locations):
+        """Find the rightmost interior wall in the given row"""
+        walls_in_row = []
+        for wall_pos in wall_locations:
+            if wall_pos[1] == row and 1 <= wall_pos[0] <= self.grid_size - 2:
+                walls_in_row.append(wall_pos[0])
+        
+        if walls_in_row:
+            return max(walls_in_row)
+        return None
+    
+    def get_blocks_right_of_wall(self, row, block_locations, wall_locations):
+        """Get only blocks that are to the right of the rightmost interior wall in the row"""
+        rightmost_wall_x = self.get_rightmost_interior_wall_in_row(row, wall_locations)
+        blocks_in_row = self.get_blocks_in_row(row, block_locations)
+        
+        if rightmost_wall_x is None:
+            return blocks_in_row
+        
+        blocks_right_of_wall = []
+        for block_idx, block_pos in blocks_in_row:
+            if block_pos[0] > rightmost_wall_x:
+                blocks_right_of_wall.append((block_idx, block_pos))
+        
+        return blocks_right_of_wall
+    
+    def get_available_positions_right_of_wall(self, row, wall_locations):
+        """Get available positions to the right of the rightmost interior wall"""
+        rightmost_wall_x = self.get_rightmost_interior_wall_in_row(row, wall_locations)
+        
+        if rightmost_wall_x is None:
+            start_x = 1
+        else:
+            start_x = rightmost_wall_x + 1
+        
+        available_x_positions = []
+        for x in range(self.grid_size - 2, start_x - 1, -1):
+            if x < start_x:
+                continue
+            candidate_pos = np.array([x, row])
+            is_wall = any(np.array_equal(candidate_pos, wall_pos) for wall_pos in wall_locations)
+            if not is_wall:
+                available_x_positions.append(x)
+        
+        return available_x_positions
+    
+    def get_rightmost_available_position(self, row, block_locations, wall_locations):
+        """Find the rightmost available position in the row"""
+        # Start from the rightmost position and move left until we find an empty spot
+        for x in range(self.grid_size - 2, 0, -1):  # x from 5 to 1 (avoiding walls at 0 and 6)
+            candidate_pos = np.array([x, row])
+            
+            # Check if position is occupied by a block
+            is_occupied = any(np.array_equal(candidate_pos, block_pos) for block_pos in block_locations)
+            # Check if position is a wall
+            is_wall = any(np.array_equal(candidate_pos, wall_pos) for wall_pos in wall_locations)
+            
+            if not is_occupied and not is_wall:
+                return candidate_pos
+        
+        return None  # No available position found
+    
+    def is_block_rightmost_aligned(self, block_pos, row, block_locations, wall_locations):
+        """Check if block is already in the correct rightmost position for this row"""
+        # Get all blocks in this row
+        blocks_in_row = self.get_blocks_in_row(row, block_locations)
+        if not blocks_in_row:
+            return True
+        
+        # Get just the positions and sort by x-coordinate (descending for rightmost)
+        block_positions = [pos for _, pos in blocks_in_row]
+        blocks_sorted_by_x = sorted(block_positions, key=lambda p: p[0], reverse=True)
+        
+        # Find all available positions in this row (not walls)
+        available_x_positions = []
+        for x in range(self.grid_size - 2, 0, -1):  # Right to left
+            candidate_pos = np.array([x, row])
+            is_wall = any(np.array_equal(candidate_pos, wall_pos) for wall_pos in wall_locations)
+            if not is_wall:
+                available_x_positions.append(x)
+        
+        # Check if the blocks are occupying the rightmost available positions
+        for i, block in enumerate(blocks_sorted_by_x):
+            if i >= len(available_x_positions):
+                # More blocks than available positions - shouldn't happen but handle gracefully
+                return True
+            
+            expected_x = available_x_positions[i]
+            if block[0] != expected_x:
+                # This block is not in the expected rightmost position
+                return False
+        
+        # All blocks are in correct rightmost positions
+        return True
+    
+    def is_row_cleaned(self, row, block_locations, wall_locations):
+        """Check if all blocks in the row are arranged in rightmost positions"""
+        # NEW: Check if row has interior walls
+        if self.has_interior_wall_in_row(row, wall_locations):
+            # print(f"JANITOR: Row {row} has interior walls - checking only blocks to the right of walls")
+            # Use wall-aware logic
+            blocks_to_consider = self.get_blocks_right_of_wall(row, block_locations, wall_locations)
+            
+            if not blocks_to_consider:
+                # print(f"JANITOR: Row {row} has no blocks to the right of walls - considering cleaned")
+                return True
+            
+            available_x_positions = self.get_available_positions_right_of_wall(row, wall_locations)
+            
+            if not available_x_positions:
+                # print(f"JANITOR: Row {row} has no available positions to the right of walls - considering cleaned")
+                return True
+            
+            if len(blocks_to_consider) > len(available_x_positions):
+                # print(f"JANITOR: Row {row} has more blocks than positions to the right of walls - considering cleaned")
+                return True
+            
+            # Check if blocks are in correct rightmost positions (right of wall)
+            block_positions = [pos for _, pos in blocks_to_consider]
+            blocks_sorted_by_x = sorted(block_positions, key=lambda p: p[0], reverse=True)
+            
+            for i, block in enumerate(blocks_sorted_by_x):
+                if i >= len(available_x_positions):
+                    return True
+                expected_x = available_x_positions[i]
+                if block[0] != expected_x:
+                    # print(f"JANITOR: Block at {block.tolist()} should be at x={expected_x}")
+                    return False
+            
+            # print(f"JANITOR: Row {row} is properly right-aligned (considering walls)")
+            return True
+        
+        else:
+            # No interior walls - use original logic
+            blocks_in_row = self.get_blocks_in_row(row, block_locations)
+            
+            if not blocks_in_row:
+                return True  # No blocks to clean
+            
+            # Get block positions and sort by x-coordinate (descending for rightmost)
+            block_positions = [pos for _, pos in blocks_in_row]
+            blocks_sorted_by_x = sorted(block_positions, key=lambda p: p[0], reverse=True)
+            
+            # Find available positions (not walls) - rightmost first
+            available_x_positions = []
+            for x in range(self.grid_size - 2, 0, -1):  # Right to left
+                candidate_pos = np.array([x, row])
+                is_wall = any(np.array_equal(candidate_pos, wall_pos) for wall_pos in wall_locations)
+                if not is_wall:
+                    available_x_positions.append(x)
+            
+            # Check if blocks occupy the rightmost available positions
+            for i, block in enumerate(blocks_sorted_by_x):
+                if i >= len(available_x_positions):
+                    return True  # More blocks than positions, assume cleaned
+                
+                expected_x = available_x_positions[i]
+                if block[0] != expected_x:
+                    # print(f"JANITOR: Block at {block.tolist()} should be at x={expected_x}")
+                    return False
+            
+            # print(f"JANITOR: Row {row} is properly right-aligned")
+            return True
+    
+    def find_block_to_move(self, row, block_locations, wall_locations):
+        """Find the rightmost block that needs to be moved to its correct position"""
+        # NEW: Check if row has interior walls
+        if self.has_interior_wall_in_row(row, wall_locations):
+            # print(f"JANITOR: Row {row} has interior walls - considering only blocks to the right of walls")
+            # Use wall-aware logic
+            blocks_to_consider = self.get_blocks_right_of_wall(row, block_locations, wall_locations)
+            
+            if not blocks_to_consider:
+                # print(f"JANITOR: No blocks to the right of walls in row {row}")
+                return None
+            
+            available_x_positions = self.get_available_positions_right_of_wall(row, wall_locations)
+            
+            if not available_x_positions:
+                # print(f"JANITOR: No available positions to the right of walls in row {row}")
+                return None
+            
+            if len(blocks_to_consider) > len(available_x_positions):
+                # print(f"JANITOR: More blocks than available positions to the right of walls in row {row}")
+                return None
+            
+            # Find block to move using wall-aware logic
+            for i, target_x in enumerate(available_x_positions):
+                if i >= len(blocks_to_consider):
+                    break
+                
+                target_pos = np.array([target_x, row])
+                block_already_there = any(np.array_equal(target_pos, pos) for _, pos in blocks_to_consider)
+                
+                if not block_already_there:
+                    # Find a misplaced block
+                    blocks_in_wrong_positions = []
+                    for block_idx, block_pos in blocks_to_consider:
+                        block_in_correct_position = False
+                        for j, correct_x in enumerate(available_x_positions):
+                            if j >= len(blocks_to_consider):
+                                break
+                            correct_pos = np.array([correct_x, row])
+                            if np.array_equal(block_pos, correct_pos):
+                                block_in_correct_position = True
+                                break
+                        
+                        if not block_in_correct_position:
+                            blocks_in_wrong_positions.append(block_pos)
+                    
+                    if blocks_in_wrong_positions:
+                        rightmost_wrong_block = max(blocks_in_wrong_positions, key=lambda p: p[0])
+                        # print(f"JANITOR: Found block to move to position x={target_x}: {rightmost_wrong_block.tolist()}")
+                        return rightmost_wrong_block
+            
+            return None
+        
+        else:
+            # No interior walls - use original logic
+            blocks_in_row = self.get_blocks_in_row(row, block_locations)
+            
+            if not blocks_in_row:
+                return None
+            
+            # Get all available positions in the row (rightmost first)
+            available_x_positions = []
+            for x in range(self.grid_size - 2, 0, -1):  # Right to left: 5, 4, 3, 2, 1
+                candidate_pos = np.array([x, row])
+                is_wall = any(np.array_equal(candidate_pos, wall_pos) for wall_pos in wall_locations)
+                if not is_wall:
+                    available_x_positions.append(x)
+            
+            if not available_x_positions:
+                return None
+            
+            # Check each target position from rightmost to leftmost
+            for i, target_x in enumerate(available_x_positions):
+                # Is there already a block at this target position?
+                target_pos = np.array([target_x, row])
+                block_already_there = any(np.array_equal(target_pos, pos) for _, pos in blocks_in_row)
+                
+                if not block_already_there:
+                    # This position is empty and should be filled
+                    # Find a block that can move here (any block that's not already in a correct position)
+                    
+                    # Get blocks that are not in their final correct positions
+                    blocks_in_wrong_positions = []
+                    for block_idx, block_pos in blocks_in_row:
+                        # Check if this block is in a correct position
+                        block_in_correct_position = False
+                        for j, correct_x in enumerate(available_x_positions):
+                            if j >= len(blocks_in_row):
+                                break
+                            correct_pos = np.array([correct_x, row])
+                            if np.array_equal(block_pos, correct_pos):
+                                block_in_correct_position = True
+                                break
+                        
+                        if not block_in_correct_position:
+                            blocks_in_wrong_positions.append(block_pos)
+                    
+                    # Return the rightmost block that's in a wrong position
+                    if blocks_in_wrong_positions:
+                        rightmost_wrong_block = max(blocks_in_wrong_positions, key=lambda p: p[0])
+                        # print(f"JANITOR: Found block to move to position x={target_x}: {rightmost_wrong_block.tolist()}")
+                        return rightmost_wrong_block
+            
+            return None  # All blocks are correctly positioned
+    
+    def find_target_position_for_block(self, block_pos, row, block_locations, wall_locations):
+        """Find where this block should go in the rightmost arrangement"""
+        # NEW: Check if row has interior walls
+        if self.has_interior_wall_in_row(row, wall_locations):
+            # Use wall-aware logic
+            all_blocks_right_of_wall = self.get_blocks_right_of_wall(row, block_locations, wall_locations)
+            other_blocks = [pos for _, pos in all_blocks_right_of_wall 
+                           if not np.array_equal(pos, block_pos)]
+            
+            available_x_positions = self.get_available_positions_right_of_wall(row, wall_locations)
+            
+            # Find available positions not occupied by other blocks
+            available_positions = []
+            for x in available_x_positions:
+                candidate_pos = np.array([x, row])
+                is_occupied_by_other = any(np.array_equal(candidate_pos, other_pos) for other_pos in other_blocks)
+                if not is_occupied_by_other:
+                    available_positions.append(candidate_pos)
+            
+            if available_positions:
+                return available_positions[0]
+            return None
+        
+        else:
+            # No interior walls - use original logic
+            # Get all blocks in row except the one we're moving
+            other_blocks = [pos for pos in block_locations 
+                           if not np.array_equal(pos, block_pos) and pos[1] == row]
+            
+            # Sort other blocks by x-coordinate (descending for rightmost)
+            other_blocks_sorted = sorted(other_blocks, key=lambda p: p[0], reverse=True)
+            
+            # Find rightmost available positions
+            available_positions = []
+            for x in range(self.grid_size - 2, 0, -1):  # Right to left
+                candidate_pos = np.array([x, row])
+                is_wall = any(np.array_equal(candidate_pos, wall_pos) for wall_pos in wall_locations)
+                is_occupied_by_other = any(np.array_equal(candidate_pos, other_pos) for other_pos in other_blocks)
+                
+                if not is_wall and not is_occupied_by_other:
+                    available_positions.append(candidate_pos)
+            
+            # Return the rightmost available position
+            if available_positions:
+                return available_positions[0]
+            
+            return None
+    
+    def manhattan_distance(self, pos1, pos2):
+        """Calculate Manhattan distance between two positions"""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+    
+    def get_next_action_towards_target(self, current_pos, target_pos, block_locations, has_block):
+        """Get the next action to move towards a target position"""
+        if target_pos is None:
+            return 0
+        
+        if np.array_equal(current_pos, target_pos):
+            return 0  # stay
+        
+        diff = target_pos - current_pos
+        moves = []
+        
+        # Prioritize horizontal movement (left-right within row)
+        if diff[0] > 0:
+            moves.append(([1, 0], 1))   # right
+        elif diff[0] < 0:
+            moves.append(([-1, 0], 2))  # left
+        if diff[1] < 0:
+            moves.append(([0, -1], 4))  # up
+        elif diff[1] > 0:
+            moves.append(([0, 1], 3))   # down
+
+        # Try each move
+        for offset, action in moves:
+            new_pos = current_pos + offset
+            # Check collision with blocks when carrying something
+            if has_block and any(np.array_equal(new_pos, block_pos) for block_pos in block_locations):
+                continue
+            return action
+
+        return 0  # stay if no valid moves
+
+    def act(self, observation) -> int:
+        '''
+        Simple Janitor Row Cleaning FSM - RIGHTMOST VERSION:
+        
+        BEHAVIOR: Clean rows from top to bottom by moving all blocks to rightmost positions
+        1. Start at row 1, work systematically down to row 5
+        2. In each row, move blocks to rightmost available positions
+        3. First block goes to rightmost spot, second block to second rightmost spot, etc.
+        4. Continue until all blocks in row are right-aligned, then move to next row
+        5. NEW: If row has interior walls, only clean blocks to the right of the rightmost wall
+        '''
+        agent_pos = np.array(observation['agent_locations'][observation['agent_id']])
+        block_locations = observation['block_locations']
+        wall_locations = observation['wall_locations']
+        has_block = observation['agent_inventory'][observation['agent_id']] != -1
+
+        # print(f"JANITOR: State={self.current_state}, Row={self.current_row}, Pos={agent_pos.tolist()}, HasBlock={has_block}")
+
+        if self.current_state == self.MOVE_TO_ROW_START:
+            # Simple fix: If we picked up a block while navigating, just drop it immediately
+            if has_block:
+                # print(f"JANITOR: Picked up block while navigating to row {self.current_row}, dropping it")
+                return 5  # interact to drop
+            
+            # Move to start of current row (rightmost position for rightmost cleaning)
+            row_start = np.array([self.grid_size - 2, self.current_row])  # Start from rightmost position
+            
+            if np.array_equal(agent_pos, row_start):
+                self.current_state = self.SCAN_ROW
+                # print(f"JANITOR: Arrived at row {self.current_row} start, switching to SCAN_ROW")
+                # Continue to SCAN_ROW logic immediately
+                return self.act(observation)
+            
+            # print(f"JANITOR: Moving to row start {row_start.tolist()}")
+            return self.get_next_action_towards_target(agent_pos, row_start, block_locations, has_block)
+
+        elif self.current_state == self.SCAN_ROW:
+            # Debug: Show current blocks in row
+            blocks_in_row = self.get_blocks_in_row(self.current_row, block_locations)
+            if blocks_in_row:
+                block_positions = [pos.tolist() for _, pos in blocks_in_row]
+                # print(f"JANITOR: Row {self.current_row} has blocks at: {block_positions}")
+            # else:
+                # print(f"JANITOR: Row {self.current_row} has no blocks")
+            
+            # Check if current row is cleaned (all blocks right-aligned)
+            row_is_clean = self.is_row_cleaned(self.current_row, block_locations, wall_locations)
+            # print(f"JANITOR: Row {self.current_row} is_clean = {row_is_clean}")
+            
+            if row_is_clean:
+                # print(f"JANITOR: Row {self.current_row} is cleaned!")
+                # Move to next row
+                self.current_row += 1
+                
+                if self.current_row >= self.grid_size - 1:
+                    # print("JANITOR: All rows cleaned! Job complete.")
+                    return 0
+                
+                # print(f"JANITOR: Moving to clean row {self.current_row}")
+                self.current_state = self.MOVE_TO_ROW_START
+                # Continue to next row logic immediately
+                return self.act(observation)
+            
+            # Find a block that needs to be moved right
+            block_to_move = self.find_block_to_move(self.current_row, block_locations, wall_locations)
+            # print(f"JANITOR: Block to move: {block_to_move}")
+            
+            if block_to_move is None:
+                # print(f"JANITOR: No blocks to move in row {self.current_row}, advancing to next row")
+                # Move to next row since nothing needs moving
+                self.current_row += 1
+                
+                if self.current_row >= self.grid_size - 1:
+                    # print("JANITOR: All rows cleaned! Job complete.")
+                    return 0
+                
+                self.current_state = self.MOVE_TO_ROW_START
+                # Continue to next row logic immediately  
+                return self.act(observation)
+            
+            self.target_block = block_to_move
+            self.current_state = self.PICKUP_BLOCK
+            # print(f"JANITOR: Moving block at {block_to_move.tolist()} in row {self.current_row}")
+            # Continue to PICKUP_BLOCK logic immediately
+            return self.act(observation)
+
+        elif self.current_state == self.PICKUP_BLOCK:
+            if has_block:
+                # Successfully picked up block, find target position
+                self.target_position = self.find_target_position_for_block(
+                    self.target_block, self.current_row, block_locations, wall_locations)
+                
+                if self.target_position is None:
+                    # Can't find target position, drop block at current location
+                    # print(f"JANITOR: Can't find target for picked up block, dropping here")
+                    return 5
+                
+                self.current_state = self.MOVE_TO_RIGHT
+                # print(f"JANITOR: Picked up block, moving to {self.target_position.tolist()}")
+                return self.act(observation)
+            
+            # Move to target block to pick it up
+            if self.target_block is None:
+                # print(f"JANITOR: No target block, going back to scan")
+                self.current_state = self.SCAN_ROW
+                return self.act(observation)
+            
+            # Check if we're at the target block position
+            if np.array_equal(agent_pos, self.target_block):
+                # We should be here to pick up the block, but we don't have it
+                # This means the block might have been picked up automatically
+                # Go back to scanning
+                # print(f"JANITOR: At target block position but no block found, going back to scan")
+                self.current_state = self.SCAN_ROW
+                return self.act(observation)
+            
+            # print(f"JANITOR: Moving to pick up block at {self.target_block.tolist()}")
+            return self.get_next_action_towards_target(agent_pos, self.target_block, block_locations, has_block)
+
+        elif self.current_state == self.MOVE_TO_RIGHT:
+            if not has_block:
+                # Dropped block, go back to scanning
+                # print(f"JANITOR: Dropped block, continuing row {self.current_row}")
+                self.current_state = self.SCAN_ROW
+                return self.act(observation)
+            
+            if self.target_position is None:
+                # No target position, go back to scanning
+                # print(f"JANITOR: No target position, going back to scan")
+                self.current_state = self.SCAN_ROW
+                return self.act(observation)
+            
+            # Move to target position
+            if np.array_equal(agent_pos, self.target_position):
+                # print(f"JANITOR: Dropping block at {self.target_position.tolist()}")
+                return 5  # interact to drop
+            
+            # print(f"JANITOR: Moving to target position {self.target_position.tolist()}")
+            return self.get_next_action_towards_target(agent_pos, self.target_position, block_locations, has_block)
+
+        return 0  # default stay
+```
