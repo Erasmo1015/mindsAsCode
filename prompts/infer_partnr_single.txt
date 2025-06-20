@@ -4,7 +4,7 @@ This environment simulates potentially multiple agents interacting in a house wi
 
 Each agent receives detailed information, but partial information, about the environment's state, including the positions of walls, objects, agents and inventories. 
 
-You need to implement the python code to model the logic of the agent's behavior as a finite state machine, as seen in the provided experiences. Please follow the template to implement the code. The code needs to be directly runnable on the state and return the action and action distribution in python as provided in the experiences.
+You need to implement the python code to model the logic of the agent's behavior as a finite state machine, as seen in the provided experiences. Please follow the template to implement the code. The code needs to be directly runnable on the state and return the action in python as provided in the experiences.
 
 You need to implement python code to model the logic of the world as seen in the following experiences:
 

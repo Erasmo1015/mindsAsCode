@@ -177,3 +177,5 @@ logs/*
 baselines/BC/*
 baselines/FSM/*
 baselines/ToMnet/*
+results/*
+old_fsm_human_data/

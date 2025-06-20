@@ -48,6 +48,7 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
 
     state_list = []
     action_list = []
+    obs_list = []
     for i in range(num_steps):
         try:
             assert len(state.block_locations) == num_blocks
@@ -62,11 +63,12 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
         
         next_obs, next_state = env.step(state, actions)
 
-        state_list.append(obs[0])
+        state_list.append(state)
         action_list.append(actions)
+        obs_list.append(obs)
         obs = next_obs
         state = next_state
-    return state_list, action_list, env
+    return state_list, action_list, obs_list, env
 
 def convert_state_to_serializable_dict(state, agent_id, num_blocks):
     assert len(state.block_locations) == num_blocks
@@ -89,10 +91,11 @@ def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, 
 
     # Create directory if it doesn't exist
     os.makedirs(f"data/agent_num{num_agents}", exist_ok=True)
-    for num_blocks_i in range(2, 22, num_block_steps):
-        agent_list = initialize_agent_list(range(20), num_agents=num_agents, num_blocks=num_blocks_i, group=group)
+    for num_blocks_i in tqdm(range(4, 8, num_block_steps)):
+        # agent_list = initialize_agent_list(range(20), num_agents=num_agents, num_blocks=num_blocks_i, group=group)
+        agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=num_blocks_i)
         assert len(agent_list) >= num_agents
-        for num_walls_i in range(2, 22, num_walls_steps):
+        for num_walls_i in tqdm(range(1, 5, num_walls_steps)):
             # Lists to collect data for this agent
             all_states = []
             all_actions = []
@@ -104,7 +107,7 @@ def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, 
                 agent_actions = []
                 agent_agent_ids = []
                 for datapoint in range(num_datapoints_per_agent):               
-                    state_list, action_list, env = generate_trajectory(
+                    state_list, action_list, obs_list, env = generate_trajectory(
                         agent_id, agent_list, seed=datapoint, 
                         num_agents=num_agents, num_steps=num_steps, 
                         num_blocks=num_blocks_i, num_walls=num_walls_i, group=group
@@ -186,21 +189,22 @@ if __name__ == "__main__":
         hand_designed_id = 0
     
     num_agents = 1  # number of agents
-    num_datapoints_per_agent = 100  # number of trajectories to generate per agent
+    num_datapoints_per_agent = 5  # number of trajectories to generate per agent
     num_steps = 50  # trajectory length
-    num_block_steps = 2  # number of blocks to increment by
-    num_walls_steps = 2  # number of walls to increment by
+    num_block_steps = 1  # number of blocks to increment by
+    num_walls_steps = 1  # number of walls to increment by
 
-    # generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=True)
+    # generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=False)
 
 
 
     agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=3)
 
 
-    state_list, action_list, env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=100, num_blocks=3, num_walls=1)
+    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=100, num_blocks=6, num_walls=1)
     # Create frames list for RGB arrays
-    stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *state_list)
+    stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *obs_list)
+    stacked_states = stacked_states[0]
 
     def convert_to_image(index, stacked_state):
         indexed_state = jax.tree.map(lambda x: x[index], stacked_state)

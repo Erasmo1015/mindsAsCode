@@ -1,15 +1,17 @@
-Please implement code to model the logic of the agent's behavior as demonstrated by the experiences. Here is the template for the agent's FSM class. Please implement the FSM code for an agent following the template. The code needs to be directly runnable on the inputs of state and return the action and action distribution as provided in the experiences.
+Please implement code to model the logic of the agent's behavior as demonstrated by the experiences. Here is the template for the agent's FSM class. Please implement the FSM code for an agent following the template. The code needs to be directly runnable on the inputs of state and return an action based on an observation.
 
 ```python
 import numpy as np
 
 class FSMAgent:
+
+    # Add internal decision making states
+
     def __init__(self, num_agents: int, num_blocks: int, num_actions: int=6):
         self.num_agents = num_agents
         self.num_blocks = num_blocks
         self.num_actions = num_actions
-        # Add interact action (0, 0, 1) - last digit indicates interact button
-        self.actions = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]  # stay, right, left, down, up, interact
+        self.actions = [0,1,2,3,4,5]  # stay, right, left, down, up, interact
         self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
     
     '''
@@ -32,18 +34,18 @@ class FSMAgent:
 
         # TODO: Implement the agent's decision-making logic here
         # This is a placeholder implementation that returns a random action.
-        action = np.random.randint(self.num_actions)
-        # replace with your own distribution. If the action is deterministic, your distribution should be a one-hot vector.
-        action_distribution = np.ones(self.num_actions) / self.num_actions  
 
-
-
+        if True:  # replace with your own conditions for taking actions that are not necessarily random
+            action = np.random.randint(self.num_actions)
+        else:
+            action = 0  # stay in place
+            
         ## DON'T CHANGE ANYTHING BELOW HERE
         assert action in range(self.num_actions)
-        return action, action_distribution
+        return action
 ```
 Please implement the FSM code to model the logic of the agent's behavior as demonstrated by the experiences. Please implement the code following the template. Feel free to implement the helper functions you need. 
-You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action and action distribution. Let's think step by step.
+You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action. Let's think step by step.
 
 Your code here:
 

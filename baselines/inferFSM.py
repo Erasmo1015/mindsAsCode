@@ -40,6 +40,8 @@ class FSMReasoner:
             5: "interact"
         }
         self.name_to_action = {v: k for k, v in self.action_to_name.items()}
+        self.action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+        self.str_action_space = ["stay", "up", "down", "left", "right", "interact"]
 
         self.group = group
         if not group:
@@ -338,33 +340,35 @@ High-level description:"""
         for hypothesis_id, agent_code in enumerate(outputs):
             # Define generate_response and revise_response functions based on model type
             if self.use_openai:
-                def generate_response(prompt):
+                def generate_response():
                     response = self.client.chat.completions.create(
                         model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=formatted_prompt,
                         temperature=1.0,
                         max_tokens=2000
                     )
                     return response.choices[0].message.content
 
                 def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
-                    revised = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=1.0,
-                        max_tokens=2000
-                    )
-                    return revised.choices[0].message.content
+                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
+                    if self.use_openai:
+                        revised = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=1.0,
+                            max_tokens=2000
+                        )
+                        return revised.choices[0].message.content
+                    else:
+                        outputs = self.llm.generate([prompt], self.sampling_params)
+                        return outputs[0].outputs[0].text
             else:
-                # vLLM implementation for generate_response
-                def generate_response(prompt):
-                    outputs = self.llm.generate([prompt], self.sampling_params)
+                def generate_response():
+                    outputs = self.llm.generate([formatted_prompt], self.sampling_params)
                     return outputs[0].outputs[0].text
 
-                # vLLM implementation for revise_response
                 def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
                     outputs = self.llm.generate([prompt], self.sampling_params)
                     return outputs[0].outputs[0].text
 
@@ -376,7 +380,7 @@ High-level description:"""
                 try:
                     agent = framework.compile_agent(agent_code, num_agents, num_blocks)
 
-                    log_prob_hypothesis = 0
+                    log_prob_hypothesis = 1e-6
                     # p(script | states, actions) = p(action | states, script) * prior(script)
                     for timestep in range(actions.shape[0] - 1):  
                         state = jax.tree.map(lambda x: x[timestep], states)
@@ -384,30 +388,50 @@ High-level description:"""
                             state['agent_id'] = 0
                         if not self.group:
                             gt_action = actions[timestep][0]
-                            proposed_action, proposed_pi = agent.act(state)
-                            proposed_pi = np.exp(np.array(proposed_pi) + 1e-8) / np.sum(np.exp(np.array(proposed_pi) + 1e-8))
-                            log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_action], 1e-8, 1))
+                            proposed_action = agent.act(state)
+
+                            try:
+                                if type(proposed_action) == tuple and proposed_action in self.action_space:
+                                    proposed_action = self.action_space.index(proposed_action)
+                                elif type(proposed_action) == str:
+                                    proposed_action = proposed_action.lower()
+                                    proposed_action = self.str_action_space.index(proposed_action)
+                                correct = float(proposed_action == gt_action)
+                            except Exception as e:
+                                breakpoint()
+                                correct = 0
+                            log_prob_hypothesis += correct
                         else:
                             gt_actions = actions[timestep]
-                            proposed_actions, proposed_pis = agent.act(state)
+                            proposed_actions = agent.act(state)
                             for a in proposed_actions:
+                                if a in self.action_space:
+                                    a = self.action_space.index(a)
+                                elif type(a) == str and a.lower() in self.str_action_space:
+                                    a = self.str_action_space.index(a)
                                 assert a in range(6), "an action in proposed_actions is not an integer in range(num_actions)"
                             for i in range(len(proposed_actions)):
-                                proposed_pi = np.exp(np.array(proposed_pis[i]) + 1e-8) / np.sum(np.exp(np.array(proposed_pis[i]) + 1e-8))
-                                log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_actions[i]], 1e-8, 1))
+                                if proposed_actions[i] in self.action_space:
+                                    proposed_actions[i] = self.action_space.index(proposed_actions[i])
+                                log_prob_hypothesis += (proposed_actions[i] == gt_actions[i])
                     
                     final_state = jax.tree.map(lambda x: x[-1], states)
                     if len(final_state['agent_locations']) == 1:
                         final_state['agent_id'] = 0
-                    final_action, final_pi = agent.act(final_state)
+                    final_action = agent.act(final_state)
                     agent_codes.append(agent_code)
                     agents.append(agent)
+                    try:
+                        assert type(log_prob_hypothesis) == float, "log_prob_hypothesis is not a float"
+                    except Exception as e:
+                        breakpoint()
                     log_prob_hypothesis_list.append(log_prob_hypothesis)
-                    final_action_pred_list.append(final_pi)  # time t
+                    final_action_pred_list.append(final_action)  # time t
                     break
                 except Exception as e:
                     trial += 1
                     full_traceback = traceback.format_exc()
+                    # print(full_traceback)
                     if trial == num_trials:
                         print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
                         break
@@ -423,7 +447,12 @@ High-level description:"""
             # These lists (agents, log_prob_hypothesis_list, agent_codes) are already populated
             
             current_agents_list = agents
-            current_log_probs_np = np.array(log_prob_hypothesis_list)
+            try:
+                current_log_probs_np = np.array(log_prob_hypothesis_list)
+            except Exception as e:
+                breakpoint()
+                current_log_probs_np = np.array(log_prob_hypothesis_list)
+                
             current_agent_codes_list = agent_codes # This should be the codes for successfully compiled agents
 
             if len(current_log_probs_np) == 0:
@@ -491,12 +520,14 @@ High-level description:"""
             weighted_program_lengths.append(weighted_length)
             
             if not self.group:
+                breakpoint()
                 curr_final_preds = curr_final_preds + 1e-8
                 curr_final_preds = np.clip(curr_final_preds, 1e-8, 1)
                 curr_final_preds = curr_final_preds / np.sum(curr_final_preds, axis=1, keepdims=True)
                 
                 res_pi = np.sum(curr_log_probs * curr_final_preds.T, axis=1)  # (num_actions,)
             else:
+                breakpoint()
                 curr_final_preds = curr_final_preds + 1e-8
                 curr_final_preds = np.clip(curr_final_preds, 1e-8, 1)
                 curr_final_preds = curr_final_preds / np.sum(curr_final_preds, axis=-1, keepdims=True)
@@ -660,21 +691,25 @@ High-level description:"""
                 return response.choices[0].message.content
 
             def revise_response(response, error_message):
-                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
-                revised = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=1.0,
-                    max_tokens=2000
-                )
-                return revised.choices[0].message.content
+                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
+                if self.use_openai:
+                    revised = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=1.0,
+                        max_tokens=2000
+                    )
+                    return revised.choices[0].message.content
+                else:
+                    outputs = self.llm.generate([prompt], self.sampling_params)
+                    return outputs[0].outputs[0].text
         else:
             def generate_response():
                 outputs = self.llm.generate([formatted_prompt], self.sampling_params)
                 return outputs[0].outputs[0].text
 
             def revise_response(response, error_message):
-                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
                 outputs = self.llm.generate([prompt], self.sampling_params)
                 return outputs[0].outputs[0].text
         
@@ -1009,33 +1044,37 @@ High-level description:"""
         for hypothesis_id, agent_code in enumerate(outputs):
             # Define generate_response and revise_response functions based on model type
             if self.use_openai:
-                def generate_response(prompt):
+                def generate_response():
                     response = self.client.chat.completions.create(
                         model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=formatted_prompt,
                         temperature=1.0,
                         max_tokens=2000
                     )
                     return response.choices[0].message.content
 
                 def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
-                    revised = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=1.0,
-                        max_tokens=2000
-                    )
-                    return revised.choices[0].message.content
+                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
+                    if self.use_openai:
+                        revised = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=1.0,
+                            max_tokens=2000
+                        )
+                        return revised.choices[0].message.content
+                    else:
+                        outputs = self.llm.generate([prompt], self.sampling_params)
+                        return outputs[0].outputs[0].text
             else:
                 # vLLM implementation for generate_response
-                def generate_response(prompt):
-                    outputs = self.llm.generate([prompt], self.sampling_params)
+                def generate_response():
+                    outputs = self.llm.generate([formatted_prompt], self.sampling_params)
                     return outputs[0].outputs[0].text
 
                 # vLLM implementation for revise_response
                 def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
                     outputs = self.llm.generate([prompt], self.sampling_params)
                     return outputs[0].outputs[0].text
 
@@ -1055,12 +1094,11 @@ High-level description:"""
                             state['agent_id'] = 0
                         if not self.group:
                             gt_action = actions[timestep][0]
-                            proposed_action, proposed_pi = agent.act(state)
-                            proposed_pi = np.exp(np.array(proposed_pi) + 1e-8) / np.sum(np.exp(np.array(proposed_pi) + 1e-8))
-                            log_prob_hypothesis += np.log(np.clip(proposed_pi[gt_action], 1e-8, 1))
+                            proposed_action = agent.act(state)
+                            log_prob_hypothesis += np.log(np.clip(proposed_action[gt_action], 1e-8, 1))
                         else:
                             gt_actions = actions[timestep]
-                            proposed_actions, proposed_pis = agent.act(state)
+                            proposed_actions = agent.act(state)
                             for a in proposed_actions:
                                 assert a in range(6), "an action in proposed_actions is not an integer in range(num_actions)"
                             for i in range(len(proposed_actions)):

@@ -60,10 +60,10 @@ def parse_args():
     )
     parser.add_argument('--num_agents_to_sample', type=int, default=1, help='Number of agents to sample from the dataset.')
     parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=1, help='Number of datapoints per agent to sample from the dataset.')
-    parser.add_argument('--num_agents', type=int, default=20, help='Number of agents in the dataset.')
-    parser.add_argument('--num_datapoints_per_agent', type=int, default=100, help='Number of datapoints per agent in the dataset.')
-    parser.add_argument('--num_steps', type=int, default=100, help='Number of steps in the dataset.')
-    parser.add_argument('--env_size', type=int, default=10, help='Size of the environment.')
+    parser.add_argument('--num_agents', type=int, default=1, help='Number of agents in the dataset.')
+    parser.add_argument('--num_datapoints_per_agent', type=int, default=5, help='Number of datapoints per agent in the dataset.')
+    parser.add_argument('--num_steps', type=int, default=50, help='Number of steps in the dataset.')
+    parser.add_argument('--env_size', type=int, default=7, help='Size of the environment.')
     # parser.add_argument('--num_blocks', type=int, default=10, help='Number of blocks in the dataset.')
     # parser.add_argument('--num_walls', type=int, default=10, help='Number of walls in the dataset.')
 
@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=25, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -91,7 +91,7 @@ def parse_args():
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
-    if args.baseline_model not in ["ToMnet", 'BC', 'TT', 'AutoToM', 'FSM', 'NLLM']:
+    if args.baseline_model not in ["ToMnet", 'BC', 'AutoToM', 'FSM', 'NLLM']:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     if args.baseline_model == 'AutoToM':
@@ -112,11 +112,11 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     while True:
         if not overfit:
             i += 1
-            num_blocks = random.choice(list(range(2, 10, 2)))
-            num_walls = random.choice(list(range(2, 22, 2)))
+            num_blocks = random.choice(list(range(4,8,1)))
+            num_walls = random.choice(list(range(1, 5, 1)))
         else:
-            num_blocks = 2
-            num_walls = 2
+            num_blocks = 4
+            num_walls = 1
 
         data_folder = f"{data_path}/num_blocks{num_blocks}/num_walls{num_walls}"
         extension = "_group" if args.group else ""
@@ -237,17 +237,6 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         yield sampled_data
         del sampled_data
 
-def eval_thoughtTrace(args, dataloader, model):
-    for i in range(args.num_epochs):
-        datapoint = next(dataloader)
-        state = datapoint['states']
-        actions = datapoint['actions']
-        agent_ids = datapoint['agent_ids']
-
-        predicted_final_action = model.predict_action(state, actions, agent_ids)
-
-        breakpoint()
-
 def eval_autoToM(args, dataloader, model, episode_id: int = 0):
     if args.multi_step_eval:
         # --- Multi-Step Evaluation Logic ---
@@ -256,7 +245,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         num_total = 0
         total_prediction_time = 0
         num_predictions = 0
-        
+        first_step_correct = 0
+        first_step_total = 0
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
         
@@ -265,35 +255,35 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         env_max_steps = num_future_steps + 5  # Sufficiently large
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):
-            data_sample = jax.tree.map(lambda x: x[a_idx, -1, :15+num_future_steps], datapoint)
+            data_sample = jax.tree.map(lambda x: x[a_idx, -1, :20+num_future_steps], datapoint)
             
-            initial_states_traj = jax.tree.map(lambda x: x[:15], data_sample['states'])
-            initial_actions_traj = jax.tree.map(lambda x: x[:15], data_sample['actions'])
+            initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
+            initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             
-            gt_future_actions = data_sample['actions'][14:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
+            gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
             num_env_agents = 4 if args.group else 1
             # Infer num_blocks and num_walls from the state
-            state_at_t14 = jax.tree.map(lambda x: x[14], initial_states_traj)
+            state_at_t19 = jax.tree.map(lambda x: x[19], initial_states_traj)
             
             # Handle different possible shapes for block_locations
-            if isinstance(state_at_t14['block_locations'], (np.ndarray, jnp.ndarray)):
-                if state_at_t14['block_locations'].ndim == 1:
+            if isinstance(state_at_t19['block_locations'], (np.ndarray, jnp.ndarray)):
+                if state_at_t19['block_locations'].ndim == 1:
                     num_blocks = 1
-                elif state_at_t14['block_locations'].ndim == 2:
-                    num_blocks = state_at_t14['block_locations'].shape[0]
+                elif state_at_t19['block_locations'].ndim == 2:
+                    num_blocks = state_at_t19['block_locations'].shape[0]
                 else:
                     num_blocks = 0
             else:
                 num_blocks = 0
                 
-            num_walls = state_at_t14['wall_locations'].shape[0]
+            num_walls = state_at_t19['wall_locations'].shape[0]
             
             env = AutomaticityEnv(num_agents=num_env_agents, size=env_size, max_steps=env_max_steps, 
                                   num_blocks=num_blocks, num_walls=num_walls)
             
             # Initialize simulation state from the last observed state
-            current_sim_state_pytree = state_at_t14
+            current_sim_state_pytree = state_at_t19
             current_sim_state_pytree = State(
                 wall_locations=current_sim_state_pytree['wall_locations'],
                 agent_locations=current_sim_state_pytree['agent_locations'],
@@ -315,6 +305,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                 # For each agent in the environment
                 for agent_id in range(num_env_agents):
                     num_total += 1
+                    if step_idx == 0:
+                        first_step_total += 1
                     
                     # Create a trajectory for this specific prediction
                     if step_idx == 0:
@@ -326,14 +318,15 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                         # Process each updated state individually to get observations
                         updated_obs = []
                         for t in range(step_idx):
-                            obs_t = env.get_observation(updated_states[t])[0]
+                            # obs_t = env.get_observation(updated_states[t])[0]
+                            obs_t = updated_states[t]
                             updated_obs.append(obs_t)
                         
                         # Stack observations into a sequence
                         stacked_obs = jax.tree.map(lambda *xs: jnp.stack(xs), *updated_obs)
                         
                         # Concatenate with initial trajectory
-                        pred_states = jax.tree.map(lambda x, y: jnp.concatenate([x[:15], y], axis=0), 
+                        pred_states = jax.tree.map(lambda x, y: jnp.concatenate([x[:20], y], axis=0), 
                                                   initial_states_traj, stacked_obs)
                         pred_actions = jnp.concatenate([initial_actions_traj, 
                                                        jnp.array(action_history[:step_idx])], axis=0)
@@ -347,6 +340,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                         gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
                         if predicted_action == gt_action:
                             num_correct += 1
+                            if step_idx == 0:
+                                first_step_correct += 1
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
@@ -375,19 +370,22 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                     action_history.append(action_to_take_in_env_list)
                 
                 # Simulate environment step
-                try:
-                    _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
-                    current_sim_state_pytree = next_env_state_pytree
-                    updated_states.append(jax.tree.map(lambda x: x, current_sim_state_pytree))
-                except Exception as e:
-                    print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
-                    break
+                current_sim_state_pytree = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
+                # try:
+                #     _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
+                #     current_sim_state_pytree = next_env_state_pytree
+                updated_states.append(jax.tree.map(lambda x: x, current_sim_state_pytree))
+                # except Exception as e:
+                #     print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
+                #     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
+        first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
         print(f"AutoToM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
+        print(f"First Step Accuracy: {first_step_accuracy:.4f} ({first_step_correct}/{first_step_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time
+        return accuracy, avg_prediction_time, first_step_accuracy
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -423,7 +421,8 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         num_total = 0
         total_prediction_time = 0
         num_predictions = 0
-        
+        first_step_correct = 0
+        first_step_total = 0
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
         
@@ -432,35 +431,35 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         env_max_steps = num_future_steps + 5  # Sufficiently large
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):
-            data_sample = jax.tree.map(lambda x: x[a_idx, -1, :15+num_future_steps], datapoint)
+            data_sample = jax.tree.map(lambda x: x[a_idx, -1, :20+num_future_steps], datapoint)
             
-            initial_states_traj = jax.tree.map(lambda x: x[:15], data_sample['states'])
-            initial_actions_traj = jax.tree.map(lambda x: x[:15], data_sample['actions'])
+            initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
+            initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             
-            gt_future_actions = data_sample['actions'][14:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
+            gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
             num_env_agents = 4 if args.group else 1
             # Infer num_blocks and num_walls from the state
-            state_at_t14 = jax.tree.map(lambda x: x[14], initial_states_traj)
+            state_at_t19 = jax.tree.map(lambda x: x[19], initial_states_traj)
             
             # Handle different possible shapes for block_locations
-            if isinstance(state_at_t14['block_locations'], (np.ndarray, jnp.ndarray)):
-                if state_at_t14['block_locations'].ndim == 1:
+            if isinstance(state_at_t19['block_locations'], (np.ndarray, jnp.ndarray)):
+                if state_at_t19['block_locations'].ndim == 1:
                     num_blocks = 1
-                elif state_at_t14['block_locations'].ndim == 2:
-                    num_blocks = state_at_t14['block_locations'].shape[0]
+                elif state_at_t19['block_locations'].ndim == 2:
+                    num_blocks = state_at_t19['block_locations'].shape[0]
                 else:
                     num_blocks = 0
             else:
                 num_blocks = 0
                 
-            num_walls = state_at_t14['wall_locations'].shape[0]
+            num_walls = state_at_t19['wall_locations'].shape[0]
             
             env = AutomaticityEnv(num_agents=num_env_agents, size=env_size, max_steps=env_max_steps, 
                                   num_blocks=num_blocks, num_walls=num_walls)
             
             # Initialize simulation state from the last observed state
-            current_sim_state_pytree = state_at_t14
+            current_sim_state_pytree = state_at_t19
             current_sim_state_pytree = State(
                 wall_locations=current_sim_state_pytree['wall_locations'],
                 agent_locations=current_sim_state_pytree['agent_locations'],
@@ -488,19 +487,21 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                         # First prediction uses the initial trajectory
                         pred_states = initial_states_traj
                         pred_actions = initial_actions_traj
+                        first_step_total += 1
                     else:
                         # Subsequent predictions use updated trajectory with previous predictions
                         # Process each updated state individually to get observations
                         updated_obs = []
                         for t in range(step_idx):
-                            obs_t = env.get_observation(updated_states[t])[0]
+                            # obs_t = env.get_observation(updated_states[t])[0]
+                            obs_t = updated_states[t]
                             updated_obs.append(obs_t)
                         
                         # Stack observations into a sequence
                         stacked_obs = jax.tree.map(lambda *xs: jnp.stack(xs), *updated_obs)
                         
                         # Concatenate with initial trajectory
-                        pred_states = jax.tree.map(lambda x, y: jnp.concatenate([x[:15], y], axis=0), 
+                        pred_states = jax.tree.map(lambda x, y: jnp.concatenate([x[:20], y], axis=0), 
                                                   initial_states_traj, stacked_obs)
                         pred_actions = jnp.concatenate([initial_actions_traj, 
                                                        jnp.array(action_history[:step_idx])], axis=0)
@@ -517,6 +518,8 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                         gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
                         if predicted_action == gt_action:
                             num_correct += 1
+                            if step_idx == 0:
+                                first_step_correct += 1
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
@@ -530,7 +533,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                 for agent_id in range(num_env_agents):
                     try:
                         predicted_probs = model.predict_action(pred_states, pred_actions, 
-                                                              agent_id=agent_id, timestep=14+step_idx)
+                                                              agent_id=agent_id, timestep=19+step_idx)
                         action_to_take_in_env_list.append(np.argmax(predicted_probs))
                     except:
                         # If prediction fails, use ground truth (to keep simulation going)
@@ -544,20 +547,22 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                 else:
                     action_history.append(action_to_take_in_env_list)
                 
-                # Simulate environment step
-                try:
-                    _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
-                    current_sim_state_pytree = next_env_state_pytree
-                    updated_states.append(jax.tree.map(lambda x: x, current_sim_state_pytree))
-                except Exception as e:
-                    print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
-                    break
+                current_sim_state_pytree = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
+                # # Simulate environment step
+                # try:
+                #     _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
+                #     current_sim_state_pytree = next_env_state_pytree
+                updated_states.append(jax.tree.map(lambda x: x, current_sim_state_pytree))
+                # except Exception as e:
+                #     print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
+                #     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
+        first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
         print(f"NLLM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time
+        return accuracy, avg_prediction_time, first_step_accuracy
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -1086,19 +1091,21 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         env_max_steps = num_future_steps + 5 # Sufficiently large
 
         datapoint = next(dataloader) # Process one batch of data
+        generation_times = 0
+        num_generations = 0
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):
-            data_sample = jax.tree.map(lambda x: x[a_idx, -1, :15+num_future_steps], datapoint) 
+            data_sample = jax.tree.map(lambda x: x[a_idx, -1, :20+num_future_steps], datapoint) 
             
-            initial_states_traj = jax.tree.map(lambda x: x[:15], data_sample['states'])
-            initial_actions_traj = jax.tree.map(lambda x: x[:15], data_sample['actions'])
+            initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
+            initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             
-            gt_future_actions = data_sample['actions'][14:] # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
+            gt_future_actions = data_sample['actions'][19:] # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
             num_env_agents = 4 if args.group else 1
             # Infer num_blocks and num_walls from the state at the beginning of the prediction horizon
             # Use state at t=14 (end of initial trajectory) to setup env for t=15 prediction
-            state_at_t14 = jax.tree.map(lambda x: x[14], initial_states_traj)
+            state_at_t14 = jax.tree.map(lambda x: x[19], initial_states_traj)
             num_blocks = state_at_t14['block_locations'].shape[0] if len(state_at_t14['block_locations'].shape) > 1 else state_at_t14['block_locations'].shape[0] # handle single block case
             if isinstance(state_at_t14['block_locations'], (np.ndarray, jnp.ndarray)) and state_at_t14['block_locations'].ndim == 1 and num_blocks > 0 : # if it's a flat array for a single block
                  num_blocks = 1
@@ -1116,7 +1123,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             compiled_agents = None
             agent_probs = None
             agent_codes = None
-            
+            generation_state = time.time()
             # Hypothesis generation time is NOT used for avg_prediction_time anymore
             if args.rejuvenation:
                 compiled_agents, agent_probs, agent_codes = model.predict_action_with_rejuvenation(
@@ -1134,7 +1141,12 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
                     return_compiled_agents=True
                 )
-                
+            generation_time = time.time() - generation_state
+            # print(f"Generation time: {generation_time:.4f} seconds")
+            generation_times += generation_time
+            num_generations += 1
+
+
             num_predictions += 1
 
             if not compiled_agents or not agent_probs:
@@ -1210,7 +1222,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     agent_input_state_for_act = current_sim_state_pytree
                     
                     # Aggregate predictions from the filtered hypotheses
-                    all_hyp_pis = []
+                    all_agent_pis = np.zeros((num_env_agents, 6))
 
                     # --- Start timing action prediction ---
                     step_prediction_start = time.time()
@@ -1218,28 +1230,67 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     for hyp_idx, hyp_agent in enumerate(curr_agents):
                         hyp_prob = curr_probs[hyp_idx]
                         try:
-                            _, proposed_pi_for_hyp = hyp_agent.act(current_obs)
-                            
+                            current_obs['agent_id'] = 0
+                            predicted_action = hyp_agent.act(current_obs)
+                            action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+                            action_space_2 = ["stay", "up", "down", "left", "right", "interact"]
                             if args.group:
                                 # proposed_pi_for_hyp is a list of np.arrays. Stack them.
-                                all_hyp_pis.append(np.array(proposed_pi_for_hyp) * hyp_prob) # (num_env_agents, num_actions)
+                                for pred_aid, pred_action in enumerate(predicted_action):
+                                    if type(pred_action) == tuple:
+                                        pred_action = list(pred_action)
+                                    elif type(pred_action) == str:
+                                        pred_action = pred_action.lower()
+                                        pred_action = action_space_2.index(pred_action)
+                                    else:
+                                        pred_action = int(pred_action)
+                                    if pred_action in action_space:
+                                        pred_action = action_space.index(pred_action)
+                                    elif pred_action in action_space_2:
+                                        pred_action = action_space_2.index(pred_action)
+                                    all_agent_pis[pred_aid, pred_action] += hyp_prob # (num_env_agents, num_actions)
                             else:
-                                all_hyp_pis.append(np.array(proposed_pi_for_hyp) * hyp_prob) # (num_actions,)
+                                if type(predicted_action) == tuple:
+                                    predicted_action = list(predicted_action)
+                                elif type(predicted_action) == str:
+                                    predicted_action = predicted_action.lower()
+                                    predicted_action = action_space_2.index(predicted_action)
+                                else:
+                                    predicted_action = int(predicted_action)
+                                if predicted_action in action_space:
+                                    predicted_action = action_space.index(predicted_action)
+                                elif predicted_action in action_space_2:
+                                    predicted_action = action_space_2.index(predicted_action)
+                                if predicted_action < all_agent_pis.shape[1]:
+                                    all_agent_pis[0, predicted_action] += hyp_prob # (num_actions,)
+                                else:
+                                    continue
                         except Exception as e:
-                            # print(f"Error in hypothesis {hyp_idx} agent.act(): {e}. Using uniform distribution.")
-                            # Create uniform distribution as fallback
-                            if args.group:
-                                # Create uniform distribution for each agent (shape: num_env_agents, 6)
-                                uniform_pi = np.ones((num_env_agents, 6)) / 6
-                                all_hyp_pis.append(uniform_pi * hyp_prob)
-                            else:
-                                # Create uniform distribution for single agent (shape: 6)
-                                uniform_pi = np.ones(6) / 6
-                                all_hyp_pis.append(uniform_pi * hyp_prob)
+                            print(f"Error in hypothesis {hyp_idx} agent.act(): {e}. Using uniform distribution.")
+                            # breakpoint()
+
+                            # predicted_action = hyp_agent.act(current_obs)  # TODO: make agent index always 0
+                            # breakpoint()
+                            # action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+                            # if args.group:
+                            #     # proposed_pi_for_hyp is a list of np.arrays. Stack them.
+                            #     for pred_aid, pred_action in enumerate(predicted_action):
+                            #         if pred_action in action_space:
+                            #             pred_action = action_space.index(pred_action)
+                            #         all_agent_pis[pred_aid, pred_action] += hyp_prob # (num_env_agents, num_actions)
+                            # else:
+                            #     if predicted_action in action_space:
+                            #         print("yeet skurt")
+                            #         predicted_action = action_space.index(predicted_action)
+                            #     if predicted_action < all_agent_pis.shape[1]:
+                            #         print("this happened")
+                            #         all_agent_pis[0, predicted_action] += hyp_prob # (num_actions,)
+                            #     else:
+                            #         breakpoint()
 
 
                     # Sum weighted pis
-                    final_predicted_pi_for_step = np.sum(np.array(all_hyp_pis), axis=0)
+                    final_predicted_pi_for_step = all_agent_pis
                     
                     action_to_take_in_env_list = []
                     if args.group:
@@ -1255,51 +1306,23 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     # Compare with ground truth for this step
                     gt_action_this_step = gt_future_actions[step_idx] # (num_env_agents,) or (1,)
                     
-                    # for aid in range(num_env_agents):
-                    #     predicted_action_for_agent = action_to_take_in_env_list[aid]
-                    #     gt_action_for_agent = gt_action_this_step[aid] if args.group else gt_action_this_step[0]
-                    #     breakpoint()
-                    #     if predicted_action_for_agent == gt_action_for_agent:
-                    #         step_correct += 1
-                    #         # Track first step accuracy separately
-                    #         if step_idx == 0:
-                    #             results[n_hyp]['first_step_correct'] += 1
-                    if not args.group:
-                        max_prob = np.max(final_predicted_pi_for_step)
-                        # count number of actions with max probability
-                        num_max_actions = np.sum(final_predicted_pi_for_step == max_prob)
-                        gt_prob = final_predicted_pi_for_step[gt_action_this_step[0]]  
-                        if max_prob == gt_prob:
+                    for aid in range(num_env_agents):
+                        max_action_prob = np.max(final_predicted_pi_for_step[aid])
+                        # count number of actions with max probability  
+                        num_max_actions = np.sum(final_predicted_pi_for_step[aid] == max_action_prob)
+                        gt_action_prob = final_predicted_pi_for_step[aid, gt_action_this_step[aid]]
+                        if max_action_prob == gt_action_prob:
                             step_correct += 1 / num_max_actions
                             if step_idx == 0:
                                 results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
-                    else:
-                        for aid in range(num_env_agents):
-                            max_action_prob = np.max(final_predicted_pi_for_step[aid])
-                            # count number of actions with max probability  
-                            num_max_actions = np.sum(final_predicted_pi_for_step[aid] == max_action_prob)
-                            gt_action_prob = final_predicted_pi_for_step[aid, gt_action_this_step[aid]]
-                            if max_action_prob == gt_action_prob:
-                                step_correct += 1 / num_max_actions
-                                if step_idx == 0:
-                                    results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
                     
                     
                     # Track first step total separately
                     if step_idx == 0:
                         results[n_hyp]['first_step_total'] += num_env_agents
                     
-                    current_obs = jax.tree.map(lambda x: x[14+step_idx+1], data_sample['states'])
-                    # # Simulate environment step
-                    # try:
-                    #     # env.step expects a list of actions, one per agent in the env
-                    #     next_obs, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
-                    #     current_sim_state_pytree = next_env_state_pytree
-                    #     current_obs = next_obs[0]
-                    # except Exception as e:
-                    #     print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
-                    #     break # Stop simulation for this sample if env step fails
-                
+                    current_obs = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
+
                 # Update results for this hypothesis count
                 results[n_hyp]['correct'] += step_correct
                 results[n_hyp]['total'] += step_total
@@ -1325,14 +1348,14 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         
         # Calculate average prediction time
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
-        
+        avg_generation_time = generation_times / num_generations if num_generations > 0 else 0
         # Print results
         for n_hyp, acc in accuracies.items():
             print(f"Hypotheses: {n_hyp}, Multi-Step Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), First Step Accuracy: {first_step_accuracies[n_hyp]:.4f}, Avg Program Length: {program_lengths[n_hyp]:.1f}")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
         
         # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
-        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies
+        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time
         
     else:
         # --- Original Single-Step Bootstrap Evaluation Logic ---
@@ -1441,7 +1464,7 @@ def main():
     if args.baseline_model == "FSM" and args.bootstrap and args.multi_step_eval:
         print(f"Multi-step evaluation enabled: predicting {args.num_steps_to_predict} future steps.")
 
-    save_path_dir = f"baselines/{args.baseline_model}/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}"
+    save_path_dir = f"results/{args.baseline_model}/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}"
     
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(save_path_dir), exist_ok=True)
@@ -1459,11 +1482,11 @@ def main():
     
     if args.baseline_model == "FSM" and args.bootstrap:
         if args.multi_step_eval:
-            csv_path = f"baselines/{args.baseline_model}/fixed2_results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
+            csv_path = f"results/{args.baseline_model}/fixed2_results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
         else: # Single-step FSM bootstrap
-            csv_path = f"baselines/{args.baseline_model}/fixed2_results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+            csv_path = f"results/{args.baseline_model}/fixed2_results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else: # Non-bootstrap FSM or other models
-        csv_path = f"baselines/{args.baseline_model}/fixed2_results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"results/{args.baseline_model}/fixed2_results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -1517,12 +1540,8 @@ def main():
     model = None
     states = None # For ToMnet/BC
     
-    if args.baseline_model == "TT":
-        from baselines.thoughtTrace import ThoughtTrace
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
-        model = ThoughtTrace(n_hypothesis=args.n_hypothesis, model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
-        eval_fn = eval_thoughtTrace
-    elif args.baseline_model == "AutoToM":
+
+    if args.baseline_model == "AutoToM":
         from baselines.AutoToM.autoToM import AutoToM
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model = AutoToM(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
@@ -1568,7 +1587,7 @@ def main():
 
         if args.baseline_model == "FSM" and args.bootstrap:
             # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
-            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict = eval_fn(args, dataloader, model, episode_id=epoch)
+            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1589,7 +1608,7 @@ def main():
                         'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                         'epoch': epoch,
                         'llm_model': args.model_name,
-                        'num_hypothesis': args.n_hypothesis, # This is k_hypotheses_to_use for rollout
+                        'num_hypothesis': n_hyp, # This is k_hypotheses_to_use for rollout
                         'two_stage': args.two_stage,
                         'structured': args.structured,
                         'rejuvenation': args.rejuvenation,
@@ -1603,7 +1622,7 @@ def main():
                     # Only include avg_prediction_time if it's in the existing CSV
                     if include_prediction_time:
                         result['avg_prediction_time'] = avg_prediction_time
-                        
+                        result['avg_generation_time'] = avg_generation_time
                     results_to_save.append(result)
             else: # Single-step FSM bootstrap
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1642,9 +1661,13 @@ def main():
         else: # Other models or non-bootstrap FSM
             if args.baseline_model in ["ToMnet", "BC"]:
                 current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, states, epoch)
+                first_step_accuracy = None
             else:
-                current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
-
+                if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
+                    current_accuracy, avg_prediction_time, first_step_accuracy = eval_fn(args, dataloader, model, episode_id=epoch)
+                else:
+                    current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
+                    first_step_accuracy = None
             # Check if existing CSV has avg_prediction_time column
             include_prediction_time = True
             if os.path.exists(csv_path):
@@ -1653,7 +1676,6 @@ def main():
                     include_prediction_time = 'avg_prediction_time' in existing_cols
                 except:
                     pass
-                    
             result = {
                 'model': args.baseline_model,
                 'accuracy': current_accuracy,
@@ -1668,10 +1690,11 @@ def main():
                 'rejuvenation': args.rejuvenation if args.baseline_model == 'FSM' else False,
                 'top_k': args.top_k if args.baseline_model == 'FSM' else 0, # or N/A
                 'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'FSM' and not args.bootstrap else 0, # Placeholder
-                'multi_step_eval': False, # Assuming these are single-step
-                'num_steps_predicted': 1  # Assuming these are single-step
+                'multi_step_eval': args.multi_step_eval,
+                'num_steps_predicted': args.num_steps_to_predict  
             }
-            
+            if first_step_accuracy is not None:
+                result['first_step_accuracy'] = first_step_accuracy
             # Only include avg_prediction_time if it's in the existing CSV
             if include_prediction_time:
                 result['avg_prediction_time'] = avg_prediction_time
