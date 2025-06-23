@@ -4,7 +4,7 @@
 #SBATCH --mail-user=kj@cs.washington.edu
 
 #SBATCH --account=socialrl
-#SBATCH --partition=gpu-l40s
+#SBATCH --partition=gpu-l40
 #SBATCH --constraint=a40|a100|l40|l40s
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
@@ -83,10 +83,10 @@ fi
 
 # Run the main command and capture its exit status
 if [ "$group" = "True" ]; then
-    python eval_ms_grid.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --bootstrap --multi_step_eval $multi_step_eval
+    python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --bootstrap --multi_step_eval $multi_step_eval
 else
     # Add structured, two_stage, and rejuvenation flags if they are True
-    python eval_ms_grid.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs  --multi_step_eval $multi_step_eval
+    python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs  --multi_step_eval $multi_step_eval
     # python eval_partnr.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 100 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 1 --group False
     # python eval_human.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 120 --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample
 fi

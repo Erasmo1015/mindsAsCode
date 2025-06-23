@@ -49,7 +49,6 @@ class FSMAgent:
             action = 0  # stay in place
             
         ## DON'T CHANGE ANYTHING BELOW HERE
-        assert action in range(self.num_actions)
         return action
 ```
 Please implement the FSM code to model the logic of the agent's behavior as demonstrated by the experiences. Please implement the code following the template. Feel free to implement the helper functions you need. 

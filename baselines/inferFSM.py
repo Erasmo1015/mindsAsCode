@@ -41,7 +41,7 @@ class FSMReasoner:
         }
         self.name_to_action = {v: k for k, v in self.action_to_name.items()}
         self.action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
-        self.str_action_space = ["stay", "up", "down", "left", "right", "interact"]
+        self.str_action_space = ["stay", "right", "left", "down", "up", "interact"]
 
         self.group = group
         if not group:
@@ -176,7 +176,35 @@ High-level description:"""
             outputs = self.llm.generate([prompt], self.sampling_params)
             return outputs[0].outputs[0].text
     
-    def predict_action_with_bootstrap(self, states, actions, training=False, episode_id=0, max_hypotheses=20, top_k=0, return_compiled_agents: bool = False):
+    def summarize_agent_code(self, agent_code):
+        prompt = f"""Below is an agent code that implements a finite state machine (FSM) for a grid world environment.
+Please provide a high-level summary of the agent's behavior pattern, focusing on:
+1. The agent's overall goal or strategy
+2. How the agent responds to different environmental features (blocks, walls)
+3. Any patterns in movement or interaction
+
+Provide a very short summary (5 words or less)with as few words as possible. For instance, if the code describes an agent which moves right constantly, your summary should be "Move right". If they choose a random action, your summary should be "Random". If they alternate between moving up and down until they hit a wall, your summary should be "Up/down until wall".
+
+Agent code:
+{agent_code}
+
+Your high-level 5 word summary:"""
+
+        if self.use_openai:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=5
+            )
+            return response.choices[0].message.content
+        else:
+            # Format for vLLM
+            sampling_params = SamplingParams(temperature=0.7, max_tokens=10)
+            outputs = self.llm.generate([prompt], sampling_params)
+            return outputs[0].outputs[0].text
+    
+    def predict_action_with_bootstrap(self, states, actions, training=False, episode_id=0, max_hypotheses=20, top_k=0, return_compiled_agents: bool = False, return_all_time_log_prob_list: bool = False):
         """
         Predicts actions with bootstrapping for different numbers of hypotheses.
         Returns predictions for hypotheses counts from 1 to max_hypotheses.
@@ -337,6 +365,7 @@ High-level description:"""
         
         agent_codes = []
         # Process each hypothesis
+        all_time_all_hyp_log_prob_list = []
         for hypothesis_id, agent_code in enumerate(outputs):
             # Define generate_response and revise_response functions based on model type
             if self.use_openai:
@@ -376,11 +405,13 @@ High-level description:"""
             error = None
             trial = 0
             num_trials = 2
+
             while trial < num_trials:
                 try:
                     agent = framework.compile_agent(agent_code, num_agents, num_blocks)
 
                     log_prob_hypothesis = 1e-6
+                    all_time_log_prob_list = []
                     # p(script | states, actions) = p(action | states, script) * prior(script)
                     for timestep in range(actions.shape[0] - 1):  
                         state = jax.tree.map(lambda x: x[timestep], states)
@@ -388,19 +419,29 @@ High-level description:"""
                             state['agent_id'] = 0
                         if not self.group:
                             gt_action = actions[timestep][0]
-                            proposed_action = agent.act(state)
+                            def loop_body():
+                                proposed_action = agent.act(state)
 
-                            try:
-                                if type(proposed_action) == tuple and proposed_action in self.action_space:
-                                    proposed_action = self.action_space.index(proposed_action)
-                                elif type(proposed_action) == str:
-                                    proposed_action = proposed_action.lower()
-                                    proposed_action = self.str_action_space.index(proposed_action)
-                                correct = float(proposed_action == gt_action)
-                            except Exception as e:
-                                breakpoint()
-                                correct = 0
+                                try:
+                                    if type(proposed_action) == tuple and proposed_action in self.action_space:
+                                        proposed_action = self.action_space.index(proposed_action)
+                                    elif type(proposed_action) == str:
+                                        proposed_action = proposed_action.lower()
+                                        proposed_action = self.str_action_space.index(proposed_action)
+                                    correct = float(proposed_action == gt_action)
+                                except Exception as e:
+                                    trial += 1
+                                    full_traceback = traceback.format_exc()
+                                    # print(full_traceback)
+                                    if trial == num_trials:
+                                        correct = 0
+                                    else:
+                                        agent_code = revise_response(agent_code, full_traceback)
+                                        correct = loop_body()
+                                return correct
+                            correct = loop_body()
                             log_prob_hypothesis += correct
+                            all_time_log_prob_list.append(log_prob_hypothesis)
                         else:
                             gt_actions = actions[timestep]
                             proposed_actions = agent.act(state)
@@ -414,18 +455,20 @@ High-level description:"""
                                 if proposed_actions[i] in self.action_space:
                                     proposed_actions[i] = self.action_space.index(proposed_actions[i])
                                 log_prob_hypothesis += (proposed_actions[i] == gt_actions[i])
-                    
+
                     final_state = jax.tree.map(lambda x: x[-1], states)
                     if len(final_state['agent_locations']) == 1:
                         final_state['agent_id'] = 0
                     final_action = agent.act(final_state)
                     agent_codes.append(agent_code)
                     agents.append(agent)
+                    
                     try:
                         assert type(log_prob_hypothesis) == float, "log_prob_hypothesis is not a float"
                     except Exception as e:
                         breakpoint()
                     log_prob_hypothesis_list.append(log_prob_hypothesis)
+                    all_time_all_hyp_log_prob_list.append(all_time_log_prob_list)
                     final_action_pred_list.append(final_action)  # time t
                     break
                 except Exception as e:
@@ -477,7 +520,13 @@ High-level description:"""
                 # Renormalize the filtered probs
                 final_probs_to_return = final_probs_to_return / np.sum(final_probs_to_return)
             
-            return final_agents_to_return, list(final_probs_to_return), final_codes_to_return
+            if return_all_time_log_prob_list:
+                all_time_all_hyp_log_prob_list = np.array(all_time_all_hyp_log_prob_list)
+                all_time_all_hyp_log_prob_list = all_time_all_hyp_log_prob_list.T
+                all_time_all_hyp_log_prob_list = all_time_all_hyp_log_prob_list / np.sum(all_time_all_hyp_log_prob_list, axis=1, keepdims=True) 
+                return final_agents_to_return, list(final_probs_to_return), final_codes_to_return, all_time_all_hyp_log_prob_list
+            else:
+                return final_agents_to_return, list(final_probs_to_return), final_codes_to_return
 
         # Store results for different numbers of hypotheses
         bootstrap_results = []
@@ -1121,7 +1170,8 @@ High-level description:"""
                     # print(full_traceback)
                     if trial == num_trials:
                         print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
-                        # print(full_traceback)
+                        print(full_traceback)
+                        breakpoint()
                         break
                     agent_code = revise_response(agent_code, full_traceback)
             if agent is None:

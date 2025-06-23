@@ -103,7 +103,7 @@ do
     for n_hypothesis in 30
     do
         # for llm_model in "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct" "meta-llama/Llama-3.1-8B-Instruct" "deepseek-ai/DeepSeek-V2-Lite"
-        for llm_model in "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct" "meta-llama/Llama-3.1-8B-Instruct"
+        for llm_model in "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
         do
             for group in False
             do
@@ -116,7 +116,8 @@ do
                         # for rejuvenation in False True
                         for rejuvenation in False
                         do
-                            for top_k in 0 1 10 # 0 means no top k, use all hypotheses
+                            # for top_k in 0 1 10 # 0 means no top k, use all hypotheses
+                            for top_k in 0
                             do
                                 # sbatch eval_cluster.slurm $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k
                                 
