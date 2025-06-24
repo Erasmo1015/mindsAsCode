@@ -262,6 +262,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
             
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
+            agent_id = int(initial_states_traj['agent_id'][0])
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -388,7 +389,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         print(f"AutoToM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"First Step Accuracy: {first_step_accuracy:.4f} ({first_step_correct}/{first_step_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy
+        return accuracy, avg_prediction_time, first_step_accuracy, agent_id
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -438,6 +439,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
             
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
+            agent_id = int(initial_states_traj['agent_id'][0])
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -565,7 +567,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
         print(f"NLLM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy
+        return accuracy, avg_prediction_time, first_step_accuracy, agent_id
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -1103,6 +1105,8 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             initial_images_traj = jax.tree.map(lambda x: x[:20], data_sample['images'])
+
+            agent_id = int(initial_states_traj['agent_id'][0])
             
             gt_future_actions = data_sample['actions'][19:] # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -1180,7 +1184,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 curr_probs = np.array(agent_probs[:actual_n_hyp])
                 curr_codes = agent_codes[:actual_n_hyp]
                 curr_all_time_log_prob_list = all_time_all_hyp_log_prob_list
-                curr_summaries = agent_summaries
+                
                 
                 # Normalize probabilities for this subset
                 curr_probs = curr_probs / np.sum(curr_probs)
@@ -1347,7 +1351,8 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     current_obs = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
 
                 
-                if args.plot_gifs:
+                if args.plot_gifs and n_hyp == max_hypotheses:
+                    curr_summaries = agent_summaries
                     # here is where we'll plot
                     images = data_sample['images']  # should
                     predicted_distributions = [np.zeros(6)] * (initial_images_traj.shape[0] - 1)
@@ -1367,7 +1372,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                             most_likely_log_probs_summaries = [curr_summaries[i] for i in most_likely_log_probs_idx]
 
                         # Create a new figure for each frame
-                        fig = plt.figure(figsize=(15, 10))
+                        fig = plt.figure(figsize=(25, 10))
                         
                         # Plot image on left subplot of top row
                         plt.subplot(2, 2, 1)
@@ -1390,20 +1395,20 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                         plt.ylim(0, 1)
                         plt.title('Action Distribution')
 
-                        # Plot empty grid in bottom left
+                        # Plot ground truth in bottom left
                         plt.subplot(2, 2, 3)
+                        script_list = os.listdir(f'generated_outputs/hand_designed')
+                        script_list = [f.replace('.txt', '') for f in script_list]
+                        plt.text(0.5, 0.5, f'Ground Truth Action: {action_to_name[ground_truth_action]}\n Ground Truth FSM: {script_list[agent_id]}',
+                               ha='center', va='center')
                         plt.axis('off')
 
-                        # Plot log probs in bottom right
+                        # Plot log probs in bottom right 
                         plt.subplot(2, 2, 4)
                         plt.barh(range(len(most_likely_log_probs)), most_likely_log_probs)
                         plt.yticks(range(len(most_likely_log_probs)), most_likely_log_probs_summaries)
                         plt.title('Top 3 Most Likely Programs')
                         plt.xlim(0, 1)
-
-                        # Add ground truth text
-                        plt.figtext(0.5, 0.02, f'Ground Truth Action: {action_to_name[ground_truth_action]}', 
-                                  ha='center', va='center')
                         
                         # Save plot to temporary file and read it back
                         temp_file = f'temp_frame_{time_idx}.png'
@@ -1457,7 +1462,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
         
         # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
-        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time
+        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id
         
     else:
         # --- Original Single-Step Bootstrap Evaluation Logic ---
@@ -1599,40 +1604,44 @@ def main():
             existing_df = pd.read_csv(csv_path)
             if not existing_df.empty:
                 filter_conditions = [
-                    (existing_df['model'] == args.baseline_model),
-                    (existing_df['group'] == args.group),
-                    (existing_df['num_agents_evaluated'] == args.num_agents_to_sample),
-                    (existing_df['datapoints_per_agent'] == args.num_datapoints_per_agent_to_sample),
-                    (existing_df['llm_model'] == (args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A'))
+                    (existing_df['model'].astype(str) == str(args.baseline_model)),
+                    (existing_df['group'].astype(str) == str(args.group)),
+                    (existing_df['num_agents_evaluated'].astype(str) == str(args.num_agents_to_sample)),
+                    (existing_df['datapoints_per_agent'].astype(str) == str(args.num_datapoints_per_agent_to_sample)),
+                    (existing_df['llm_model'].astype(str) == str(args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A'))
                 ]
                 
                 if 'two_stage' in existing_df.columns:
-                    filter_conditions.append(existing_df['two_stage'] == args.two_stage)
+                    filter_conditions.append(existing_df['two_stage'].astype(str) == str(args.two_stage))
                 if 'structured' in existing_df.columns:
                     filter_conditions.append(existing_df['structured'].astype(str) == str(args.structured))
                 if 'rejuvenation' in existing_df.columns:
-                    filter_conditions.append(existing_df['rejuvenation'] == args.rejuvenation)
+                    filter_conditions.append(existing_df['rejuvenation'].astype(str) == str(args.rejuvenation))
                 if 'top_k' in existing_df.columns: # Relevant for FSM bootstrap
-                     filter_conditions.append(existing_df['top_k'] == args.top_k)
+                     filter_conditions.append(existing_df['top_k'].astype(str) == str(args.top_k))
 
                 if args.baseline_model == "FSM" and args.bootstrap:
                     if 'multi_step_eval' in existing_df.columns:
-                        filter_conditions.append(existing_df['multi_step_eval'] == args.multi_step_eval)
+                        filter_conditions.append(existing_df['multi_step_eval'].astype(str) == str(args.multi_step_eval))
                     if args.multi_step_eval and 'num_steps_predicted' in existing_df.columns:
-                        filter_conditions.append(existing_df['num_steps_predicted'] == args.num_steps_to_predict)
+                        filter_conditions.append(existing_df['num_steps_predicted'].astype(str) == str(args.num_steps_to_predict))
                     # For single-step bootstrap, num_hypothesis varies, so we don't filter by it here for resuming.
                     # For multi-step, n_hypothesis is fixed by args.n_hypothesis for the rollout.
                     if args.multi_step_eval and 'num_hypothesis' in existing_df.columns:
-                         filter_conditions.append(existing_df['num_hypothesis'] == args.n_hypothesis)
+                         filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))  
 
                 elif 'num_hypothesis' in existing_df.columns : # For non-FSM bootstrap models like TT, NLLM
                     filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))
                 
+                
+                
                 matching_rows = existing_df[np.logical_and.reduce(filter_conditions)]
                 
                 if len(matching_rows) > 0:
-                    start_epoch = matching_rows['epoch'].max() + 1
+                    start_epoch = matching_rows['epoch'].astype(int).max() + 1
                     print(f"Resuming from epoch {start_epoch}")
+                else:
+                    print("No matching rows found. Starting from epoch 0.")
         except pd.errors.EmptyDataError:
             print(f"CSV file {csv_path} is empty. Starting from epoch 0.")
         except Exception as e:
@@ -1682,6 +1691,9 @@ def main():
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
 
     # Run evaluation for each epoch and save results
+    fsm_names = os.listdir(f'generated_outputs/hand_designed')
+    fsm_names = [f.replace('.txt', '') for f in fsm_names]
+
     for epoch in tqdm(range(start_epoch, args.num_epochs), desc="Epochs"):
         print(f"\nRunning epoch {epoch+1}/{args.num_epochs}")
         
@@ -1689,7 +1701,7 @@ def main():
 
         if args.baseline_model == "FSM" and args.bootstrap:
             # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
-            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time = eval_fn(args, dataloader, model, episode_id=epoch)
+            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1703,6 +1715,7 @@ def main():
                             pass
 
                     result = {
+                        'gt_fsm_id': agent_id,
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
                         'group': args.group,
@@ -1738,6 +1751,7 @@ def main():
                     #         pass
                             
                     result = {
+                        'gt_fsm_id': agent_id,
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
                         'group': args.group,
@@ -1766,7 +1780,7 @@ def main():
                 first_step_accuracy = None
             else:
                 if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
-                    current_accuracy, avg_prediction_time, first_step_accuracy = eval_fn(args, dataloader, model, episode_id=epoch)
+                    current_accuracy, avg_prediction_time, first_step_accuracy, agent_id = eval_fn(args, dataloader, model, episode_id=epoch)
                 else:
                     current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
                     first_step_accuracy = None
@@ -1779,6 +1793,7 @@ def main():
                 except:
                     pass
             result = {
+                'gt_fsm_id': agent_id,
                 'model': args.baseline_model,
                 'accuracy': current_accuracy,
                 'group': args.group,

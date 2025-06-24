@@ -1,4 +1,5 @@
-from environment import AutomaticityEnv, state_to_image_jit
+from environment import state_to_image_jit
+from environment_jax import AutomaticityEnv
 from agent import AgentExecutionFramework
 import numpy as np
 import matplotlib.pyplot as plt
@@ -43,7 +44,7 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
     key = jrandom.PRNGKey(seed)
     np.random.seed(seed)
 
-    obs, state = env.reset()
+    obs, state = env.reset(key)
     assert len(state.block_locations) == num_blocks
 
     state_list = []
@@ -60,8 +61,15 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
         else:
             actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
         assert len(actions) == num_agents
-        
-        next_obs, next_state = env.step(state, actions)
+
+        print(state.agent_locations)
+        print(state.agent_inventory)
+        action_name = env.action_to_name[actions[0]]
+        print(action_name)
+        print('--------------------------------')
+ 
+
+        next_obs, next_state = env.step(state, jnp.array(actions))
 
         state_list.append(state)
         action_list.append(actions)
@@ -198,9 +206,9 @@ if __name__ == "__main__":
 
 
 
-    agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=3)
+    agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=8)
 
-    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=100, num_blocks=3, num_walls=1)
+    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=25, num_blocks=8, num_walls=1)
     # Create frames list for RGB arrays
     stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *obs_list)
     stacked_states = stacked_states[0]
