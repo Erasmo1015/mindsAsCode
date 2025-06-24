@@ -89,7 +89,8 @@ def parse_args():
     parser.add_argument('--max_rejuvenation_attempts', type=int, default=5, help='Maximum number of rejuvenation attempts')
     parser.add_argument('--top_k', type=int, default=0, help='If > 0, only average over the top k most likely hypotheses')
     parser.add_argument('--multi_step_eval', type=bool, default=True, help='Perform multi-step evaluation for FSM')
-    parser.add_argument('--num_steps_to_predict', type=int, default=5, help='Number of future steps to predict in multi-step eval')
+    parser.add_argument('--num_steps_to_predict', type=int, default=20, help='Number of future steps to predict in multi-step eval')
+    parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
@@ -122,6 +123,8 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
 
         data_folder = f"{data_path}/num_blocks{num_blocks}/num_walls{num_walls}"
         extension = "_group" if args.group else ""
+        if args.flip_quarter:
+            extension += "_flip_quarter"
         data_file = f"{data_folder}/gt_fsm{extension}_traj_data_{args.num_agents}agents.msgpack"
         # print(f"Loading data from {data_file}")
 
@@ -250,6 +253,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         num_predictions = 0
         first_step_correct = 0
         first_step_total = 0
+        correct_after_flip = 0
+        total_after_flip = 0
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
         
@@ -308,9 +313,12 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                 step_prediction_start = time.time()
                 # For each agent in the environment
                 for agent_id in range(num_env_agents):
-                    num_total += 1
-                    if step_idx == 0:
-                        first_step_total += 1
+                    if step_idx < 10:
+                        num_total += 1
+                        if step_idx == 0:
+                            first_step_total += 1
+                    else:
+                        total_after_flip += 1
                     
                     # Create a trajectory for this specific prediction
                     if step_idx == 0:
@@ -343,9 +351,12 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                         # Compare with ground truth
                         gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
                         if predicted_action == gt_action:
-                            num_correct += 1
-                            if step_idx == 0:
-                                first_step_correct += 1
+                            if step_idx < 10:
+                                num_correct += 1
+                                if step_idx == 0:
+                                    first_step_correct += 1
+                            else:
+                                correct_after_flip += 1
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
@@ -386,10 +397,12 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         accuracy = num_correct / num_total if num_total > 0 else 0
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
+        accuracy_after_flip = correct_after_flip / total_after_flip if total_after_flip > 0 else 0
         print(f"AutoToM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"First Step Accuracy: {first_step_accuracy:.4f} ({first_step_correct}/{first_step_total})")
+        print(f"Accuracy After Flip: {accuracy_after_flip:.4f} ({correct_after_flip}/{total_after_flip})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy, agent_id
+        return accuracy, avg_prediction_time, first_step_accuracy, agent_id, accuracy_after_flip
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -427,11 +440,13 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         num_predictions = 0
         first_step_correct = 0
         first_step_total = 0
+        correct_after_flip = 0
+        total_after_flip = 0
         # Process just one datapoint (one epoch) at a time
         datapoint = next(dataloader)
         
         # Initialize environment (parameters will be set per datapoint)
-        env_size = 10
+        env_size = 7
         env_max_steps = num_future_steps + 5  # Sufficiently large
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):
@@ -485,8 +500,11 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                 step_prediction_start = time.time()
                 # For each agent in the environment
                 for agent_id in range(num_env_agents):
-                    num_total += 1
-                    
+                    if step_idx < 10:
+                        num_total += 1
+                    else:
+                        total_after_flip += 1
+                            
                     # Create a trajectory for this specific prediction
                     if step_idx == 0:
                         # First prediction uses the initial trajectory
@@ -522,9 +540,12 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                         # Compare with ground truth
                         gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
                         if predicted_action == gt_action:
-                            num_correct += 1
-                            if step_idx == 0:
-                                first_step_correct += 1
+                            if step_idx < 10:
+                                num_correct += 1
+                                if step_idx == 0:
+                                    first_step_correct += 1
+                            else:
+                                correct_after_flip += 1
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
                         continue
@@ -563,11 +584,12 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                 #     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
+        accuracy_after_flip = correct_after_flip / total_after_flip if total_after_flip > 0 else 0
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
         print(f"NLLM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy, agent_id
+        return accuracy, avg_prediction_time, first_step_accuracy, agent_id, accuracy_after_flip
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -1084,7 +1106,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         
         # Track results for each hypothesis count
         results = {n: {'correct': 0, 'total': 0, 'program_length': 0, 
-                       'first_step_correct': 0, 'first_step_total': 0} for n in range(1, max_hypotheses + 1)}
+                       'first_step_correct': 0, 'first_step_total': 0, 'correct_after_flip': 0, 'total_after_flip': 0} for n in range(1, max_hypotheses + 1)}
         
         # Add timing measurements
         total_prediction_time = 0  # <-- This will now accumulate action prediction time
@@ -1230,6 +1252,8 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 # Track correct predictions for this hypothesis count
                 step_correct = 0
                 step_total = 0
+                correct_after_flip = 0
+                total_after_flip = 0
                 action_time_per_step = time.time()
 
                 predicted_distribution_actions = []
@@ -1240,7 +1264,10 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     if step_idx >= gt_future_actions.shape[0]:
                         break
                     
-                    step_total += num_env_agents
+                    if step_idx < 10:
+                        step_total += num_env_agents
+                    else:
+                        total_after_flip += 1
                     
                     # Prepare agent_input_state for agent.act()
                     agent_input_state_for_act = current_sim_state_pytree
@@ -1339,10 +1366,12 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                         num_max_actions = np.sum(final_predicted_pi_for_step[aid] == max_action_prob)
                         gt_action_prob = final_predicted_pi_for_step[aid, gt_action_this_step[aid]]
                         if max_action_prob == gt_action_prob:
-                            step_correct += 1 / num_max_actions
-                            if step_idx == 0:
-                                results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
-                    
+                            if step_idx < 10:
+                                step_correct += 1 / num_max_actions
+                                if step_idx == 0:
+                                    results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
+                            else:
+                                correct_after_flip += 1 / num_max_actions
                     
                     # Track first step total separately
                     if step_idx == 0:
@@ -1433,10 +1462,13 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 # Update results for this hypothesis count
                 results[n_hyp]['correct'] += step_correct
                 results[n_hyp]['total'] += step_total
+                results[n_hyp]['correct_after_flip'] += correct_after_flip
+                results[n_hyp]['total_after_flip'] += total_after_flip
 
         # Calculate accuracies and average program lengths for each number of hypotheses
         accuracies = {}
         first_step_accuracies = {}
+        accuracies_after_flip = {}
         program_lengths = {}
         action_times = {}
         for n_hyp in results:
@@ -1446,6 +1478,11 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             else:
                 accuracies[n_hyp] = 0.0
                 program_lengths[n_hyp] = 0.0
+            
+            if results[n_hyp]['total_after_flip'] > 0:
+                accuracies_after_flip[n_hyp] = results[n_hyp]['correct_after_flip'] / results[n_hyp]['total_after_flip']
+            else:
+                accuracies_after_flip[n_hyp] = 0.0
                 
             # Calculate first step accuracy
             if results[n_hyp]['first_step_total'] > 0:
@@ -1462,7 +1499,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
         
         # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
-        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id
+        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id, accuracies_after_flip
         
     else:
         # --- Original Single-Step Bootstrap Evaluation Logic ---
@@ -1701,7 +1738,7 @@ def main():
 
         if args.baseline_model == "FSM" and args.bootstrap:
             # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
-            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id = eval_fn(args, dataloader, model, episode_id=epoch)
+            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1731,7 +1768,8 @@ def main():
                         'program_length': program_lengths_dict.get(n_hyp, 0.0),
                         'multi_step_eval': True,
                         'num_steps_predicted': args.num_steps_to_predict,
-                        'first_step_accuracy': first_step_accuracies_dict.get(n_hyp, 0.0)
+                        'first_step_accuracy': first_step_accuracies_dict.get(n_hyp, 0.0),
+                        'accuracy_after_flip': accuracies_after_flip_dict.get(n_hyp, 0.0),
                     }
                     
                     # Only include avg_prediction_time if it's in the existing CSV
@@ -1780,7 +1818,7 @@ def main():
                 first_step_accuracy = None
             else:
                 if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
-                    current_accuracy, avg_prediction_time, first_step_accuracy, agent_id = eval_fn(args, dataloader, model, episode_id=epoch)
+                    current_accuracy, avg_prediction_time, first_step_accuracy, agent_id, accuracy_after_flip = eval_fn(args, dataloader, model, episode_id=epoch)
                 else:
                     current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
                     first_step_accuracy = None
@@ -1815,7 +1853,8 @@ def main():
             # Only include avg_prediction_time if it's in the existing CSV
             if include_prediction_time:
                 result['avg_prediction_time'] = avg_prediction_time
-                
+            if accuracy_after_flip is not None:
+                result['accuracy_after_flip'] = accuracy_after_flip
             results_to_save.append(result)
 
         if results_to_save:
