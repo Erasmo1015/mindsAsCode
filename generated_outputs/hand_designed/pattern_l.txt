@@ -23,6 +23,9 @@ class FSMAgent:
         self.action_to_name = ["stay", "right", "left", "down", "up", "interact"]
         # Initialize state
         self.current_state = self.MOVE_DOWN
+        # Track starting position for the L pattern
+        self.starting_pos = None
+        self.pattern_started = False
         # Track steps remaining in current direction
         self.steps_remaining = 3
         self.previous_pos = None
@@ -46,11 +49,11 @@ class FSMAgent:
 
     def act(self, observation) -> int:
         '''
-        FSM implementation for square pattern:
-        - Move down 3 steps
-        - Move right 3 steps
-        - Move left 3 steps
-        - Move up 3 steps
+        FSM implementation for L pattern:
+        - Move down until hitting a wall
+        - Move right until hitting a wall  
+        - Move left until returning to starting x-coordinate
+        - Move up until hitting a wall
         - Repeat
         
         If agent has a block, it will drop it immediately regardless of state
@@ -63,17 +66,11 @@ class FSMAgent:
         agent_pos = np.array(observation['agent_locations'][observation['agent_id']])
         wall_locations = observation['wall_locations']
         
-        # Check if we're stuck
-        if self.previous_pos is not None and np.array_equal(agent_pos, self.previous_pos):
-            self.stuck_count += 1
-            if self.stuck_count > 2:  # If stuck for more than 2 steps, move to next state
-                self.current_state = (self.current_state + 1) % 4
-                self.steps_remaining = 3
-                self.stuck_count = 0
-        else:
-            self.stuck_count = 0
-        self.previous_pos = agent_pos.copy()
-
+        # Initialize starting position on first call
+        if not self.pattern_started:
+            self.starting_pos = agent_pos.copy()
+            self.pattern_started = True
+        
         # Get available moves
         adjacent_positions = self.get_adjacent_positions(agent_pos)
         walls = [self.has_wall(pos, wall_locations) for pos in adjacent_positions]
@@ -81,40 +78,39 @@ class FSMAgent:
 
         # State transitions and movement
         if self.current_state == self.MOVE_DOWN:
-            if self.steps_remaining > 0 and can_move[self.DOWN]:
-                self.steps_remaining -= 1
+            if can_move[self.DOWN]:
                 return 3  # Move down
             else:
                 self.current_state = self.MOVE_RIGHT
-                self.steps_remaining = 3
-                return self.act(observation)
+                return 1  # Move right
         
         elif self.current_state == self.MOVE_RIGHT:
-            if self.steps_remaining > 0 and can_move[self.RIGHT]:
-                self.steps_remaining -= 1
+            if can_move[self.RIGHT]:
                 return 1  # Move right
             else:
                 self.current_state = self.MOVE_LEFT
-                self.steps_remaining = 3
-                return self.act(observation)
+                return 2  # Move left
         
         elif self.current_state == self.MOVE_LEFT:
-            if self.steps_remaining > 0 and can_move[self.LEFT]:
-                self.steps_remaining -= 1
+            # Check if we've returned to the starting x-coordinate
+            if agent_pos[0] <= self.starting_pos[0]:
+                self.current_state = self.MOVE_UP
+                return 4  # Move up
+            elif can_move[self.LEFT]:
                 return 2  # Move left
             else:
+                # If we hit a wall before reaching starting x-coordinate, still transition to up
                 self.current_state = self.MOVE_UP
-                self.steps_remaining = 3
-                return self.act(observation)
+                return 4  # Move up
         
         else:  # MOVE_UP
-            if self.steps_remaining > 0 and can_move[self.UP]:
-                self.steps_remaining -= 1
+            if can_move[self.UP]:
                 return 4  # Move up
             else:
+                # Reset pattern when we hit the top wall
                 self.current_state = self.MOVE_DOWN
-                self.steps_remaining = 3
-                return self.act(observation)
+                self.pattern_started = False  # This will reset starting_pos on next call
+                return 3  # Move down
 
         return 0  # Stay if no valid moves
 

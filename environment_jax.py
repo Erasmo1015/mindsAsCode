@@ -231,6 +231,25 @@ class AutomaticityEnv:
             # if interacting, agent stays in the same place
             new_pos = jax.lax.select(is_interact_action, current_pos, new_pos)
 
+            def _drop_block():
+                # Remove from carried blocks
+                new_carried_blocks = jnp.where(
+                    carried_blocks == agent_idx, -1, carried_blocks
+                )
+                return (
+                    new_carried_blocks,
+                    new_inventory.at[agent_idx].set(-1),
+                    new_inventory_colors.at[agent_idx].set([-1, -1, -1]),
+                    True,
+                )
+
+            has_inventory = new_inventory[agent_idx] != -1
+            carried_blocks, new_inventory, new_inventory_colors, dropped_block = jax.lax.cond(
+                is_interact_action & has_inventory,
+                _drop_block,
+                lambda: (carried_blocks, new_inventory, new_inventory_colors, False),
+            )
+
             # Check if new position is valid
             touching_wall = jnp.any(jnp.all(new_pos == state.wall_locations, axis=1))
             within_bounds = jnp.all((new_pos >= 0) & (new_pos <= self.size))
@@ -245,9 +264,8 @@ class AutomaticityEnv:
             selected_block = jnp.argmax(can_use_block)
             inventory_full = new_inventory[agent_idx] != -1
 
-            # First try to pick up block if we're on one and have empty inventory
             new_inventory, new_inventory_colors, carried_blocks = jax.lax.cond(
-                can_use_block[selected_block] & ~inventory_full,
+                can_use_block[selected_block] & ~inventory_full & ~dropped_block,
                 lambda: (
                     new_inventory.at[agent_idx].set(1),
                     new_inventory_colors.at[agent_idx].set(
@@ -257,27 +275,6 @@ class AutomaticityEnv:
                 ),
                 lambda: (new_inventory, new_inventory_colors, carried_blocks),
             )
-
-            # Then handle dropping if that's the action
-            def _drop_block():
-                # Remove from carried blocks
-                new_carried_blocks = jnp.where(
-                    carried_blocks == agent_idx, -1, carried_blocks
-                )
-                return (
-                    new_carried_blocks,
-                    new_inventory.at[agent_idx].set(-1),
-                    new_inventory_colors.at[agent_idx].set([-1, -1, -1]),
-                )
-
-            has_inventory = new_inventory[agent_idx] != -1
-            carried_blocks, new_inventory, new_inventory_colors = jax.lax.cond(
-                is_interact_action & has_inventory,
-                _drop_block,
-                lambda: (carried_blocks, new_inventory, new_inventory_colors),
-            )
-
-            # Don't move if trying to pick up with full inventory
             new_pos = jax.lax.select(
                 can_use_block[selected_block] & inventory_full, current_pos, new_pos
             )

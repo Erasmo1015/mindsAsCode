@@ -1,5 +1,5 @@
-from environment import state_to_image_jit
-from environment_jax import AutomaticityEnv
+from environment import state_to_image_jit, AutomaticityEnv
+# from environment_jax import AutomaticityEnv
 from agent import AgentExecutionFramework
 import numpy as np
 import matplotlib.pyplot as plt
@@ -35,7 +35,7 @@ def initialize_hand_designed_agent_list(num_agents=1, num_blocks=1, group=False)
         agent_list.append(framework.compile_agent(agent_code, num_agents=num_agents, num_blocks=num_blocks))
     return agent_list
 
-def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=20, group=False):
+def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=100, num_blocks=1, num_walls=20, group=False, flip_quarter=False):
     '''
     agent list should be a list of compiled agents
     '''
@@ -44,13 +44,23 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
     key = jrandom.PRNGKey(seed)
     np.random.seed(seed)
 
-    obs, state = env.reset(key)
+    try:
+        obs, state = env.reset(key)
+    except:
+        obs, state = env.reset()
+    key, subkey = jax.random.split(key)
     assert len(state.block_locations) == num_blocks
 
     state_list = []
     action_list = []
     obs_list = []
     for i in range(num_steps):
+        if flip_quarter and i == 30:
+            try:
+                obs, state = env.reset(subkey)
+            except:
+                obs, state = env.reset()
+            key, subkey = jax.random.split(key)
         try:
             assert len(state.block_locations) == num_blocks
             assert len(obs[0]['agent_inventory']) >= num_agents
@@ -59,17 +69,23 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
         if group:
             actions = agent_list[agent_id].act(obs[0])  # all agents follow group planner
         else:
-            actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
+            try:
+                actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
+            except:
+                # print full traceback
+                import traceback
+                traceback.print_exc()
+                breakpoint()
         assert len(actions) == num_agents
 
-        print(state.agent_locations)
-        print(state.agent_inventory)
-        action_name = env.action_to_name[actions[0]]
-        print(action_name)
-        print('--------------------------------')
- 
-
+        # print(state.agent_locations)
+        # print(state.agent_inventory)
+        # action_name = env.action_to_name[actions[0]]
+        # print(action_name)
+        # print('--------------------------------')
+        # try:
         next_obs, next_state = env.step(state, jnp.array(actions))
+
 
         state_list.append(state)
         action_list.append(actions)
@@ -95,7 +111,7 @@ def convert_state_to_serializable_dict(state, agent_id, num_blocks):
 def convert_state_list_to_serializable_list(state_list, agent_id, num_blocks):
     return [convert_state_to_serializable_dict(state, agent_id, num_blocks) for state in state_list]
 
-def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, num_block_steps=2, num_walls_steps=2, group=False):
+def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, num_block_steps=2, num_walls_steps=2, group=False, flip_quarter=False):
 
     # Create directory if it doesn't exist
     os.makedirs(f"data/agent_num{num_agents}", exist_ok=True)
@@ -118,7 +134,7 @@ def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, 
                     state_list, action_list, obs_list, env = generate_trajectory(
                         agent_id, agent_list, seed=datapoint, 
                         num_agents=num_agents, num_steps=num_steps, 
-                        num_blocks=num_blocks_i, num_walls=num_walls_i, group=group
+                        num_blocks=num_blocks_i, num_walls=num_walls_i, group=group, flip_quarter=flip_quarter
                     )
                     
                     # Convert state_list to serializable dictionaries
@@ -184,6 +200,8 @@ def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, 
                 extension = "_group"
             else:
                 extension = ""
+            if flip_quarter:
+                extension += "_flip_quarter"
             with open(f"data/num_blocks{num_blocks_i}/num_walls{num_walls_i}/gt_fsm{extension}_traj_data_{num_agents}agents.msgpack", "wb") as f:
                 f.write(serialized_data)
             
@@ -202,13 +220,13 @@ if __name__ == "__main__":
     num_block_steps = 1  # number of blocks to increment by
     num_walls_steps = 1  # number of walls to increment by
 
-    # generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=False)
+    # generate_dataset(num_datapoints_per_agent=num_datapoints_per_agent, num_steps=num_steps, num_agents=num_agents, num_block_steps=num_block_steps, num_walls_steps=num_walls_steps, group=False, flip_quarter=True)
 
 
 
     agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=8)
 
-    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=25, num_blocks=8, num_walls=1)
+    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=num_steps, num_blocks=3, num_walls=3, flip_quarter=True)
     # Create frames list for RGB arrays
     stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *obs_list)
     stacked_states = stacked_states[0]
