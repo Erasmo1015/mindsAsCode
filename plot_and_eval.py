@@ -85,8 +85,8 @@ def parse_args():
                         help='Structured prompting type for FSM reasoning: False, p1, or p2')
     parser.add_argument('--rejuvenation', action='store_true', help='Use rejuvenation for FSM model')
     parser.add_argument('--plot_gifs', action='store_true', help='Plot gifs for FSM model')
-    parser.add_argument('--rejuvenation_threshold', type=float, default=-10, help='Threshold for rejuvenation')
-    parser.add_argument('--max_rejuvenation_attempts', type=int, default=5, help='Maximum number of rejuvenation attempts')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=1, help='Threshold for rejuvenation')
+    parser.add_argument('--max_rejuvenation_attempts', type=int, default=2, help='Maximum number of rejuvenation attempts')
     parser.add_argument('--top_k', type=int, default=0, help='If > 0, only average over the top k most likely hypotheses')
     parser.add_argument('--multi_step_eval', type=bool, default=True, help='Perform multi-step evaluation for FSM')
     parser.add_argument('--num_steps_to_predict', type=int, default=20, help='Number of future steps to predict in multi-step eval')
@@ -188,13 +188,13 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         
         # Process data in smaller chunks to reduce memory usage
         sampled_data = {}
-        sampled_data['actions'] = loaded_data['actions'][agent_indices][:, batch_indices][:, :, :args.num_steps//2]
-        sampled_data['agent_ids'] = loaded_data['agent_ids'][agent_indices][:, batch_indices][:, :, :args.num_steps//2]
+        sampled_data['actions'] = loaded_data['actions'][agent_indices][:, batch_indices][:, :, :]
+        sampled_data['agent_ids'] = loaded_data['agent_ids'][agent_indices][:, batch_indices][:, :, :]
         
         # Process states separately to reduce peak memory usage
         sampled_states = {}
         for key in loaded_data['states']:
-            sampled_states[key] = loaded_data['states'][key][agent_indices][:, batch_indices][:, :, :args.num_steps//2]
+            sampled_states[key] = loaded_data['states'][key][agent_indices][:, batch_indices][:, :, :]
 
         # Free memory
         del loaded_data
@@ -1155,24 +1155,25 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             agent_codes = None
             generation_state = time.time()
             # Hypothesis generation time is NOT used for avg_prediction_time anymore
-            if args.rejuvenation:
-                compiled_agents, agent_probs, agent_codes, all_time_all_hyp_log_prob_list = model.predict_action_with_rejuvenation(
-                    initial_states_traj, initial_actions_traj, episode_id=episode_id,
-                    max_hypotheses=max_hypotheses,
-                    rejuvenation_threshold=args.rejuvenation_threshold,
-                    max_rejuvenation_attempts=args.max_rejuvenation_attempts,
-                    top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
-                    return_compiled_agents=True,
-                    return_all_time_log_prob_list=True
-                )
-            else:
-                compiled_agents, agent_probs, agent_codes, all_time_all_hyp_log_prob_list = model.predict_action_with_bootstrap(
-                    initial_states_traj, initial_actions_traj, episode_id=episode_id,
-                    max_hypotheses=max_hypotheses,
-                    top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
-                    return_compiled_agents=True,
-                    return_all_time_log_prob_list=True
-                )
+            # if args.rejuvenation:
+            compiled_agents, agent_probs, agent_codes, all_time_all_hyp_log_prob_list = model.predict_action_with_bootstrap(
+                initial_states_traj, initial_actions_traj, episode_id=episode_id,
+                max_hypotheses=max_hypotheses,
+                rejuvenation_threshold=args.rejuvenation_threshold,
+                max_rejuvenation_attempts=args.max_rejuvenation_attempts,
+                top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
+                return_compiled_agents=True,
+                return_all_time_log_prob_list=True,
+                doing_rejuvenation=args.rejuvenation
+            )
+            # else:
+            #     compiled_agents, agent_probs, agent_codes, all_time_all_hyp_log_prob_list = model.predict_action_with_bootstrap(
+            #         initial_states_traj, initial_actions_traj, episode_id=episode_id,
+            #         max_hypotheses=max_hypotheses,
+            #         top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
+            #         return_compiled_agents=True,
+            #         return_all_time_log_prob_list=True
+            #     )
             generation_time = time.time() - generation_state
             # print(f"Generation time: {generation_time:.4f} seconds")
             generation_times += generation_time
@@ -1426,7 +1427,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
 
                         # Plot ground truth in bottom left
                         plt.subplot(2, 2, 3)
-                        script_list = os.listdir(f'generated_outputs/hand_designed')
+                        script_list = sorted(os.listdir("generated_outputs/hand_designed"))
                         script_list = [f.replace('.txt', '') for f in script_list]
                         plt.text(0.5, 0.5, f'Ground Truth Action: {action_to_name[ground_truth_action]}\n Ground Truth FSM: {script_list[agent_id]}',
                                ha='center', va='center')

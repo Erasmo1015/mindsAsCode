@@ -172,7 +172,7 @@ class AutomaticityEnv:
                 if np.array_equal(new_pos, block_pos):
                     if new_inventory[agent_idx] == -1:
                         # Agent picks up the block
-                        new_inventory[agent_idx] = 1
+                        new_inventory[agent_idx] = block_idx
                         new_inventory_colors[agent_idx] = new_block_colors[block_idx]
                         carried_blocks[block_idx] = agent_idx
                     else:

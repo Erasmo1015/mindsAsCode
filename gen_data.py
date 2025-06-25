@@ -1,5 +1,5 @@
-from environment import state_to_image_jit
-from environment_jax import AutomaticityEnv
+from environment import state_to_image_jit, AutomaticityEnv
+# from environment_jax import AutomaticityEnv
 from agent import AgentExecutionFramework
 import numpy as np
 import matplotlib.pyplot as plt
@@ -226,7 +226,7 @@ if __name__ == "__main__":
 
     agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=8)
 
-    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=num_steps, num_blocks=3, num_walls=3, flip_quarter=True)
+    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=1, num_agents=1, num_steps=num_steps, num_blocks=6, num_walls=1, flip_quarter=True)
     # Create frames list for RGB arrays
     stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *obs_list)
     stacked_states = stacked_states[0]

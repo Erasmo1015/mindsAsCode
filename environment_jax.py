@@ -176,10 +176,13 @@ class AutomaticityEnv:
                 color_matches = jnp.all(
                     new_block_colors == agent_inventory_color, axis=1
                 )
-                block_idx = jnp.argmax(color_matches)
+                location_matches = jnp.all(  # need location matching to handle multiple blocks of same color
+                    new_blocks == state.agent_locations[agent_idx], axis=1
+                )
+                block_idx = jnp.argmax(jnp.logical_and(color_matches, location_matches))
                 return carried_blocks.at[block_idx].set(
                     jax.lax.select(
-                        color_matches[block_idx], agent_idx, carried_blocks[block_idx]
+                        jnp.logical_and(color_matches[block_idx], location_matches[block_idx]), agent_idx, carried_blocks[block_idx]
                     )
                 )
 
@@ -267,7 +270,7 @@ class AutomaticityEnv:
             new_inventory, new_inventory_colors, carried_blocks = jax.lax.cond(
                 can_use_block[selected_block] & ~inventory_full & ~dropped_block,
                 lambda: (
-                    new_inventory.at[agent_idx].set(1),
+                    new_inventory.at[agent_idx].set(selected_block),
                     new_inventory_colors.at[agent_idx].set(
                         new_block_colors[selected_block]
                     ),
