@@ -54,6 +54,7 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
     state_list = []
     action_list = []
     obs_list = []
+    framework = AgentExecutionFramework()
     for i in range(num_steps):
         if flip_quarter and i == 30:
             try:
@@ -67,10 +68,10 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
         except:
             breakpoint()
         if group:
-            actions = agent_list[agent_id].act(obs[0])  # all agents follow group planner
+            actions = [framework.execute_agent(agent_list[agent_id], obs[0])]  # all agents follow group planner
         else:
             try:
-                actions = [agent_list[agent_id].act(obs[0])]  # all agents follow same action for now
+                actions = [framework.execute_agent(agent_list[agent_id], obs[0])]  # all agents follow same action for now
             except:
                 # print full traceback
                 import traceback

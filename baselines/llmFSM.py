@@ -136,8 +136,8 @@ class FSMReasoner:
             action_string = f"{i+1}. Agent 0 Action: {action}"
             action_strings.append(action_string)
             tools = tools.union(set(state['tool_list']))
-            tool_descriptions += state['tool_descriptions']
-        state_action_strings = [f"{s} {a}" for s, a in zip(state_strings[:-2], action_strings[:-2])]
+            tool_descriptions = state['tool_descriptions']
+        state_action_strings = [f"{s} {a} \n ----------\n" for s, a in zip(state_strings[:-2], action_strings[:-2])]
         state_action_strings.append(state_strings[-1])
         return "\n-------\n".join(state_action_strings), tools, tool_descriptions
     
@@ -169,7 +169,7 @@ High-level description:"""
             outputs = self.llm.generate([prompt], self.sampling_params)
             return outputs[0].outputs[0].text
 
-    def predict_action_with_bootstrap(self, states, actions, training=False, episode_id=0, max_hypotheses=20, top_k=0):
+    def predict_action_with_bootstrap(self, states, actions, training=False, episode_id=0, max_hypotheses=20, rejuvenation_threshold=2, max_rejuvenation_attempts=2, top_k=0, use_rejuvenation=False):
         """
         Predicts actions with bootstrapping for different numbers of hypotheses.
         Returns predictions for hypotheses counts from 1 to max_hypotheses.
@@ -339,8 +339,10 @@ High-level description:"""
                     )
                     return response.choices[0].message.content
 
-                def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                def revise_response(response, error_message, prompt,rejuvenation_attempt=False):
+                    # prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                    if rejuvenation_attempt:
+                        prompt = f"{prompt}\n Here's the code you make last time {response}. Return a new program that is different from the last one.\n"
                     revised = self.client.chat.completions.create(
                         model=self.model_name,
                         messages=[{"role": "user", "content": prompt}],
@@ -355,8 +357,10 @@ High-level description:"""
                     return outputs[0].outputs[0].text
 
                 # vLLM implementation for revise_response
-                def revise_response(response, error_message):
-                    prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                def revise_response(response, error_message, prompt, rejuvenation_attempt=False):
+                    # prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+                    if rejuvenation_attempt:
+                        prompt = f"{prompt}\n Here's the code you make last time {response}. Return a new program that is different from the last one.\n"
                     outputs = self.llm.generate([prompt], self.sampling_params)
                     return outputs[0].outputs[0].text
             
@@ -364,11 +368,12 @@ High-level description:"""
             error = None
             trial = 0
             num_trials = 2
-            while trial < num_trials:
+            rejuvenation_attempts = 0
+            while trial < num_trials and rejuvenation_attempts < max_rejuvenation_attempts:
                 try:
                     agent = framework.compile_agent(agent_code, num_agents)
 
-                    log_prob_hypothesis = 0
+                    log_prob_hypothesis = 1e-6
                     # p(script | states, actions) = p(action | states, script) * prior(script)
                     for timestep in range(len(actions) - 2):  
                         state = states[timestep]
@@ -384,10 +389,16 @@ High-level description:"""
                     final_state = states[-2]
                     final_action = agent.act(final_state)
 
-                    agent_codes.append(agent_code)  # Store the agent code
-                    agents.append(agent)
-                    log_prob_hypothesis_list.append(log_prob_hypothesis)
-                    final_action_pred_list.append(final_action)  # time t
+                    if log_prob_hypothesis < rejuvenation_threshold and use_rejuvenation:
+                        rejuvenation_attempts += 1
+                        agent_code = revise_response(agent_code, "Rejuvenation attempt", formatted_prompts[hypothesis_id], rejuvenation_attempt=True)
+                        trial = 0
+                        log_prob_hypothesis = 1e-6
+                    else:
+                        agent_codes.append(agent_code)  # Store the agent code
+                        agents.append(agent)
+                        log_prob_hypothesis_list.append(log_prob_hypothesis)
+                        final_action_pred_list.append(final_action)  # time t
                     break
                 except Exception as e:
                     trial += 1
@@ -395,7 +406,7 @@ High-level description:"""
                     # print(full_traceback)
                     if trial == num_trials:
                         break
-                    agent_code = revise_response(agent_code, full_traceback)
+                    agent_code = revise_response(agent_code, full_traceback, formatted_prompts[hypothesis_id], rejuvenation_attempt=False)
         
         if len(log_prob_hypothesis_list) == 0:
             return None
@@ -406,11 +417,13 @@ High-level description:"""
         weighted_program_lengths = []
         
         # For each number of hypotheses from 1 to max_hypotheses (or as many as we have)
-        for n_hyp in range(1, min(len(log_prob_hypothesis_list) + 1, max_hypotheses + 1)):
+        for n_hyp in range(1, max_hypotheses + 1):
+
+            actual_n_hyp = min(len(log_prob_hypothesis_list), n_hyp)
             # Use only the first n_hyp hypotheses
-            curr_log_probs = np.array(log_prob_hypothesis_list[:n_hyp])
-            curr_final_preds = final_action_pred_list[:n_hyp]
-            curr_agent_codes = agent_codes[:n_hyp]  # Get current subset of agent codes
+            curr_log_probs = np.array(log_prob_hypothesis_list[:actual_n_hyp])
+            curr_final_preds = final_action_pred_list[:actual_n_hyp]
+            curr_agent_codes = agent_codes[:actual_n_hyp]  # Get current subset of agent codes
             
             # normalize the log probs
             curr_log_probs = curr_log_probs - np.max(curr_log_probs)
@@ -857,8 +870,8 @@ High-level description:"""
                 )
                 return response.choices[0].message.content
 
-            def revise_response(response, error_message):
-                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+            def revise_response(response, error_message, prompt):
+                # prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
                 revised = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
@@ -871,8 +884,8 @@ High-level description:"""
                 outputs = self.llm.generate([formatted_prompt], self.sampling_params)
                 return outputs[0].outputs[0].text
 
-            def revise_response(response, error_message):
-                prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
+            def revise_response(response, error_message, prompt):
+                # prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}"
                 outputs = self.llm.generate([prompt], self.sampling_params)
                 return outputs[0].outputs[0].text
         

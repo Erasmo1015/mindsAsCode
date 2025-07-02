@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument('--num_agents_to_sample', type=int, default=1, help='Number of agents to sample from the dataset.')
     parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=1, help='Number of datapoints per agent to sample from the dataset.')
     parser.add_argument('--num_agents', type=int, default=20, help='Number of agents in the dataset.')
-    parser.add_argument('--num_datapoints_per_agent', type=int, default=100, help='Number of datapoints per agent in the dataset.')
+    parser.add_argument('--num_datapoints_per_agent', type=int, default=1, help='Number of datapoints per agent in the dataset.')
     parser.add_argument('--num_steps', type=int, default=100, help='Number of steps in the dataset.')
     parser.add_argument('--env_size', type=int, default=10, help='Size of the environment.')
     # parser.add_argument('--num_blocks', type=int, default=10, help='Number of blocks in the dataset.')
@@ -75,8 +75,8 @@ def parse_args():
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to evaluate with bootstrapping for different numbers of hypotheses.')
     parser.add_argument('--rejuvenation', action='store_true', help='Whether to use rejuvenation for FSM evaluation.')
-    parser.add_argument('--rejuvenation_threshold', type=float, default=-10, help='Threshold for rejuvenation in FSM.')
-    parser.add_argument('--max_rejuvenation_attempts', type=int, default=5, help='Maximum number of rejuvenation attempts in FSM.')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=2, help='Threshold for rejuvenation in FSM.')
+    parser.add_argument('--max_rejuvenation_attempts', type=int, default=2, help='Maximum number of rejuvenation attempts in FSM.')
     parser.add_argument('--top_k', type=int, default=0, help='Number of top hypotheses to consider (0 means use all).')
     parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage reasoning for FSM.')
     parser.add_argument('--structured', type=str, default="False", choices=["False", "p1", "p2"], 
@@ -404,75 +404,81 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
     else:
         num_agents_per_sample = 1
         
-    try:
-        # Enable bootstrapping
-        model.bootstrap = True
+    # try:
+    # Enable bootstrapping
+    model.bootstrap = True
+    
+    # Choose between rejuvenation and regular bootstrap based on args
+    if args.rejuvenation:
+        bootstrap_results = model.predict_action_with_bootstrap(
+            states, actions, episode_id=episode_id, 
+            max_hypotheses=args.n_hypothesis,
+            rejuvenation_threshold=args.rejuvenation_threshold,
+            max_rejuvenation_attempts=args.max_rejuvenation_attempts,
+            top_k=args.top_k,
+            use_rejuvenation=True
+        )
+    else:
+        bootstrap_results = model.predict_action_with_bootstrap(
+            states, actions, episode_id=episode_id, 
+            max_hypotheses=args.n_hypothesis,
+            rejuvenation_threshold=args.rejuvenation_threshold,
+            max_rejuvenation_attempts=args.max_rejuvenation_attempts,
+            top_k=args.top_k,
+            use_rejuvenation=False
+        )
+    
+    if bootstrap_results is None:
+        return {n: 0.0 for n in range(1, max_hypotheses + 1)}, {n: 0.0 for n in range(1, max_hypotheses + 1)}
         
-        # Choose between rejuvenation and regular bootstrap based on args
-        if args.rejuvenation:
-            bootstrap_results = model.predict_action_with_rejuvenation(
-                states, actions, episode_id=episode_id, 
-                max_hypotheses=args.n_hypothesis,
-                rejuvenation_threshold=args.rejuvenation_threshold,
-                max_rejuvenation_attempts=args.max_rejuvenation_attempts,
-                top_k=args.top_k
-            )
-        else:
-            bootstrap_results = model.predict_action_with_bootstrap(
-                states, actions, episode_id=episode_id, 
-                max_hypotheses=args.n_hypothesis,
-                top_k=args.top_k
-            )
+    gt_final_action = actions[-2][0] if not args.group else actions[-2][0]
+    
+    # Get the number of available hypotheses
+    num_available_hyp = len(bootstrap_results)
+    
+    # Evaluate each bootstrap prediction (for all hypothesis counts up to max_hypotheses)
+    for n_hyp in range(1, max_hypotheses + 1):
+        results[n_hyp]['total'] += num_agents_per_sample
         
-        if bootstrap_results is None:
-            return {n: 0.0 for n in range(1, max_hypotheses + 1)}, {n: 0.0 for n in range(1, max_hypotheses + 1)}
-            
-        gt_final_action = actions[-2][0] if not args.group else actions[-2][0]
-        
-        # Get the number of available hypotheses
-        num_available_hyp = len(bootstrap_results)
-        
-        # Evaluate each bootstrap prediction (for all hypothesis counts up to max_hypotheses)
-        for n_hyp in range(1, max_hypotheses + 1):
-            results[n_hyp]['total'] += num_agents_per_sample
-            
-            # If we have this hypothesis result available, use it
-            # Otherwise, use the last available hypothesis result
-            hyp_idx = min(n_hyp, num_available_hyp) - 1  # Convert to 0-indexed
-            prediction, program_length = bootstrap_results[hyp_idx]
-            results[n_hyp]['program_length'] += program_length
+        # If we have this hypothesis result available, use it
+        # Otherwise, use the last available hypothesis result
+        hyp_idx = min(n_hyp, num_available_hyp) - 1  # Convert to 0-indexed
+        prediction, program_length = bootstrap_results[hyp_idx]
+        results[n_hyp]['program_length'] += program_length
 
+        # breakpoint()
+        
+        if not args.group or True:
+            prediction = prediction[0]
             # breakpoint()
-            
-            if not args.group or True:
-                prediction = prediction[0]
-                # breakpoint()
-                # print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
+            # print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
+            if type(prediction) == str:
                 if prediction.lower() == gt_final_action.lower():
                     results[n_hyp]['correct'] += 1
-            else:
-                for p in prediction:
-                    if type(p) == str:
-                        # print(f"p: {p}, gt_final_action: {gt_final_action}")
-                        if p.lower() == gt_final_action.lower():
-                            results[n_hyp]['correct'] += 1
-                            break
-                    # else:
-                    #     if p.lower() == gt_final_action.lower():
-                    #         results[n_hyp]['correct'] += 1
-                    #         break
-            #     if len(prediction.shape) == 1:
-            #         prediction = prediction.reshape(1, -1)
+
+        else:
+            for p in prediction:
+                if type(p) == str:
+                    # print(f"p: {p}, gt_final_action: {gt_final_action}")
+                    if p.lower() == gt_final_action.lower():
+                        results[n_hyp]['correct'] += 1
+                        break
+                # else:
+                #     if p.lower() == gt_final_action.lower():
+                #         results[n_hyp]['correct'] += 1
+                #         break
+        #     if len(prediction.shape) == 1:
+        #         prediction = prediction.reshape(1, -1)
+            
+        #     for aid in range(len(gt_final_action)):
+        #         breakpoint()
+        #         final_action_prob = prediction[aid, gt_final_action[aid]]
                 
-            #     for aid in range(len(gt_final_action)):
-            #         breakpoint()
-            #         final_action_prob = prediction[aid, gt_final_action[aid]]
+        #         if final_action_prob >= np.max(prediction[aid]):
+        #             results[n_hyp]['correct'] += 1
                     
-            #         if final_action_prob >= np.max(prediction[aid]):
-            #             results[n_hyp]['correct'] += 1
-                    
-    except Exception as e:
-        print(f"Error: {e}")
+    # except Exception as e:
+    #     print(f"Error: {e}")
         # full_traceback = traceback.format_exc()
         # print(full_traceback)
         # breakpoint()
@@ -503,7 +509,7 @@ def main():
     os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
     
     print(f"Evaluating baseline model: {args.baseline_model}; n_hypothesis: {args.n_hypothesis}; num_epochs: {args.num_epochs}; model_arch: {args.model_name}")
-    save_path = f"baselines/{args.baseline_model}/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}"
+    save_path = f"results/{args.baseline_model}/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}"
     
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -524,9 +530,9 @@ def main():
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
         
     if args.bootstrap and args.baseline_model == "FSM":
-        csv_path = f"baselines/{args.baseline_model}/partnr2_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+        csv_path = f"results/{args.baseline_model}/partnr2_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else:
-        csv_path = f"baselines/{args.baseline_model}/partnr2_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"results/{args.baseline_model}/partnr2_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     

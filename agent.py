@@ -143,6 +143,24 @@ import re
 import numpy as np
 import traceback
 from typing import Dict, Any
+import sys
+import contextlib
+
+class NullWriter:
+    def write(self, _): pass
+    def flush(self): pass
+
+@contextlib.contextmanager
+def suppress_output():
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    sys.stdout = NullWriter()
+    sys.stderr = NullWriter()
+    try:
+        yield
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
 class AgentExecutionFramework:
     """
@@ -194,7 +212,8 @@ class AgentExecutionFramework:
             code = f'{raw_code}\n\n_AGENT_INSTANCE = FSMAgent({num_agents}, {num_blocks})'  # instantiate with num_agents and num_blocks
             
             # Execute in isolated namespace
-            exec(code, self._execution_namespace)
+            with suppress_output():
+                exec(code, self._execution_namespace)
             self._validate_agent_class(self._execution_namespace)
             
             return self._execution_namespace['_AGENT_INSTANCE']
@@ -213,7 +232,14 @@ class AgentExecutionFramework:
             raise TypeError("Observation must be a dictionary")
                 
         try:
-            return agent.act(observation)
+            with suppress_output():
+                return agent.act(observation)
         except Exception as e:
             # traceback.print_exc()
             raise RuntimeError(f"Agent execution failed: {str(e)}") from e
+
+if __name__ == "__main__":
+    agent = AgentExecutionFramework()
+    agent_instance = agent.compile_agent(llm_code)
+    action = agent.execute_agent(agent_instance, {})
+    print(action)

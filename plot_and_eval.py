@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=25, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
@@ -267,7 +267,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
             
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
-            agent_id = int(initial_states_traj['agent_id'][0])
+            gt_agent_script_id = int(initial_states_traj['agent_id'][0])
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -402,7 +402,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         print(f"First Step Accuracy: {first_step_accuracy:.4f} ({first_step_correct}/{first_step_total})")
         print(f"Accuracy After Flip: {accuracy_after_flip:.4f} ({correct_after_flip}/{total_after_flip})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy, agent_id, accuracy_after_flip
+        return accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -454,7 +454,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
             
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
-            agent_id = int(initial_states_traj['agent_id'][0])
+            gt_agent_script_id = int(initial_states_traj['agent_id'][0])
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -589,7 +589,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
         print(f"NLLM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy, agent_id, accuracy_after_flip
+        return accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -1819,7 +1819,7 @@ def main():
                 first_step_accuracy = None
             else:
                 if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
-                    current_accuracy, avg_prediction_time, first_step_accuracy, agent_id, accuracy_after_flip = eval_fn(args, dataloader, model, episode_id=epoch)
+                    current_accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip = eval_fn(args, dataloader, model, episode_id=epoch)
                 else:
                     current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
                     first_step_accuracy = None
@@ -1832,7 +1832,7 @@ def main():
                 except:
                     pass
             result = {
-                'gt_fsm_id': agent_id,
+                'gt_fsm_id': gt_agent_script_id,
                 'model': args.baseline_model,
                 'accuracy': current_accuracy,
                 'group': args.group,

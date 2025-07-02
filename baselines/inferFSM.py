@@ -871,7 +871,9 @@ Your high-level 5 word summary:"""
                         break
                     else:
                         num_rejuvenation_attempts += 1
+                        trial = 0
                         agent_code = revise_response(agent_code, "Rejuvenation attempt", rejuvenation_attempt=True)
+                        log_prob_hypothesis = 1e-6
                         continue
                 except Exception as e:
                     trial += 1
