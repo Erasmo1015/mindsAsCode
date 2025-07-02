@@ -34,6 +34,7 @@ import pandas as pd
 import imageio.v2 as imageio
 from baselines.ToMnet import ToMNet
 from baselines.BC import BCNet
+from agent import AgentExecutionFramework
 
 import time
 from io import BytesIO
@@ -1154,6 +1155,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             agent_probs = None
             agent_codes = None
             generation_state = time.time()
+            framework = AgentExecutionFramework()
             # Hypothesis generation time is NOT used for avg_prediction_time anymore
             # if args.rejuvenation:
             compiled_agents, agent_probs, agent_codes, all_time_all_hyp_log_prob_list = model.predict_action_with_bootstrap(
@@ -1283,7 +1285,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                         hyp_prob = curr_probs[hyp_idx]
                         try:
                             current_obs['agent_id'] = 0
-                            predicted_action = hyp_agent.act(current_obs)
+                            predicted_action = framework.execute_agent(hyp_agent, current_obs)
                             action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
                             action_space_2 = ["stay", "right", "left", "down", "up", "interact"]
                             if args.group:

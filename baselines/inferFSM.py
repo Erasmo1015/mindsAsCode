@@ -815,7 +815,7 @@ Your high-level 5 word summary:"""
                         if not self.group:
                             gt_action = actions[timestep][0]
                             def loop_body():
-                                proposed_action = agent.act(state)
+                                proposed_action = framework.execute_agent(agent, state)
 
                                 try:
                                     if type(proposed_action) == tuple and proposed_action in self.action_space:
@@ -839,7 +839,7 @@ Your high-level 5 word summary:"""
                             all_time_log_prob_list.append(log_prob_hypothesis)
                         else:
                             gt_actions = actions[timestep]
-                            proposed_actions = agent.act(state)
+                            proposed_actions = framework.execute_agent(agent, state)
                             for a in proposed_actions:
                                 if a in self.action_space:
                                     a = self.action_space.index(a)
@@ -854,7 +854,7 @@ Your high-level 5 word summary:"""
                     final_state = jax.tree.map(lambda x: x[-1], states)
                     if len(final_state['agent_locations']) == 1:
                         final_state['agent_id'] = 0
-                    final_action = agent.act(final_state)
+                    final_action = framework.execute_agent(agent, final_state)
   
                     
                     try:
@@ -1212,11 +1212,11 @@ Your high-level 5 word summary:"""
                             state['agent_id'] = 0
                         if not self.group:
                             gt_action = actions[timestep][0]
-                            proposed_action = agent.act(state)
+                            proposed_action = framework.execute_agent(agent, state)
                             log_prob_hypothesis += np.log(np.clip(proposed_action[gt_action], 1e-8, 1))
                         else:
                             gt_actions = actions[timestep]
-                            proposed_actions = agent.act(state)
+                            proposed_actions = framework.execute_agent(agent, state)
                             for a in proposed_actions:
                                 assert a in range(6), "an action in proposed_actions is not an integer in range(num_actions)"
                             for i in range(len(proposed_actions)):
@@ -1226,7 +1226,7 @@ Your high-level 5 word summary:"""
                     final_state = jax.tree.map(lambda x: x[-1], states)
                     if len(final_state['agent_locations']) == 1:
                         final_state['agent_id'] = 0
-                    final_action, final_pi = agent.act(final_state)
+                    final_action, final_pi = framework.execute_agent(agent, final_state)
                     agent_codes.append(agent_code)
                     agents.append(agent)
                     log_prob_hypothesis_list.append(log_prob_hypothesis)

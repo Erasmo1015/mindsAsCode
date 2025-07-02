@@ -379,7 +379,7 @@ High-level description:"""
                         state = states[timestep]
 
                         gt_actions = actions[timestep]
-                        proposed_actions = agent.act(state)
+                        proposed_actions = framework.execute_agent(agent, state)
                         
                         for i in range(1):  # just take tool use for now
                             pa = proposed_actions[i]
@@ -387,7 +387,7 @@ High-level description:"""
                             log_prob_hypothesis += (ga.lower() == pa.lower())  # did we get the sub part of the action right?
                     
                     final_state = states[-2]
-                    final_action = agent.act(final_state)
+                    final_action = framework.execute_agent(agent, final_state)
 
                     if log_prob_hypothesis < rejuvenation_threshold and use_rejuvenation:
                         rejuvenation_attempts += 1
@@ -671,7 +671,7 @@ High-level description:"""
                         state = states[timestep]
 
                         gt_actions = actions[timestep]
-                        proposed_actions = agent.act(state)
+                        proposed_actions = framework.execute_agent(agent, state)
                         
                         for i in range(1):  # just take tool use for now
                             pa = proposed_actions[i]
@@ -679,7 +679,7 @@ High-level description:"""
                             log_prob_hypothesis += (ga == pa)  # did we get the sub part of the action right?
                     
                     final_state = states[-2]
-                    final_action = agent.act(final_state)
+                    final_action = framework.execute_agent(agent, final_state)
 
                     agents.append(agent)
                     log_prob_hypothesis_list.append(log_prob_hypothesis)
@@ -913,7 +913,7 @@ High-level description:"""
                         state = states[timestep]
 
                         gt_actions = actions[timestep]
-                        proposed_actions = agent.act(state)
+                        proposed_actions = framework.execute_agent(agent, state)
                         
                         for i in range(1):  # just take tool use for now
                             # breakpoint()
@@ -923,7 +923,7 @@ High-level description:"""
                     
                     # Get final prediction
                     final_state = states[-2]
-                    final_action = agent.act(final_state)
+                    final_action = framework.execute_agent(agent, final_state)
                     
                     # Check if this hypothesis is good enough or needs rejuvenation
                     if log_prob_hypothesis < rejuvenation_threshold and hypothesis_id >= max_hypotheses // 2:
