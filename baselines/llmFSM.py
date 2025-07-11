@@ -13,6 +13,7 @@ from agent import AgentExecutionFramework
 # Import vLLM
 from vllm import LLM, SamplingParams
 import traceback
+import gc
 
 openai_api_key = os.environ.get("OPENAI_API_KEY", "")
 
@@ -407,6 +408,11 @@ High-level description:"""
                     if trial == num_trials:
                         break
                     agent_code = revise_response(agent_code, full_traceback, formatted_prompts[hypothesis_id], rejuvenation_attempt=False)
+            
+            # Clean up memory after each hypothesis to prevent accumulation
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         
         if len(log_prob_hypothesis_list) == 0:
             return None
@@ -691,6 +697,11 @@ High-level description:"""
                     if trial == num_trials:
                         break
                     agent_code = revise_response(agent_code, full_traceback)
+            
+            # Clean up memory after each hypothesis to prevent accumulation
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         
         if len(log_prob_hypothesis_list) == 0:
             return None

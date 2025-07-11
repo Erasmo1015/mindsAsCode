@@ -524,21 +524,75 @@ def state_to_image_jit(state, grid_size, tile_size):
     return image
 
 
+sample_grid = '''
+#######
+#  1  #
+# A A #
+#  #  #
+#21 3 #
+# 4  5#
+#######
+'''
+
+def str_to_grid(state_str: str):
+    lines = state_str.split('\n')
+    height = len(lines)
+    width = len(lines[0])
+    wall_locations = []
+    agent_locations = []
+    block_locations = []
+    agent_inventory = []
+    agent_inventory_colors = []
+    block_colors_grid = []
+    time = 0
+    terminal = False
+    agent_id = -1
+
+    for y, line in enumerate(lines):
+        for x, char in enumerate(line):
+            if char == '#':
+                wall_locations.append((x, y))
+            elif char == ' ':
+                pass
+            elif char == 'A':
+                agent_locations.append((x, y))
+                agent_inventory.append(-1)
+                agent_inventory_colors.append((255, 0, 0))
+            elif char.isdigit():
+                block_locations.append((x, y))
+                block_colors_grid.append(block_colors[int(char)-1])
+
+    return State(
+        wall_locations=jnp.array(wall_locations),
+        agent_locations=jnp.array(agent_locations),
+        block_locations=jnp.array(block_locations),
+        agent_inventory=jnp.array(agent_inventory),
+        agent_inventory_colors=jnp.array(agent_inventory_colors),
+        block_colors=jnp.array(block_colors_grid),
+        time=time,
+        terminal=terminal,
+        agent_id=agent_id
+    )
+
 if __name__ == "__main__":
     num_agents = 1
-    tile_size = 12
-    grid_size = 10
+    tile_size = 10
+    grid_size = 7
 
     env = AutomaticityEnv(
         num_agents=num_agents,
         size=grid_size,
         max_steps=100,
-        num_blocks=4,
-        num_walls=12,
+        num_blocks=6,
+        num_walls=0,
     )
     rng = jax.random.PRNGKey(0)
     # jitted_reset = jax.jit(env.reset, static_argnums=0)
     obs, state = env.reset(rng)
+    state = str_to_grid(sample_grid)
+    obs = env.get_observation(state)
+
+
     obs = obs[0]
     obs = jax.tree.map(lambda x: jnp.array(x), obs)
     # img1 = state_to_image(obs, grid_size, tile_size=tile_size)

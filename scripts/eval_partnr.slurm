@@ -4,7 +4,7 @@
 #SBATCH --mail-user=kj@cs.washington.edu
 
 #SBATCH --account=socialrl
-#SBATCH --partition=gpu-l40s
+#SBATCH --partition=gpu-l40
 #SBATCH --constraint=a40|a100|l40|l40s
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
@@ -12,7 +12,7 @@
 #SBATCH --mem=48G
 #SBATCH --gres=gpu:1
 #SBATCH --gpus=1
-#SBATCH --time=02-00:00:00 # Max runtime in DD-HH:MM:SS format.
+#SBATCH --time=00-08:00:00 # Max runtime in DD-HH:MM:SS format.
 
 #SBATCH --output=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.out
 #SBATCH --error=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.err
@@ -102,7 +102,7 @@ EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
     echo "Job failed with exit code $EXIT_CODE. Requeuing..."
     # Submit the same script again
-    sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k
+    sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k 
     exit $EXIT_CODE
 fi
 

@@ -161,7 +161,7 @@ class NaiveLLMReasoner:
             prompt = f"{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
         else:
             # prompt = f"{self.base_prompt}\n{state_action_text}\nWhat action will agent {agent_id} take next?"
-            prompt = f"{state_action_text}\nWhat action will agent {agent_id} take at timestep {timestep + 1}?"  
+            prompt = f"{state_action_text}\nWhat action will agent {agent_id} take next?"  
         if not self.partnr:
             prompt += f" Choose from the following options: {self.action_to_name.values()}. Your answer should be in the following format: \nAction: <action>\n Your answer:"
         else:
@@ -198,47 +198,50 @@ class NaiveLLMReasoner:
             formatted_prompts.append(formatted_prompt)
         
         # Generate responses for each hypothesis
-        if self.use_openai:
-            # Process each hypothesis individually with OpenAI API
-            outputs = []
-            for prompt in formatted_prompts:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=prompt,
-                    temperature=0.75,
-                    max_tokens=10,
-                    stop=["<|user|>", "<|system|>"] # Stop at next user/system message
-                )
-                outputs.append(response.choices[0].message.content.split("<|assistant|>\n")[-1].strip())
-        else:
-            # Batch generate with vLLM
-            vllm_outputs = self.llm.generate(formatted_prompts, self.sampling_params)
-            outputs = [output.outputs[0].text.split("<|assistant|>\n")[-1].strip() for output in vllm_outputs]
+        MAX_RETRIES = 2
 
-        for output in outputs:
-            success = False
+        for i, prompt in enumerate(formatted_prompts):
             retries = 0
-            while not success and retries < 1:
+            success = False
+            output = None
+            while not success and retries < MAX_RETRIES:
                 try:
+                    if self.use_openai:
+                        response = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=prompt,
+                            temperature=0.75,
+                            max_tokens=10,
+                            stop=["<|user|>", "<|system|>"]
+                        )
+                        output = response.choices[0].message.content.split("<|assistant|>\n")[-1].strip()
+                    else:
+                        vllm_output = self.llm.generate([prompt], self.sampling_params)[0]
+                        output = vllm_output.outputs[0].text.split("<|assistant|>\n")[-1].strip()
+                    
+                    # Check if output is valid
                     if not self.partnr:
                         for action in self.action_to_name.values():
                             if action.lower() in output.lower():
                                 final_action_pred_list.append(self.name_to_action[action])
+                                success = True
                                 break
-                            success = True
                     else:
                         for tool in tools:
                             if tool.lower() in output.lower():
                                 final_action_pred_list.append(tool)
+                                success = True
                                 break
-                            success = True
-                    log_prob_hypothesis_list.append(1)
-                    
+                    if success:
+                        log_prob_hypothesis_list.append(1)
+                    else:
+                        retries += 1
                 except Exception as e:
                     retries += 1
-                break
-            
+                    # Optionally log the exception
+
             if not success:
+                # Optionally log the failure
                 continue
 
 

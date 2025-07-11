@@ -32,6 +32,15 @@ import gzip
 import json
 import traceback
 
+def cleanup_memory():
+    """Clean up memory after each evaluation."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    # Force garbage collection multiple times
+    for _ in range(3):
+        gc.collect()
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train baseline models for automaticity.")
@@ -67,16 +76,16 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=2, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
-    parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
+    parser.add_argument('--gpu_memory_utilization', type=float, default=0.7, help='GPU memory utilization.')  # Reduced from 0.9 to 0.7
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to evaluate with bootstrapping for different numbers of hypotheses.')
     parser.add_argument('--rejuvenation', action='store_true', help='Whether to use rejuvenation for FSM evaluation.')
-    parser.add_argument('--rejuvenation_threshold', type=float, default=2, help='Threshold for rejuvenation in FSM.')
-    parser.add_argument('--max_rejuvenation_attempts', type=int, default=2, help='Maximum number of rejuvenation attempts in FSM.')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=1, help='Threshold for rejuvenation in FSM.')
+    parser.add_argument('--max_rejuvenation_attempts', type=int, default=1, help='Maximum number of rejuvenation attempts in FSM.')
     parser.add_argument('--top_k', type=int, default=0, help='Number of top hypotheses to consider (0 means use all).')
     parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage reasoning for FSM.')
     parser.add_argument('--structured', type=str, default="False", choices=["False", "p1", "p2"], 
@@ -198,9 +207,10 @@ def eval_naive_LLM(args, dataloader, model, episode_id: int = 0):
         predicted_final_action = model.predict_action(states, actions, agent_id=0, episode_id=episode_id)
         if predicted_final_action.lower() == gt_action.lower():
             num_correct += 1
-        # break  # end loop if prediction is successful
+            # break  # end loop if prediction is successful
     except Exception as e:
         print(f"Error: {e}")
+
         tries += 1
     # num_total += 1
     accuracy = num_correct / num_total
@@ -278,6 +288,10 @@ def eval_fsm(args, dataloader, model, episode_id: int = 0):
         pass
 
     print(f"Total Accuracy: {num_correct / num_total}")
+    
+    # Clean up memory after evaluation
+    cleanup_memory()
+    
     return num_correct / num_total
             
 
@@ -497,6 +511,9 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
     # Print results
     for n_hyp, acc in accuracies.items():
         print(f"Hypotheses: {n_hyp}, Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), Avg Program Length: {program_lengths[n_hyp]:.2f}")
+    
+    # Clean up memory after evaluation
+    cleanup_memory()
     
     return accuracies, program_lengths
 
