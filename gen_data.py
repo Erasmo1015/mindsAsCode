@@ -1,5 +1,5 @@
-from environment import state_to_image_jit, AutomaticityEnv
-# from environment_jax import AutomaticityEnv
+from environment import state_to_image_jit
+from environment_jax import AutomaticityEnv
 from agent import AgentExecutionFramework
 import numpy as np
 import matplotlib.pyplot as plt

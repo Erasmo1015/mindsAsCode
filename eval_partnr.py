@@ -9,13 +9,11 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import torch
 torch.multiprocessing.set_start_method('spawn')
 import gc
-if torch.cuda.is_available():
-    torch.cuda.empty_cache()
-    gc.collect()
-    
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import argparse
+import cProfile, pstats, io
 
 import numpy as np
 import random
@@ -31,15 +29,6 @@ import pandas as pd
 import gzip
 import json
 import traceback
-
-def cleanup_memory():
-    """Clean up memory after each evaluation."""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-    # Force garbage collection multiple times
-    for _ in range(3):
-        gc.collect()
 
 def parse_args():
     """Parse command line arguments."""
@@ -80,7 +69,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
-    parser.add_argument('--gpu_memory_utilization', type=float, default=0.7, help='GPU memory utilization.')  # Reduced from 0.9 to 0.7
+    parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')  # Reduced from 0.9 to 0.7
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to evaluate with bootstrapping for different numbers of hypotheses.')
     parser.add_argument('--rejuvenation', action='store_true', help='Whether to use rejuvenation for FSM evaluation.')
@@ -288,9 +277,6 @@ def eval_fsm(args, dataloader, model, episode_id: int = 0):
         pass
 
     print(f"Total Accuracy: {num_correct / num_total}")
-    
-    # Clean up memory after evaluation
-    cleanup_memory()
     
     return num_correct / num_total
             
@@ -512,9 +498,6 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
     for n_hyp, acc in accuracies.items():
         print(f"Hypotheses: {n_hyp}, Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), Avg Program Length: {program_lengths[n_hyp]:.2f}")
     
-    # Clean up memory after evaluation
-    cleanup_memory()
-    
     return accuracies, program_lengths
 
 def main():
@@ -625,6 +608,8 @@ def main():
     # Run evaluation for each epoch and save results after each epoch
     all_results = []
     for epoch in range(start_epoch, args.num_epochs):
+        # pr = cProfile.Profile()
+        # pr.enable()
         print(f"Running epoch {epoch}/{args.num_epochs}")
         
         if args.bootstrap and args.baseline_model == "FSM":
@@ -691,6 +676,14 @@ def main():
                 df.to_csv(csv_path, index=False)
         
         print(f"Saved results for epoch {epoch}")
+        # pr.disable()
+        # # Save profile data to file
+        # profile_path = f'profile_epoch_{epoch}.prof'
+        # ps = pstats.Stats(pr)
+        # ps.sort_stats('cumulative')
+        # ps.dump_stats(profile_path)
+        # print(f"Saved profile data to {profile_path}")
+        # break
     os.environ['CURRENT_MODEL_NAME'] = ''
 
 if __name__ == "__main__":

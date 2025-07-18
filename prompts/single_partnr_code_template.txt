@@ -55,7 +55,7 @@ class FSMAgent:
         return (tool, target, None)
 ```
 Please implement the FSM code to model the logic of the agent's behavior as demonstrated by the experiences. Please implement the code following the template. Feel free to implement the helper functions you need. 
-You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action (tool, target, None). Let's think step by step.
+You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action (tool, target, None). Let's think step by step. Do not use any while loops, since these won't compile.
 
 
 Your code here:
