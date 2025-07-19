@@ -50,6 +50,13 @@ class FSMAgent:
                 return corner_pos
         return None
 
+    def is_on_green_block(self, agent_pos, block_locations, block_colors):
+        """Check if agent is standing on a green block"""
+        for color, pos in zip(block_colors, block_locations):
+            if np.array_equal(pos, agent_pos) and np.array_equal(color, [0, 255, 0]):
+                return True
+        return False
+
     def get_next_action_towards_target(self, current_pos, target_pos, block_locations, has_block):
         """Get the next action to move towards a target position"""
         diff = target_pos - current_pos
@@ -98,13 +105,16 @@ class FSMAgent:
                 self.current_state = self.MOVE_TO_CORNER
                 return self.act(observation)
             
+            # Check if we're on a green block and need to pick it up
+            if self.is_on_green_block(agent_pos, block_locations, block_colors):
+                return 5  # Interact to pick up the green block
+            
             # Find closest green block not in corner
             target_block_pos = self.find_closest_green_block(agent_pos, block_locations, block_colors)
             if target_block_pos is None:
                 return 0  # No more green blocks to move
             
             return self.get_next_action_towards_target(agent_pos, target_block_pos, block_locations, has_block)
-
 
         else:  # MOVE_TO_CORNER state
             if not has_block:
@@ -118,8 +128,6 @@ class FSMAgent:
                 if self.target_pos is None:
                     # No empty corner positions, drop the block
                     return 5
-            
-            
             
             # If we're at the target position, drop the block
             if np.array_equal(agent_pos, self.target_pos):
