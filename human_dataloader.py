@@ -7,6 +7,7 @@ import os
 import flax
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 
@@ -72,84 +73,144 @@ async def read_file(filepath: str):
     return datapoints
 
 task_list = [
-    'Always move right',
-    'Wander randomly without any specific direction',
-    'Always pick up the nearest block',
-    'Move in a vertical line (up and down)',
-    'Bounce off walls without moving beyond them',
-    'Stay in place',
-    'Always pick up purple blocks',
-    'Only pick up the first block encountered',
-    'Move towards the farthest block each time',
-    'Follow a clockwise square pattern',
-    'Snake through the grid (right, up, left, down)',
-    'Collect blocks of a specific color',
-    'Move left if possible, otherwise right',
-    'Move in an L-shape pattern',
-    'Oscillate between two points',
-    'Follow a path to collect all blocks of a specific color',
-    'Create a spiral movement pattern',
-    'Move diagonally towards blocks',
-    'Return to a specific location when possible',
-    'Maximize the number of blocks collected frontally',
+    "Repeatedly go from the green-->blue-->purple blocks",
+    "Patrol the border of the grid in a clockwise manner", 
+    "Patrol the border of the grid in a counter-clockwise manner",
+    "Alternate between going left until you hit a wall, then going right until you hit a wall", 
+    "Pickup a blue block and place it next to another blue block",
+    "Repeatedly move in an L-shape pattern", 
+    "Pickup the green blocks and move them to a corner of the grid", 
+    "Pickup the pink blocks and move them to a corner of the grid", 
+    "Snake up and down across the rows of the grid",
+    "Alternate between going up until you hit a wall, then going down until you hit a wall",
 ]
 
-def load_and_stack_data(directory: str='./data/human_data'):
-    while True:
-        files = os.listdir(directory)
-        files = [f for f in files if f.endswith('.json')]
-        all_file_states = []
-        all_file_actions = []
-        all_file_agent_indices = []
-        for i, file in enumerate(files):
-            # print(f"loading file {i} of {len(files)}")
-            filepath = os.path.join(directory, file)
-            datapoints = asyncio.run(read_file(filepath))
-            all_state_trajectories = []
-            all_action_trajectories = []
-            curr_state_trajectory = []
-            curr_action_trajectory = []
-            current_task = ""
-            for datapoint in datapoints:
-                # print("new datapoint")
-                try:
-                    task = datapoint['metadata']['task']
-                    if task != current_task:
-                        current_task = task
-                        # stack the trajectories
-                        if len(curr_state_trajectory) > 0:
-                            stacked_state_trajectory = jax.tree.map(lambda *x: jnp.stack(x), *curr_state_trajectory)
-                            stacked_action_trajectory = jnp.stack(curr_action_trajectory)
-                            agent_id = task_list.index(task)
-                            yield stacked_state_trajectory, stacked_action_trajectory, agent_id, file, task
-                            del stacked_state_trajectory, stacked_action_trajectory
-                            del agent_id
-                            # all_state_trajectories.append(stacked_state_trajectory)
-                            # all_action_trajectories.append(stacked_action_trajectory)
-                        curr_state_trajectory = []
-                        curr_action_trajectory = []
-                    action = jnp.array(datapoint['data']['action_idx'])
-                    state = datapoint['data']['timestep']['state']  # this is a dict. convert all leaves to jax arrays
-                    state = jax.tree.map(lambda x: jnp.array(x), state)
-                    curr_state_trajectory.append(state)
-                    curr_action_trajectory.append(action)
-                except Exception as e:
-                    # logger.error(f"Failed to process {filepath}: {e}")
+def load_and_save_human_gameplay_data(directory: str):
+    files = os.listdir(directory)
+    files = [f for f in files if f.endswith('.json')]
+    all_file_states = []
+    all_file_actions = []
+    all_file_agent_indices = []
+    all_file_names = []
+    for i, file in enumerate(files):
+        filepath = os.path.join(directory, file)
+        datapoints = asyncio.run(read_file(filepath))
+        all_state_trajectories = []
+        all_action_trajectories = []
+        curr_state_trajectory = []
+        curr_action_trajectory = []
+        all_tasks = []
+        current_task = ""
+        for datapoint in datapoints:
+            try:
+                task = datapoint['metadata']['task']
+                if 'Tutorial' in task:
                     continue
-            # all_state_trajectories = jax.tree.map(lambda *x: jnp.stack(x), *all_state_trajectories)  # (num_tasks, num_timesteps, *)
-            # all_action_trajectories = jnp.stack(all_action_trajectories)  # (num_tasks, num_timesteps)
-            # all_agent_indices = jnp.arange(all_action_trajectories.shape[0])
-            # if all_action_trajectories.shape[0] == 19:
-            #     all_file_states.append(all_state_trajectories)
-            #     all_file_actions.append(all_action_trajectories)
-            #     all_file_agent_indices.append(all_agent_indices)
-        # all_file_states = jax.tree.map(lambda *x: jnp.stack(x), *all_file_states)  # (num_files, num_tasks, num_timesteps, *)
-        # all_file_actions = jnp.stack(all_file_actions)  # (num_files, num_tasks, num_timesteps)
-        # all_file_agent_indices = jnp.stack(all_file_agent_indices)  # (num_files, num_tasks)
-        # return all_file_states, all_file_actions, all_file_agent_indices
+                if task != current_task:
+                    current_task = task
+                    all_tasks.append(current_task)
+                    # stack the trajectories
+                    if len(curr_state_trajectory) > 0:
+                        stacked_state_trajectory = jax.tree.map(lambda *x: np.stack(x), *curr_state_trajectory)
+                        stacked_action_trajectory = np.stack(curr_action_trajectory)
+                        task_id = task_list.index(current_task)
+                        
+                        # yield stacked_state_trajectory, stacked_action_trajectory, task_id, file, current_task
+
+                        all_state_trajectories.append(stacked_state_trajectory)
+                        all_action_trajectories.append(stacked_action_trajectory)
+                    curr_state_trajectory = []
+                    curr_action_trajectory = []
+                action = np.array(datapoint['data']['action_idx'])
+                state = datapoint['data']['timestep']['state']  # this is a dict. convert all leaves to numpy arrays
+                state = jax.tree.map(lambda x: np.array(x), state)
+                curr_state_trajectory.append(state)
+                curr_action_trajectory.append(action)
+            except Exception as e:
+                # logger.error(f"Failed to process {filepath}: {e}")
+                continue
+        
+        # # Add the final task's trajectories
+        if len(curr_state_trajectory) > 0:
+            stacked_state_trajectory = jax.tree.map(lambda *x: np.stack(x), *curr_state_trajectory)
+            stacked_action_trajectory = np.stack(curr_action_trajectory)
+            task_id = task_list.index(current_task)
+            # yield stacked_state_trajectory, stacked_action_trajectory, task_id, file, current_task
+            all_state_trajectories.append(stacked_state_trajectory)
+            all_action_trajectories.append(stacked_action_trajectory)
+
+        task_to_idx = {task: i for i, task in enumerate(all_tasks)}
+        task_to_idx = np.array([task_list.index(task) for task in all_tasks])
+
+        # Sort by task indices
+        sort_indices = np.argsort(task_to_idx)
+
+        not_complete = False
+        for k_index, action_traj in enumerate(all_action_trajectories):
+            if len(action_traj) < 30:
+                not_complete = True
+                break
+        if not_complete:
+            continue
+        
+        
+
+        all_state_trajectories = jax.tree.map(lambda *x: np.stack(x), *all_state_trajectories)  # (num_tasks, num_timesteps, *)
+        all_action_trajectories = np.stack(all_action_trajectories)  # (num_tasks, num_timesteps)
+        
+        # Reindex trajectories based on sorted task order
+        all_state_trajectories = jax.tree.map(lambda x: x[sort_indices], all_state_trajectories)
+        all_action_trajectories = all_action_trajectories[sort_indices]
+        task_to_idx = task_to_idx[sort_indices]
+
+        data_file = {
+            'states': all_state_trajectories,
+            'actions': all_action_trajectories,
+            'tasks': all_tasks,
+            'task_to_idx': task_to_idx,
+            'sort_indices': sort_indices,
+            'file': file,
+        }
+        # save data file to pkl with same filename but new extension
+        import pickle
+
+        pkl_file = file.replace('.json', '.pkl')
+        with open(f'{directory}/{pkl_file}', 'wb') as f:
+            pickle.dump(data_file, f)
+
+        # all_agent_indices = np.arange(all_action_trajectories.shape[0])
+        # if all_action_trajectories.shape[0] == len(task_list):  # number of tasks
+        #     for i in range(all_action_trajectories.shape[0]):
+        #         state_dat = jax.tree.map(lambda x: x[i], all_state_trajectories)
+        #         action_dat = all_action_trajectories[i]
+        #         agent_id = task_to_idx[i]
+        #         breakpoint()
+        #         yield state_dat, action_dat, agent_id, file, all_tasks[i]
+        print(f'saved {file}')
+
+def load_and_stack_human_gameplay_data(directory: str):
+    import pickle
+    files = os.listdir(directory)
+    files = [f for f in files if f.endswith('.pkl')]
+    for file in files:
+        filepath = os.path.join(directory, file)
+        with open(filepath, 'rb') as f:
+            data_file = pickle.load(f)
+            states = data_file['states']
+            actions = data_file['actions']
+            task_idx = data_file['sort_indices']
+            filename = data_file['file']
+            for i in range(actions.shape[0]):
+                state_dat = jax.tree.map(lambda x: x[i], states)
+                action_dat = actions[i]
+                agent_id = task_idx[i]
+                yield state_dat, action_dat, agent_id, filename, task_list[agent_id]
+
+            
 
 
 if __name__ == "__main__":
     # directory = '/Users/kunal/Code/UW/human_data'
-    all_file_states, all_file_actions, all_file_agent_indices = load_and_stack_data()
-    breakpoint()
+    # load_and_save_human_gameplay_data('data/human_data_fix')
+    load_and_stack_human_gameplay_data('data/human_data_fix')
+    print('done')

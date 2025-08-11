@@ -72,8 +72,8 @@ def parse_args():
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=25, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -437,6 +437,8 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
+
+            breakpoint()
 
             num_env_agents = 4 if args.group else 1
             # Infer num_blocks and num_walls from the state
@@ -848,7 +850,7 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
         datapoint = next(dataloader)
         
         # Initialize environment (parameters will be set per datapoint)
-        env_size = 10
+        env_size = 7
         env_max_steps = num_future_steps + 5  # Sufficiently large
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):

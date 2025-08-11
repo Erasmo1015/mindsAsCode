@@ -70,23 +70,50 @@ class NaiveLLMReasoner:
             self.use_openai = True
         else:
             self.use_openai = False
-            # Load model using vLLM with optimized settings
-            vllm_kwargs = {
-                "model": model_name,
-                "tensor_parallel_size": tensor_parallel_size,
-                "gpu_memory_utilization": gpu_memory_utilization,
-                "dtype": torch.bfloat16,
-                "trust_remote_code": True,
-                "max_num_batched_tokens": 40000,
-                # "max_model_len": max_model_len,
-            }
-            
-            # Add quantization if specified
-            if quantization:
-                vllm_kwargs["quantization"] = quantization
+            if 'checkpoint' not in model_name:
+                # Load model using vLLM with optimized settings
+                vllm_kwargs = {
+                    "model": model_name,
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "gpu_memory_utilization": gpu_memory_utilization,
+                    "dtype": torch.bfloat16,
+                    "trust_remote_code": True,
+                    "max_num_batched_tokens": 40000,
+                    # "max_model_len": max_model_len,
+                }
                 
-            self.llm = LLM(**vllm_kwargs)
-            self.sampling_params = SamplingParams(temperature=0.75, max_tokens=10)
+                # Add quantization if specified
+                if quantization:
+                    vllm_kwargs["quantization"] = quantization
+                    
+                self.llm = LLM(**vllm_kwargs)
+                self.sampling_params = SamplingParams(temperature=0.75, max_tokens=10)
+            else:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    device_map="auto", 
+                    low_cpu_mem_usage=True,
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=True,
+                    max_memory={0: f"30GB"} # Control GPU memory usage
+                )
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.reserved_string = "<|reserved_special_token_0|>"
+                self.reserved_token = self.tokenizer.encode(
+                    self.reserved_string, add_special_tokens=False
+                )
+
+                parser_args = {
+                    "model": 'Qwen/Qwen2.5-0.5B-Instruct',
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "gpu_memory_utilization": 0.1,
+                    "dtype": torch.bfloat16,
+                    "trust_remote_code": True,
+                    "max_num_batched_tokens": 40000,
+                }
+                self.parser = LLM(**parser_args)
+                self.parser_sampling_params = SamplingParams(temperature=0.0, max_tokens=6)
         
         # Keep transformers implementation (commented out)
         # self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -216,8 +243,20 @@ class NaiveLLMReasoner:
                         )
                         output = response.choices[0].message.content.split("<|assistant|>\n")[-1].strip()
                     else:
-                        vllm_output = self.llm.generate([prompt], self.sampling_params)[0]
-                        output = vllm_output.outputs[0].text.split("<|assistant|>\n")[-1].strip()
+                        if 'checkpoint' not in self.model_name:
+                            vllm_output = self.llm.generate([prompt], self.sampling_params)[0]
+                            output = vllm_output.outputs[0].text.split("<|assistant|>\n")[-1].strip()
+                        else:
+                            # generate using transformers
+                            # breakpoint()
+                            inputs = self.tokenizer([prompt], return_tensors="pt")
+                            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                            input_length = inputs['input_ids'].shape[1]
+                            outputs = self.model.generate(**inputs, max_new_tokens=500, do_sample=True, temperature=0.7)
+                            output = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                            parser_prompt = f"Parse the following text: {output} to extract the action. The action should be a tool from the following list: {tools}. The action should be in the following format: \nAction: <tool_name>\n For example, if the tool is 'clean', your answer should be: \nAction: clean\n If the tool is 'wait', your answer should be: \nAction: wait\n Only respond with the tool name, not any other text. Your answer:"
+                            parser_output = self.parser.generate([parser_prompt], self.parser_sampling_params)[0]
+                            output = parser_output.outputs[0].text
                     
                     # Check if output is valid
                     if not self.partnr:
@@ -230,6 +269,7 @@ class NaiveLLMReasoner:
                         for tool in tools:
                             if tool.lower() in output.lower():
                                 final_action_pred_list.append(tool)
+                                print(f"Tool: {tool}")
                                 success = True
                                 break
                     if success:
@@ -237,6 +277,8 @@ class NaiveLLMReasoner:
                     else:
                         retries += 1
                 except Exception as e:
+                    # print(f"Error: {e}")
+                    # breakpoint()
                     retries += 1
                     # Optionally log the exception
 

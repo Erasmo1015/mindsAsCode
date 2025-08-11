@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=testToM
+#SBATCH --job-name=testToMHuman
 #SBATCH --mail-user=kj@cs.washington.edu
 
 #SBATCH --account=socialrl
@@ -36,6 +36,17 @@ structured=${5:-"False"}
 two_stage=${6:-False}
 rejuvenation=${7:-False}
 top_k=${8:-0}
+multi_step_eval=${9:-True}
+
+if [ "$model_arch" = "BC" ]; then
+    num_agents_to_sample=3
+    num_datapoints_per_agent_to_sample=3
+    num_epochs=33
+else
+    num_agents_to_sample=1
+    num_datapoints_per_agent_to_sample=1
+    num_epochs=100
+fi
 
 echo "model_arch: $model_arch"
 echo "n_hypothesis: $n_hypothesis"
@@ -45,12 +56,9 @@ echo "structured: $structured"
 echo "two_stage: $two_stage"
 echo "rejuvenation: $rejuvenation"
 echo "top_k: $top_k"
-# echo "n_agents_to_sample: $n_agents_to_sample"
-# echo "n_datapoints_per_agent_to_sample: $n_datapoints_per_agent_to_sample"
-# echo "as_images: $as_images"
-# echo "num_epochs: $num_epochs"
-
-# Add structured, two_stage, and rejuvenation flags if they are True
+echo "num_agents_to_sample: $num_agents_to_sample"
+echo "num_datapoints_per_agent_to_sample: $num_datapoints_per_agent_to_sample"
+echo "num_epochs: $num_epochs"
 structured_flag=""
 two_stage_flag=""
 rejuvenation_flag=""
@@ -71,16 +79,24 @@ fi
 if [ "$top_k" -gt 0 ]; then
     top_k_flag="--top_k $top_k"
 fi
+    
 
 # Run the main command and capture its exit status
-python eval_human.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag
+if [ "$group" = "True" ]; then
+    python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --bootstrap --multi_step_eval $multi_step_eval
+else
+    # Add structured, two_stage, and rejuvenation flags if they are True
+    python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --multi_step_eval $multi_step_eval  --num_steps_to_predict 10 --human_data True --flip_quarter False
+    # python eval_partnr.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 100 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 1 --group False
+    # python eval_human.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 120 --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample
+fi
 EXIT_CODE=$?
 
-# # If the job failed (non-zero exit code), resubmit it
-# if [ $EXIT_CODE -ne 0 ]; then
-#     echo "Job failed with exit code $EXIT_CODE. Requeuing..."
-#     # Submit the same script again
-#     sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k
-#     exit $EXIT_CODE
-# fi
+# If the job failed (non-zero exit code), resubmit it
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "Job failed with exit code $EXIT_CODE. Requeuing..."
+    # Submit the same script again
+    sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k $multi_step_eval
+    exit $EXIT_CODE
+fi
 

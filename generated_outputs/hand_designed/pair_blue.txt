@@ -1,0 +1,152 @@
+```python
+import numpy as np
+from heapq import heappush, heappop
+
+class FSMAgent:
+    """
+    Goal: Find the closest pair of non-adjacent blue blocks, pick one up, 
+    and move it next to the other. This version uses a committed, two-stage
+    plan and an explicit state machine to prevent getting stuck or making
+    redundant moves.
+    """
+    TARGET_COLOR = np.array([0, 0, 255]) # Blue
+
+    # Define states for our FSM
+    IDLE = 0
+    MOVING_TO_BLOCK = 1
+    MOVING_TO_DROP = 2
+
+    def __init__(self, num_agents: int, num_blocks: int, num_actions: int = 6):
+        self.num_actions = num_actions
+        # State variables to store the agent's committed plan
+        self.state = self.IDLE
+        self.target_block_to_move = None
+        self.target_drop_pos = None
+
+    def manhattan_distance(self, pos1, pos2):
+        """Calculates the Manhattan distance between two points."""
+        if pos1 is None or pos2 is None: return float('inf')
+        pos1, pos2 = np.array(pos1), np.array(pos2)
+        return np.abs(pos1[0] - pos2[0]) + np.abs(pos1[1] - pos2[1])
+
+    def a_star_path(self, start, goal, wall_locations, block_locations, has_block):
+        """A* search algorithm to find the next best move towards a goal."""
+        def get_neighbors(pos):
+            neighbors = []
+            for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                new_pos = np.array([pos[0] + dx, pos[1] + dy])
+                if any(np.array_equal(new_pos, wall) for wall in wall_locations): continue
+                if has_block and any(np.array_equal(new_pos, b) for b in block_locations): continue
+                neighbors.append(new_pos)
+            return neighbors
+
+        open_list = [(0, tuple(start))]
+        came_from = {}
+        g_score = {tuple(start): 0}
+        f_score = {tuple(start): self.manhattan_distance(start, goal)}
+
+        while open_list:
+            _, current_tuple = heappop(open_list)
+            current = np.array(current_tuple)
+
+            if np.array_equal(current, goal):
+                path = []
+                temp = current
+                while tuple(temp) in came_from:
+                    path.append(temp)
+                    temp = came_from[tuple(temp)]
+                if not path: return 0
+                next_step = path[-1]
+                diff = next_step - start
+                if np.array_equal(diff, [1, 0]): return 1
+                if np.array_equal(diff, [-1, 0]): return 2
+                if np.array_equal(diff, [0, 1]): return 3
+                if np.array_equal(diff, [0, -1]): return 4
+                return 0
+
+            for neighbor in get_neighbors(current):
+                neighbor_tuple = tuple(neighbor)
+                tentative_g_score = g_score.get(tuple(current), float('inf')) + 1
+                if tentative_g_score < g_score.get(neighbor_tuple, float('inf')):
+                    came_from[neighbor_tuple] = current
+                    g_score[neighbor_tuple] = tentative_g_score
+                    f_score[neighbor_tuple] = tentative_g_score + self.manhattan_distance(neighbor, goal)
+                    heappush(open_list, (f_score[neighbor_tuple], neighbor_tuple))
+        return 0
+
+    def act(self, observation):
+        agent_pos = np.array(observation['agent_locations'][observation['agent_id']])
+        block_locs = np.array(observation['block_locations'])
+        block_cols = observation['block_colors']
+        wall_locs = np.array(observation['wall_locations'])
+        has_block = observation['agent_inventory'][observation['agent_id']] != -1
+
+        # --- FSM LOGIC ---
+
+        if self.state == self.IDLE:
+            # Time to find a new task.
+            # If we just dropped a block, has_block will be false, so we stay here for a turn.
+            if has_block: # Should not happen, but as a safeguard
+                self.state = self.MOVING_TO_DROP
+                return self.act(observation)
+
+            blue_blocks = [p for p, c in zip(block_locs, block_cols) if np.array_equal(c, self.TARGET_COLOR)]
+            if len(blue_blocks) < 2: return 0
+
+            best_pair = None
+            min_dist = float('inf')
+            for i in range(len(blue_blocks)):
+                for j in range(i + 1, len(blue_blocks)):
+                    pos1, pos2 = blue_blocks[i], blue_blocks[j]
+                    dist = self.manhattan_distance(pos1, pos2)
+                    if dist > 1 and dist < min_dist:
+                        min_dist = dist
+                        best_pair = (pos1, pos2)
+            
+            if best_pair is None: return 0
+
+            # Commit to a plan
+            self.target_block_to_move, stationary_block = best_pair
+            
+            occupied = {tuple(w) for w in wall_locs} | {tuple(b) for b in block_locs}
+            possible_drops = []
+            for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                spot = (stationary_block[0] + dx, stationary_block[1] + dy)
+                if spot not in occupied:
+                    possible_drops.append(np.array(spot))
+            
+            if not possible_drops: return 0
+
+            self.target_drop_pos = min(possible_drops, key=lambda p: self.manhattan_distance(self.target_block_to_move, p))
+            self.state = self.MOVING_TO_BLOCK
+            # Fall through to execute the first step of the plan immediately
+
+        if self.state == self.MOVING_TO_BLOCK:
+            if has_block: # We picked it up!
+                self.state = self.MOVING_TO_DROP
+                return self.act(observation)
+            
+            if np.array_equal(agent_pos, self.target_block_to_move):
+                return 5 # Interact to pick up
+
+            return self.a_star_path(agent_pos, self.target_block_to_move, wall_locs, block_locs, has_block=False)
+
+        if self.state == self.MOVING_TO_DROP:
+            if not has_block: # Dropped it or lost it
+                self.state = self.IDLE
+                return 0 # This is the essential PAUSE after dropping.
+
+            # As requested, check if we're carrying the wrong block.
+            inventory_color = observation['agent_inventory_colors'][observation['agent_id']]
+            if not np.array_equal(inventory_color, self.TARGET_COLOR):
+                self.state = self.IDLE # Abort plan
+                return 5 # Drop wrong block
+
+            if np.array_equal(agent_pos, self.target_drop_pos):
+                return 5 # Interact to drop
+
+            return self.a_star_path(agent_pos, self.target_drop_pos, wall_locs, block_locs, has_block=True)
+            
+        return 0 # Default action
+
+```

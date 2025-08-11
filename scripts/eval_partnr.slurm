@@ -101,8 +101,12 @@ EXIT_CODE=$?
 # If the job failed (non-zero exit code), resubmit it
 if [ $EXIT_CODE -ne 0 ]; then
     echo "Job failed with exit code $EXIT_CODE. Requeuing..."
+    # Get the job ID of the current job
+    JOBID=$SLURM_JOB_ID
+    # Remove the error and output files from the failed job
+    rm -rf /mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.out
+    rm -rf /mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.err
     # Submit the same script again
-    sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k 
+    sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k
     exit $EXIT_CODE
 fi
-

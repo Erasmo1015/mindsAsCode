@@ -102,7 +102,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     data_path = args.data_path
     as_images = args.as_images
 
-    data_folder = f"{data_path}/human_data"
+    data_folder = f"{data_path}/human_data_fix"
     human_dataloader = load_and_stack_data(data_folder)
     human_data = None
     for j in range(epoch+1):

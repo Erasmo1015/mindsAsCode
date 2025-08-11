@@ -42,7 +42,7 @@ def parse_args():
     
     parser.add_argument('--num_agents_to_sample', type=int, default=1, help='Number of agents to sample from the dataset.')
     parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=3, help='Number of datapoints per agent to sample from the dataset.')
-    parser.add_argument('--num_agents', type=int, default=20, help='Number of agents in the dataset.')
+    parser.add_argument('--num_agents', type=int, default=1, help='Number of agents in the dataset.')
     parser.add_argument('--num_datapoints_per_agent', type=int, default=100, help='Number of datapoints per agent in the dataset.')
     parser.add_argument('--num_steps', type=int, default=100, help='Number of steps in the dataset.')
     parser.add_argument('--env_size', type=int, default=10, help='Size of the environment.')
@@ -73,20 +73,18 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     while True:
         if not overfit:
             i += 1
-            num_blocks = random.choice(list(range(2, 22, 2)))
-            num_walls = random.choice(list(range(2, 22, 2)))
+            num_blocks = random.choice(list(range(3,8,1)))
+            num_walls = random.choice(list(range(1, 5, 1)))
         else:
-            num_blocks = random.choice(list(range(2, 22, 2)))
-            num_walls = random.choice(list(range(2, 22, 2)))
-            # num_blocks = 2
-            # num_walls = 2
+            num_blocks = 4
+            num_walls = 1
             
         data_folder = f"{data_path}/num_blocks{num_blocks}/num_walls{num_walls}"
         if args.group:
             extension = "_group"
             num_agents_acting = 4
         else:
-            extension = ""
+            extension = "_flip_quarter"
             num_agents_acting = 1
             
         data_file = f"{data_folder}/gt_fsm{extension}_traj_data_{args.num_agents}agents.msgpack"
@@ -183,8 +181,8 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
                 
                 batch_state = jax.tree.map(lambda x: x[batch_indices] if isinstance(x, (jnp.ndarray, np.ndarray)) else x, reshaped_state)
 
-                img_size = args.env_size * 8
-                tile_size = 8
+                img_size = args.env_size * 7
+                tile_size = 7
                 grid_size = args.env_size
                 img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
                 render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)

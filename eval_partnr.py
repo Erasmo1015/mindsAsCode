@@ -62,10 +62,10 @@ def parse_args():
 
     parser.add_argument('--as_images', type=bool, default=False, help='Whether to load the data as images.')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer.')
-    parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
+    parser.add_argument('--num_epochs', type=int, default=200, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
-    parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--n_hypothesis', type=int, default=2, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to evaluate with bootstrapping for different numbers of hypotheses.')
     parser.add_argument('--rejuvenation', action='store_true', help='Whether to use rejuvenation for FSM evaluation.')
-    parser.add_argument('--rejuvenation_threshold', type=float, default=1, help='Threshold for rejuvenation in FSM.')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=2, help='Threshold for rejuvenation in FSM.')
     parser.add_argument('--max_rejuvenation_attempts', type=int, default=1, help='Maximum number of rejuvenation attempts in FSM.')
     parser.add_argument('--top_k', type=int, default=0, help='Number of top hypotheses to consider (0 means use all).')
     parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage reasoning for FSM.')
@@ -98,7 +98,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     i = 0
     while True:    
         if not args.group:
-            partnr_data_folder = "/mmfs1/gscratch/socialrl/kjha/habitat/partnr-planner/outputs/habitat_llm/single_agent_traj_data/results/single_agent_traj_data/state_action_traj_data"
+            partnr_data_folder = "/mmfs1/gscratch/socialrl/kjha/habitat/partnr-planner/outputs/habitat_llm/full_single_agent_traj_data"
         else:
             partnr_data_folder = "/mmfs1/gscratch/socialrl/kjha/habitat/partnr-planner/outputs/habitat_llm/group_traj_data/results/group_traj_data/state_action_traj_data"
         episode_dirs = os.listdir(partnr_data_folder)
@@ -109,6 +109,8 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
             agent_id_list = [0]
         for agent_id in agent_id_list:
             episode_path = os.path.join(partnr_data_folder, episode_dir, f'agent_{agent_id}.json.gz')
+            if not os.path.exists(episode_path):
+                continue
             with gzip.open(episode_path, "rt") as f:
                 episode = json.load(f)
             states = []
@@ -192,15 +194,20 @@ def eval_naive_LLM(args, dataloader, model, episode_id: int = 0):
     
     # while tries < 6:
     # try:
-    try:
-        predicted_final_action = model.predict_action(states, actions, agent_id=0, episode_id=episode_id)
-        if predicted_final_action.lower() == gt_action.lower():
+    # try:
+    predicted_final_action = model.predict_action(states, actions, agent_id=0, episode_id=episode_id)
+    if predicted_final_action is None:
+        if gt_action is None:
             num_correct += 1
+    else:
+        if gt_action is not None:
+            if predicted_final_action.lower() == gt_action.lower():
+                num_correct += 1
             # break  # end loop if prediction is successful
-    except Exception as e:
-        print(f"Error: {e}")
+    # except Exception as e:
+    #     print(f"Error: {e}")
 
-        tries += 1
+    #     tries += 1
     # num_total += 1
     accuracy = num_correct / num_total
     print(f"Accuracy: {accuracy}")
@@ -409,24 +416,49 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
     model.bootstrap = True
     
     # Choose between rejuvenation and regular bootstrap based on args
-    if args.rejuvenation:
-        bootstrap_results = model.predict_action_with_bootstrap(
-            states, actions, episode_id=episode_id, 
-            max_hypotheses=args.n_hypothesis,
-            rejuvenation_threshold=args.rejuvenation_threshold,
-            max_rejuvenation_attempts=args.max_rejuvenation_attempts,
-            top_k=args.top_k,
-            use_rejuvenation=True
-        )
-    else:
-        bootstrap_results = model.predict_action_with_bootstrap(
-            states, actions, episode_id=episode_id, 
-            max_hypotheses=args.n_hypothesis,
-            rejuvenation_threshold=args.rejuvenation_threshold,
-            max_rejuvenation_attempts=args.max_rejuvenation_attempts,
-            top_k=args.top_k,
-            use_rejuvenation=False
-        )
+    def try_bootstrap_with_timeout():
+        import signal
+        from functools import partial
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Bootstrap prediction took too long")
+            
+        # Set 20 minute timeout
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(2400)  # 40 minutes in seconds
+        
+        try:
+            if args.rejuvenation:
+                return model.predict_action_with_bootstrap(
+                    states, actions, episode_id=episode_id,
+                    max_hypotheses=args.n_hypothesis,
+                    rejuvenation_threshold=args.rejuvenation_threshold,
+                    max_rejuvenation_attempts=args.max_rejuvenation_attempts,
+                    top_k=args.top_k,
+                    use_rejuvenation=True
+                )
+            else:
+                return model.predict_action_with_bootstrap(
+                    states, actions, episode_id=episode_id,
+                    max_hypotheses=args.n_hypothesis, 
+                    rejuvenation_threshold=args.rejuvenation_threshold,
+                    max_rejuvenation_attempts=args.max_rejuvenation_attempts,
+                    top_k=args.top_k,
+                    use_rejuvenation=False
+                )
+        finally:
+            signal.alarm(0)  # Disable the alarm
+    
+    # First attempt
+    try:
+        bootstrap_results = try_bootstrap_with_timeout()
+    except TimeoutError:
+        print("First bootstrap attempt timed out after 20 minutes. Trying again...")
+        # Second attempt
+        try:
+            bootstrap_results = try_bootstrap_with_timeout()
+        except TimeoutError:
+            raise RuntimeError("Bootstrap prediction failed twice with 20 minute timeouts")
     
     if bootstrap_results is None:
         return {n: 0.0 for n in range(1, max_hypotheses + 1)}, {n: 0.0 for n in range(1, max_hypotheses + 1)}
@@ -443,18 +475,21 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         # If we have this hypothesis result available, use it
         # Otherwise, use the last available hypothesis result
         hyp_idx = min(n_hyp, num_available_hyp) - 1  # Convert to 0-indexed
-        prediction, program_length = bootstrap_results[hyp_idx]
+        prediction, program_length, correct_tool_preds_prob = bootstrap_results[hyp_idx]
         results[n_hyp]['program_length'] += program_length
 
         # breakpoint()
-        
+
         if not args.group or True:
-            prediction = prediction[0]
-            # breakpoint()
-            # print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
-            if type(prediction) == str:
-                if prediction.lower() == gt_final_action.lower():
-                    results[n_hyp]['correct'] += 1
+            results[n_hyp]['correct'] += correct_tool_preds_prob  # 
+
+            # prediction = prediction[0]
+            # # breakpoint()
+            # # print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
+            # if type(prediction) == str:
+            #     print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
+            #     if prediction.lower() == gt_final_action.lower():
+            #         results[n_hyp]['correct'] += co
 
         else:
             for p in prediction:
@@ -530,9 +565,9 @@ def main():
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
         
     if args.bootstrap and args.baseline_model == "FSM":
-        csv_path = f"results/{args.baseline_model}/partnr2_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+        csv_path = f"results/{args.baseline_model}/partnr3_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else:
-        csv_path = f"results/{args.baseline_model}/partnr2_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"results/{args.baseline_model}/partnr3_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -546,7 +581,7 @@ def main():
             (existing_df['group'] == args.group),
             (existing_df['num_agents_evaluated'] == args.num_agents_to_sample),
             (existing_df['datapoints_per_agent'] == args.num_datapoints_per_agent_to_sample),
-            (existing_df['llm_model'] == args.model_name)
+            ((existing_df['llm_model'] == args.model_name) | (existing_df['llm_model'] == 'N/A'))
         ]
         
         # Add optional filter conditions if columns exist
@@ -602,6 +637,13 @@ def main():
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
         model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=True)
         eval_fn = eval_naive_LLM
+    elif args.baseline_model == 'BC':
+        from baselines.basic_LLM import NaiveLLMReasoner
+        model_name = '/mmfs1/gscratch/socialrl/kjha/habitat/partnr-planner/outputs/checkpoint/checkpoint-15360'
+        args.model_name = model_name
+        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
+        model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=True)
+        eval_fn = eval_naive_LLM
     else:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
@@ -643,7 +685,7 @@ def main():
                     # Create new CSV file or overwrite for first epoch
                     df.to_csv(csv_path, index=False)
         else:
-            if args.baseline_model == "FSM" or args.baseline_model == "AutoToM" or args.baseline_model == "NLLM":
+            if args.baseline_model in ['FSM', 'AutoToM', 'NLLM', 'BC']:
                 res = eval_fn(args, dataloader, model, episode_id=epoch)
             else:
                 res = eval_fn(args, dataloader, model)

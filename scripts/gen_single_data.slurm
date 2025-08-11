@@ -22,4 +22,6 @@ conda activate llm
 module load cuda/12.4
 module load gcc/10.2.0
 
+cd ..
+
 python gen_data.py

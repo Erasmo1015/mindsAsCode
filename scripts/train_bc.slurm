@@ -4,7 +4,7 @@
 #SBATCH --mail-user=kj@cs.washington.edu
 
 #SBATCH --account=socialrl
-#SBATCH --partition=ckpt-all
+#SBATCH --partition=gpu-l40
 #SBATCH --constraint=a40|a100|l40|l40s
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
@@ -12,7 +12,7 @@
 #SBATCH --mem=48G
 #SBATCH --gres=gpu:1
 #SBATCH --gpus=1
-#SBATCH --time=02-00:00:00 # Max runtime in DD-HH:MM:SS format.
+#SBATCH --time=00-10:00:00 # Max runtime in DD-HH:MM:SS format.
 
 #SBATCH --output=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.out
 #SBATCH --error=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.err
@@ -26,8 +26,10 @@ conda activate llm
 module load cuda/12.4
 module load gcc/10.2.0
 
+cd /mmfs1/gscratch/socialrl/kjha/automaticity
+
 # Run the main command and capture its exit status
-python train_baselines.py --baseline_model 'BC' --num_epochs 10000 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 3 --seed 0
+python train_baselines.py --baseline_model 'BC' --num_epochs 5000 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 3 --seed 0
 EXIT_CODE=$?
 
 # If the job failed (non-zero exit code), resubmit it

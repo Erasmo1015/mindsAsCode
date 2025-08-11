@@ -92,6 +92,7 @@ def parse_args():
     parser.add_argument('--multi_step_eval', type=bool, default=True, help='Perform multi-step evaluation for FSM')
     parser.add_argument('--num_steps_to_predict', type=int, default=20, help='Number of future steps to predict in multi-step eval')
     parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
+    parser.add_argument('--human_data', type=bool, default=False, help='Use human data')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
@@ -107,6 +108,104 @@ def initialize_environment(num_agents: int, num_blocks: int, num_walls: int, siz
     env = AutomaticityEnv(num_agents=num_agents, size=size, max_steps=max_steps, num_blocks=num_blocks, num_walls=num_walls)
     return env
 
+
+def make_dataloader_human(args, num_agents_to_sample: int = 2, num_datapoints_per_agent_to_sample: int = 20, overfit: bool = False, training: bool = False, epoch: int = 0):
+    """Load data from the dataset folders."""
+    data_path = args.data_path
+    as_images = args.as_images
+
+    data_folder = f"{data_path}/human_data_fix"
+    from human_dataloader import load_and_stack_human_gameplay_data
+    human_dataloader = load_and_stack_human_gameplay_data(data_folder)
+    human_data = None
+    try:
+        for j in range(epoch+1):
+            human_data, human_actions, agent_id, filename, task = next(human_dataloader)
+        current_data_loaded = epoch
+    except StopIteration:
+        print("Reached end of human data, exiting successfully")
+        exit(0)
+
+    i = epoch
+    while True:
+        '''
+        actions is (num_agents to sample, num_datapoints per agent, traj_length, 1)
+        agent ids is (num_agents_to_sample, num_datapoints per_agent, traj_length) where each value for agent is the task number
+        states is (num_agents_to_sample, num_datapoints per agent, traj_length, *state_shape)
+        '''
+        human_states = human_data
+        # Add two dimensions of length 1 to each leaf in human_states
+        human_states = jax.tree.map(
+            lambda x: x[None, None, :, ...] if isinstance(x, (jnp.ndarray, np.ndarray)) else x,
+            human_states
+        )
+        human_actions = human_actions[None, None, :, None]
+        human_agent_id = jnp.array([agent_id])[None, None, :] # (1, 1, 1)
+        # Repeat agent_id to match length of human_actions
+        human_agent_id = jnp.repeat(human_agent_id, human_actions.shape[2], axis=2)  # (1, 1, traj_length)
+        sampled_states = human_states
+        sampled_data = {
+            'states': sampled_states,
+            'actions': human_actions,
+            'agent_ids': human_agent_id,
+            # 'filename': filename,
+            # 'task': task
+        }
+
+        # Reshape all arrays to (-1, *original_shape[3:])
+        reshaped_state = jax.tree.map(
+            lambda x: jnp.array(x).reshape(-1, *x.shape[3:]) if (isinstance(x, jnp.ndarray) or isinstance(x, np.ndarray)) else x,
+            sampled_states
+        )
+        # Process images in smaller batches to reduce memory usage
+        batch_size = 100  # Process images in smaller batches
+        num_samples = reshaped_state['agent_locations'].shape[0]
+        all_images = []
+
+
+        for start_idx in range(0, num_samples, batch_size):
+            end_idx = min(start_idx + batch_size, num_samples)
+            batch_indices = jnp.arange(start_idx, end_idx)
+            
+            batch_state = jax.tree.map(lambda x: x[batch_indices] if isinstance(x, (jnp.ndarray, np.ndarray)) else x, reshaped_state)
+            
+            def convert_to_image(index, stacked_state):
+                indexed_state = jax.tree.map(lambda x: x[index], stacked_state)
+                img_size = args.env_size * 8
+                tile_size = 8
+                grid_size = args.env_size
+                img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+                render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)
+                return render_fn(indexed_state)
+            
+            batch_images = jax.vmap(convert_to_image, in_axes=(0, None))(jnp.arange(len(batch_indices)), batch_state)
+            all_images.append(batch_images)
+        
+        # Concatenate all batches
+        stacked_images = jnp.concatenate(all_images, axis=0)
+
+        del reshaped_state, all_images
+
+        if as_images:
+            sampled_data['states'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, args.num_steps, *stacked_images.shape[1:])
+            sampled_data['images'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, -1, *stacked_images.shape[1:])
+        else:
+            sampled_data['states'] = sampled_states
+            sampled_data['images'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, -1, *stacked_images.shape[1:])
+
+        yield sampled_data
+        del sampled_data
+
+
+
+        
+        try:
+            human_data, human_actions, agent_id, filename, task = next(human_dataloader)
+            current_data_loaded += 1
+        except StopIteration:
+            print("Reached end of human data, exiting successfully")
+            exit(0)
+
 def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agent_to_sample: int = 20, overfit: bool = False, training: bool = False, epoch: int = 0):
     """Load data from the dataset folders."""
     data_path = args.data_path
@@ -116,7 +215,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
     while True:
         if not overfit:
             i += 1
-            num_blocks = random.choice(list(range(4,8,1)))
+            num_blocks = random.choice(list(range(3,8,1)))
             num_walls = random.choice(list(range(1, 5, 1)))
         else:
             num_blocks = 4
@@ -236,7 +335,8 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         del reshaped_state, all_images
         
         if as_images:
-            sampled_data['states'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, args.num_steps//2, *stacked_images.shape[1:])
+            sampled_data['states'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, args.num_steps, *stacked_images.shape[1:])
+            sampled_data['images'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, -1, *stacked_images.shape[1:])
         else:
             sampled_data['states'] = sampled_states
             sampled_data['images'] = stacked_images.reshape(num_agents_to_sample, num_datapoints_per_agent_to_sample, -1, *stacked_images.shape[1:])
@@ -269,6 +369,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             gt_agent_script_id = int(initial_states_traj['agent_id'][0])
+
+            avg_matching_states, mean_equal_actions = get_matching_states_and_actions(initial_states_traj, initial_actions_traj)
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -403,7 +505,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         print(f"First Step Accuracy: {first_step_accuracy:.4f} ({first_step_correct}/{first_step_total})")
         print(f"Accuracy After Flip: {accuracy_after_flip:.4f} ({correct_after_flip}/{total_after_flip})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip
+        return accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip, avg_matching_states, mean_equal_actions
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -431,6 +533,54 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
         print(f"Accuracy: {num_correct / num_total}")
         return num_correct / num_total, 0.0  # Return 0.0 as placeholder for avg_prediction_time
 
+
+def get_matching_states_and_actions(states, actions):
+    # Get all state indices
+    state_indices = list(np.arange(states['agent_locations'].shape[0]))
+    
+    # Track groups of matching states
+    matching_groups = []
+    used_indices = set()
+    
+    # Compare each state with every other state
+    for i in state_indices:
+        if i in used_indices:
+            continue
+            
+        current_group = {i}
+        used_indices.add(i)
+        
+        # Compare with remaining states
+        for j in state_indices:
+            if j in used_indices:
+                continue
+                
+            # Check if all state components match using jnp.all
+            states_match = True
+            for key in states.keys():
+                if key in ['time', 'terminal']:
+                    continue
+                    
+                if not jnp.all(states[key][i] == states[key][j]):
+                    states_match = False
+                    break
+                    
+            if states_match:
+                current_group.add(j)
+                used_indices.add(j)
+                
+        matching_groups.append(len(current_group))
+        
+    # Calculate average size of matching groups
+    avg_matching_states = sum(matching_groups) / len(matching_groups) if matching_groups else 1
+    print(f"Average size of matching state groups: {avg_matching_states:.2f}")
+
+    next_time_actions = actions[1:]
+    old_time_actions = actions[:-1]
+    action_equal = jnp.all(next_time_actions == old_time_actions, axis=1)
+    mean_equal_actions = jnp.mean(action_equal)
+    return avg_matching_states, mean_equal_actions
+
 def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
     if args.multi_step_eval:
         # --- Multi-Step Evaluation Logic ---
@@ -456,6 +606,8 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             gt_agent_script_id = int(initial_states_traj['agent_id'][0])
+
+            avg_matching_states, mean_equal_actions = get_matching_states_and_actions(initial_states_traj, initial_actions_traj)
             
             gt_future_actions = data_sample['actions'][19:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -590,7 +742,7 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         first_step_accuracy = first_step_correct / first_step_total if first_step_total > 0 else 0
         print(f"NLLM Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip
+        return accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip, avg_matching_states, mean_equal_actions
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -876,7 +1028,7 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
         datapoint = next(dataloader)
         
         # Initialize environment (parameters will be set per datapoint)
-        env_size = 10
+        env_size = 7
         env_max_steps = num_future_steps + 5  # Sufficiently large
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):
@@ -884,6 +1036,8 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
             
             initial_states_traj = jax.tree.map(lambda x: x[:15], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:15], data_sample['actions'])
+
+            avg_matching_states, mean_equal_actions = get_matching_states_and_actions(initial_states_traj, initial_actions_traj)
             
             gt_future_actions = data_sample['actions'][14:]  # Shape (num_future_steps, num_env_agents) or (num_future_steps, 1)
 
@@ -1059,7 +1213,7 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0):
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
         print(f"BC Multi-Step Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
-        return accuracy, avg_prediction_time
+        return accuracy, avg_prediction_time, avg_matching_states, mean_equal_actions
     else:
         # Original single-step evaluation
         num_correct = 0
@@ -1128,6 +1282,8 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
             initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
             initial_images_traj = jax.tree.map(lambda x: x[:20], data_sample['images'])
+
+            avg_matching_states, mean_equal_actions = get_matching_states_and_actions(initial_states_traj, initial_actions_traj)
 
             agent_id = int(initial_states_traj['agent_id'][0])
             
@@ -1453,7 +1609,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                         plt.close(fig)
                     
                     # Save as gif
-                    gif_file_name = f'results/{args.baseline_model}/fixed3_results_fsm_bootstrap_multistep_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime/episode_{episode_id}/prediction_visualization_{n_hyp}.gif'
+                    gif_file_name = f'results/{args.baseline_model}/fixed5_results_fsm_bootstrap_multistep_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime/episode_{episode_id}/prediction_visualization_{n_hyp}.gif'
                     
                     # Create directory if it doesn't exist
                     os.makedirs(os.path.dirname(gif_file_name), exist_ok=True)
@@ -1502,7 +1658,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
         
         # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
-        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id, accuracies_after_flip
+        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id, accuracies_after_flip, avg_matching_states, mean_equal_actions
         
     else:
         # --- Original Single-Step Bootstrap Evaluation Logic ---
@@ -1626,14 +1782,15 @@ def main():
     two_stage_extension = "_two_stage" if args.two_stage else ""
     structured_extension = f"_structured_{args.structured}" if args.structured != "False" else ""
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
+    human_data_extension = "_human_data" if args.human_data else ""
     
     if args.baseline_model == "FSM" and args.bootstrap:
         if args.multi_step_eval:
-            csv_path = f"results/{args.baseline_model}/fixed3_results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
+            csv_path = f"results/{args.baseline_model}/fixed5_results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
         else: # Single-step FSM bootstrap
-            csv_path = f"results/{args.baseline_model}/fixed3_results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+            csv_path = f"results/{args.baseline_model}/fixed5_results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}.csv"
     else: # Non-bootstrap FSM or other models
-        csv_path = f"results/{args.baseline_model}/fixed3_results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"results/{args.baseline_model}/fixed5_results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -1690,16 +1847,21 @@ def main():
     # Initialize model, dataloader, and evaluation function
     model = None
     states = None # For ToMnet/BC
+
+    if args.human_data:
+        dataloader_fn = make_dataloader_human
+    else:
+        dataloader_fn = make_dataloader
     
 
     if args.baseline_model == "AutoToM":
         from baselines.AutoToM.autoToM import AutoToM
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model = AutoToM(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
         eval_fn = eval_autoToM
     elif args.baseline_model == "FSM":
         from baselines.inferFSM import FSMReasoner
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
                            dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
                            num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
@@ -1710,18 +1872,18 @@ def main():
             eval_fn = eval_fsm 
     elif args.baseline_model == 'NLLM':
         from baselines.basic_LLM import NaiveLLMReasoner
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False) # Assuming partnr=False for this context
         eval_fn = eval_naive_llm
     elif args.baseline_model == "ToMnet":
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model, states = load_tomnet_models(args)
         if not states['params']: # Check if any models were loaded
             print("No ToMnet models found or loaded. Please train models first or check paths.")
             return
         eval_fn = lambda a, d, m, s, ep_id: eval_mtom(a, d, m, s) # eval_mtom uses 'states'
     elif args.baseline_model == "BC":
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model, states = load_bc_models(args)
         if not states['params']: # Check if any models were loaded
             print("No BC models found or loaded. Please train models first or check paths.")
@@ -1741,7 +1903,7 @@ def main():
 
         if args.baseline_model == "FSM" and args.bootstrap:
             # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
-            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict = eval_fn(args, dataloader, model, episode_id=epoch)
+            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1773,6 +1935,8 @@ def main():
                         'num_steps_predicted': args.num_steps_to_predict,
                         'first_step_accuracy': first_step_accuracies_dict.get(n_hyp, 0.0),
                         'accuracy_after_flip': accuracies_after_flip_dict.get(n_hyp, 0.0),
+                        'avg_matching_states': avg_matching_states,
+                        'mean_equal_actions': mean_equal_actions,
                     }
                     
                     # Only include avg_prediction_time if it's in the existing CSV
@@ -1807,7 +1971,9 @@ def main():
                         'top_k': args.top_k,
                         'program_length': program_lengths_dict.get(n_hyp, 0.0),
                         'multi_step_eval': False,
-                        'num_steps_predicted': 1
+                        'num_steps_predicted': 1,
+                        'avg_matching_states': avg_matching_states,
+                        'mean_equal_actions': mean_equal_actions,
                     }
                     
                     # Only include avg_prediction_time if it's in the existing CSV
@@ -1821,7 +1987,7 @@ def main():
                 first_step_accuracy = None
             else:
                 if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
-                    current_accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip = eval_fn(args, dataloader, model, episode_id=epoch)
+                    current_accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
                 else:
                     current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
                     first_step_accuracy = None
@@ -1849,7 +2015,9 @@ def main():
                 'top_k': args.top_k if args.baseline_model == 'FSM' else 0, # or N/A
                 'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'FSM' and not args.bootstrap else 0, # Placeholder
                 'multi_step_eval': args.multi_step_eval,
-                'num_steps_predicted': args.num_steps_to_predict  
+                'num_steps_predicted': args.num_steps_to_predict,
+                'avg_matching_states': avg_matching_states,
+                'mean_equal_actions': mean_equal_actions,
             }
             if first_step_accuracy is not None:
                 result['first_step_accuracy'] = first_step_accuracy

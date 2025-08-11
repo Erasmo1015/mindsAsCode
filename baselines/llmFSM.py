@@ -381,11 +381,17 @@ High-level description:"""
 
                         gt_actions = actions[timestep]
                         proposed_actions = framework.execute_agent(agent, state)
-                        
-                        for i in range(1):  # just take tool use for now
-                            pa = proposed_actions[i]
-                            ga = gt_actions[i]
-                            log_prob_hypothesis += (ga.lower() == pa.lower())  # did we get the sub part of the action right?
+                        if type(proposed_actions) == tuple:
+                            for i in range(1):  # just take tool use for now
+                                pa = proposed_actions[i]
+                                ga = gt_actions[i]
+                                if type(pa) == str:
+                                    log_prob_hypothesis += (ga.lower() == pa.lower())  # did we get the sub part of the action right?
+                        elif type(proposed_actions) == str:
+                            pa = proposed_actions
+                            ga = gt_actions[0]
+                            if type(pa) == str:
+                                log_prob_hypothesis += (ga.lower() == pa.lower())  # did we get the sub part of the action right?
                     
                     final_state = states[-2]
                     final_action = framework.execute_agent(agent, final_state)
@@ -405,6 +411,7 @@ High-level description:"""
                     trial += 1
                     full_traceback = traceback.format_exc()
                     # print(full_traceback)
+                    # breakpoint()
                     if trial == num_trials:
                         break
                     agent_code = revise_response(agent_code, full_traceback, formatted_prompts[hypothesis_id], rejuvenation_attempt=False)
@@ -460,10 +467,45 @@ High-level description:"""
             weighted_program_lengths.append(weighted_length)
             
             # sample index from curr_log_probs
+            # if actual_n_hyp > 3:
+            #     breakpoint()
+            tool_preds = {}
+            tool_counts = {}
+            correct_tool_preds_prob = 0.0  # probability of the correct tool being predicted
+            not_correct_tool_preds_prob = 0.0  # probability of the correct tool not being predicted
+            for p_id, pred in enumerate(curr_final_preds):
+                if type(pred) == tuple:
+                    tool = pred[0]
+                elif type(pred) == str:
+                    tool = pred
+                if type(tool) == str:
+                    tool_preds[tool.lower()] = tool_preds.get(tool.lower(), 0) + curr_log_probs[p_id]
+                    tool_counts[tool.lower()] = tool_counts.get(tool.lower(), 0) + 1
+            # find all the tools with maximum probability
+            if len(tool_preds) == 0:
+                correct_tool_preds_prob = 0.0
+            else:
+                max_prob = max(tool_preds.values())
+                max_tools = [tool for tool, prob in tool_preds.items() if prob == max_prob]
+                if actions[-2][0] is not None:
+                    if actions[-2][0].lower() in max_tools:  # if the correct tool is in the max tools, then the probability of the correct tool being predicted is the probability of the correct tool being predicted divided by the number of max tools
+                        correct_tool_preds_prob = 1 / len(max_tools)
+                elif actions[-2][0] is None:
+                    if None in max_tools:
+                        correct_tool_preds_prob = 1 / len(max_tools)
+                else:
+                    correct_tool_preds_prob = 0.0
+
+
+                # if type(tool) == str:
+                #     if tool.lower() == actions[-2][0].lower():
+                #         correct_tool_preds_prob += curr_log_probs[p_id]
+                #     else:
+                #         not_correct_tool_preds_prob += curr_log_probs[p_id]
             sampled_index = np.random.choice(range(len(curr_log_probs)), p=curr_log_probs)
             final_action_pred = curr_final_preds[sampled_index]
             
-            bootstrap_results.append((final_action_pred, weighted_length))
+            bootstrap_results.append((final_action_pred, weighted_length, correct_tool_preds_prob))
         
         return bootstrap_results
 
