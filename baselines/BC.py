@@ -82,8 +82,13 @@ class BCNet(nn.Module):
         x = x.reshape(observations.shape[0], observations.shape[1], -1)  # (batch, num_datapoints, hidden_size)
         x = nn.Dense(features=self.hidden_size)(x)
         x = nn.relu(x)
+        # x= nn.Dense(features=self.lstm_hidden_size)(x)
+        # x = nn.relu(x)
+        # x = nn.Dense(features=self.lstm_hidden_size)(x)
+        # x = nn.relu(x)
 
         # add lstm
+        # breakpoint()
         batch_size = observations.shape[0]
         lstm = SimpleScan(hidden_size=self.lstm_hidden_size)
         def init_carry(batch_size, hidden_size):

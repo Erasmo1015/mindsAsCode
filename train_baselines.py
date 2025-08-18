@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument(
         "--baseline_model",
         type=str,
-        default="ToMnet",
+        default="BC",
         help="Baseline model to train. Currently only 'ToMnet' and 'BC' are implemented."
     )
     parser.add_argument(
@@ -50,7 +50,7 @@ def parse_args():
     # parser.add_argument('--num_walls', type=int, default=10, help='Number of walls in the dataset.')
 
     parser.add_argument('--as_images', type=bool, default=True, help='Whether to load the data as images.')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer.')
+    parser.add_argument('--learning_rate', type=float, default=1e-2, help='Learning rate for the optimizer.')
     parser.add_argument('--num_epochs', type=int, default=50, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=30, help='Random seed.')
@@ -318,6 +318,7 @@ def bc_train_step(state, batch, rng_key):
             
             # Forward pass through the model
             variables = {'params': params, 'batch_stats': state.batch_stats}
+            # breakpoint()
             action_prediction, updates = state.apply_fn(
                 variables, 
                 agent_states, 

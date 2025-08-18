@@ -19,23 +19,42 @@ class FSMAgent:
     '''
     Your helper functions for decision-making go here
     '''
+
+    def parse_scene_graph(self, observation):
+        for keys in observation['scene_graph']:
+            if keys == 'furniture':
+                for room_name, furniture_list in observation['scene_graph'][key].items():
+                    for furniture_piece in furniture_list:
+                        pass  # each furniture_piece is a string
+            if keys == 'objects':
+                if type(observation['scene_graph'][keys]) == list and len(observation['scene_graph'][keys]) == 0:
+                    pass  # no objects seen
+                else:
+                    for object, object_holder_list in observation['scene_graph'][keys].items():
+                        for object_holder in object_holder_list:
+                            pass # each object is either on or in an object holder
+        return # do whatever is most helpful here
+        
         
     def act(self, observation) -> int:
         '''
         observation is a dictionary with the following keys:
         - tool_list: List of tools available to the agent
         - tool_descriptions: Description of how each tool is used
-        - scene_graph: Scene graph of the environment, dictionary mapping
-            - object_class string (i.e. furnitutre, objects) to dictionary mapping
-                - room string (i.e. living_room_1, bathroom_1, etc.) if object_class is "furniture" to list of 
+        - scene_graph: Scene graph of the environment, dictionary with keys
+            - "furniture" which maps to a dictionary with the keys
+                - room description string (i.e. keys could be "living_room_1", "bathroom_1", etc.) that maps to list of 
                     - object_id string (i.e. table_21, chair_32, etc.)
-                - object_id string (i.e. "plate_container_2", "vase_1" etc.) if object_class is "objects" to list of 
+            - "objects" which maps to a dictionary of 
+                - object_id string (i.e. keys could be "plate_container_2", "vase_1" etc.) to list of 
                     - object_base string (i.e "table_14", "table_21")
-        - agent_state: String describing the state of the agent
+                if type(observation['scene_graph']['objects']) == list, then you do not observe any objects
+        - agent_state: Dictionary mapping to 
+            - string of agent id (i.e. "0") maps to string describing what agent is doing
         '''
 
         # TODO: Implement the agent's decision-making logic here
-        # This is a placeholder implementation that returns a random action.
+        # This is a placeholder implementation
         tool = 'Navigate'
         target = 'table_21'
 
@@ -43,6 +62,7 @@ class FSMAgent:
         ## DON'T CHANGE ANYTHING BELOW HERE
         return (tool, target, None)
 ```
+
 Please implement the FSM code to model the logic of the agent's behavior as demonstrated by the experiences. Please implement the code following the template. Feel free to implement the helper functions you need. 
 You must leave your answer in a code block surrounded by ```python and ```, with the agent class being called FSMAgent. The code needs to be directly runnable on the inputs as observation and return the action (tool, target, None). Let's think step by step.
 

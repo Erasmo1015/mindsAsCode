@@ -87,7 +87,7 @@ task_list = [
 
 def load_and_save_human_gameplay_data(directory: str):
     files = os.listdir(directory)
-    files = [f for f in files if f.endswith('.json')]
+    files = sorted([f for f in files if f.endswith('.json')])
     all_file_states = []
     all_file_actions = []
     all_file_agent_indices = []
@@ -153,7 +153,8 @@ def load_and_save_human_gameplay_data(directory: str):
         if not_complete:
             continue
         
-        
+        if len(all_state_trajectories) == 0:
+            continue
 
         all_state_trajectories = jax.tree.map(lambda *x: np.stack(x), *all_state_trajectories)  # (num_tasks, num_timesteps, *)
         all_action_trajectories = np.stack(all_action_trajectories)  # (num_tasks, num_timesteps)
@@ -190,9 +191,12 @@ def load_and_save_human_gameplay_data(directory: str):
 
 def load_and_stack_human_gameplay_data(directory: str):
     import pickle
-    files = os.listdir(directory)
+    files = sorted(os.listdir(directory)) 
     files = [f for f in files if f.endswith('.pkl')]
-    for file in files:
+    bad_indices = [0, 2, 9]
+    for i, file in enumerate(files):
+        if i in bad_indices:
+            continue
         filepath = os.path.join(directory, file)
         with open(filepath, 'rb') as f:
             data_file = pickle.load(f)
@@ -211,6 +215,7 @@ def load_and_stack_human_gameplay_data(directory: str):
 
 if __name__ == "__main__":
     # directory = '/Users/kunal/Code/UW/human_data'
-    # load_and_save_human_gameplay_data('data/human_data_fix')
-    load_and_stack_human_gameplay_data('data/human_data_fix')
-    print('done')
+    load_and_save_human_gameplay_data('data/human_data_fix')
+    # breakpoint()
+    # load_and_stack_human_gameplay_data('data/human_data_fix')
+    # print('done')
