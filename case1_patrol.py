@@ -5,6 +5,11 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
+import random
+import math
+from copy import deepcopy
+from tqdm import tqdm
+
 grid_str = """
 #######
 ## 1 ##
@@ -40,6 +45,7 @@ class PatrolEnv(AutomaticityEnv):
         reward = jnp.where(reached_block, 100, reward)
         return obs, state, reward
 
+
 def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
     img_frames = []
     actions_taken = []
@@ -53,6 +59,7 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
     framework = AgentExecutionFramework()
     state = init_state
     total_reward = 0
+    trajectory = ['stay', 'up', 'left', 'up', 'up', 'up', 'right']
     for i in range(num_steps):
         actions = []
         action_taken_list = []
@@ -60,7 +67,8 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
             if agent_id < len(agent_list):
                 chosen_action = framework.execute_agent(agent_list[agent_id], obs[agent_id])
             else:
-                chosen_action = 0
+                chosen_action = trajectory[i]
+                chosen_action = action_names.index(chosen_action)
             actions.append(chosen_action)
             action_taken_list.append(action_names[chosen_action])
         actions_taken.append(action_taken_list)
@@ -69,7 +77,10 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
         obs0 = jax.tree.map(lambda x: jnp.array(x), obs[0])
         obs1 = jax.tree.map(lambda x: jnp.array(x), obs[1])
         img_frames.append(state_to_image_jit(obs0, grid_size, tile_size=tile_size))
-    return img_frames[:-1], actions_taken, total_reward
+        if reward != -1:
+            break
+    actions_taken.append(['Terminal', 'Terminal'])
+    return img_frames, actions_taken, total_reward
 
 def trajectory_to_gif(img_frames, actions_taken, gif_path):
     try:
@@ -151,6 +162,7 @@ if __name__ == "__main__":
     patrolling_agent_txt = open(patrolling_agent_path, 'r').read()
     patrolling_agent = AgentExecutionFramework().compile_agent(patrolling_agent_txt, num_agents=num_agents, num_blocks=1)
 
+    # Generate trajectory with both agents
     img_frames, actions_taken, total_reward = generate_trajectory(env, state, 100, [patrolling_agent], num_agents)
-    trajectory_to_gif(img_frames, actions_taken, 'patrol.gif')
+    trajectory_to_gif(img_frames, actions_taken, 'patrol_mcts.gif')
     print(f"Total reward: {total_reward}")
