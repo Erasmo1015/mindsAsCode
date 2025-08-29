@@ -80,12 +80,6 @@ def generate_trajectory(agent_id, agent_list, seed=0, num_agents=1, num_steps=10
                 breakpoint()
         assert len(actions) == num_agents
 
-        # print(state.agent_locations)
-        # print(state.agent_inventory)
-        # action_name = env.action_to_name[actions[0]]
-        # print(action_name)
-        # print('--------------------------------')
-        # try:
         next_obs, next_state = env.step(state, jnp.array(actions))
 
 

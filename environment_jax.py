@@ -552,16 +552,16 @@ def state_to_image_jit(state, grid_size, tile_size):
 
 sample_grid = '''
 #######
-#  1  #
-# A A #
-#  #  #
-#21 3 #
-# 4  5#
+#     #
+#1A  2#
+#     #
+#3    #
+#     #
 #######
 '''
 
 def str_to_grid(state_str: str):
-    lines = state_str.split('\n')
+    lines = state_str.strip().split('\n')
     height = len(lines)
     width = len(lines[0])
     wall_locations = []
@@ -572,8 +572,8 @@ def str_to_grid(state_str: str):
     block_colors_grid = []
     time = 0
     terminal = False
-    agent_id = -1
-
+    agent_id = 0
+    curr_agent_id = 0
     for y, line in enumerate(lines):
         for x, char in enumerate(line):
             if char == '#':
@@ -583,7 +583,8 @@ def str_to_grid(state_str: str):
             elif char == 'A':
                 agent_locations.append((x, y))
                 agent_inventory.append(-1)
-                agent_inventory_colors.append((255, 0, 0))
+                agent_inventory_colors.append(agent_colors[curr_agent_id])
+                curr_agent_id += 1
             elif char.isdigit():
                 block_locations.append((x, y))
                 block_colors_grid.append(block_colors[int(char)-1])
@@ -632,18 +633,24 @@ if __name__ == "__main__":
     obs = jax.tree.map(lambda x: jnp.array(x), obs)
 
     # Test the original function
-    image = state_to_image(obs, grid_size, tile_size=tile_size)
+    # image = state_to_image(obs, grid_size, tile_size=tile_size)
+    # plt.figure(figsize=(8, 8))
+    # plt.subplot(1, 2, 1)
+    # plt.title("Original")
+    # plt.imshow(image)
+
+    # # Test the JIT-compatible function
+    # jitted_render = jax.jit(state_to_image_jit, static_argnums=(1, 2))
+    # img_size = grid_size * tile_size
+    # jit_image = jitted_render(obs, grid_size, tile_size)
+    # plt.subplot(1, 2, 2)
+    # plt.title("JIT")
+    # plt.imshow(jit_image)
+
+    # plt.savefig("test.svg")
+    
+    image = state_to_image_jit(obs, grid_size, tile_size=tile_size)
     plt.figure(figsize=(8, 8))
-    plt.subplot(1, 2, 1)
-    plt.title("Original")
     plt.imshow(image)
-
-    # Test the JIT-compatible function
-    jitted_render = jax.jit(state_to_image_jit, static_argnums=(1, 2))
-    img_size = grid_size * tile_size
-    jit_image = jitted_render(obs, grid_size, tile_size)
-    plt.subplot(1, 2, 2)
-    plt.title("JIT")
-    plt.imshow(jit_image)
-
-    plt.savefig("test.png")
+    plt.axis("off")
+    plt.savefig("block_cycle.svg")
