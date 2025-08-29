@@ -96,7 +96,7 @@ def parse_args():
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
-    if args.baseline_model not in ["ToMnet", 'BC', 'AutoToM', 'FSM', 'NLLM']:
+    if args.baseline_model not in ["ToMnet", 'BC', 'AutoToM', 'FSM', 'NLLM', 'Oracle']:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     if args.baseline_model == 'AutoToM':
@@ -1929,6 +1929,17 @@ def main():
             eval_fn = eval_fsm_bootstrap # This function handles multi_step_eval internally
         else:
             eval_fn = eval_fsm 
+    elif args.baseline_model == "Oracle":
+        from baselines.inferFSM import FSMReasoner
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+                           dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
+                           num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
+                           structured=args.structured, oracle=True)
+        if args.bootstrap:
+            eval_fn = eval_fsm_bootstrap # This function handles multi_step_eval internally
+        else:
+            eval_fn = eval_fsm 
     elif args.baseline_model == 'NLLM':
         from baselines.basic_LLM import NaiveLLMReasoner
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
@@ -1962,7 +1973,7 @@ def main():
         
         results_to_save = []
 
-        if args.baseline_model == "FSM" and args.bootstrap:
+        if args.baseline_model in ["FSM", "Oracle"] and args.bootstrap:
             # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
             accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
             

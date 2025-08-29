@@ -20,7 +20,7 @@ class FSMReasoner:
     def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", tensor_parallel_size: int = 1, device: str = "cuda", 
                  dtype: str = "float16", gpu_memory_utilization: float = 0.55, num_hypothesis: int = 4,
                  max_model_len: int = 2048, quantization: str = None, group: bool = False, two_stage: bool = False,
-                 structured: str = "False"):
+                 structured: str = "False", oracle: bool = False):
         self.model_name = model_name
         self.tensor_parallel_size = tensor_parallel_size
         self.device = device
@@ -31,6 +31,7 @@ class FSMReasoner:
         self.quantization = quantization
         self.two_stage = two_stage
         self.structured = structured
+        self.oracle = oracle
         self.action_to_name = {
             0: "stay",
             1: "right",
@@ -73,6 +74,11 @@ class FSMReasoner:
         self.refinement_1 = open(refinement_1_path, "r").read()
         self.refinement_2 = open(refinement_2_path, "r").read()
         self.refinement_3 = open(refinement_3_path, "r").read()
+
+        if self.oracle:
+            program_dir = "/mmfs1/gscratch/socialrl/kjha/automaticity/generated_outputs/hand_designed"
+            gt_programs = sorted(os.listdir(program_dir))
+            self.gt_programs = [open(f"{program_dir}/{p}", "r").read() for p in gt_programs]
 
 
         # Convert dtype string to torch dtype
@@ -222,10 +228,13 @@ Your high-level 5 word summary:"""
                   If 0, average over all hypotheses (default behavior).
             return_compiled_agents: If True, return compiled agents, their probabilities, and codes for max_hypotheses.
         """
+        if self.oracle:
+            max_hypotheses = len(self.gt_programs)  # use all oracle programs
+            
         episode_name = f"{self.dataset_name}_{episode_id}"
         state_action_text = self.convert_states_actions_to_text(states, actions)
         
-        if self.two_stage:
+        if self.two_stage and not self.oracle:
             # Generate high-level description first
             high_level_description = self.generate_high_level_description(state_action_text)
             
@@ -271,7 +280,7 @@ Your high-level 5 word summary:"""
             else:
                 # Original approach for other structured options
                 full_prompt = f"{self.base_prompt}\n{high_level_description}\n{self.code_template}"
-        else:
+        elif not self.oracle and not self.two_stage:
             # Not using two-stage approach
             if self.structured == "p2":
                 # First stage: Generate high-level FSM description using state_action_text
@@ -325,46 +334,49 @@ Your high-level 5 word summary:"""
         agent_codes = []
         
         # Generate max_hypotheses instead of self.num_hypothesis
-        formatted_prompts = []
-        for hypothesis_id in range(max_hypotheses):
-            messages = [{"role": "system", "content": "You are a helpful assistant."}, {'role': 'user', 'content': full_prompt}]
-            
-            # Format messages for vLLM or OpenAI
-            if self.use_openai:
-                formatted_prompt = messages
-            elif "llama" in self.model_name.lower():
-                # Format for Llama models
-                formatted_prompt = ""
-                for msg in messages:
-                    if msg["role"] == "system":
-                        formatted_prompt += f"<|system|>\n{msg['content']}\n"
-                    elif msg["role"] == "user":
-                        formatted_prompt += f"<|user|>\n{msg['content']}\n"
-                    elif msg["role"] == "assistant":
-                        formatted_prompt += f"<|assistant|>\n{msg['content']}\n"
-                formatted_prompt += "<|assistant|>\n"
-            else:
-                # Generic chat format
-                formatted_prompt = full_prompt
+        if not self.oracle:
+            formatted_prompts = []
+            for hypothesis_id in range(max_hypotheses):
+                messages = [{"role": "system", "content": "You are a helpful assistant."}, {'role': 'user', 'content': full_prompt}]
                 
-            formatted_prompts.append(formatted_prompt)
+                # Format messages for vLLM or OpenAI
+                if self.use_openai:
+                    formatted_prompt = messages
+                elif "llama" in self.model_name.lower():
+                    # Format for Llama models
+                    formatted_prompt = ""
+                    for msg in messages:
+                        if msg["role"] == "system":
+                            formatted_prompt += f"<|system|>\n{msg['content']}\n"
+                        elif msg["role"] == "user":
+                            formatted_prompt += f"<|user|>\n{msg['content']}\n"
+                        elif msg["role"] == "assistant":
+                            formatted_prompt += f"<|assistant|>\n{msg['content']}\n"
+                    formatted_prompt += "<|assistant|>\n"
+                else:
+                    # Generic chat format
+                    formatted_prompt = full_prompt
+                    
+                formatted_prompts.append(formatted_prompt)
         
-        # Generate responses for each hypothesis
-        if self.use_openai:
-            # Process each hypothesis individually with OpenAI API
-            outputs = []
-            for prompt in formatted_prompts:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=prompt,
-                    temperature=1.0,
-                    max_tokens=2000
-                )
-                outputs.append(response.choices[0].message.content)
+            # Generate responses for each hypothesis
+            if self.use_openai:
+                # Process each hypothesis individually with OpenAI API
+                outputs = []
+                for prompt in formatted_prompts:
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=prompt,
+                        temperature=1.0,
+                        max_tokens=2000
+                    )
+                    outputs.append(response.choices[0].message.content)
+            else:
+                # Batch generate with vLLM
+                vllm_outputs = self.llm.generate(formatted_prompts, self.sampling_params)
+                outputs = [output.outputs[0].text for output in vllm_outputs]
         else:
-            # Batch generate with vLLM
-            vllm_outputs = self.llm.generate(formatted_prompts, self.sampling_params)
-            outputs = [output.outputs[0].text for output in vllm_outputs]
+            outputs = self.gt_programs
         
         agent_codes = []
         # Process each hypothesis

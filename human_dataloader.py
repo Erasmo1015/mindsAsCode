@@ -85,6 +85,19 @@ task_list = [
     "Alternate between going up until you hit a wall, then going down until you hit a wall",
 ]
 
+abbreviated_task_list = [
+    "Repeat green-->blue-->purple",
+    "Patrol Clockwise",
+    "Patrol Counter-clockwise",
+    "Left to right",
+    "Pair blue blocks",
+    "L-shape",
+    "Green to corner",
+    "Pink to corner",
+    "Snake up and down",
+    "Up and down",
+]
+
 def load_and_save_human_gameplay_data(directory: str):
     files = os.listdir(directory)
     files = sorted([f for f in files if f.endswith('.json')])
@@ -139,7 +152,7 @@ def load_and_save_human_gameplay_data(directory: str):
             all_state_trajectories.append(stacked_state_trajectory)
             all_action_trajectories.append(stacked_action_trajectory)
 
-        task_to_idx = {task: i for i, task in enumerate(all_tasks)}
+
         task_to_idx = np.array([task_list.index(task) for task in all_tasks])
 
         # Sort by task indices
@@ -163,6 +176,8 @@ def load_and_save_human_gameplay_data(directory: str):
         all_state_trajectories = jax.tree.map(lambda x: x[sort_indices], all_state_trajectories)
         all_action_trajectories = all_action_trajectories[sort_indices]
         task_to_idx = task_to_idx[sort_indices]
+
+        all_tasks = [all_tasks[i] for i in sort_indices]
 
         data_file = {
             'states': all_state_trajectories,
@@ -202,13 +217,11 @@ def load_and_stack_human_gameplay_data(directory: str):
             data_file = pickle.load(f)
             states = data_file['states']
             actions = data_file['actions']
-            task_idx = data_file['sort_indices']
             filename = data_file['file']
             for i in range(actions.shape[0]):
                 state_dat = jax.tree.map(lambda x: x[i], states)
                 action_dat = actions[i]
-                agent_id = task_idx[i]
-                yield state_dat, action_dat, agent_id, filename, task_list[agent_id]
+                yield state_dat, action_dat, i, filename, task_list[i]
 
             
 
@@ -217,5 +230,6 @@ if __name__ == "__main__":
     # directory = '/Users/kunal/Code/UW/human_data'
     load_and_save_human_gameplay_data('data/human_data_fix')
     # breakpoint()
-    # load_and_stack_human_gameplay_data('data/human_data_fix')
+    # loader= load_and_stack_human_gameplay_data('data/human_data_fix')
+    # next(loader)
     # print('done')

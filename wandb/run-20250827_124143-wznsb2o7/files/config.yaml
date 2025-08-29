@@ -1,0 +1,55 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    code_path: code/eval_partnr.py
+    python_version: 3.12.9
+    cli_version: 0.16.1
+    framework: huggingface
+    huggingface_version: 4.48.3
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1756323704.794191
+    t:
+      1:
+      - 1
+      - 2
+      - 3
+      - 5
+      - 11
+      - 12
+      - 30
+      - 41
+      - 45
+      - 49
+      - 53
+      - 55
+      - 71
+      - 95
+      - 105
+      2:
+      - 1
+      - 2
+      - 3
+      - 5
+      - 11
+      - 12
+      - 30
+      - 41
+      - 45
+      - 49
+      - 53
+      - 55
+      - 71
+      - 95
+      - 105
+      3:
+      - 13
+      - 23
+      4: 3.12.9
+      5: 0.16.1
+      6: 4.48.3
+      8:
+      - 5
+      13: linux-x86_64
