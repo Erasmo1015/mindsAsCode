@@ -1,4 +1,6 @@
-from environment_jax import AutomaticityEnv, str_to_grid, state_to_image_jit
+from environment_jax import AutomaticityEnv, str_to_grid
+from environment import state_to_image_jit
+from baselines.BC import BCNet
 from agent import AgentExecutionFramework
 import jax
 import jax.numpy as jnp
@@ -10,6 +12,76 @@ import math
 import pickle
 import copy
 from tqdm import tqdm
+import argparse
+import os
+import flax
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Train baseline models for automaticity.")
+    parser.add_argument(
+        "--baseline_model",
+        type=str,
+        default="BC",
+        help="Baseline model to train. Currently only 'ToMnet' and 'BC' are implemented."
+    )
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="data",
+        help="Path to the dataset folders."
+    )
+    parser.add_argument(
+        "--group",
+        type=bool,
+        default=False,
+        help="Whether to use joint-planner data."
+    )
+    parser.add_argument('--num_agents_to_sample', type=int, default=1, help='Number of agents to sample from the dataset.')
+    parser.add_argument('--num_datapoints_per_agent_to_sample', type=int, default=3, help='Number of datapoints per agent to sample from the dataset.')
+    parser.add_argument('--num_agents', type=int, default=1, help='Number of agents in the dataset.')
+    parser.add_argument('--num_datapoints_per_agent', type=int, default=5, help='Number of datapoints per agent in the dataset.')
+    parser.add_argument('--num_steps', type=int, default=50, help='Number of steps in the dataset.')
+    parser.add_argument('--env_size', type=int, default=7, help='Size of the environment.')
+    # parser.add_argument('--num_blocks', type=int, default=10, help='Number of blocks in the dataset.')
+    # parser.add_argument('--num_walls', type=int, default=10, help='Number of walls in the dataset.')
+
+    parser.add_argument('--as_images', type=bool, default=False, help='Whether to load the data as images.')
+    parser.add_argument('--learning_rate', type=float, default=1e-2, help='Learning rate for the optimizer.')
+    parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
+    parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed.')
+    parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
+    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
+    parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
+    parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
+    parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
+    parser.add_argument('--bootstrap', action='store_true', help='Whether to use bootstrapping for hypothesis evaluation')
+    parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage approach for FSM reasoning')
+    parser.add_argument('--structured', type=str, default="False", choices=["False", "p1", "p2"], 
+                        help='Structured prompting type for FSM reasoning: False, p1, or p2')
+    parser.add_argument('--rejuvenation', action='store_true', help='Use rejuvenation for FSM model')
+    parser.add_argument('--plot_gifs', action='store_true', help='Plot gifs for FSM model')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=1, help='Threshold for rejuvenation')
+    parser.add_argument('--max_rejuvenation_attempts', type=int, default=2, help='Maximum number of rejuvenation attempts')
+    parser.add_argument('--top_k', type=int, default=0, help='If > 0, only average over the top k most likely hypotheses')
+    parser.add_argument('--multi_step_eval', type=bool, default=True, help='Perform multi-step evaluation for FSM')
+    parser.add_argument('--num_steps_to_predict', type=int, default=20, help='Number of future steps to predict in multi-step eval')
+    parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
+    parser.add_argument('--human_data', type=bool, default=False, help='Use human data')
+    args = parser.parse_args()
+    
+    # Check if the selected baseline model is implemented
+    if args.baseline_model not in ["ToMnet", 'BC', 'AutoToM', 'FSM', 'NLLM', 'Oracle']:
+        raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
+    
+    if args.baseline_model == 'AutoToM':
+        os.environ['CURRENT_MODEL_NAME'] = args.model_name
+    
+    return args
+
+
 
 grid_str = """
 #######
@@ -51,8 +123,12 @@ class MCTSAgent:
         action_probs = jnp.exp(-distances)
         action_probs = action_probs / jnp.sum(action_probs)
         return action_probs.astype(np.float32)
+
+    '''
+    TODO: make a separate get_action function for bc that uses jax's vmap to speed up the simulation
+    '''
         
-    def get_action(self, obs, state, predictor_model):
+    def get_action(self, obs, state, predictor_model, first_patrol_obs):
         '''
         This function takes in the current observation, simulates many possible trajectories, and returns the action that maximizes the expected reward.
         '''
@@ -74,7 +150,7 @@ class MCTSAgent:
                     curr_obs = obs
                     curr_state = state
                     sneak_action = first_step_action
-                    patrol_obs = self.jitted_get_observation(curr_state)[0]
+                    patrol_obs = first_patrol_obs
                 else:
                     action_probs = self.value_function(curr_obs)
                     try:    
@@ -87,12 +163,29 @@ class MCTSAgent:
                     patrol_action = framework.execute_agent(copy_of_model, patrol_obs)
                 elif self.prediction_model_type == 'random':
                     patrol_action = np.random.randint(0, self.num_actions)
+                elif self.prediction_model_type == 'bc':
+                    bc_model, bc_state = predictor_model
+                    params_to_use = np.random.randint(0, 6)
+                    bc_param_state = jax.tree.map(lambda x: x[params_to_use], bc_state)
+                    action_pred = bc_model.apply(bc_param_state, patrol_obs, None, training=False)
+                    action_pred = action_pred[0, -1]
+                    try:
+                        patrol_action = np.random.choice(self.num_actions, p=action_pred)
+                    except:
+                        patrol_action = np.argmax(action_pred)
                 else:
                     raise ValueError(f"Invalid prediction model type: {self.prediction_model_type}")
                 actions_to_execute = jnp.array([int(patrol_action), int(sneak_action)])
                 all_obs, curr_state, reward = self.jitted_step(curr_state, actions_to_execute)
                 curr_obs = all_obs[1] # sneak agent's observation
-                patrol_obs = all_obs[0] # patrol agent's observation
+                if self.prediction_model_type == 'bc':
+                    grid_size = 7
+                    tile_size = 10
+                    patrol_image = state_to_image_jit(all_obs[0], grid_size*tile_size, grid_size, tile_size=tile_size)
+                    patrol_image = patrol_image[None, None]
+                    patrol_obs = jnp.concatenate([patrol_obs, patrol_image], axis=1)[:, 1:]
+                else:
+                    patrol_obs = all_obs[0] # patrol agent's observation
                 curr_sim_reward += reward
                 if curr_state.terminal:
                     break
@@ -127,7 +220,7 @@ class PatrolEnv(AutomaticityEnv):
         return obs, state, reward
 
 
-def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
+def generate_trajectory(env, init_state, num_steps, agent_list, num_agents, prediction_model):
     img_frames = []
     actions_taken = []
     action_names = ["stay", "right", "left", "down", "up", "interact"]
@@ -135,21 +228,29 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
 
     obs0 = jax.tree.map(lambda x: jnp.array(x), obs[0])
     obs1 = jax.tree.map(lambda x: jnp.array(x), obs[1])
-    img_frames.append(state_to_image_jit(obs0, grid_size, tile_size=tile_size))
+    img_frames.append(state_to_image_jit(obs0,grid_size*tile_size, grid_size, tile_size=tile_size))
     
     framework = AgentExecutionFramework()
     state = init_state
     total_reward = 0
-    trajectory = ['stay', 'up', 'left', 'up', 'up', 'up', 'right']
+    trajectory = ['stay'] * 19
     for i in range(num_steps):
         actions = []
         action_taken_list = []
         for agent_id in range(num_agents):
             if agent_id < len(agent_list):
-                if type(agent_list[agent_id]) == MCTSAgent:
-                    chosen_action = agent_list[agent_id].get_action(obs[agent_id], state, agent_list[0])
+                agent = agent_list[agent_id]
+                if type(agent) == MCTSAgent:
+                    if i < 19:
+                        chosen_action = action_names.index(trajectory[i])
+                    else:
+                        if agent.prediction_model_type == 'gt' or agent.prediction_model_type == 'random':
+                            first_patrol_obs = obs[0]
+                        else:
+                            first_patrol_obs = jnp.stack(img_frames)[None]  # add batch dimension 
+                        chosen_action = agent.get_action(obs[1], state, prediction_model, first_patrol_obs)
                 else:
-                    chosen_action = framework.execute_agent(agent_list[agent_id], obs[agent_id])
+                    chosen_action = framework.execute_agent(agent, obs[agent_id])
             else:
                 chosen_action = trajectory[i]
                 chosen_action = action_names.index(chosen_action)
@@ -161,7 +262,7 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents):
         total_reward += reward
         obs0 = jax.tree.map(lambda x: jnp.array(x), obs[0])
         obs1 = jax.tree.map(lambda x: jnp.array(x), obs[1])
-        img_frames.append(state_to_image_jit(obs0, grid_size, tile_size=tile_size))
+        img_frames.append(state_to_image_jit(obs0, grid_size*tile_size, grid_size, tile_size=tile_size))
         if reward != -2:
             break
     actions_taken.append(['Terminal', 'Terminal'])
@@ -227,11 +328,95 @@ def trajectory_to_gif(img_frames, actions_taken, gif_path):
         print("Try installing imageio with: pip install imageio")
 
 
+def load_bc_models(args):
+    """Load BC models from multiple seeds."""
+    states = []
+    
+    # Define the learning rate to use
+    lr = args.learning_rate
+
+    # Initialize model
+    if args.group:
+        num_to_predict = 4
+    else:
+        num_to_predict = 1
+    model = BCNet(output_size=6, hidden_size=32, num_to_predict=num_to_predict)
+    
+    for seed in range(6):
+        # Construct the path pattern similar to what's used in train_baselines.py
+        model_path = f"baselines/BC/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}_seed{seed}_lr{lr}_group{args.group}"
+        
+        # Look for the latest checkpoint
+        checkpoint_dir = os.path.dirname(model_path)
+
+        if not os.path.exists(checkpoint_dir):
+            print(f"Directory {checkpoint_dir} does not exist, skipping seed {seed}")
+            continue
+            
+        checkpoint_files = [f for f in os.listdir(checkpoint_dir) 
+                            if os.path.basename(model_path) in f and "checkpoint" in f]
+        
+        if not checkpoint_files:
+            # Try looking for final model
+            final_model = f"{model_path}_final.msgpack"
+            if os.path.exists(final_model):
+                checkpoint_path = final_model
+            else:
+                print(f"No checkpoint found for seed {seed}, skipping")
+                continue
+        else:
+            # Find the most recent checkpoint
+            checkpoint_epochs = [int(f.split("epoch")[-1].split(".")[0]) for f in checkpoint_files]
+            if 2500 in checkpoint_epochs:
+                most_recent_epoch = 2500
+            else:
+                most_recent_epoch = max(checkpoint_epochs)
+            
+            most_recent_checkpoint = [f for f in checkpoint_files if f"epoch{most_recent_epoch}" in f][0]
+            checkpoint_path = os.path.join(checkpoint_dir, most_recent_checkpoint)
+        
+        print(f"Loading BC model from seed {seed}: {checkpoint_path}")
+        
+        
+        # Load checkpoint
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint_bytes = f.read()
+        
+        # Create a dummy state to get the structure right
+        rng_key = jax.random.PRNGKey(0)
+        dummy_states = jnp.zeros((args.num_datapoints_per_agent_to_sample, 20, args.env_size*7, args.env_size*7, 3))
+        dummy_actions = jnp.zeros((args.num_datapoints_per_agent_to_sample, 20, 1))
+        variables = model.init(rng_key, dummy_states, dummy_actions)
+        
+        # Create target structure for deserialization
+        target = {
+            'params': variables['params'],
+            'batch_stats': variables.get('batch_stats', flax.core.FrozenDict()),
+            'epoch': 0,
+            'loss': 0.0
+        }
+        
+        # Deserialize checkpoint
+        checkpoint = flax.serialization.from_bytes(target, checkpoint_bytes)
+        
+        states.append({
+            'params': checkpoint['params'],
+            'batch_stats': checkpoint['batch_stats']
+        })
+    # Stack all parameters from different seeds into a single state
+    stacked_state = {
+        'params': jax.tree.map(lambda *xs: jnp.stack(xs), *[s['params'] for s in states]),
+        'batch_stats': jax.tree.map(lambda *xs: jnp.stack(xs), *[s['batch_stats'] for s in states])
+    }
+    return model, stacked_state
 
 if __name__ == "__main__":
+    args = parse_args()
     num_agents = 2
     tile_size = 10
     grid_size = 7
+
+    bc_model, bc_state = load_bc_models(args)
 
     env = PatrolEnv(
         num_agents=num_agents,
@@ -247,9 +432,9 @@ if __name__ == "__main__":
     patrolling_agent_txt = open(patrolling_agent_path, 'r').read()
     patrolling_agent = AgentExecutionFramework().compile_agent(patrolling_agent_txt, num_agents=num_agents, num_blocks=1)
 
-    mcts_agent = MCTSAgent(env, num_agents, num_blocks=1, num_walls=1, num_simulations=500, simulation_depth=50, prediction_model_type='gt')
+    mcts_agent = MCTSAgent(env, num_agents, num_blocks=1, num_walls=1, num_simulations=500, simulation_depth=50, prediction_model_type='bc')
 
     # Generate trajectory with both agents
-    img_frames, actions_taken, total_reward = generate_trajectory(env, state, 100, [patrolling_agent, mcts_agent], num_agents)
+    img_frames, actions_taken, total_reward = generate_trajectory(env, state, 100, [patrolling_agent, mcts_agent], num_agents, [bc_model, bc_state])
     trajectory_to_gif(img_frames, actions_taken, 'patrol_mcts.gif')
     print(f"Total reward: {total_reward}")
