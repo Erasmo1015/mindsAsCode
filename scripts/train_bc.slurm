@@ -26,16 +26,18 @@ conda activate llm
 module load cuda/12.4
 module load gcc/10.2.0
 
-cd /mmfs1/gscratch/socialrl/kjha/automaticity
+cd /mmfs1/gscratch/socialrl/kjha/automaticity/results
 
-# Run the main command and capture its exit status
-python train_baselines.py --baseline_model 'BC' --num_epochs 5000 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 3 --seed $1
-EXIT_CODE=$?
+python partnr_embeddings.py
 
-# If the job failed (non-zero exit code), resubmit it
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "Job failed with exit code $EXIT_CODE. Requeuing..."
-    # Submit the same script again
-    sbatch $0 $1
-    exit $EXIT_CODE
-fi
+# # Run the main command and capture its exit status
+# python train_baselines.py --baseline_model 'BC' --num_epochs 5000 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 3 --seed $1
+# EXIT_CODE=$?
+
+# # If the job failed (non-zero exit code), resubmit it
+# if [ $EXIT_CODE -ne 0 ]; then
+#     echo "Job failed with exit code $EXIT_CODE. Requeuing..."
+#     # Submit the same script again
+#     sbatch $0 $1
+#     exit $EXIT_CODE
+# fi

@@ -1,12 +1,11 @@
 from environment_jax import AutomaticityEnv, str_to_grid
 from environment import state_to_image_jit
-from baselines.BC import BCNet
 from agent import AgentExecutionFramework
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-
+import torch
 import random
 import math
 import pickle
@@ -15,6 +14,7 @@ from tqdm import tqdm
 import argparse
 import os
 import flax
+# from jax_tqdm import scan_tqdm
 
 def parse_args():
     """Parse command line arguments."""
@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument(
         "--baseline_model",
         type=str,
-        default="BC",
+        default="AutoToM",
         help="Baseline model to train. Currently only 'ToMnet' and 'BC' are implemented."
     )
     parser.add_argument(
@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--model_name', type=str, default="meta-llama/Llama-3.1-8B-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -122,11 +122,148 @@ class MCTSAgent:
         distances = jax.vmap(compute_distance, in_axes=(None, None, 0))(sneak_location, block_location, self.action_deltas)
         action_probs = jnp.exp(-distances)
         action_probs = action_probs / jnp.sum(action_probs)
-        return action_probs.astype(np.float32)
+        return action_probs.astype(jnp.float32)
 
     '''
     TODO: make a separate get_action function for bc that uses jax's vmap to speed up the simulation
     '''
+    def get_action_bc(self, rng_key, obs, state, predictor_model, first_patrol_obs):
+        '''
+        This function takes in the current observation, simulates many possible trajectories, and returns the action that maximizes the expected reward.
+        '''
+        action_reward_dict = {a: [] for a in range(self.num_actions)} # initialize the action reward dictionary
+        def single_simulation(sim_id, rng_key, obs, state, predictor_model, first_patrol_obs):
+            bc_model, stacked_bc_state = predictor_model
+            param_to_use = jax.random.randint(rng_key, (1,), 0, 6)[0]
+            param_state = jax.tree.map(lambda x: x[param_to_use], stacked_bc_state)
+            rng_key, subkey = jax.random.split(rng_key)
+            curr_sim_reward = 0
+            action_probs = self.value_function(obs)
+            sample_action_fn = lambda p, rng_key: jax.random.choice(rng_key, self.num_actions, p=p)
+            uniform_function = lambda p, rng_key: jax.random.choice(rng_key, self.num_actions)
+            first_step_action = jax.lax.cond(jnp.sum(action_probs) == 1, sample_action_fn, uniform_function, action_probs, rng_key)
+            rng_key, subkey = jax.random.split(rng_key)
+            
+            # @scan_tqdm(self.simulation_depth)
+            def inner_loop(carry, time_step):
+                curr_obs, curr_patrol_obs, curr_state, reward, first_step_action, rng_key, param_state, was_terminal = carry
+
+                # get sneak action
+                def sample_action(o, rng_key):
+                    action_probs = self.value_function(obs)
+                    sample_action_fn = lambda p, rng_key: jax.random.choice(rng_key, self.num_actions, p=p)
+                    uniform_function = lambda p, rng_key: jax.random.choice(rng_key, self.num_actions)
+                    action = jax.lax.cond(jnp.sum(action_probs) == 1, sample_action_fn, uniform_function, action_probs, rng_key)
+                    return action
+                first_action_fn = lambda o, rng_key: first_step_action
+                sneak_action = jax.lax.cond(time_step == 0, first_action_fn, sample_action, obs, rng_key)
+                rng_key, subkey = jax.random.split(rng_key)
+
+
+                # Get the action from the BC model
+                patrol_action = bc_model.apply(param_state, curr_patrol_obs, None, training=False)
+                patrol_action = patrol_action[0, -1]
+                sample_patrol_action_fn = lambda p, rng_key: jax.random.choice(rng_key, self.num_actions, p=p)
+                argmax_patrol_action_fn = lambda p, rng_key: jnp.argmax(p)
+                patrol_action = jax.lax.cond(jnp.sum(patrol_action) == 1, sample_patrol_action_fn, argmax_patrol_action_fn, patrol_action, rng_key)
+                rng_key, subkey = jax.random.split(rng_key)
+
+                # execute the actions
+                actions_to_execute = jnp.array([patrol_action, sneak_action])
+
+                all_obs, curr_state, new_reward = self.jitted_step(curr_state, actions_to_execute)
+                curr_obs = all_obs[1] # sneak agent's observation
+
+                # if the state was terminal, set reward to 0
+                new_reward = jnp.where(was_terminal, 0, new_reward)
+                reward = reward + new_reward
+                # if the state is terminal, set was_terminal to true, otherwise leave it as is
+                was_terminal = jnp.where(curr_state.terminal, True, was_terminal)
+
+                
+                grid_size = 7
+                tile_size = 10
+                patrol_image = state_to_image_jit(all_obs[0], grid_size*tile_size, grid_size, tile_size=tile_size)
+                patrol_image = patrol_image[None, None]
+                patrol_obs = jnp.concatenate([curr_patrol_obs, patrol_image], axis=1)[:, 1:]
+
+                new_carry = (curr_obs, patrol_obs, curr_state, reward, first_step_action, rng_key, param_state, was_terminal)
+                return new_carry, new_reward
+            
+            curr_obs = obs
+            curr_patrol_obs = first_patrol_obs
+            curr_state = state
+            reward = 0
+            was_terminal = False
+            carry = (curr_obs, curr_patrol_obs, curr_state, reward, first_step_action, rng_key, param_state, was_terminal)
+            carry, _ = jax.lax.scan(inner_loop, carry, jnp.arange(self.simulation_depth), self.simulation_depth)
+            reward = carry[3]
+            action_values = jnp.zeros(self.num_actions)
+            action_values = action_values.at[first_step_action].set(reward)
+            return action_values
+        
+        action_values_stacked = jax.vmap(single_simulation, in_axes=(0, 0, None, None, None, None))(jnp.arange(self.num_simulations), jax.random.split(rng_key, self.num_simulations), obs, state, predictor_model, first_patrol_obs)
+        action_values_dict = {a: action_values_stacked[:, a].mean() for a in range(self.num_actions)}
+        best_action = max(action_values_dict, key=action_values_dict.get)
+        return best_action
+
+    def get_action_autoToM(self, rng, obs, state, predictor_model, first_patrol_obs, patrol_actions):
+        '''
+        This function takes in the current observation, simulates many possible trajectories, and returns the action that maximizes the expected reward.
+        '''
+        action_reward_dict = {a: [] for a in range(self.num_actions)} # initialize the action reward dictionary
+        for _ in tqdm(range(self.num_simulations)):
+            curr_sim_reward = 0
+            sneak_action_probs = self.value_function(obs)
+            try:
+                first_step_action = np.random.choice(self.num_actions, p=sneak_action_probs)
+            except Exception as e:
+                # print(f"Error: {e}")
+                sneak_action_probs = sneak_action_probs / np.sum(sneak_action_probs)
+                first_step_action = np.random.choice(self.num_actions)
+
+            for i in tqdm(range(self.simulation_depth)):
+                if i == 0:
+                    curr_obs = obs
+                    curr_state = state
+                    sneak_action = first_step_action
+                    curr_stacked_states = first_patrol_obs
+                else:
+                    action_probs = self.value_function(curr_obs)
+                    try:
+                        sneak_action = np.random.choice(self.num_actions, p=action_probs)
+                    except Exception as e:
+                        # print(f"Error: {e}")
+                        action_probs = action_probs / np.sum(action_probs)
+                        sneak_action = np.random.choice(self.num_actions)
+                
+                # get the predicted action
+                pred_action, pred_probs = predictor_model.predict_action(curr_stacked_states, patrol_actions, agent_id=0, timestep=None)
+                try:
+                    patrol_action = np.random.choice(self.num_actions, p=pred_probs)
+                except ValueError:
+                    patrol_action = pred_action
+                
+                actions_to_execute = jnp.array([int(patrol_action), int(sneak_action)])
+                all_obs, curr_state, reward = self.jitted_step(curr_state, actions_to_execute)
+                curr_obs = all_obs[1] # sneak agent's observation
+                # first expand patrol obs
+                expanded_patrol_obs = jax.tree.map(lambda x: jnp.expand_dims(x, axis=0), all_obs[0])
+                # then concatenate the expanded patrol obs with curr_stacked_states
+                curr_stacked_states = jax.tree.map(lambda *x: jnp.concatenate([x[0], x[1]], axis=0), curr_stacked_states, expanded_patrol_obs)
+                # breakpoint()
+                # remove the first element of curr_stacked_states
+                # curr_stacked_states = jax.tree.map(lambda x: x[1:], curr_stacked_states)
+                curr_sim_reward += reward
+                if curr_state.terminal:
+                    break
+            action_reward_dict[first_step_action].append(curr_sim_reward)
+        action_reward_dict = {k: np.mean(v) for k, v in action_reward_dict.items()}
+        best_action = max(action_reward_dict, key=action_reward_dict.get)
+        return best_action
+
+
+
         
     def get_action(self, obs, state, predictor_model, first_patrol_obs):
         '''
@@ -156,7 +293,6 @@ class MCTSAgent:
                     try:    
                         sneak_action = np.random.choice(self.num_actions, p=action_probs)
                     except ValueError:
-                        # breakpoint()
                         action_probs = action_probs / np.sum(action_probs)
                         sneak_action = np.random.choice(self.num_actions)
                 if self.prediction_model_type == 'gt':
@@ -222,13 +358,16 @@ class PatrolEnv(AutomaticityEnv):
 
 def generate_trajectory(env, init_state, num_steps, agent_list, num_agents, prediction_model):
     img_frames = []
+    patrol_obs = []
     actions_taken = []
+    action_id_taken = []
     action_names = ["stay", "right", "left", "down", "up", "interact"]
     obs = env.get_observation(init_state)
 
     obs0 = jax.tree.map(lambda x: jnp.array(x), obs[0])
     obs1 = jax.tree.map(lambda x: jnp.array(x), obs[1])
     img_frames.append(state_to_image_jit(obs0,grid_size*tile_size, grid_size, tile_size=tile_size))
+    patrol_obs.append(obs[0])
     
     framework = AgentExecutionFramework()
     state = init_state
@@ -246,9 +385,15 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents, pred
                     else:
                         if agent.prediction_model_type == 'gt' or agent.prediction_model_type == 'random':
                             first_patrol_obs = obs[0]
-                        else:
+                            chosen_action = agent.get_action(obs[1], state, prediction_model, first_patrol_obs)
+                        elif agent.prediction_model_type == 'BC':
                             first_patrol_obs = jnp.stack(img_frames)[None]  # add batch dimension 
-                        chosen_action = agent.get_action(obs[1], state, prediction_model, first_patrol_obs)
+                            chosen_action = agent.get_action_bc(rng, obs[1], state, prediction_model, first_patrol_obs)
+                        elif agent.prediction_model_type == 'AutoToM':
+                            # stack the patrol obs
+                            first_patrol_obs = jax.tree.map(lambda *x: jnp.stack(x), *patrol_obs)
+                            patrol_actions = np.array(action_id_taken)
+                            chosen_action = agent.get_action_autoToM(rng, obs[1], state, prediction_model, first_patrol_obs, patrol_actions)
                 else:
                     chosen_action = framework.execute_agent(agent, obs[agent_id])
             else:
@@ -258,11 +403,13 @@ def generate_trajectory(env, init_state, num_steps, agent_list, num_agents, pred
             action_taken_list.append(action_names[chosen_action])
         print(f"Patrol action: {action_taken_list[0]}, Sneak action: {action_taken_list[1]}")
         actions_taken.append(action_taken_list)
+        action_id_taken.append(actions)
         obs, state, reward = env.step(state, jnp.array(actions))
         total_reward += reward
         obs0 = jax.tree.map(lambda x: jnp.array(x), obs[0])
         obs1 = jax.tree.map(lambda x: jnp.array(x), obs[1])
         img_frames.append(state_to_image_jit(obs0, grid_size*tile_size, grid_size, tile_size=tile_size))
+        patrol_obs.append(obs[0])
         if reward != -2:
             break
     actions_taken.append(['Terminal', 'Terminal'])
@@ -416,7 +563,13 @@ if __name__ == "__main__":
     tile_size = 10
     grid_size = 7
 
-    bc_model, bc_state = load_bc_models(args)
+    # bc_model, bc_state = load_bc_models(args)
+    if args.baseline_model == 'AutoToM':
+        from baselines.AutoToM.autoToM import AutoToM
+        autoToM_model = AutoToM(model_name=args.model_name, tensor_parallel_size=1, dtype=torch.bfloat16, gpu_memory_utilization=0.95, group=False)
+    elif args.baseline_model == 'BC':
+        from baselines.BC.bc import BCNet
+        bc_model, bc_state = load_bc_models(args)
 
     env = PatrolEnv(
         num_agents=num_agents,
@@ -432,9 +585,16 @@ if __name__ == "__main__":
     patrolling_agent_txt = open(patrolling_agent_path, 'r').read()
     patrolling_agent = AgentExecutionFramework().compile_agent(patrolling_agent_txt, num_agents=num_agents, num_blocks=1)
 
-    mcts_agent = MCTSAgent(env, num_agents, num_blocks=1, num_walls=1, num_simulations=500, simulation_depth=50, prediction_model_type='bc')
+    mcts_agent = MCTSAgent(env, num_agents, num_blocks=1, num_walls=1, num_simulations=300, simulation_depth=10, prediction_model_type=args.baseline_model)
 
     # Generate trajectory with both agents
-    img_frames, actions_taken, total_reward = generate_trajectory(env, state, 100, [patrolling_agent, mcts_agent], num_agents, [bc_model, bc_state])
+    if args.baseline_model == 'AutoToM':
+        prediction_model = autoToM_model
+    elif args.baseline_model == 'BC':
+        prediction_model = [bc_model, bc_state]
+    elif args.baseline_model == 'random' or args.baseline_model == 'gt':
+        prediction_model = patrolling_agent
+
+    img_frames, actions_taken, total_reward = generate_trajectory(env, state, 100, [patrolling_agent, mcts_agent], num_agents, prediction_model)
     trajectory_to_gif(img_frames, actions_taken, 'patrol_mcts.gif')
     print(f"Total reward: {total_reward}")

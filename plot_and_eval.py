@@ -449,7 +449,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                     # Get model prediction for this step and agent
                     try:
                         predicted_action, predicted_probs = model.predict_action(pred_states, pred_actions, 
-                                                                               agent_id=agent_id, timestep=14+step_idx)
+                                                                               agent_id=agent_id, timestep=19+step_idx)
                         
                         # Compare with ground truth
                         gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
@@ -473,7 +473,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                 for agent_id in range(num_env_agents):
                     try:
                         predicted_action, _ = model.predict_action(pred_states, pred_actions, 
-                                                                 agent_id=agent_id, timestep=14+step_idx)
+                                                                 agent_id=agent_id, timestep=19+step_idx)
                         action_to_take_in_env_list.append(predicted_action)
                     except:
                         # If prediction fails, use ground truth (to keep simulation going)
