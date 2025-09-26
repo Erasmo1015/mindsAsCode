@@ -275,10 +275,10 @@ Your high-level 5 word summary:"""
                     outputs = self.llm.generate([formatted_prompt], fsm_sampling_params)
                     high_level_fsm = outputs[0].outputs[0].text
                     
-                    # save high_level_fsm to a file
-                    with open(f"high_level_fsm_grid.txt", "w") as f:
-                        f.write(high_level_fsm)
-                    exit()
+                    # # save high_level_fsm to a file
+                    # with open(f"high_level_fsm_grid.txt", "w") as f:
+                    #     f.write(high_level_fsm)
+                    # exit()
                 # Second stage: Use the high-level FSM in the final prompt
                 full_prompt = f"{self.base_prompt}\n{high_level_description}\nHIGH LEVEL FSM TO IMPLEMENT IN CODE: {high_level_fsm}\n{self.code_template}"
             else:
@@ -322,10 +322,10 @@ Your high-level 5 word summary:"""
                     fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=500)
                     outputs = self.llm.generate([formatted_prompt], fsm_sampling_params)
                     high_level_fsm = outputs[0].outputs[0].text
-                # save high_level_fsm to a file
-                with open(f"high_level_fsm_grid.txt", "w") as f:
-                    f.write(high_level_fsm)
-                exit()
+                # # save high_level_fsm to a file
+                # with open(f"high_level_fsm_grid.txt", "w") as f:
+                #     f.write(high_level_fsm)
+                # exit()
                 # Second stage: Use the high-level FSM in the final prompt
                 full_prompt = f"{self.base_prompt}\n{state_action_text}\nHIGH LEVEL FSM TO IMPLEMENT IN CODE: {high_level_fsm}\n{self.code_template}"
             else:
