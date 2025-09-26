@@ -1,0 +1,53 @@
+
+```python
+class AgentFSM:
+    def __init__(self):
+        self.state = 'explore'
+
+    def transition(self, state, action, info):
+        if state == 'explore':
+            if action == 'up':
+                return 'move_up', info
+            elif action == 'down':
+                return 'move_down', info
+            elif action == 'left':
+                return 'move_left', info
+            elif action == 'right':
+                return 'move_right', info
+            elif action == 'interact':
+                return 'interact', info
+            else:
+                return 'stay', info
+        elif state == 'move_up':
+            return 'stay', info
+        elif state == 'move_down':
+            return 'stay', info
+        elif state == 'move_left':
+            return 'stay', info
+        elif state == 'move_right':
+            return 'stay', info
+        elif state == 'interact':
+            return 'stay', info
+
+    def get_action(self, info):
+        if self.state == 'explore':
+            # Randomly choose an action from the available options
+            import random
+            actions = ['up', 'down', 'left', 'right', 'interact']
+            action = random.choice(actions)
+            self.state, _ = self.transition('explore', action, info)
+            return action
+        else:
+            action = self.state
+            self.state, _ = self.transition(self.state, action, info)
+            return action
+```
+```
+
+Let's write the code for the agent's behavior, taking into account the experiences provided:
+
+1. The agent's overall goal or strategy: The agent appears to be exploring its environment, possibly looking for a specific block or blocks.
+   It is not actively engaging with the environment in a goal-directed way, as it does not seem to be collecting, storing, or moving blocks in a strategic manner.
+
+2. How the agent responds to different environmental features (blocks, walls): The agent moves around the environment, avoiding walls and seemingly indifferent to blocks. 
+   It repeatedly moves left and right and up and down, indicating a lack of

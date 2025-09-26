@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer.')
     parser.add_argument('--num_epochs', type=int, default=300, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
-    parser.add_argument('--seed', type=int, default=0, help='Random seed.')
+    parser.add_argument('--seed', type=int, default=12, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=2, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')

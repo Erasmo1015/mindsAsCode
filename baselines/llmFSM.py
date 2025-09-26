@@ -228,6 +228,7 @@ High-level description:"""
                     outputs = self.llm.generate([formatted_prompt], fsm_sampling_params)
                     high_level_fsm = outputs[0].outputs[0].text
                 
+
                 # Second stage: Use the high-level FSM in the final prompt
                 full_prompt = f"{self.base_prompt}\n{high_level_description}\nHIGH LEVEL FSM TO IMPLEMENT IN CODE: {high_level_fsm}\nThe available tools are: {tools}\nHere is a description of how each tool is used, which is important to implement the FSM correctly: {tool_descriptions}\n{self.code_template}"
             else:
@@ -247,7 +248,7 @@ High-level description:"""
                         model=self.model_name,
                         messages=messages,
                         temperature=0.7,
-                        max_tokens=100  # Limit to 100 tokens for high-level FSM
+                        max_tokens=500  # Limit to 100 tokens for high-level FSM
                     )
                     high_level_fsm = response.choices[0].message.content
                 else:
@@ -268,10 +269,13 @@ High-level description:"""
                         formatted_prompt = first_stage_prompt
                     
                     # Create special sampling params with limited tokens
-                    fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=100)
+                    fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=500)
                     outputs = self.llm.generate([formatted_prompt], fsm_sampling_params)
                     high_level_fsm = outputs[0].outputs[0].text
-                
+                # # save high_level_fsm to a file
+                # with open(f"high_level_fsm_partnr.txt", "w") as f:
+                #     f.write(high_level_fsm)
+                # exit()
                 # Second stage: Use the high-level FSM in the final prompt
                 full_prompt = f"{self.base_prompt}\n{state_action_text}\nHIGH LEVEL FSM TO IMPLEMENT IN CODE: {high_level_fsm}\nThe available tools are: {tools}\nHere is a description of how each tool is used, which is important to implement the FSM correctly: {tool_descriptions}\n{self.code_template}"
             else:
@@ -489,6 +493,13 @@ High-level description:"""
                 max_tools = [tool for tool, prob in tool_preds.items() if prob == max_prob]
                 if actions[-2][0] is not None:
                     if actions[-2][0].lower() in max_tools:  # if the correct tool is in the max tools, then the probability of the correct tool being predicted is the probability of the correct tool being predicted divided by the number of max tools
+                        breakpoint()
+                        sample_code = curr_agent_codes[0]
+                        # save sample code as a python file but remove everything before ```python and after ```
+                        sample_code = sample_code.split("```python")[1].split("```")[0]
+                        with open(f"sample_code.py", "w") as f:
+                            f.write(sample_code)
+                        exit()
                         correct_tool_preds_prob = 1 / len(max_tools)
                 elif actions[-2][0] is None:
                     if None in max_tools:

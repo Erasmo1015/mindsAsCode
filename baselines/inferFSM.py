@@ -237,7 +237,7 @@ Your high-level 5 word summary:"""
         if self.two_stage and not self.oracle:
             # Generate high-level description first
             high_level_description = self.generate_high_level_description(state_action_text)
-            
+
             if self.structured == "p2":
                 # First stage: Generate high-level FSM description
                 first_stage_prompt = f"{self.base_prompt}\n{high_level_description}\n{self.first_stage_prompt}"
@@ -250,7 +250,7 @@ Your high-level 5 word summary:"""
                         model=self.model_name,
                         messages=messages,
                         temperature=0.7,
-                        max_tokens=100  # Limit to 100 tokens for high-level FSM
+                        max_tokens=500  # Limit to 100 tokens for high-level FSM
                     )
                     high_level_fsm = response.choices[0].message.content
                 else:
@@ -271,10 +271,14 @@ Your high-level 5 word summary:"""
                         formatted_prompt = first_stage_prompt
                     
                     # Create special sampling params with limited tokens
-                    fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=100)
+                    fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=500)
                     outputs = self.llm.generate([formatted_prompt], fsm_sampling_params)
                     high_level_fsm = outputs[0].outputs[0].text
-                
+                    
+                    # save high_level_fsm to a file
+                    with open(f"high_level_fsm_grid.txt", "w") as f:
+                        f.write(high_level_fsm)
+                    exit()
                 # Second stage: Use the high-level FSM in the final prompt
                 full_prompt = f"{self.base_prompt}\n{high_level_description}\nHIGH LEVEL FSM TO IMPLEMENT IN CODE: {high_level_fsm}\n{self.code_template}"
             else:
@@ -294,7 +298,7 @@ Your high-level 5 word summary:"""
                         model=self.model_name,
                         messages=messages,
                         temperature=0.7,
-                        max_tokens=100  # Limit to 100 tokens for high-level FSM
+                        max_tokens=500  # Limit to 100 tokens for high-level FSM
                     )
                     high_level_fsm = response.choices[0].message.content
                 else:
@@ -315,10 +319,13 @@ Your high-level 5 word summary:"""
                         formatted_prompt = first_stage_prompt
                     
                     # Create special sampling params with limited tokens
-                    fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=100)
+                    fsm_sampling_params = SamplingParams(temperature=0.7, max_tokens=500)
                     outputs = self.llm.generate([formatted_prompt], fsm_sampling_params)
                     high_level_fsm = outputs[0].outputs[0].text
-                
+                # save high_level_fsm to a file
+                with open(f"high_level_fsm_grid.txt", "w") as f:
+                    f.write(high_level_fsm)
+                exit()
                 # Second stage: Use the high-level FSM in the final prompt
                 full_prompt = f"{self.base_prompt}\n{state_action_text}\nHIGH LEVEL FSM TO IMPLEMENT IN CODE: {high_level_fsm}\n{self.code_template}"
             else:

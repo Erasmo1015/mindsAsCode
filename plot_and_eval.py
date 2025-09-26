@@ -73,9 +73,9 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=1e-2, help='Learning rate for the optimizer.')
     parser.add_argument('--num_epochs', type=int, default=100, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
-    parser.add_argument('--seed', type=int, default=0, help='Random seed.')
+    parser.add_argument('--seed', type=int, default=12, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
-    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct
+    parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct or deepseek-ai/DeepSeek-V2-Lite
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
@@ -263,7 +263,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
                 
         # Sample only what we need
         if overfit:
-            agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=14, maxval=15)
+            agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=1, maxval=2)
         else:
             agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=0, maxval=loaded_data['states']['agent_locations'].shape[0])
         
@@ -1585,6 +1585,13 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                             if step_idx < 10:
                                 step_correct += 1 / num_max_actions
                                 if step_idx == 0:
+                                    # breakpoint()
+                                    # sample_code = curr_codes[0]
+                                    # # save sample code as a python file but remove everything before ```python and after ```
+                                    # sample_code = sample_code.split("```python")[1].split("```")[0]
+                                    # with open(f"sample_code.py", "w") as f:
+                                    #     f.write(sample_code)
+                                    # exit()
                                     results[n_hyp]['first_step_correct'] += (1 / num_max_actions)
                             else:
                                 correct_after_flip += 1 / num_max_actions
