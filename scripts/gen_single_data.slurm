@@ -14,8 +14,8 @@
 #SBATCH --gpus=1
 #SBATCH --time=01-00:00:00 # Max runtime in DD-HH:MM:SS format.
 
-#SBATCH --output=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.out
-#SBATCH --error=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.err
+#SBATCH --output=/mmfs1/gscratch/socialrl/kjha/mindsAsCode/logs/%x.%j.out
+#SBATCH --error=/mmfs1/gscratch/socialrl/kjha/mindsAsCode/logs/%x.%j.err
 
 source ~/.bashrc
 conda activate llm

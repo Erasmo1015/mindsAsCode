@@ -32,7 +32,6 @@ from flax.training import train_state
 from flax import struct
 import pandas as pd
 import imageio.v2 as imageio
-from baselines.ToMnet import ToMNet
 from baselines.BC import BCNet
 from agent import AgentExecutionFramework
 
@@ -45,8 +44,8 @@ def parse_args():
     parser.add_argument(
         "--baseline_model",
         type=str,
-        default="FSM",
-        help="Baseline model to train. Currently only 'ToMnet' and 'BC' are implemented."
+        default="ROTE",
+        help="Baseline model to train."
     )
     parser.add_argument(
         "--data_path",
@@ -81,22 +80,22 @@ def parse_args():
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to use bootstrapping for hypothesis evaluation')
-    parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage approach for FSM reasoning')
+    parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage approach for ROTE reasoning')
     parser.add_argument('--structured', type=str, default="False", choices=["False", "p1", "p2"], 
-                        help='Structured prompting type for FSM reasoning: False, p1, or p2')
-    parser.add_argument('--rejuvenation', action='store_true', help='Use rejuvenation for FSM model')
-    parser.add_argument('--plot_gifs', action='store_true', help='Plot gifs for FSM model')
+                        help='Structured prompting type for ROTE reasoning: False, p1, or p2')
+    parser.add_argument('--rejuvenation', action='store_true', help='Use rejuvenation for ROTE model')
+    parser.add_argument('--plot_gifs', action='store_true', help='Plot gifs for ROTE model')
     parser.add_argument('--rejuvenation_threshold', type=float, default=1, help='Threshold for rejuvenation')
     parser.add_argument('--max_rejuvenation_attempts', type=int, default=2, help='Maximum number of rejuvenation attempts')
     parser.add_argument('--top_k', type=int, default=0, help='If > 0, only average over the top k most likely hypotheses')
-    parser.add_argument('--multi_step_eval', type=bool, default=True, help='Perform multi-step evaluation for FSM')
+    parser.add_argument('--multi_step_eval', type=bool, default=True, help='Perform multi-step evaluation for ROTE')
     parser.add_argument('--num_steps_to_predict', type=int, default=20, help='Number of future steps to predict in multi-step eval')
     parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
     parser.add_argument('--human_data', type=bool, default=False, help='Use human data')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
-    if args.baseline_model not in ["ToMnet", 'BC', 'AutoToM', 'FSM', 'NLLM', 'Oracle']:
+    if args.baseline_model not in ['BC', 'AutoToM', 'ROTE', 'NLLM', 'Oracle']:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     if args.baseline_model == 'AutoToM':
@@ -267,10 +266,6 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         else:
             agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=0, maxval=loaded_data['states']['agent_locations'].shape[0])
         
-        # print("Agent indices:", agent_indices.tolist())  # Convert to Python list for printing
-            
-        # agent_indices = jnp.array([8])
-        # if not overfit:
         i += 1
         if training:  # for creating held out set
             batch_floor = 0
@@ -282,9 +277,7 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
 
         batch_indices = jax.random.randint(jax.random.PRNGKey(i), (num_datapoints_per_agent_to_sample,), minval=batch_floor, maxval=batch_limit)
 
-        # if not overfit:
         i += 1
-        # breakpoint()
         
         # Process data in smaller chunks to reduce memory usage
         sampled_data = {}
@@ -489,13 +482,8 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
                 
                 # Simulate environment step
                 current_sim_state_pytree = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
-                # try:
-                #     _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
-                #     current_sim_state_pytree = next_env_state_pytree
+
                 updated_states.append(jax.tree.map(lambda x: x, current_sim_state_pytree))
-                # except Exception as e:
-                #     print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
-                #     break
         
         accuracy = num_correct / num_total if num_total > 0 else 0
         avg_prediction_time = total_prediction_time / num_predictions if num_predictions > 0 else 0
@@ -727,14 +715,9 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
                     action_history.append(action_to_take_in_env_list)
                 
                 current_sim_state_pytree = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
-                # # Simulate environment step
-                # try:
-                #     _, next_env_state_pytree = env.step(current_sim_state_pytree, action_to_take_in_env_list)
-                #     current_sim_state_pytree = next_env_state_pytree
+
                 updated_states.append(jax.tree.map(lambda x: x, current_sim_state_pytree))
-                # except Exception as e:
-                #     print(f"Error during env.step for sample {a_idx}, step {step_idx}: {e}")
-                #     break
+
         
         accuracy = num_correct / num_total if num_total > 0 else 0
         accuracy_after_flip = correct_after_flip / total_after_flip if total_after_flip > 0 else 0
@@ -770,168 +753,6 @@ def eval_naive_llm(args, dataloader, model, episode_id: int = 0):
         print(f"Accuracy: {num_correct / num_total}")
         return num_correct / num_total
 
-def eval_fsm(args, dataloader, model, episode_id: int = 0):
-    num_correct = 0
-    num_total = 0
-    # Process just one datapoint (one epoch) at a time
-    datapoint = next(dataloader)
-    
-    for a in tqdm(range(args.num_agents_to_sample)):
-        if args.group:
-            num_total += 4
-        else:
-            num_total += 1
-        data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)  # last datapoint, 20 timesteps for each agent
-        states = data['states']
-        actions = data['actions']  # (20, 1)  # 20 timesteps, 1 action
-        agent_ids = data['agent_ids']
-        try:
-            tries = 0
-            succeeded = False
-            predicted_final_action = model.predict_action(states, actions, agent_ids)
-            if predicted_final_action is None:
-                continue
-            elif len(predicted_final_action.shape) == 1:
-                predicted_final_action = predicted_final_action.reshape(1, -1)
-
-            gt_final_action = actions[-1]
-            for aid in tqdm(range(len(gt_final_action))):
-                final_action_prob = predicted_final_action[aid, gt_final_action[aid]]
-                if final_action_prob >= np.max(predicted_final_action[aid]):  # only count a success if the model succeesfully made a prediction
-                    num_correct += 1
-        except:
-            # full_traceback = traceback.format_exc()
-            # print(full_traceback)
-            continue
-
-    del datapoint
-        
-    if num_total > 0:
-        # print(f"Successful Prediction rate: {num_successes / num_total}")
-        # if num_successes > 0:
-        #     print(f"Successful Prediction Accuracy: {num_correct / num_successes}")
-        print(f"Total Accuracy: {num_correct / num_total}")
-        return num_correct / num_total
-    else:
-        print("No valid predictions were made")
-        return 0.0
-            
-
-def load_tomnet_models(args):
-    """Load ToMnet models from multiple seeds."""
-    states = []
-    
-    # Define the learning rate to use
-    lr = args.learning_rate
-
-    # Initialize model
-    if args.group:
-        num_to_predict = 4
-    else:
-        num_to_predict = 1
-    model = ToMNet(character_net_features=64, mental_net_features=128, output_size=6, num_to_predict=num_to_predict)
-    
-    for seed in range(6):
-        # Construct the path pattern similar to what's used in train_baselines.py
-        model_path = f"baselines/ToMnet/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}_seed{seed}_lr{lr}_group{args.group}"
-        
-        # Look for the latest checkpoint
-        checkpoint_dir = os.path.dirname(model_path)
-
-        if not os.path.exists(checkpoint_dir):
-            print(f"Directory {checkpoint_dir} does not exist, skipping seed {seed}")
-            continue
-            
-        checkpoint_files = [f for f in os.listdir(checkpoint_dir) 
-                            if os.path.basename(model_path) in f and "checkpoint" in f]
-        
-        if not checkpoint_files:
-            # Try looking for final model
-            final_model = f"{model_path}_final.msgpack"
-            if os.path.exists(final_model):
-                checkpoint_path = final_model
-            else:
-                print(f"No checkpoint found for seed {seed}, skipping")
-                continue
-        else:
-            # Find the most recent checkpoint
-            checkpoint_epochs = [int(f.split("epoch")[-1].split(".")[0]) for f in checkpoint_files]
-            most_recent_epoch = max(checkpoint_epochs)
-            most_recent_checkpoint = [f for f in checkpoint_files if f"epoch{most_recent_epoch}" in f][0]
-            checkpoint_path = os.path.join(checkpoint_dir, most_recent_checkpoint)
-        
-        print(f"Loading ToMnet model from seed {seed}: {checkpoint_path}")
-        
-        
-        # Load checkpoint
-        with open(checkpoint_path, 'rb') as f:
-            checkpoint_bytes = f.read()
-        
-        # Create a dummy state to get the structure right
-        rng_key = jax.random.PRNGKey(0)
-        dummy_states = jnp.zeros((args.num_datapoints_per_agent_to_sample, 15, args.env_size*5, args.env_size*5, 3))
-        dummy_actions = jnp.zeros((args.num_datapoints_per_agent_to_sample, 15, 1))
-        variables = model.init(rng_key, dummy_states, dummy_actions)
-        
-        # Create target structure for deserialization
-        target = {
-            'params': variables['params'],
-            'batch_stats': variables.get('batch_stats', flax.core.FrozenDict()),
-            'epoch': 0,
-            'loss': 0.0
-        }
-        
-        # Deserialize checkpoint
-        checkpoint = flax.serialization.from_bytes(target, checkpoint_bytes)
-        
-        states.append({
-            'params': checkpoint['params'],
-            'batch_stats': checkpoint['batch_stats']
-        })
-    # Stack all parameters from different seeds into a single state
-    stacked_state = {
-        'params': jax.tree.map(lambda *xs: jnp.stack(xs), *[s['params'] for s in states]),
-        'batch_stats': jax.tree.map(lambda *xs: jnp.stack(xs), *[s['batch_stats'] for s in states])
-    }
-    return model, stacked_state
-
-def eval_mtom(args, dataloader, model, states):
-    """Evaluate ToMnet models."""
-    num_correct = 0
-    num_total = 0
-    
-    for i in tqdm(range(args.num_epochs)):
-        datapoint = next(dataloader)
-        
-        for a in range(args.num_agents_to_sample):
-            data = jax.tree.map(lambda x: x[a, :, :15], datapoint)  # num_datapoints, 15, *
-            gt_final_actions = data['actions'][-1, -1]  # num_agents,
-
-            def single_agent_pred(param_state, data):
-                # Include batch_stats in the variables dictionary
-                variables = {'params': param_state['params'], 'batch_stats': param_state['batch_stats']}
-                res = model.apply(variables, data['states'], data['actions'], training=False)
-                return res
-            
-            action_preds = jax.vmap(single_agent_pred, in_axes=(0, None))(states, data)  # num loaded params, num_agents,num_timepoints - 1, 6
-
-            action_preds = action_preds[:, :, -1, :]  # get final timepoint prediction for each agent, (num loaded params, num_agents, 6)
-
-            def single_agent_acc(action_ps, gt_final_action):
-                def single_action_acc(action_p, gt_final_action):
-                    action_pred = jnp.argmax(action_p, axis=-1)
-                    return action_pred == gt_final_action
-                action_accs = jax.vmap(single_action_acc, in_axes=(0, 0))(action_ps, gt_final_action)
-                return jnp.sum(action_accs)
-
-            action_accs = jax.vmap(single_agent_acc, in_axes=(0, None))(action_preds, gt_final_actions)
-
-            num_correct += jnp.mean(action_accs)  # average over num_parameters
-            num_total += action_preds.shape[1]  # count number of agents predictions
-
-    accuracy = num_correct / num_total if num_total > 0 else 0
-    print(f"ToMnet Ensemble Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
-    return accuracy
 
 def load_bc_models(args):
     """Load BC models from multiple seeds."""
@@ -1093,8 +914,7 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0, env=None):
                 img_size = args.env_size * 7
                 tile_size = 7
                 grid_size = args.env_size
-                
-                # img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+
                 try:
                     image_t = img_gen_fn(state_t, img_size, grid_size, tile_size)
                     initial_states_images.append(image_t)
@@ -1175,7 +995,6 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0, env=None):
                         action_preds = action_preds[:, agent_id, -1, :]  # [num_models, 6]
                         
                         # Average predictions across ensemble
-                        # breakpoint()
 
                         def single_network_acc(action_pred, gt_action):
                             max_action_prob = jnp.max(action_pred)
@@ -1192,22 +1011,6 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0, env=None):
                                 first_step_correct += avg_accs
                         else:
                             correct_after_flip += avg_accs
-                        # breakpoint()
-                        # # num_correct += jnp.sum(accs)
-                        # # num_total += len(accs)
-                        # # if step_idx < 10:
-                        # #     first_step_correct += jnp.sum(accs)
-                        # # avg_action_pred = jnp.mean(action_preds, axis=0)  # [6]
-                        # # predicted_action = jnp.argmax(avg_action_pred)
-                        
-                        # # Compare with ground truth
-                        # gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
-                        
-                        # max_action_prob = np.max(avg_action_pred)
-                        # # count number of actions with max probability  
-                        # num_max_actions = np.sum(avg_action_pred == max_action_prob)
-                        # gt_action_prob = avg_action_pred[gt_action]
-                        # if max_action_prob == gt_action_prob:
 
                     except Exception as e:
                         print(f"Error predicting action for agent {agent_id}, step {step_idx}: {e}")
@@ -1215,39 +1018,6 @@ def eval_bc(args, dataloader, model, states, episode_id: int = 0, env=None):
                 
 
                 num_predictions += 1
-                
-                # # Collect actions for all agents to update environment
-                # action_to_take_in_env_list = []
-                # step_prediction_start = time.time()
-                # for agent_id in range(num_env_agents):
-                #     try:
-                #         # Reshape for batch prediction
-                #         pred_states_batch = jnp.expand_dims(pred_states_images, axis=0)
-                #         pred_actions_batch = jnp.expand_dims(pred_actions, axis=0)
-                        
-                #         # Apply model to get predictions
-                #         def single_agent_pred(param_state, data_states, data_actions):
-                #             variables = {'params': param_state['params'], 'batch_stats': param_state['batch_stats']}
-                #             res = model.apply(variables, data_states, data_actions, training=False)
-                #             return res
-                        
-                #         # Get predictions from all ensemble models
-                #         action_preds = jax.vmap(single_agent_pred, in_axes=(0, None, None))(
-                #             states, pred_states_batch, pred_actions_batch)
-                        
-                #         # Get prediction for this agent
-                #         action_preds = action_preds[:, agent_id, -1, :]  # [num_models, 6]
-                        
-                #         # Average predictions across ensemble
-                #         avg_action_pred = jnp.mean(action_preds, axis=0)
-                #         predicted_action = jnp.argmax(avg_action_pred)
-                        
-                #         action_to_take_in_env_list.append(predicted_action)
-                #     except Exception as e:
-                #         # If prediction fails, use ground truth (to keep simulation going)
-                #         gt_action = gt_future_actions[step_idx][agent_id] if args.group else gt_future_actions[step_idx][0]
-                #         action_to_take_in_env_list.append(gt_action)
-                #         print(f"Using ground truth for agent {agent_id}, step {step_idx} due to error: {e}")
                 
                 
 
@@ -1381,14 +1151,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 return_all_time_log_prob_list=True,
                 doing_rejuvenation=args.rejuvenation
             )
-            # else:
-            #     compiled_agents, agent_probs, agent_codes, all_time_all_hyp_log_prob_list = model.predict_action_with_bootstrap(
-            #         initial_states_traj, initial_actions_traj, episode_id=episode_id,
-            #         max_hypotheses=max_hypotheses,
-            #         top_k=0,  # Don't apply top_k here, we'll apply it per n_hyp
-            #         return_compiled_agents=True,
-            #         return_all_time_log_prob_list=True
-            #     )
+
             generation_time = time.time() - generation_state
             # print(f"Generation time: {generation_time:.4f} seconds")
             generation_times += generation_time
@@ -1533,28 +1296,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                                 else:
                                     continue
                         except Exception as e:
-                            # print(f"Error in hypothesis {hyp_idx} agent.act(): {e}. Using uniform distribution.")
                             continue
-                            # breakpoint()
-
-                            # predicted_action = hyp_agent.act(current_obs)  # TODO: make agent index always 0
-                            # breakpoint()
-                            # action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
-                            # if args.group:
-                            #     # proposed_pi_for_hyp is a list of np.arrays. Stack them.
-                            #     for pred_aid, pred_action in enumerate(predicted_action):
-                            #         if pred_action in action_space:
-                            #             pred_action = action_space.index(pred_action)
-                            #         all_agent_pis[pred_aid, pred_action] += hyp_prob # (num_env_agents, num_actions)
-                            # else:
-                            #     if predicted_action in action_space:
-                            #         print("yeet skurt")
-                            #         predicted_action = action_space.index(predicted_action)
-                            #     if predicted_action < all_agent_pis.shape[1]:
-                            #         print("this happened")
-                            #         all_agent_pis[0, predicted_action] += hyp_prob # (num_actions,)
-                            #     else:
-                            #         breakpoint()
 
 
                     # Sum weighted pis
@@ -1723,94 +1465,6 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         
         # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
         return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id, accuracies_after_flip, avg_matching_states, mean_equal_actions
-        
-    else:
-        # --- Original Single-Step Bootstrap Evaluation Logic ---
-        # This part remains unchanged as it's already measuring single-step accuracy
-        max_hypotheses = args.n_hypothesis  # Maximum number of hypotheses to consider
-        results = {n: {'correct': 0, 'total': 0, 'program_length': 0} for n in range(1, max_hypotheses + 1)}
-        
-        # Process just one datapoint (one epoch) at a time
-        datapoint = next(dataloader)
-        
-        for a in tqdm(range(args.num_agents_to_sample)):
-            if args.group:
-                num_agents_per_sample = 4
-            else:
-                num_agents_per_sample = 1
-            
-            data = jax.tree.map(lambda x: x[a, -1, :15], datapoint)  # last datapoint, 15 timesteps for each agent
-            states = data['states']
-            actions = data['actions']  # (15, num_agents_per_sample)
-            agent_ids = data['agent_ids']
-            
-            try:
-                if args.rejuvenation:
-                    bootstrap_results = model.predict_action_with_rejuvenation(
-                        states, actions, episode_id=episode_id, 
-                        max_hypotheses=args.n_hypothesis,
-                        rejuvenation_threshold=args.rejuvenation_threshold,
-                        max_rejuvenation_attempts=args.max_rejuvenation_attempts,
-                        top_k=args.top_k
-                    )
-                else:
-                    bootstrap_results = model.predict_action_with_bootstrap(
-                        states, actions, episode_id=episode_id, 
-                        max_hypotheses=args.n_hypothesis,
-                        top_k=args.top_k
-                    )
-                
-                if bootstrap_results is None:
-                    continue
-                    
-                gt_final_action = actions[-1]
-                
-                # Get the number of available hypotheses
-                num_available_hyp = len(bootstrap_results)
-                
-                # Evaluate each bootstrap prediction (for all hypothesis counts up to max_hypotheses)
-                for n_hyp in range(1, max_hypotheses + 1):
-                    results[n_hyp]['total'] += num_agents_per_sample
-                    
-                    # If we have this hypothesis result available, use it
-                    # Otherwise, use the last available hypothesis result
-                    hyp_idx = min(n_hyp, num_available_hyp) - 1  # Convert to 0-indexed
-                    prediction, program_length = bootstrap_results[hyp_idx]
-                    results[n_hyp]['program_length'] += program_length
-                    
-                    if len(prediction.shape) == 1:
-                        prediction = prediction.reshape(1, -1)
-                    
-                    for aid in range(len(gt_final_action)):
-                        final_action_prob = prediction[aid, gt_final_action[aid]]
-                        # Count number of actions with max probability
-                        max_prob = np.max(prediction[aid])
-                        num_max_actions = np.sum(prediction[aid] == max_prob)
-                        
-                        # If final action has max probability, add fractional correct count
-                        if final_action_prob == max_prob:
-                            results[n_hyp]['correct'] += 1.0 / num_max_actions
-                            
-            except Exception as e:
-                continue
-        
-        # Calculate accuracies and average program lengths for each number of hypotheses
-        accuracies = {}
-        program_lengths = {}
-        for n_hyp in results:
-            if results[n_hyp]['total'] > 0:
-                accuracies[n_hyp] = results[n_hyp]['correct'] / results[n_hyp]['total']
-                program_lengths[n_hyp] = results[n_hyp]['program_length'] / args.num_agents_to_sample
-            else:
-                accuracies[n_hyp] = 0.0
-                program_lengths[n_hyp] = 0.0
-        
-        # Print results
-        for n_hyp, acc in accuracies.items():
-            print(f"Hypotheses: {n_hyp}, Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), Avg Program Length: {program_lengths[n_hyp]:.1f}")
-        
-        # Return the full dictionary of accuracies and program lengths
-        return accuracies, program_lengths
 
 def main():
     """Main function to eval baseline models."""
@@ -1827,9 +1481,11 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
         
+
     print(f"Evaluating baseline model: {args.baseline_model}; n_hypothesis: {args.n_hypothesis}; num_epochs: {args.num_epochs}; model_arch: {args.model_name}")
-    if args.baseline_model == "FSM" and args.bootstrap and args.multi_step_eval:
+    if args.baseline_model == "ROTE" and args.bootstrap and args.multi_step_eval:
         print(f"Multi-step evaluation enabled: predicting {args.num_steps_to_predict} future steps.")
+
 
     save_path_dir = f"results/{args.baseline_model}/{args.save_path}/nagents{args.num_agents_to_sample}_ndatapoints{args.num_datapoints_per_agent_to_sample}"
     
@@ -1848,13 +1504,13 @@ def main():
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
     human_data_extension = "_human_data" if args.human_data else ""
     
-    if args.baseline_model == "FSM" and args.bootstrap:
+    if args.baseline_model == "ROTE" and args.bootstrap:
         if args.multi_step_eval:
-            csv_path = f"results/{args.baseline_model}/fixed5_results_fsm_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
-        else: # Single-step FSM bootstrap
-            csv_path = f"results/{args.baseline_model}/fixed5_results_fsm_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}.csv"
-    else: # Non-bootstrap FSM or other models
-        csv_path = f"results/{args.baseline_model}/fixed5_results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}.csv"
+            csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime.csv"
+        else: # Single-step ROTE bootstrap
+            csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}.csv"
+    else: # Non-bootstrap ROTE or other models
+        csv_path = f"results/{args.baseline_model}/results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -1869,7 +1525,7 @@ def main():
                     (existing_df['group'].astype(str) == str(args.group)),
                     (existing_df['num_agents_evaluated'].astype(str) == str(args.num_agents_to_sample)),
                     (existing_df['datapoints_per_agent'].astype(str) == str(args.num_datapoints_per_agent_to_sample)),
-                    (existing_df['llm_model'].astype(str) == str(args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A'))
+                    (existing_df['llm_model'].astype(str) == str(args.model_name if args.baseline_model in ['TT', 'AutoToM', 'ROTE', 'NLLM'] else 'N/A'))
                 ]
                 
                 if 'two_stage' in existing_df.columns:
@@ -1878,10 +1534,10 @@ def main():
                     filter_conditions.append(existing_df['structured'].astype(str) == str(args.structured))
                 if 'rejuvenation' in existing_df.columns:
                     filter_conditions.append(existing_df['rejuvenation'].astype(str) == str(args.rejuvenation))
-                if 'top_k' in existing_df.columns: # Relevant for FSM bootstrap
+                if 'top_k' in existing_df.columns: # Relevant for ROTE bootstrap
                      filter_conditions.append(existing_df['top_k'].astype(str) == str(args.top_k))
 
-                if args.baseline_model == "FSM" and args.bootstrap:
+                if args.baseline_model == "ROTE" and args.bootstrap:
                     if 'multi_step_eval' in existing_df.columns:
                         filter_conditions.append(existing_df['multi_step_eval'].astype(str) == str(args.multi_step_eval))
                     if args.multi_step_eval and 'num_steps_predicted' in existing_df.columns:
@@ -1891,10 +1547,8 @@ def main():
                     if args.multi_step_eval and 'num_hypothesis' in existing_df.columns:
                          filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))  
 
-                elif 'num_hypothesis' in existing_df.columns : # For non-FSM bootstrap models like TT, NLLM
+                elif 'num_hypothesis' in existing_df.columns : # For non-ROTE bootstrap models like TT, NLLM
                     filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))
-                
-                
                 
                 matching_rows = existing_df[np.logical_and.reduce(filter_conditions)]
                 
@@ -1910,7 +1564,7 @@ def main():
 
     # Initialize model, dataloader, and evaluation function
     model = None
-    states = None # For ToMnet/BC
+    states = None # For BC
 
     if args.human_data:
         print("Loading human data")
@@ -1925,10 +1579,10 @@ def main():
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model = AutoToM(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
         eval_fn = eval_autoToM
-    elif args.baseline_model == "FSM":
-        from baselines.inferFSM import FSMReasoner
+    elif args.baseline_model == "ROTE":
+        from baselines.gridROTE import ROTEReasoner
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
-        model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+        model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
                            dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
                            num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
                            structured=args.structured)
@@ -1937,9 +1591,9 @@ def main():
         else:
             eval_fn = eval_fsm 
     elif args.baseline_model == "Oracle":
-        from baselines.inferFSM import FSMReasoner
+        from baselines.gridROTE import ROTEReasoner
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
-        model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+        model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
                            dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
                            num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
                            structured=args.structured, oracle=True)
@@ -1952,14 +1606,6 @@ def main():
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
         model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False) # Assuming partnr=False for this context
         eval_fn = eval_naive_llm
-    elif args.baseline_model == "ToMnet":
-        # args.as_images = True
-        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
-        model, states = load_tomnet_models(args)
-        if not states['params']: # Check if any models were loaded
-            print("No ToMnet models found or loaded. Please train models first or check paths.")
-            return
-        eval_fn = lambda a, d, m, s, ep_id, env: eval_mtom(a, d, m, s) # eval_mtom uses 'states'
     elif args.baseline_model == "BC":
         # args.as_images = True
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
@@ -1980,8 +1626,8 @@ def main():
         
         results_to_save = []
 
-        if args.baseline_model in ["FSM", "Oracle"] and args.bootstrap:
-            # eval_fsm_bootstrap returns (accuracies_dict, program_lengths_dict)
+        if args.baseline_model in ["ROTE", "Oracle"] and args.bootstrap:
+            # eval_rote_bootstrap returns (accuracies_dict, program_lengths_dict)
             accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
@@ -2023,16 +1669,10 @@ def main():
                         result['avg_prediction_time'] = avg_prediction_time
                         result['avg_generation_time'] = avg_generation_time
                     results_to_save.append(result)
-            else: # Single-step FSM bootstrap
+            else: # Single-step ROTE bootstrap
                 for n_hyp, accuracy_val in accuracies_dict.items():
                     # Check if existing CSV has avg_prediction_time column
                     include_prediction_time = True
-                    # if os.path.exists(csv_path):
-                    #     try:
-                    #         existing_cols = pd.read_csv(csv_path, nrows=0).columns
-                    #         include_prediction_time = 'avg_prediction_time' in existing_cols
-                    #     except:
-                    #         pass
                             
                     result = {
                         'gt_fsm_id': agent_id,
@@ -2060,8 +1700,8 @@ def main():
                         result['avg_prediction_time'] = avg_prediction_time
                         
                     results_to_save.append(result)
-        else: # Other models or non-bootstrap FSM
-            if args.baseline_model in ["ToMnet", "BC"]:
+        else: # Other models or non-bootstrap ROTE
+            if args.baseline_model in ["BC"]:
                 if args.multi_step_eval and args.baseline_model == "BC":
                     current_accuracy, avg_prediction_time, first_step_accuracy, avg_matching_states, mean_equal_actions, accuracy_after_flip, env, gt_agent_script_id = eval_fn(args, dataloader, model, states, epoch, env)
                 else:
@@ -2097,13 +1737,13 @@ def main():
                 'num_agents_evaluated': args.num_agents_to_sample,
                 'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                 'epoch': epoch,
-                'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A',
-                'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'FSM', 'NLLM'] else ('ensemble' if args.baseline_model in ["ToMnet", "BC"] else 'N/A'),
-                'two_stage': args.two_stage if args.baseline_model == 'FSM' else False,
-                'structured': args.structured if args.baseline_model == 'FSM' else "False",
-                'rejuvenation': args.rejuvenation if args.baseline_model == 'FSM' else False,
-                'top_k': args.top_k if args.baseline_model == 'FSM' else 0, # or N/A
-                'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'FSM' and not args.bootstrap else 0, # Placeholder
+                'llm_model': args.model_name if args.baseline_model in ['AutoToM', 'ROTE', 'NLLM'] else 'N/A',
+                'num_hypothesis': args.n_hypothesis if args.baseline_model in ['ROTE', 'NLLM'] else ('ensemble' if args.baseline_model in ["BC"] else 'N/A'),
+                'two_stage': args.two_stage if args.baseline_model == 'ROTE' else False,
+                'structured': args.structured if args.baseline_model == 'ROTE' else "False",
+                'rejuvenation': args.rejuvenation if args.baseline_model == 'ROTE' else False,
+                'top_k': args.top_k if args.baseline_model == 'ROTE' else 0, # or N/A
+                'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'ROTE' and not args.bootstrap else 0, # Placeholder
                 'multi_step_eval': args.multi_step_eval,
                 'num_steps_predicted': args.num_steps_to_predict,
                 'avg_matching_states': avg_matching_states,

@@ -14,14 +14,14 @@
 #SBATCH --gpus=1
 #SBATCH --time=02-00:00:00 # Max runtime in DD-HH:MM:SS format.
 
-#SBATCH --output=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.out
-#SBATCH --error=/mmfs1/gscratch/socialrl/kjha/automaticity/logs/%x.%j.err
+#SBATCH --output=/mmfs1/gscratch/socialrl/kjha/mindsAsCode/logs/%x.%j.out
+#SBATCH --error=/mmfs1/gscratch/socialrl/kjha/mindsAsCode/logs/%x.%j.err
 #SBATCH --open-mode=append
 
 # Add requeue flag
 #SBATCH --requeue
 
-cd /mmfs1/gscratch/socialrl/kjha/automaticity
+cd /mmfs1/gscratch/socialrl/kjha/mindsAsCode
 
 source ~/.bashrc
 conda activate llm
@@ -92,21 +92,17 @@ if [ "$group" = "True" ]; then
     python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 4 --group True $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --bootstrap --multi_step_eval $multi_step_eval --env_size $env_size
 else
     # Add structured, two_stage, and rejuvenation flags if they are True
-    # Add structured, two_stage, and rejuvenation flags if they are True
-    echo "python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --multi_step_eval $multi_step_eval  --num_steps_to_predict 20 --human_data False --flip_quarter True --env_size $env_size"
-
-    
     python plot_and_eval.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --bootstrap $structured_flag $two_stage_flag $rejuvenation_flag $top_k_flag --num_agents_to_sample $num_agents_to_sample --num_datapoints_per_agent_to_sample $num_datapoints_per_agent_to_sample --num_epochs $num_epochs --multi_step_eval $multi_step_eval  --num_steps_to_predict 20 --flip_quarter True --env_size $env_size
     # python eval_partnr.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 100 --num_agents_to_sample 1 --num_datapoints_per_agent_to_sample 1 --group False
     # python eval_human.py --baseline_model $model_arch --n_hypothesis $n_hypothesis --model_name $llm_model --num_agents 20 --num_epochs 120 --num_agents_to_sample $n_agents_to_sample --num_datapoints_per_agent_to_sample $n_datapoints_per_agent_to_sample
 fi
 EXIT_CODE=$?
 
-# If the job failed (non-zero exit code), resubmit it
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "Job failed with exit code $EXIT_CODE. Requeuing..."
-    # Submit the same script again
-    sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k $multi_step_eval
-    exit $EXIT_CODE
-fi
+# # If the job failed (non-zero exit code), resubmit it
+# if [ $EXIT_CODE -ne 0 ]; then
+#     echo "Job failed with exit code $EXIT_CODE. Requeuing..."
+#     # Submit the same script again
+#     sbatch $0 $llm_model $model_arch $n_hypothesis $group $structured $two_stage $rejuvenation $top_k $multi_step_eval
+#     exit $EXIT_CODE
+# fi
 

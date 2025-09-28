@@ -110,7 +110,6 @@ def convert_state_list_to_serializable_list(state_list, agent_id, num_blocks):
 def generate_dataset(num_datapoints_per_agent=100, num_steps=100, num_agents=1, num_block_steps=2, num_walls_steps=2, group=False, flip_quarter=False):
 
     # Create directory if it doesn't exist
-    os.makedirs(f"data/agent_num{num_agents}", exist_ok=True)
     for num_blocks_i in tqdm(range(3, 8, num_block_steps)):
         # agent_list = initialize_agent_list(range(20), num_agents=num_agents, num_blocks=num_blocks_i, group=group)
         agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=num_blocks_i)
@@ -221,62 +220,62 @@ if __name__ == "__main__":
 
 
 
-    # agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=8)
+    agent_list = initialize_hand_designed_agent_list(num_agents=num_agents, num_blocks=8)
 
-    # state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=30, num_agents=1, num_steps=num_steps, num_blocks=6, num_walls=1, flip_quarter=True)
-    # # Create frames list for RGB arrays
-    # stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *obs_list)
-    # stacked_states = stacked_states[0]
-    # stacked_actions = jnp.array(action_list)[:, 0]
+    state_list, action_list, obs_list,env = generate_trajectory(hand_designed_id, agent_list, seed=30, num_agents=1, num_steps=num_steps, num_blocks=6, num_walls=1, flip_quarter=True)
+    # Create frames list for RGB arrays
+    stacked_states = jax.tree.map(lambda *xs: jnp.stack(xs), *obs_list)
+    stacked_states = stacked_states[0]
+    stacked_actions = jnp.array(action_list)[:, 0]
 
-    # def convert_to_image(index, stacked_state):
-    #     indexed_state = jax.tree.map(lambda x: x[index], stacked_state)
-    #     tile_size = 20  # Increased from 14 to 20
-    #     grid_size = 7
-    #     img_size = grid_size * tile_size
+    def convert_to_image(index, stacked_state):
+        indexed_state = jax.tree.map(lambda x: x[index], stacked_state)
+        tile_size = 20  # Increased from 14 to 20
+        grid_size = 7
+        img_size = grid_size * tile_size
 
-    #     img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
-    #     render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)
-    #     base_image = render_fn(indexed_state)
+        img_gen_fn = jax.jit(state_to_image_jit, static_argnums=(1, 2, 3))
+        render_fn = lambda x: img_gen_fn(x, img_size, grid_size, tile_size)
+        base_image = render_fn(indexed_state)
         
-    #     # Convert to numpy for text rendering
-    #     base_image_np = np.array(base_image)
+        # Convert to numpy for text rendering
+        base_image_np = np.array(base_image)
         
-    #     # Add action information at the bottom
-    #     action_idx = stacked_actions[index]
-    #     action_name = env.action_to_name[action_idx]
+        # Add action information at the bottom
+        action_idx = stacked_actions[index]
+        action_name = env.action_to_name[action_idx]
         
-    #     # Create a larger image with more space for text
-    #     text_height = 50  # Increased from 30 to 50
-    #     new_height = base_image_np.shape[0] + text_height
-    #     new_image = np.ones((new_height, base_image_np.shape[1], 3), dtype=np.uint8) * 255
+        # Create a larger image with more space for text
+        text_height = 50  # Increased from 30 to 50
+        new_height = base_image_np.shape[0] + text_height
+        new_image = np.ones((new_height, base_image_np.shape[1], 3), dtype=np.uint8) * 255
         
-    #     # Copy the base image to the top
-    #     new_image[:base_image_np.shape[0], :, :] = base_image_np
+        # Copy the base image to the top
+        new_image[:base_image_np.shape[0], :, :] = base_image_np
         
-    #     # Add text at the bottom
-    #     import cv2
-    #     font = cv2.FONT_HERSHEY_SIMPLEX
-    #     font_scale = 1.0  # Increased from 0.7 to 1.0
-    #     font_thickness = 3  # Increased from 2 to 3
-    #     text = f"{index}: {action_name}"
+        # Add text at the bottom
+        import cv2
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0  # Increased from 0.7 to 1.0
+        font_thickness = 3  # Increased from 2 to 3
+        text = f"{index}: {action_name}"
         
-    #     # Get text size
-    #     (text_width, text_height_cv), baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
+        # Get text size
+        (text_width, text_height_cv), baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
         
-    #     # Calculate text position (centered horizontally, positioned in the text area)
-    #     text_x = (new_image.shape[1] - text_width) // 2
-    #     text_y = base_image_np.shape[0] + (text_height + text_height_cv) // 2
+        # Calculate text position (centered horizontally, positioned in the text area)
+        text_x = (new_image.shape[1] - text_width) // 2
+        text_y = base_image_np.shape[0] + (text_height + text_height_cv) // 2
         
-    #     # Draw text
-    #     cv2.putText(new_image, text, (text_x, text_y), font, font_scale, (0, 0, 0), font_thickness)
+        # Draw text
+        cv2.putText(new_image, text, (text_x, text_y), font, font_scale, (0, 0, 0), font_thickness)
         
-    #     return new_image
+        return new_image
     
-    # # frames = jax.vmap(convert_to_image, in_axes=(0, None))(jnp.arange(len(action_list)), stacked_states)
+    # frames = jax.vmap(convert_to_image, in_axes=(0, None))(jnp.arange(len(action_list)), stacked_states)
 
-    # # frames = [state_to_image(s, env.size) for s in state_list]
-    # frames = [convert_to_image(i, stacked_states) for i in range(len(action_list))]
-    # # Save frames as GIF using imageio with loop=0 for infinite looping
-    # imageio.mimsave(f'environment_simulation_{hand_designed_id}.gif', frames, fps=2, loop=0)
-    # print("Saved GIF")
+    # frames = [state_to_image(s, env.size) for s in state_list]
+    frames = [convert_to_image(i, stacked_states) for i in range(len(action_list))]
+    # Save frames as GIF using imageio with loop=0 for infinite looping
+    imageio.mimsave(f'environment_simulation_{hand_designed_id}.gif', frames, fps=2, loop=0)
+    print("Saved GIF")

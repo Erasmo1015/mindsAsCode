@@ -15,7 +15,6 @@ import optax
 from flax.training import train_state
 from flax import struct
 
-from baselines.ToMnet import ToMNet
 from baselines.BC import BCNet
 
 def parse_args():
@@ -25,7 +24,7 @@ def parse_args():
         "--baseline_model",
         type=str,
         default="BC",
-        help="Baseline model to train. Currently only 'ToMnet' and 'BC' are implemented."
+        help="Baseline model to train. Currently only  'BC' is implemented."
     )
     parser.add_argument(
         "--data_path",
@@ -53,13 +52,13 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=1e-2, help='Learning rate for the optimizer.')
     parser.add_argument('--num_epochs', type=int, default=50, help='Number of training epochs.')
     parser.add_argument('--save_path', type=str, default='models', help='Path to save the model.')
-    parser.add_argument('--seed', type=int, default=30, help='Random seed.')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
-    if args.baseline_model not in ["ToMnet", 'BC']:
+    if args.baseline_model not in ["BC"]:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     return args
@@ -234,77 +233,6 @@ def create_train_state(rng_key, model, learning_rate, example_states, example_ac
         batch_stats=variables.get('batch_stats', flax.core.FrozenDict())
     )
 
-def tomnet_train_step(state, batch, rng_key):
-    """Train for a single step."""
-    # Extract states and actions from batch
-    states = batch['states']  # Shape: (num_agents, num_datapoints_per_agent, num_steps, height, width, 3)
-    actions = batch['actions']  # Shape: (num_agents, num_datapoints_per_agent, num_steps, 1)
-    
-    # Use scan instead of vmap to reduce memory usage
-    def loss_fn(params):
-        def single_agent_loss(agent_idx):
-            agent_states = states[agent_idx]
-            agent_actions = actions[agent_idx]
-            
-            # Forward pass through the model
-            variables = {'params': params, 'batch_stats': state.batch_stats}
-            action_prediction, updates = state.apply_fn(  # states are num traj, num_steps, height, width, 3
-                variables, 
-                agent_states, 
-                agent_actions,
-                mutable=['batch_stats']  # Make batch_stats mutable
-            )
-            action_prediction = jnp.transpose(action_prediction, (1, 0, 2))  # (num_steps, num_agents, 6)
-           
-            action_prediction = action_prediction.reshape(-1, 6)
-
-            gt_action = agent_actions[-1:, 1:, :]  # Get actions from the last batch
-            # Convert ground truth action to one-hot
-            gt_action_one_hot = jax.nn.one_hot(gt_action, num_classes=6)  
-            gt_action_one_hot = gt_action_one_hot.reshape(-1, 6) # (batch, 6)
-            
-            # Compute negative log likelihood loss
-            epsilon = 1e-8
-            nll_loss = -jnp.sum(gt_action_one_hot * jnp.log(action_prediction + epsilon), axis=-1)
-            return nll_loss.mean(), updates
-        
-        # Process agents one by one to reduce memory usage
-        total_loss = 0
-        all_updates = None
-        
-        for agent_idx in range(states.shape[0]):
-            agent_loss, agent_updates = single_agent_loss(agent_idx)
-            total_loss += agent_loss
-            
-            # Accumulate updates
-            if all_updates is None:
-                all_updates = agent_updates
-            else:
-                all_updates = jax.tree.map(
-                    lambda x, y: x + y, 
-                    all_updates, 
-                    agent_updates
-                )
-        
-        # Average the updates
-        all_updates = jax.tree.map(
-            lambda x: x / states.shape[0], 
-            all_updates
-        )
-        
-        return total_loss / states.shape[0], all_updates
-    
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, updates), grads = grad_fn(state.params)
-    
-    # Update state
-    new_state = state.apply_gradients(
-        grads=grads,
-        batch_stats=updates['batch_stats']
-    )
-    
-    return new_state, loss
-
 def bc_train_step(state, batch, rng_key):
     """Train for a single step."""
     # Extract states and actions from batch
@@ -399,20 +327,7 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
     
-    if args.baseline_model == "ToMnet":
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, overfit=args.overfit)
-
-        # Get a batch of data for initialization
-        example_batch = next(dataloader)
-        
-        # Initialize model
-        if args.group:
-            num_to_predict = 4
-        else:
-            num_to_predict = 1
-        model = ToMNet(character_net_features=64, mental_net_features=128, output_size=6, num_to_predict=num_to_predict)
-        train_step = tomnet_train_step
-    elif args.baseline_model == "BC":
+    if args.baseline_model == "BC":
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, overfit=args.overfit)
 
         # Get a batch of data for initialization
@@ -425,6 +340,8 @@ def main():
             num_to_predict = 1
         model = BCNet(output_size=6, hidden_size=32, num_to_predict=num_to_predict)
         train_step = bc_train_step
+    else:
+        raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
 
     # Check for existing checkpoints
     checkpoint_files = [f for f in os.listdir(os.path.dirname(save_path)) 
@@ -569,44 +486,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # args = parse_args()
-    # dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, overfit=args.overfit)
-    
-    # obs_traj = []
-    # act_traj = []
-    # for num_dat in range(25):
-    #     batch = next(dataloader)
-    #     obs = batch['states'].reshape(-1, *batch['states'].shape[-3:])
-    #     act = batch['actions'].reshape(-1, *batch['actions'].shape[-1:])
-    #     obs_traj.append(obs)
-    #     act_traj.append(act)
-    # obs_traj = jnp.concatenate(obs_traj, axis=0)
-    # act_traj = jnp.concatenate(act_traj, axis=0)
-    # # Save trajectories to pickle file
-    # # Convert to numpy arrays
-    # obs_array = np.array(obs_traj)
-    # act_array = np.array(act_traj)
-    
-    # Create directory if it doesn't exist
-    # save_dir = 'data/trajectories'
-    # os.makedirs(save_dir, exist_ok=True)
-    
-    # Save with descriptive filename including num agents and datapoints
-    # save_path = os.path.join(save_dir, f'dummy_trajectory.npz')
-    
-    # # Save arrays using npz format
-    # np.savez(save_path, 
-    #          observations=obs_array,
-    #          actions=act_array)
-        
-    # print(f"Saved trajectories to {save_path}")
-
-
-    # Load trajectories from npz file
-    # data = np.load(save_path)
-    # observations = data['observations']
-    # actions = data['actions']
-
-    # print(observations.shape)
-    # print(actions.shape)
-

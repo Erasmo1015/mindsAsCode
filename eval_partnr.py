@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument(
         "--baseline_model",
         type=str,
-        default="FSM",
+        default="ROTE",
         help="Baseline model to train. Currently only 'ToMnet' and 'BC' are implemented."
     )
     parser.add_argument(
@@ -72,17 +72,17 @@ def parse_args():
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')  # Reduced from 0.9 to 0.7
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to evaluate with bootstrapping for different numbers of hypotheses.')
-    parser.add_argument('--rejuvenation', action='store_true', help='Whether to use rejuvenation for FSM evaluation.')
-    parser.add_argument('--rejuvenation_threshold', type=float, default=2, help='Threshold for rejuvenation in FSM.')
-    parser.add_argument('--max_rejuvenation_attempts', type=int, default=1, help='Maximum number of rejuvenation attempts in FSM.')
+    parser.add_argument('--rejuvenation', action='store_true', help='Whether to use rejuvenation for ROTE evaluation.')
+    parser.add_argument('--rejuvenation_threshold', type=float, default=2, help='Threshold for rejuvenation in ROTE.')
+    parser.add_argument('--max_rejuvenation_attempts', type=int, default=1, help='Maximum number of rejuvenation attempts in ROTE.')
     parser.add_argument('--top_k', type=int, default=0, help='Number of top hypotheses to consider (0 means use all).')
-    parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage reasoning for FSM.')
+    parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage reasoning for ROTE.')
     parser.add_argument('--structured', type=str, default="False", choices=["False", "p1", "p2"], 
                         help='Type of structured reasoning to use (False, "p1", or "p2").')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
-    if args.baseline_model not in ["ToMnet", 'BC', 'TT', 'AutoToM', 'FSM', 'NLLM']:
+    if args.baseline_model not in ["ToMnet", 'BC', 'TT', 'AutoToM', 'ROTE', 'NLLM']:
         raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
     
     if args.baseline_model == 'AutoToM':
@@ -193,9 +193,7 @@ def eval_naive_LLM(args, dataloader, model, episode_id: int = 0):
 
     gt_action = actions[-2][0]
     
-    # while tries < 6:
-    # try:
-    # try:
+
     predicted_final_action = model.predict_action(states, actions, agent_id=0, episode_id=episode_id)
     if predicted_final_action is None:
         if gt_action is None:
@@ -204,12 +202,7 @@ def eval_naive_LLM(args, dataloader, model, episode_id: int = 0):
         if gt_action is not None:
             if predicted_final_action.lower() == gt_action.lower():
                 num_correct += 1
-            # break  # end loop if prediction is successful
-    # except Exception as e:
-    #     print(f"Error: {e}")
 
-    #     tries += 1
-    # num_total += 1
     accuracy = num_correct / num_total
     print(f"Accuracy: {accuracy}")
     return accuracy, instruction
@@ -242,7 +235,7 @@ def eval_autoToM(args, dataloader, model, episode_id: int = 0):
     return accuracy, instruction
             
 
-def eval_fsm(args, dataloader, model, episode_id: int = 0):
+def eval_rote(args, dataloader, model, episode_id: int = 0):
     num_correct = 0
     num_total = 0
     num_successes = 0
@@ -398,8 +391,8 @@ def eval_mtom(args, dataloader, model, states):
     print(f"ToMnet Ensemble Accuracy: {accuracy:.4f} ({num_correct}/{num_total})")
     return accuracy
 
-def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
-    """Evaluate FSM with bootstrapping for different numbers of hypotheses."""
+def eval_rote_bootstrap(args, dataloader, model, episode_id: int = 0):
+    """Evaluate ROTE with bootstrapping for different numbers of hypotheses."""
     max_hypotheses = args.n_hypothesis  # Maximum number of hypotheses to consider
     results = {n: {'correct': 0, 'total': 0, 'program_length': 0} for n in range(1, max_hypotheses + 1)}
     
@@ -412,7 +405,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
     else:
         num_agents_per_sample = 1
         
-    # try:
+
     # Enable bootstrapping
     model.bootstrap = True
     
@@ -484,13 +477,6 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         if not args.group or True:
             results[n_hyp]['correct'] += correct_tool_preds_prob  # 
 
-            # prediction = prediction[0]
-            # # breakpoint()
-            # # print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
-            # if type(prediction) == str:
-            #     print(f"prediction: {prediction}, gt_final_action: {gt_final_action}")
-            #     if prediction.lower() == gt_final_action.lower():
-            #         results[n_hyp]['correct'] += co
 
         else:
             for p in prediction:
@@ -499,25 +485,6 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     if p.lower() == gt_final_action.lower():
                         results[n_hyp]['correct'] += 1
                         break
-                # else:
-                #     if p.lower() == gt_final_action.lower():
-                #         results[n_hyp]['correct'] += 1
-                #         break
-        #     if len(prediction.shape) == 1:
-        #         prediction = prediction.reshape(1, -1)
-            
-        #     for aid in range(len(gt_final_action)):
-        #         breakpoint()
-        #         final_action_prob = prediction[aid, gt_final_action[aid]]
-                
-        #         if final_action_prob >= np.max(prediction[aid]):
-        #             results[n_hyp]['correct'] += 1
-                    
-    # except Exception as e:
-    #     print(f"Error: {e}")
-        # full_traceback = traceback.format_exc()
-        # print(full_traceback)
-        # breakpoint()
     
     # Calculate accuracies and average program lengths for each number of hypotheses
     accuracies = {}
@@ -565,10 +532,10 @@ def main():
     structured_extension = f"_structured_{args.structured}" if args.structured != "False" else ""
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
         
-    if args.bootstrap and args.baseline_model == "FSM":
-        csv_path = f"results/{args.baseline_model}/partnr4_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
+    if args.bootstrap and args.baseline_model == "ROTE":
+        csv_path = f"results/{args.baseline_model}/partnr_bootstrap_accuracy_{args.baseline_model}{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}_topk{args.top_k}.csv"
     else:
-        csv_path = f"results/{args.baseline_model}/partnr4_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
+        csv_path = f"results/{args.baseline_model}/partnr_accuracy_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}.csv"
     
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
@@ -605,27 +572,23 @@ def main():
             start_epoch = matching_rows['epoch'].max() + 1
             print(f"Resuming from epoch {start_epoch}")
     
-    if args.baseline_model == "TT":
-        from baselines.thoughtTrace import ThoughtTrace
-        dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
-        model = ThoughtTrace(n_hypothesis=args.n_hypothesis, model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
-        eval_fn = eval_thoughtTrace
-    elif args.baseline_model == "AutoToM":
+
+    if args.baseline_model == "AutoToM":
         from baselines.AutoToM.partnr_autoToM import AutoToM
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
         model = AutoToM(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, group=args.group)
         eval_fn = eval_autoToM
-    elif args.baseline_model == "FSM":
-        from baselines.llmFSM import FSMReasoner
+    elif args.baseline_model == "ROTE":
+        from baselines.llmROTE import ROTEReasoner
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
-        model = FSMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+        model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
                            dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
                            num_hypothesis=args.n_hypothesis, group=args.group, 
                            two_stage=args.two_stage, structured=args.structured)
         if args.bootstrap:
-            eval_fn = eval_fsm_bootstrap
+            eval_fn = eval_rote_bootstrap
         else:
-            eval_fn = eval_fsm
+            eval_fn = eval_rote
     elif args.baseline_model == "ToMnet":
         dataloader = make_dataloader(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False)
         model, states = load_tomnet_models(args)
@@ -651,11 +614,9 @@ def main():
     # Run evaluation for each epoch and save results after each epoch
     all_results = []
     for epoch in range(start_epoch, args.num_epochs):
-        # pr = cProfile.Profile()
-        # pr.enable()
         print(f"Running epoch {epoch}/{args.num_epochs}")
         
-        if args.bootstrap and args.baseline_model == "FSM":
+        if args.bootstrap and args.baseline_model == "ROTE":
             accuracies, program_lengths, instruction = eval_fn(args, dataloader, model, episode_id=epoch)
             
             # Create results for each hypothesis count
@@ -687,7 +648,7 @@ def main():
                     # Create new CSV file or overwrite for first epoch
                     df.to_csv(csv_path, index=False)
         else:
-            if args.baseline_model in ['FSM', 'AutoToM', 'NLLM', 'BC']:
+            if args.baseline_model in ['ROTE', 'AutoToM', 'NLLM', 'BC']:
                 res, instruction = eval_fn(args, dataloader, model, episode_id=epoch)
             else:
                 res, instruction = eval_fn(args, dataloader, model)
@@ -701,13 +662,13 @@ def main():
                 'num_agents_evaluated': args.num_agents_to_sample,
                 'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                 'epoch': epoch,
-                'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'FSM', 'NLLM'] else 'N/A',
-                'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'FSM', 'NLLM'] else 'N/A',
-                'two_stage': args.two_stage if args.baseline_model == 'FSM' else False,
-                'structured': args.structured if args.baseline_model == 'FSM' else "False",
-                'rejuvenation': args.rejuvenation if args.baseline_model == 'FSM' else False,
-                'top_k': args.top_k if args.baseline_model == 'FSM' else 0,
-                'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'FSM' else 0
+                'llm_model': args.model_name if args.baseline_model in ['TT', 'AutoToM', 'ROTE', 'NLLM'] else 'N/A',
+                'num_hypothesis': args.n_hypothesis if args.baseline_model in ['TT', 'ROTE', 'NLLM'] else 'N/A',
+                'two_stage': args.two_stage if args.baseline_model == 'ROTE' else False,
+                'structured': args.structured if args.baseline_model == 'ROTE' else "False",
+                'rejuvenation': args.rejuvenation if args.baseline_model == 'ROTE' else False,
+                'top_k': args.top_k if args.baseline_model == 'ROTE' else 0,
+                'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'ROTE' else 0
             }
             
             # Create single-row dataframe for this epoch's result
@@ -721,14 +682,7 @@ def main():
                 df.to_csv(csv_path, index=False)
         
         print(f"Saved results for epoch {epoch}")
-        # pr.disable()
-        # # Save profile data to file
-        # profile_path = f'profile_epoch_{epoch}.prof'
-        # ps = pstats.Stats(pr)
-        # ps.sort_stats('cumulative')
-        # ps.dump_stats(profile_path)
-        # print(f"Saved profile data to {profile_path}")
-        # break
+
     os.environ['CURRENT_MODEL_NAME'] = ''
 
 if __name__ == "__main__":
