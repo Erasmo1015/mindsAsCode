@@ -79,6 +79,7 @@ Then, generate necessary scripted and tutorial videos using the command
 
 ```
 python video_generation_script.py
+python generate_tutorial_videos.py
 ```
 
 To collect gameplay of humans, run
@@ -98,6 +99,8 @@ To collect human predictions of human gameplay, run
 ```
 python prediction_human_web_app.py
 ```
+
+Make sure to modify ```misc/consent.md``` with your university's IRB or company's requried consent form for running human experiments!
 
 
 ## Partnr Evaluations
