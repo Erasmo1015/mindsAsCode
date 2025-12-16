@@ -5,9 +5,9 @@ os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
 
 # Set PyTorch to use expandable segments to avoid memory fragmentation
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-
+os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 import torch
-torch.multiprocessing.set_start_method('spawn')
+# torch.multiprocessing.set_start_method('spawn')
 import gc
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
