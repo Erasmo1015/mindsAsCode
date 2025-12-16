@@ -44,41 +44,54 @@ class ROTEReasoner:
         self.action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
         self.str_action_space = ["stay", "right", "left", "down", "up", "interact"]
 
+        PROJECT_ROOT = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..")
+        )
+
         self.group = group
+
         if not group:
             self.dataset_name = "single_agent_dataset"
-            prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/infer_single_fsm.txt"
+            prompt_path = os.path.join(PROJECT_ROOT, "prompts", "infer_single_fsm.txt")
+
             if structured == "p1":
-                code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_single_code_template.txt"
+                code_template_path = os.path.join(PROJECT_ROOT, "prompts", "structured_single_code_template.txt")
             elif structured == "p2":
-                code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_p2_single_code_template.txt"
-                self.first_stage_prompt = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_p1_single_code_template.txt"
+                code_template_path = os.path.join(PROJECT_ROOT, "prompts", "structured_p2_single_code_template.txt")
+                self.first_stage_prompt = os.path.join(PROJECT_ROOT, "prompts", "structured_p1_single_code_template.txt")
             else:
-                code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/single_code_template.txt"
+                code_template_path = os.path.join(PROJECT_ROOT, "prompts", "single_code_template.txt")
+
         else:
             self.dataset_name = "group_agent_dataset"
-            prompt_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/infer_group_fsm.txt"
-            if structured == "p1":
-                code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_group_code_template.txt"
-            elif structured == "p2":
-                code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_p2_group_code_template.txt"
-                self.first_stage_prompt = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/structured_p1_group_code_template.txt"
-            else:
-                code_template_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/group_code_template.txt"
-        refinement_1_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/refinement_1.txt"
-        refinement_2_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/refinement_2.txt"
-        refinement_3_path = "/mmfs1/gscratch/socialrl/kjha/automaticity/prompts/refinement_3.txt"
+            prompt_path = os.path.join(PROJECT_ROOT, "prompts", "infer_group_fsm.txt")
 
-        self.base_prompt = open(prompt_path, "r").read()
-        self.code_template = open(code_template_path, "r").read()
-        self.refinement_1 = open(refinement_1_path, "r").read()
-        self.refinement_2 = open(refinement_2_path, "r").read()
-        self.refinement_3 = open(refinement_3_path, "r").read()
+            if structured == "p1":
+                code_template_path = os.path.join(PROJECT_ROOT, "prompts", "structured_group_code_template.txt")
+            elif structured == "p2":
+                code_template_path = os.path.join(PROJECT_ROOT, "prompts", "structured_p2_group_code_template.txt")
+                self.first_stage_prompt = os.path.join(PROJECT_ROOT, "prompts", "structured_p1_group_code_template.txt")
+            else:
+                code_template_path = os.path.join(PROJECT_ROOT, "prompts", "group_code_template.txt")
+
+        refinement_1_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_1.txt")
+        refinement_2_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_2.txt")
+        refinement_3_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_3.txt")
+
+        self.base_prompt = open(prompt_path).read()
+        self.code_template = open(code_template_path).read()
+        self.refinement_1 = open(refinement_1_path).read()
+        self.refinement_2 = open(refinement_2_path).read()
+        self.refinement_3 = open(refinement_3_path).read()
 
         if self.oracle:
-            program_dir = "/mmfs1/gscratch/socialrl/kjha/automaticity/generated_outputs/hand_designed"
+            program_dir = os.path.join(PROJECT_ROOT, "generated_outputs", "hand_designed")
             gt_programs = sorted(os.listdir(program_dir))
-            self.gt_programs = [open(f"{program_dir}/{p}", "r").read() for p in gt_programs]
+            self.gt_programs = [
+                open(os.path.join(program_dir, p)).read()
+                for p in gt_programs
+            ]
+
 
 
         # Convert dtype string to torch dtype
