@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 import random
+from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
@@ -75,9 +76,13 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=12, help='Random seed.')
     parser.add_argument('--n_hypothesis', type=int, default=30, help='Number of hypothesis for thought trace.')
     parser.add_argument('--model_name', type=str, default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", help='Name of the model to use.')  # deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct or meta-llama/Llama-3.1-8B-Instruct or deepseek-ai/DeepSeek-V2-Lite
+    parser.add_argument('--mode', type=str, default="default", choices=["default", "local"], help='LLM mode: default uses in-process models; local routes to an external vLLM server.')
+    parser.add_argument('--llm_server_url', type=str, default=os.getenv("VLLM_LOCAL_URL", "http://localhost:8000/v1"), help='Base URL for local vLLM server when --mode local.')
+    parser.add_argument('--llm_api_key', type=str, default=os.getenv("VLLM_LOCAL_API_KEY", "EMPTY"), help='API key for local vLLM server when --mode local.')
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
+    parser.add_argument('--no_log', type=lambda x: str(x).lower() == 'true', default=False, help='Disable wandb logging. Default False (logging enabled).')
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to use bootstrapping for hypothesis evaluation')
     parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage approach for ROTE reasoning')
@@ -1492,6 +1497,40 @@ def main():
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(save_path_dir), exist_ok=True)
     
+    # Optional wandb setup
+    wandb_enabled = False
+    wandb = None
+    if not args.no_log:
+        try:
+            import wandb as _wandb
+            wandb = _wandb
+            dataset_name = os.path.basename(os.path.normpath(args.data_path)) or "dataset"
+            run_name = f"{datetime.now():%y%m%d_%H%M%S}_{dataset_name}"
+            wandb.init(
+                project="mindAsCode",
+                name=run_name,
+                config=vars(args),
+                reinit=False,
+            )
+            wandb_enabled = True
+        except Exception as e:
+            print(f"wandb logging disabled: {e}")
+            wandb_enabled = False
+
+    def _log_to_wandb(data_dict, step):
+        if not wandb_enabled or wandb is None:
+            return
+        try:
+            cleaned = {}
+            for k, v in data_dict.items():
+                if isinstance(v, np.generic):
+                    v = v.item()
+                cleaned[k] = v
+            cleaned.setdefault('mode', args.mode)
+            wandb.log(cleaned, step=step)
+        except Exception as e:
+            print(f"wandb log failed: {e}")
+
     # Initialize random key for parameter initialization
     rng_key = jax.random.PRNGKey(args.seed)
     np.random.seed(args.seed)
@@ -1585,7 +1624,7 @@ def main():
         model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
                            dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
                            num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
-                           structured=args.structured)
+                           structured=args.structured, mode=args.mode, api_base=args.llm_server_url, api_key=args.llm_api_key)
         if args.bootstrap:
             eval_fn = eval_fsm_bootstrap # This function handles multi_step_eval internally
         else:
@@ -1596,7 +1635,7 @@ def main():
         model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
                            dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
                            num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
-                           structured=args.structured, oracle=True)
+                           structured=args.structured, oracle=True, mode=args.mode, api_base=args.llm_server_url, api_key=args.llm_api_key)
         if args.bootstrap:
             eval_fn = eval_fsm_bootstrap # This function handles multi_step_eval internally
         else:
@@ -1604,7 +1643,7 @@ def main():
     elif args.baseline_model == 'NLLM':
         from baselines.basic_LLM import NaiveLLMReasoner
         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
-        model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False) # Assuming partnr=False for this context
+        model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False, mode=args.mode, api_base=args.llm_server_url, api_key=args.llm_api_key) # Assuming partnr=False for this context
         eval_fn = eval_naive_llm
     elif args.baseline_model == "BC":
         # args.as_images = True
@@ -1761,6 +1800,12 @@ def main():
             results_to_save.append(result)
 
         if results_to_save:
+            if wandb_enabled:
+                for entry in results_to_save:
+                    entry_with_mode = dict(entry)
+                    entry_with_mode.setdefault('mode', args.mode)
+                    _log_to_wandb(entry_with_mode, step=epoch)
+
             df = pd.DataFrame(results_to_save)
             
             # Check if we need to match columns with existing CSV

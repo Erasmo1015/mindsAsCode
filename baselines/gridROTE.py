@@ -13,6 +13,7 @@ from agent import AgentExecutionFramework
 # Import vLLM
 from vllm import LLM, SamplingParams
 import traceback
+import openai
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
@@ -20,7 +21,7 @@ class ROTEReasoner:
     def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", tensor_parallel_size: int = 1, device: str = "cuda", 
                  dtype: str = "float16", gpu_memory_utilization: float = 0.55, num_hypothesis: int = 4,
                  max_model_len: int = 2048, quantization: str = None, group: bool = False, two_stage: bool = False,
-                 structured: str = "False", oracle: bool = False):
+                 structured: str = "False", oracle: bool = False, mode: str = "default", api_base: str | None = None, api_key: str | None = None):
         self.model_name = model_name
         self.tensor_parallel_size = tensor_parallel_size
         self.device = device
@@ -101,34 +102,41 @@ class ROTEReasoner:
         elif dtype == "float32":
             torch_dtype = torch.float32
 
-        # Check if model is a GPT model
-        if "gpt" in model_name.lower():
-            # Override with GPT-4.1 Nano
-            self.model_name = "gpt-4.1-nano"
-            # Use OpenAI API instead of vLLM
-            import openai
-            openai.api_key = openai_api_key
-            self.client = openai.OpenAI(api_key=openai_api_key)
+        if mode == "local":
+            # External vLLM server via OpenAI-compatible API; no local weights loaded.
             self.use_openai = True
+            self.client = openai.OpenAI(api_key=api_key or "EMPTY", base_url=api_base or "http://localhost:8000/v1")
         else:
-            self.use_openai = False
-            # Load model using vLLM with optimized settings
-            vllm_kwargs = {
-                "model": model_name,
-                "tensor_parallel_size": tensor_parallel_size,
-                "gpu_memory_utilization": gpu_memory_utilization,
-                "dtype": torch.bfloat16,
-                "trust_remote_code": True,
-                "max_num_batched_tokens": 40000,
-                # "max_model_len": max_model_len,
-            }
-            
-            # Add quantization if specified
-            if quantization:
-                vllm_kwargs["quantization"] = quantization
+            # Check if model is a GPT model
+            if "gpt" in model_name.lower():
+                # Override with GPT-4.1 Nano
+                self.model_name = "gpt-4.1-nano"
+                # Use OpenAI API instead of vLLM
+                openai.api_key = openai_api_key
+                self.client = openai.OpenAI(api_key=openai_api_key)
+                self.use_openai = True
+            else:
+                self.use_openai = False
+                # Load model using vLLM with optimized settings
+                vllm_kwargs = {
+                    "model": model_name,
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "gpu_memory_utilization": gpu_memory_utilization,
+                    # "dtype": torch.bfloat16,
+                    "dtype": "half",
+                    "trust_remote_code": True,
+                    "max_num_batched_tokens": 40000,
+                    "disable_custom_all_reduce": True,
+                    "max_model_len": 32768,
+                    # "max_model_len": max_model_len,
+                }
                 
-            self.llm = LLM(**vllm_kwargs)
-            self.sampling_params = SamplingParams(temperature=1.0, max_tokens=2000)
+                # Add quantization if specified
+                if quantization:
+                    vllm_kwargs["quantization"] = quantization
+                    
+                self.llm = LLM(**vllm_kwargs)
+                self.sampling_params = SamplingParams(temperature=1.0, max_tokens=2000)
         
         # Keep transformers implementation (commented out)
         # self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)

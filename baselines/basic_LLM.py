@@ -13,13 +13,15 @@ from agent import AgentExecutionFramework
 # Import vLLM
 from vllm import LLM, SamplingParams
 import traceback
+import openai
 
 openai_api_key = os.environ["OPENAI_API_KEY"]
 
 class NaiveLLMReasoner:
     def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", tensor_parallel_size: int = 1, device: str = "cuda", 
                  dtype: str = "float16", gpu_memory_utilization: float = 0.55, num_hypothesis: int = 4,
-                 max_model_len: int = 2048, quantization: str = None, group: bool = False, partnr: bool = False):
+                 max_model_len: int = 2048, quantization: str = None, group: bool = False, partnr: bool = False,
+                 mode: str = "default", api_base: str | None = None, api_key: str | None = None):
         self.model_name = model_name
         self.tensor_parallel_size = tensor_parallel_size
         self.device = device
@@ -59,61 +61,65 @@ class NaiveLLMReasoner:
         elif dtype == "float32":
             torch_dtype = torch.float32
 
-        # Check if model is a GPT model
-        if "gpt" in model_name.lower():
-            # Override with GPT-4.1 Nano
-            self.model_name = "gpt-4.1-nano"
-            # Use OpenAI API instead of vLLM
-            import openai
-            openai.api_key = openai_api_key
-            self.client = openai.OpenAI(api_key=openai_api_key)
+        if mode == "local":
+            # External vLLM server via OpenAI-compatible API; no local weights loaded.
             self.use_openai = True
+            self.client = openai.OpenAI(api_key=api_key or "EMPTY", base_url=api_base or "http://localhost:8000/v1")
         else:
-            self.use_openai = False
-            if 'checkpoint' not in model_name:
-                # Load model using vLLM with optimized settings
-                vllm_kwargs = {
-                    "model": model_name,
-                    "tensor_parallel_size": tensor_parallel_size,
-                    "gpu_memory_utilization": gpu_memory_utilization,
-                    "dtype": torch.bfloat16,
-                    "trust_remote_code": True,
-                    "max_num_batched_tokens": 40000,
-                    # "max_model_len": max_model_len,
-                }
-                
-                # Add quantization if specified
-                if quantization:
-                    vllm_kwargs["quantization"] = quantization
-                    
-                self.llm = LLM(**vllm_kwargs)
-                self.sampling_params = SamplingParams(temperature=0.75, max_tokens=10)
+            # Check if model is a GPT model
+            if "gpt" in model_name.lower():
+                # Override with GPT-4.1 Nano
+                self.model_name = "gpt-4.1-nano"
+                # Use OpenAI API instead of vLLM
+                openai.api_key = openai_api_key
+                self.client = openai.OpenAI(api_key=openai_api_key)
+                self.use_openai = True
             else:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    device_map="auto", 
-                    low_cpu_mem_usage=True,
-                    torch_dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                    max_memory={0: f"30GB"} # Control GPU memory usage
-                )
-                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.reserved_string = "<|reserved_special_token_0|>"
-                self.reserved_token = self.tokenizer.encode(
-                    self.reserved_string, add_special_tokens=False
-                )
+                self.use_openai = False
+                if 'checkpoint' not in model_name:
+                    # Load model using vLLM with optimized settings
+                    vllm_kwargs = {
+                        "model": model_name,
+                        "tensor_parallel_size": tensor_parallel_size,
+                        "gpu_memory_utilization": gpu_memory_utilization,
+                        "dtype": torch.bfloat16,
+                        "trust_remote_code": True,
+                        "max_num_batched_tokens": 40000,
+                        # "max_model_len": max_model_len,
+                    }
+                    
+                    # Add quantization if specified
+                    if quantization:
+                        vllm_kwargs["quantization"] = quantization
+                        
+                    self.llm = LLM(**vllm_kwargs)
+                    self.sampling_params = SamplingParams(temperature=0.75, max_tokens=10)
+                else:
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        device_map="auto", 
+                        low_cpu_mem_usage=True,
+                        torch_dtype=torch.bfloat16,
+                        trust_remote_code=True,
+                        max_memory={0: f"30GB"} # Control GPU memory usage
+                    )
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.reserved_string = "<|reserved_special_token_0|>"
+                    self.reserved_token = self.tokenizer.encode(
+                        self.reserved_string, add_special_tokens=False
+                    )
 
-                parser_args = {
-                    "model": 'Qwen/Qwen2.5-0.5B-Instruct',
-                    "tensor_parallel_size": tensor_parallel_size,
-                    "gpu_memory_utilization": 0.1,
-                    "dtype": torch.bfloat16,
-                    "trust_remote_code": True,
-                    "max_num_batched_tokens": 40000,
-                }
-                self.parser = LLM(**parser_args)
-                self.parser_sampling_params = SamplingParams(temperature=0.0, max_tokens=6)
+                    parser_args = {
+                        "model": 'Qwen/Qwen2.5-0.5B-Instruct',
+                        "tensor_parallel_size": tensor_parallel_size,
+                        "gpu_memory_utilization": 0.1,
+                        "dtype": torch.bfloat16,
+                        "trust_remote_code": True,
+                        "max_num_batched_tokens": 40000,
+                    }
+                    self.parser = LLM(**parser_args)
+                    self.parser_sampling_params = SamplingParams(temperature=0.0, max_tokens=6)
         
         # Keep transformers implementation (commented out)
         # self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name)

@@ -183,3 +183,5 @@ scripts/*
 
 
 *.gif
+
+wandb/
