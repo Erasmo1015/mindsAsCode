@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 import random
+import logging
 from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -35,9 +36,13 @@ import pandas as pd
 import imageio.v2 as imageio
 from baselines.BC import BCNet
 from agent import AgentExecutionFramework
+from data_modules.choice13k import get_choice13k_experiments
+from openai import OpenAI
 
 import time
 from io import BytesIO
+import json
+from pathlib import Path
 
 def parse_args():
     """Parse command line arguments."""
@@ -79,10 +84,11 @@ def parse_args():
     parser.add_argument('--mode', type=str, default="default", choices=["default", "local"], help='LLM mode: default uses in-process models; local routes to an external vLLM server.')
     parser.add_argument('--llm_server_url', type=str, default=os.getenv("VLLM_LOCAL_URL", "http://localhost:8000/v1"), help='Base URL for local vLLM server when --mode local.')
     parser.add_argument('--llm_api_key', type=str, default=os.getenv("VLLM_LOCAL_API_KEY", "EMPTY"), help='API key for local vLLM server when --mode local.')
+    parser.add_argument('--dataset', type=str, default="gridworld", choices=["gridworld", "choice13k"], help='Dataset to use. Default gridworld; choice13k mirrors llm_evo_cog.')
     parser.add_argument('--tensor_parallel_size', type=int, default=1, help='Number of tensor parallel size.')
     parser.add_argument('--dtype', type=str, default="float16", help='Data type.')
     parser.add_argument('--gpu_memory_utilization', type=float, default=0.9, help='GPU memory utilization.')
-    parser.add_argument('--no_log', type=lambda x: str(x).lower() == 'true', default=False, help='Disable wandb logging. Default False (logging enabled).')
+    parser.add_argument('--no_log', action='store_true', help='Disable wandb logging. Default is enabled.')
     parser.add_argument('--overfit', type=bool, default=False, help='Whether to overfit on a single environment.')
     parser.add_argument('--bootstrap', action='store_true', help='Whether to use bootstrapping for hypothesis evaluation')
     parser.add_argument('--two_stage', action='store_true', help='Whether to use two-stage approach for ROTE reasoning')
@@ -97,6 +103,8 @@ def parse_args():
     parser.add_argument('--num_steps_to_predict', type=int, default=20, help='Number of future steps to predict in multi-step eval')
     parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
     parser.add_argument('--human_data', type=bool, default=False, help='Use human data')
+    parser.add_argument('--participant_id', type=int, default=None, help='Specific participant ID to evaluate (0-indexed). If None, evaluates all participants from 0 to num_agents_to_sample-1.')
+    parser.add_argument('--prompt_mode', type=str, default="non_strict", choices=["strict", "non_strict"], help='Prompt mode for choice13k: "non_strict" (default) uses standard prompts, "strict" uses parametrized program prompts.')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
@@ -1474,6 +1482,10 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
 def main():
     """Main function to eval baseline models."""
     args = parse_args()
+
+    # Quiet chat HTTP request spam from the OpenAI/httpx client while retaining warnings/errors.
+    for _logger in ("httpx", "openai", "openai._base_client", "openai._client"):
+        logging.getLogger(_logger).setLevel(logging.WARNING)
     
     # Set JAX memory allocation to grow as needed
     os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
@@ -1487,7 +1499,7 @@ def main():
         gc.collect()
         
 
-    print(f"Evaluating baseline model: {args.baseline_model}; n_hypothesis: {args.n_hypothesis}; num_epochs: {args.num_epochs}; model_arch: {args.model_name}")
+    print(f"Evaluating baseline model: {args.baseline_model}; n_hypothesis: {args.n_hypothesis}; num_epochs: {args.num_epochs}; model_arch: {args.model_name}; dataset: {args.dataset}")
     if args.baseline_model == "ROTE" and args.bootstrap and args.multi_step_eval:
         print(f"Multi-step evaluation enabled: predicting {args.num_steps_to_predict} future steps.")
 
@@ -1504,8 +1516,14 @@ def main():
         try:
             import wandb as _wandb
             wandb = _wandb
-            dataset_name = os.path.basename(os.path.normpath(args.data_path)) or "dataset"
+            dataset_name = args.dataset
             run_name = f"{datetime.now():%y%m%d_%H%M%S}_{dataset_name}"
+            # Append prompt_mode for choice13k
+            if args.dataset == "choice13k":
+                run_name = f"{run_name}_{args.prompt_mode}"
+            # Append participant_id to run name if specified
+            if args.participant_id is not None:
+                run_name = f"{run_name}_participant{args.participant_id}"
             wandb.init(
                 project="mindAsCode",
                 name=run_name,
@@ -1527,9 +1545,368 @@ def main():
                     v = v.item()
                 cleaned[k] = v
             cleaned.setdefault('mode', args.mode)
+            cleaned.setdefault('dataset', args.dataset)
             wandb.log(cleaned, step=step)
         except Exception as e:
             print(f"wandb log failed: {e}")
+
+    # Early dataset dispatch for Choice13k
+    if args.dataset == "choice13k":
+        run_choice13k_mindascode(args, log_fn=_log_to_wandb if not args.no_log else None, participant_id=args.participant_id)
+        print("Finished Choice13k evaluation.")
+        return
+
+    # === Gridworld flow ===
+    rng_key = jax.random.PRNGKey(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+
+    group_extension = "_group" if args.group else ""
+    two_stage_extension = "_two_stage" if args.two_stage else ""
+    structured_extension = f"_structured_{args.structured}" if args.structured != "False" else ""
+    rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
+    human_data_extension = "_human_data" if args.human_data else ""
+    
+    if args.baseline_model == "ROTE" and args.bootstrap:
+        if args.multi_step_eval:
+            csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime_Dec17.csv"
+        else: # Single-step ROTE bootstrap
+            csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}.csv"
+    else: # Non-bootstrap ROTE or other models
+        csv_path = f"results/{args.baseline_model}/results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}.csv"
+    
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    
+    start_epoch = 0
+    if os.path.exists(csv_path):
+        try:
+            existing_df = pd.read_csv(csv_path)
+            if not existing_df.empty:
+                filter_conditions = [
+                    (existing_df['model'].astype(str) == str(args.baseline_model)),
+                    (existing_df['group'].astype(str) == str(args.group)),
+                    (existing_df['num_agents_evaluated'].astype(str) == str(args.num_agents_to_sample)),
+                    (existing_df['datapoints_per_agent'].astype(str) == str(args.num_datapoints_per_agent_to_sample)),
+                    (existing_df['llm_model'].astype(str) == str(args.model_name if args.baseline_model in ['TT', 'AutoToM', 'ROTE', 'NLLM'] else 'N/A'))
+                ]
+                
+                if 'two_stage' in existing_df.columns:
+                    filter_conditions.append(existing_df['two_stage'].astype(str) == str(args.two_stage))
+                if 'structured' in existing_df.columns:
+                    filter_conditions.append(existing_df['structured'].astype(str) == str(args.structured))
+                if 'rejuvenation' in existing_df.columns:
+                    filter_conditions.append(existing_df['rejuvenation'].astype(str) == str(args.rejuvenation))
+                if 'top_k' in existing_df.columns: # Relevant for ROTE bootstrap
+                     filter_conditions.append(existing_df['top_k'].astype(str) == str(args.top_k))
+
+                if args.baseline_model == "ROTE" and args.bootstrap:
+                    if 'multi_step_eval' in existing_df.columns:
+                        filter_conditions.append(existing_df['multi_step_eval'].astype(str) == str(args.multi_step_eval))
+                    if args.multi_step_eval and 'num_steps_predicted' in existing_df.columns:
+                        filter_conditions.append(existing_df['num_steps_predicted'].astype(str) == str(args.num_steps_to_predict))
+                    if args.multi_step_eval and 'num_hypothesis' in existing_df.columns:
+                         filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))  
+
+                elif 'num_hypothesis' in existing_df.columns : # For non-ROTE bootstrap models like TT, NLLM
+                    filter_conditions.append(existing_df['num_hypothesis'].astype(str) == str(args.n_hypothesis))
+                
+                matching_rows = existing_df[np.logical_and.reduce(filter_conditions)]
+                
+                if len(matching_rows) > 0:
+                    start_epoch = matching_rows['epoch'].astype(int).max() + 1
+                    print(f"Resuming from epoch {start_epoch}")
+                else:
+                    print("No matching rows found. Starting from epoch 0.")
+        except pd.errors.EmptyDataError:
+            print(f"CSV file {csv_path} is empty. Starting from epoch 0.")
+        except Exception as e:
+            print(f"Error reading CSV for resume: {e}. Starting from epoch 0.")
+
+    model = None
+    states = None
+
+    print("Loading grid data")
+    if args.human_data:
+        print("Loading human data")
+        dataloader_fn = make_dataloader_human
+    else:
+        dataloader_fn = make_dataloader
+    
+
+    if args.baseline_model == "AutoToM":
+        from baselines.AutoToM.autoToM import AutoToM
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        model = AutoToM(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization)
+        eval_fn = eval_autoToM
+    elif args.baseline_model == "ROTE":
+        from baselines.gridROTE import ROTEReasoner
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+                           dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
+                           num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
+                           structured=args.structured, mode=args.mode, api_base=args.llm_server_url, api_key=args.llm_api_key)
+        if not args.no_log:
+            model.save_programs = True
+            model.program_save_root = Path(f"generated_outputs/gridworld/run_{datetime.now():%y%m%d_%H%M%S}")
+        if args.bootstrap:
+            eval_fn = eval_fsm_bootstrap
+        else:
+            eval_fn = eval_fsm 
+    elif args.baseline_model == "Oracle":
+        from baselines.gridROTE import ROTEReasoner
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        model = ROTEReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, 
+                           dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, 
+                           num_hypothesis=args.n_hypothesis, group=args.group, two_stage=args.two_stage,
+                           structured=args.structured, oracle=True, mode=args.mode, api_base=args.llm_server_url, api_key=args.llm_api_key)
+        if not args.no_log:
+            model.save_programs = True
+            model.program_save_root = Path(f"generated_outputs/gridworld/run_{datetime.now():%y%m%d_%H%M%S}")
+        if args.bootstrap:
+            eval_fn = eval_fsm_bootstrap
+        else:
+            eval_fn = eval_fsm 
+    elif args.baseline_model == 'NLLM':
+        from baselines.basic_LLM import NaiveLLMReasoner
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        model = NaiveLLMReasoner(model_name=args.model_name, tensor_parallel_size=args.tensor_parallel_size, dtype=args.dtype, gpu_memory_utilization=args.gpu_memory_utilization, num_hypothesis=args.n_hypothesis, group=args.group, partnr=False, mode=args.mode, api_base=args.llm_server_url, api_key=args.llm_api_key)
+        eval_fn = eval_naive_llm
+    elif args.baseline_model == "BC":
+        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=start_epoch)
+        model, states = load_bc_models(args)
+        if not states['params']:
+            print("No BC models found or loaded. Please train models first or check paths.")
+            return
+        eval_fn = lambda a, d, m, s, ep_id, env: eval_bc(a, d, m, s, ep_id, env)
+    else:
+        raise NotImplementedError(f"Baseline model '{args.baseline_model}' is not implemented.")
+
+    fsm_names = os.listdir(f'generated_outputs/hand_designed')
+    fsm_names = [f.replace('.txt', '') for f in fsm_names]
+    env = None
+    assert args.dataset == "gridworld", "Gridworld epoch loop requires dataset=gridworld."
+    for epoch in tqdm(range(start_epoch, args.num_epochs), desc="Epochs"):
+        print(f"\nRunning epoch {epoch+1}/{args.num_epochs}")
+        
+        results_to_save = []
+
+        if args.baseline_model in ["ROTE", "Oracle"] and args.bootstrap:
+            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
+            
+            if args.multi_step_eval:
+                for n_hyp, accuracy_val in accuracies_dict.items():
+                    include_prediction_time = True
+                    if os.path.exists(csv_path):
+                        try:
+                            existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                            include_prediction_time = 'avg_prediction_time' in existing_cols
+                        except:
+                            pass
+
+                    result = {
+                        'gt_fsm_id': agent_id,
+                        'model': args.baseline_model,
+                        'accuracy': accuracy_val,
+                        'group': args.group,
+                        'num_agents_evaluated': args.num_agents_to_sample,
+                        'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
+                        'epoch': epoch,
+                        'llm_model': args.model_name,
+                        'num_hypothesis': n_hyp,
+                        'two_stage': args.two_stage,
+                        'structured': args.structured,
+                        'rejuvenation': args.rejuvenation,
+                        'top_k': args.top_k,
+                        'program_length': program_lengths_dict.get(n_hyp, 0.0),
+                        'multi_step_eval': True,
+                        'num_steps_predicted': args.num_steps_to_predict,
+                        'first_step_accuracy': first_step_accuracies_dict.get(n_hyp, 0.0),
+                        'accuracy_after_flip': accuracies_after_flip_dict.get(n_hyp, 0.0),
+                        'avg_matching_states': avg_matching_states,
+                        'mean_equal_actions': mean_equal_actions,
+                    }
+                    
+                    if include_prediction_time:
+                        result['avg_prediction_time'] = avg_prediction_time
+                        result['avg_generation_time'] = avg_generation_time
+                    results_to_save.append(result)
+            else:
+                for n_hyp, accuracy_val in accuracies_dict.items():
+                    include_prediction_time = True
+                            
+                    result = {
+                        'gt_fsm_id': agent_id,
+                        'model': args.baseline_model,
+                        'accuracy': accuracy_val,
+                        'group': args.group,
+                        'num_agents_evaluated': args.num_agents_to_sample,
+                        'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
+                        'epoch': epoch,
+                        'llm_model': args.model_name,
+                        'num_hypothesis': n_hyp,
+                        'two_stage': args.two_stage,
+                        'structured': args.structured,
+                        'rejuvenation': args.rejuvenation,
+                        'top_k': args.top_k,
+                        'program_length': program_lengths_dict.get(n_hyp, 0.0),
+                        'multi_step_eval': False,
+                        'num_steps_predicted': 1,
+                        'avg_matching_states': avg_matching_states,
+                        'mean_equal_actions': mean_equal_actions,
+                    }
+                    
+                    if include_prediction_time:
+                        result['avg_prediction_time'] = avg_prediction_time
+                        
+                    results_to_save.append(result)
+        else:
+            if args.baseline_model in ["BC"]:
+                if args.multi_step_eval and args.baseline_model == "BC":
+                    current_accuracy, avg_prediction_time, first_step_accuracy, avg_matching_states, mean_equal_actions, accuracy_after_flip, env, gt_agent_script_id = eval_fn(args, dataloader, model, states, epoch, env)
+                else:
+                    current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, states, epoch)
+                    first_step_accuracy = None
+                    gt_agent_script_id = None
+                    accuracy_after_flip = None
+                    avg_matching_states = None
+                    mean_equal_actions = None
+            else:
+                if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
+                    current_accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip, avg_matching_states, mean_equal_actions, env = eval_fn(args, dataloader, model, episode_id=epoch, env=env)
+                else:
+                    current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
+                    first_step_accuracy = None
+                    gt_agent_script_id = None
+                    accuracy_after_flip = None
+                    avg_matching_states = None
+                    mean_equal_actions = None
+            include_prediction_time = True
+            if os.path.exists(csv_path):
+                try:
+                    existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                    include_prediction_time = 'avg_prediction_time' in existing_cols
+                except:
+                    pass
+            result = {
+                'gt_fsm_id': gt_agent_script_id,
+                'model': args.baseline_model,
+                'accuracy': current_accuracy,
+                'group': args.group,
+                'num_agents_evaluated': args.num_agents_to_sample,
+                'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
+                'epoch': epoch,
+                'llm_model': args.model_name if args.baseline_model in ['AutoToM', 'ROTE', 'NLLM'] else 'N/A',
+                'num_hypothesis': args.n_hypothesis if args.baseline_model in ['ROTE', 'NLLM'] else ('ensemble' if args.baseline_model in ["BC"] else 'N/A'),
+                'two_stage': args.two_stage if args.baseline_model == 'ROTE' else False,
+                'structured': args.structured if args.baseline_model == 'ROTE' else "False",
+                'rejuvenation': args.rejuvenation if args.baseline_model == 'ROTE' else False,
+                'top_k': args.top_k if args.baseline_model == 'ROTE' else 0,
+                'program_length': getattr(model, 'weighted_program_length', 0) if args.baseline_model == 'ROTE' and not args.bootstrap else 0,
+                'multi_step_eval': args.multi_step_eval,
+                'num_steps_predicted': args.num_steps_to_predict,
+                'avg_matching_states': avg_matching_states,
+                'mean_equal_actions': mean_equal_actions,
+            }
+            if first_step_accuracy is not None:
+                result['first_step_accuracy'] = first_step_accuracy
+            if accuracy_after_flip is not None:
+                result['accuracy_after_flip'] = accuracy_after_flip
+            if include_prediction_time:
+                result['avg_prediction_time'] = avg_prediction_time
+            if accuracy_after_flip is not None:
+                result['accuracy_after_flip'] = accuracy_after_flip
+            results_to_save.append(result)
+
+        if results_to_save:
+            df = pd.DataFrame(results_to_save)
+            
+            if os.path.exists(csv_path):
+                try:
+                    existing_df = pd.read_csv(csv_path)
+                    if not existing_df.empty:
+                        existing_cols = existing_df.columns.tolist()
+                        for col in existing_cols:
+                            if col not in df.columns:
+                                df[col] = None
+                        df = df[existing_cols]
+                except Exception as e:
+                    print(f"Error matching columns with existing CSV: {e}")
+            
+            if os.path.exists(csv_path) and start_epoch <= epoch:
+                try:
+                    header_needed = pd.read_csv(csv_path, nrows=0).empty
+                except pd.errors.EmptyDataError:
+                    header_needed = True
+                except FileNotFoundError:
+                    header_needed = True
+
+                df.to_csv(csv_path, mode='a', header=header_needed, index=False)
+            else:
+                df.to_csv(csv_path, index=False)
+            print(f"Saved results for epoch {epoch+1} to {csv_path}")
+        else:
+            print(f"No results to save for epoch {epoch+1}")
+
+    if args.baseline_model == 'AutoToM':
+        os.environ['CURRENT_MODEL_NAME'] = ''
+
+
+def run_choice13k(args, log_fn=None):
+    """Evaluate on Choice13k dataset using a simple prompt-driven LLM choice predictor."""
+    experiments = get_choice13k_experiments(n_participants=args.num_agents_to_sample)
+    client_kwargs = {}
+    if args.mode == "local":
+        client_kwargs = {"api_key": args.llm_api_key, "base_url": args.llm_server_url}
+    client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+
+    def predict_choice(prompt: str):
+        response = client.chat.completions.create(
+            model=args.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=4,
+        )
+        return response.choices[0].message.content.strip()
+
+    overall_total = 0
+    overall_correct = 0
+    per_participant = []
+
+    for participant_idx, exp in enumerate(experiments):
+        participant_total = 0
+        participant_correct = 0
+        for block in exp.blocks:
+            instruction = exp.instruction.strip()
+            for trial in block.trials:
+                participant_total += 1
+                option_keys = block.option_keys
+                gt_key = option_keys[trial.action]
+                prompt = f"{instruction}\n\n{trial.history}\n\nWhich option do you choose? Reply with only the option letter."
+                pred_text = predict_choice(prompt)
+                pred_key = None
+                for k in option_keys:
+                    if k in pred_text:
+                        pred_key = k
+                        break
+                if pred_key == gt_key:
+                    participant_correct += 1
+        overall_total += participant_total
+        overall_correct += participant_correct
+        acc = participant_correct / participant_total if participant_total > 0 else 0
+        per_participant.append({"participant": participant_idx, "accuracy": acc})
+        print(f"Participant {participant_idx}: accuracy {acc:.4f} ({participant_correct}/{participant_total})")
+
+    overall_acc = overall_correct / overall_total if overall_total > 0 else 0
+    summary = {
+        "dataset": "choice13k",
+        "model": args.model_name,
+        "mode": args.mode,
+        "accuracy": overall_acc,
+        "total_trials": overall_total,
+    }
+    print(f"Choice13k overall accuracy: {overall_acc:.4f} ({overall_correct}/{overall_total})")
+    if log_fn:
+        log_fn(summary, step=0)
 
     # Initialize random key for parameter initialization
     rng_key = jax.random.PRNGKey(args.seed)
@@ -1605,11 +1982,11 @@ def main():
     model = None
     states = None # For BC
 
+    print("Loading grid data")
     if args.human_data:
         print("Loading human data")
         dataloader_fn = make_dataloader_human
     else:
-        print("Loading grid data")
         dataloader_fn = make_dataloader
     
 
@@ -1660,6 +2037,7 @@ def main():
     fsm_names = os.listdir(f'generated_outputs/hand_designed')
     fsm_names = [f.replace('.txt', '') for f in fsm_names]
     env = None
+    assert args.dataset == "gridworld", "Gridworld epoch loop requires dataset=gridworld."
     for epoch in tqdm(range(start_epoch, args.num_epochs), desc="Epochs"):
         print(f"\nRunning epoch {epoch+1}/{args.num_epochs}")
         
@@ -1739,6 +2117,23 @@ def main():
                         result['avg_prediction_time'] = avg_prediction_time
                         
                     results_to_save.append(result)
+            # wandb summary logging (bootstrap)
+            accuracy_final = accuracies_dict.get(args.n_hypothesis) if hasattr(args, "n_hypothesis") else None
+            first_step_final = first_step_accuracies_dict.get(args.n_hypothesis) if hasattr(args, "n_hypothesis") else None
+            program_len_final = program_lengths_dict.get(args.n_hypothesis) if hasattr(args, "n_hypothesis") else None
+            num_valid_programs = len(program_lengths_dict)
+            expected = getattr(args, "n_hypothesis", num_valid_programs or 1)
+            compile_failure_rate = max(0.0, (expected - num_valid_programs) / expected) if expected else None
+            log_metrics = {
+                "accuracy_final": accuracy_final,
+                "first_step_accuracy_final": first_step_final,
+                "avg_program_length": program_len_final,
+                "num_valid_programs": num_valid_programs,
+                "compile_failure_rate": compile_failure_rate,
+                "avg_generation_time": avg_generation_time,
+                "epoch": epoch,
+            }
+            _log_to_wandb(log_metrics, step=epoch)
         else: # Other models or non-bootstrap ROTE
             if args.baseline_model in ["BC"]:
                 if args.multi_step_eval and args.baseline_model == "BC":
@@ -1798,6 +2193,17 @@ def main():
             if accuracy_after_flip is not None:
                 result['accuracy_after_flip'] = accuracy_after_flip
             results_to_save.append(result)
+            # wandb summary logging (non-bootstrap)
+            log_metrics = {
+                "accuracy_final": current_accuracy,
+                "first_step_accuracy_final": first_step_accuracy,
+                "avg_program_length": result.get('program_length'),
+                "num_valid_programs": None,
+                "compile_failure_rate": None,
+                "avg_generation_time": avg_generation_time if 'avg_generation_time' in locals() else None,
+                "epoch": epoch,
+            }
+            _log_to_wandb(log_metrics, step=epoch)
 
         if results_to_save:
             if wandb_enabled:
@@ -1844,6 +2250,162 @@ def main():
 
     if args.baseline_model == 'AutoToM': # Clear environment variable if set
         os.environ['CURRENT_MODEL_NAME'] = ''
+
+
+def run_choice13k_mindascode(args, log_fn=None, participant_id=None):
+    """
+    MindAsCode evaluation on Choice13k:
+    - generate programs from train trials
+    - execute on train/test split
+    - aggregate via bootstrap weighting
+    
+    Args:
+        args: Command line arguments
+        log_fn: Optional logging function for wandb
+        participant_id: Optional specific participant ID to evaluate (0-indexed). 
+                       If None, evaluates all participants.
+    """
+    from baselines.choice13k import (
+    Choice13kProgramGenerator,
+    compile_program,
+    load_choice13k,
+    split_trials,
+    evaluate_program,
+    aggregate_predictions,
+)
+    from baselines.choice13k.state_formatter import format_trials_to_text
+
+    # If participant_id is specified, ensure we load enough participants to include it
+    if participant_id is not None:
+        # Ensure num_agents_to_sample is at least participant_id + 1 to include the requested participant
+        if args.num_agents_to_sample <= participant_id:
+            args.num_agents_to_sample = participant_id + 1
+            print(f"Loading {args.num_agents_to_sample} participants to include participant_id {participant_id}")
+    
+    experiments = load_choice13k(args)
+    
+    # Filter to specific participant if requested
+    if participant_id is not None:
+        if participant_id >= len(experiments):
+            raise ValueError(f"participant_id {participant_id} is out of range. Available participants: 0-{len(experiments)-1}")
+        experiments = [experiments[participant_id]]
+        print(f"Evaluating only participant {participant_id}")
+
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ""))
+    
+    # Select prompt files based on prompt_mode
+    if args.prompt_mode == "strict":
+        prompt_subdir = os.path.join("prompts", "choice13k", "strict")
+    else:  # non_strict (default)
+        prompt_subdir = os.path.join("prompts", "choice13k")
+    
+    prompt_path = os.path.join(PROJECT_ROOT, prompt_subdir, "infer_single_choice.txt")
+    code_template_path = os.path.join(PROJECT_ROOT, prompt_subdir, "single_code_template.txt")
+    refinement_1_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_1.txt")
+    refinement_2_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_2.txt")
+    refinement_3_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_3.txt")
+    base_prompt = open(prompt_path).read()
+    code_template = open(code_template_path).read()
+    refinement_1 = open(refinement_1_path).read()
+    refinement_2 = open(refinement_2_path).read()
+    refinement_3 = open(refinement_3_path).read()
+
+    client_kwargs = {}
+    if args.mode == "local":
+        client_kwargs = {"api_key": args.llm_api_key, "base_url": args.llm_server_url}
+    client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+    generator = Choice13kProgramGenerator(client, args.model_name, max_tokens=800)
+
+    out_root = Path("generated_outputs/choice13k")
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    run_dir = Path(f"generated_outputs/choice13k/run_{datetime.now():%y%m%d_%H%M%S}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, exp in enumerate(tqdm(experiments, desc="Participants")):
+        # Use actual participant_id: if filtering was done, participant_id is set; otherwise use index
+        if participant_id is not None:
+            actual_participant_id = participant_id
+        else:
+            actual_participant_id = idx
+        train_trials, test_trials, options = split_trials(exp)
+
+        participant_dir = run_dir / f"participant_{actual_participant_id}"
+        participant_dir.mkdir(parents=True, exist_ok=True)
+
+        for epoch in tqdm(range(args.num_epochs), desc=f"Participant {actual_participant_id} epochs", leave=False):
+            pass_dir = participant_dir / f"epoch_{epoch}"
+            raw_dir = pass_dir / "raw"
+            good_dir = pass_dir / "good"
+            bad_dir = pass_dir / "bad_compile"
+            prompt_dir = pass_dir / "prompt"
+            pass_dir.mkdir(parents=True, exist_ok=True)
+            raw_dir.mkdir(exist_ok=True)
+            good_dir.mkdir(exist_ok=True)
+            bad_dir.mkdir(exist_ok=True)
+            prompt_dir.mkdir(exist_ok=True)
+
+            n_programs = args.n_hypothesis
+            state_text = format_trials_to_text(train_trials)
+            prompt_text = f"{base_prompt}\n{state_text}\n{code_template}"
+            (prompt_dir / "prompt.txt").write_text(prompt_text)
+            program_codes = generator.generate_programs(prompt_text, n_programs)
+
+            compiled = []
+            train_scores = []
+            for idx, code in enumerate(program_codes):
+                (raw_dir / f"program_{idx}.txt").write_text(code or "")
+                if not code:
+                    (bad_dir / f"program_{idx}.reason.txt").write_text("empty_code")
+                    continue
+                choose_fn = compile_program(code)
+                if choose_fn is None:
+                    (bad_dir / f"program_{idx}.reason.txt").write_text("compile_failed")
+                    continue
+                train_eval = evaluate_program(choose_fn, train_trials)
+                train_scores.append(train_eval["accuracy"])
+                compiled.append((idx, code, choose_fn))
+                (good_dir / f"program_{idx}.py").write_text(code)
+
+            if not compiled:
+                print(f"Participant {actual_participant_id} epoch {epoch}: no valid programs generated.")
+                metrics = {
+                    "participant": actual_participant_id,
+                    "epoch": epoch,
+                    "train_accuracy": 0.0,
+                    "test_accuracy": 0.0,
+                    "num_programs": 0,
+                    "avg_program_length": 0.0,
+                }
+                (pass_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+                if log_fn:
+                    log_fn({**metrics, "dataset": "choice13k"}, step=epoch)
+                continue
+
+            weights = np.array(train_scores, dtype=float)
+            if weights.sum() == 0:
+                weights = np.ones_like(weights)
+            weights = weights / weights.sum()
+
+            choose_fns = [c[2] for c in compiled]
+            # Use the same ensemble aggregation method for both train and test
+            train_accuracy = aggregate_predictions(choose_fns, weights, train_trials)
+            test_accuracy = aggregate_predictions(choose_fns, weights, test_trials)
+            avg_program_length = np.mean([len(code.splitlines()) for _, code, _ in compiled])
+
+            metrics = {
+                "participant": actual_participant_id,
+                "epoch": epoch,
+                "train_accuracy": train_accuracy,
+                "test_accuracy": test_accuracy,
+                "num_programs": len(compiled),
+                "avg_program_length": avg_program_length,
+            }
+            (pass_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+            print(f"Participant {actual_participant_id} epoch {epoch}: train_acc={train_accuracy:.4f}, test_acc={test_accuracy:.4f}, programs={len(compiled)}")
+            if log_fn:
+                log_fn({**metrics, "dataset": "choice13k"}, step=epoch)
     
     print("Evaluation complete.")
 

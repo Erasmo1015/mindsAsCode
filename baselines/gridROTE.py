@@ -33,6 +33,9 @@ class ROTEReasoner:
         self.two_stage = two_stage
         self.structured = structured
         self.oracle = oracle
+        # Optional program saving (set externally)
+        self.save_programs = False
+        self.program_save_root = None
         self.action_to_name = {
             0: "stay",
             1: "right",
@@ -364,6 +367,8 @@ Your high-level 5 word summary:"""
         # Generate max_hypotheses instead of self.num_hypothesis
         if not self.oracle:
             formatted_prompts = []
+            base_messages = [{"role": "system", "content": "You are a helpful assistant."},
+                             {'role': 'user', 'content': full_prompt}]
             for hypothesis_id in range(max_hypotheses):
                 messages = [{"role": "system", "content": "You are a helpful assistant."}, {'role': 'user', 'content': full_prompt}]
                 
@@ -410,33 +415,33 @@ Your high-level 5 word summary:"""
         # Process each hypothesis
         all_time_all_hyp_log_prob_list = []
         for hypothesis_id, agent_code in enumerate(outputs):
+            if getattr(self, "save_programs", False) and self.program_save_root:
+                raw_dir = self.program_save_root / f"epoch_{episode_id}" / f"hyp_{hypothesis_id}" / "raw"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                (raw_dir / "program.py").write_text(agent_code)
             # Define generate_response and revise_response functions based on model type
             if self.use_openai:
                 def generate_response():
                     response = self.client.chat.completions.create(
                         model=self.model_name,
-                        messages=formatted_prompt,
+                        messages=base_messages,
                         temperature=1.0,
                         max_tokens=2000
                     )
                     return response.choices[0].message.content
 
                 def revise_response(response, error_message, rejuvenation_attempt=False):
-                    # prompt = f"{self.refinement_1}\n{response}\n{self.refinement_2}\n{error_message}\n{self.refinement_3}\nORIGINAL TASK:\n{full_prompt}"
-                    prompt = formatted_prompts[0]
+                    new_prompt = full_prompt
                     if rejuvenation_attempt:
-                        prompt = f"{prompt}\n Here's the code you make last time {response}. Return a new program that is different from the last one.\n"
-                    if self.use_openai:
-                        revised = self.client.chat.completions.create(
-                            model=self.model_name,
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=1.0,
-                            max_tokens=2000
-                        )
-                        return revised.choices[0].message.content
-                    else:
-                        outputs = self.llm.generate([prompt], self.sampling_params)
-                        return outputs[0].outputs[0].text
+                        new_prompt = f"{full_prompt}\nHere's the code you made last time:\n{response}\nReturn a new program that is different from the last one."
+                    revised = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "system", "content": "You are a helpful assistant."},
+                                  {"role": "user", "content": new_prompt}],
+                        temperature=1.0,
+                        max_tokens=2000
+                    )
+                    return revised.choices[0].message.content
             else:
                 def generate_response():
                     outputs = self.llm.generate([formatted_prompt], self.sampling_params)
@@ -519,6 +524,10 @@ Your high-level 5 word summary:"""
                         agent_codes.append(agent_code)
                         agents.append(agent)
                         log_prob_hypothesis_list.append(log_prob_hypothesis)
+                        if getattr(self, "save_programs", False) and self.program_save_root:
+                            good_dir = self.program_save_root / f"epoch_{episode_id}" / f"hyp_{hypothesis_id}" / "good"
+                            good_dir.mkdir(parents=True, exist_ok=True)
+                            (good_dir / "program.py").write_text(agent_code)
                         all_time_all_hyp_log_prob_list.append(all_time_log_prob_list)
                         final_action_pred_list.append(final_action)  # time t
                         break
@@ -534,6 +543,10 @@ Your high-level 5 word summary:"""
                     # print(full_traceback)
                     if trial == num_trials:
                         print(f"Failed to compile hypothesis {hypothesis_id} after {num_trials} trials")
+                        if getattr(self, "save_programs", False) and self.program_save_root:
+                            bad_dir = self.program_save_root / f"epoch_{episode_id}" / f"hyp_{hypothesis_id}" / "bad_compile"
+                            bad_dir.mkdir(parents=True, exist_ok=True)
+                            (bad_dir / "reason.txt").write_text(full_traceback)
                         break
                     agent_code = revise_response(agent_code, full_traceback)
         
@@ -813,6 +826,10 @@ Your high-level 5 word summary:"""
         agent_codes = []
         # Process each hypothesis
         for hypothesis_id, agent_code in enumerate(outputs):
+            if getattr(self, "save_programs", False) and self.program_save_root:
+                raw_dir = self.program_save_root / f"epoch_{episode_id}" / f"hyp_{hypothesis_id}" / "raw"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                (raw_dir / "program.py").write_text(agent_code)
             # Define generate_response and revise_response functions based on model type
             if self.use_openai:
                 def generate_response():

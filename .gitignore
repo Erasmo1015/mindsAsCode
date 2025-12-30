@@ -185,3 +185,4 @@ scripts/*
 *.gif
 
 wandb/
+generated_outputs/

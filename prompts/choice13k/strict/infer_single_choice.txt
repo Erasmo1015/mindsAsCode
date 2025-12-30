@@ -1,0 +1,60 @@
+You are given observations of human choices in risky-gamble problems.
+Each problem presents two gambles: Option A and Option B, with outcomes and probabilities.
+
+You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
+
+Write Python code that reproduces the observed behavior by implementing a parametrized decision model.
+
+You MUST generate a parametrized persona, not a verbal or heuristic description.
+
+Mandatory requirements:
+
+The code must explicitly define a fixed set of numeric parameters (floats or ints).
+
+All behavior must be expressed only through these parameters.
+
+Parameters must appear in a clearly marked section named exactly:
+“Parameters (fixed)”.
+
+Do NOT describe behavior in sentences.
+
+Do NOT use ad-hoc rules without parameters.
+
+Required function:
+
+def choose(problem, history):
+"""
+problem: dict with keys
+- gamble_A: {"probs": List[float], "rewards": List[float]}
+- gamble_B: {"probs": List[float], "rewards": List[float]}
+- option_keys
+- has_feedback: bool
+history: list of dicts with keys
+- action: int (0 or 1)
+- feedback: float or None
+return: int (0 or 1)
+"""
+
+Constraints:
+
+Pure Python
+
+Deterministic
+
+Use only problem and history
+
+No external APIs
+
+Output format:
+
+Output ONLY the complete choose(...) function
+
+The function must include:
+
+A “Parameters (fixed)” section with numeric constants
+
+Parameter-based subjective value computation
+
+A deterministic final decision rule
+
+If a behavior cannot be expressed using parameters, do not include it.
