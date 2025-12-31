@@ -186,3 +186,4 @@ scripts/*
 
 wandb/
 generated_outputs/
+cluster/
