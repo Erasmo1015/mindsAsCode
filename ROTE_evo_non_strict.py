@@ -16,6 +16,7 @@ The evolution process:
 import os
 import re
 import json
+import csv
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from datetime import datetime
@@ -279,9 +280,6 @@ def run_evolution(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Save seed program
-    (output_path / "seed_program.py").write_text(seed_code)
-    
     # ===== BASELINE EVALUATION =====
     print(f"\n{'='*80}")
     print(f"BASELINE EVALUATION: Evaluating seed program ({seed_program_path})")
@@ -291,7 +289,7 @@ def run_evolution(
     
     if baseline_fn is None:
         print("ERROR: Failed to compile baseline program!")
-        return
+        return None
     
     baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True)
     baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True)
@@ -300,7 +298,7 @@ def run_evolution(
     print(f"  Train accuracy: {baseline_train_eval['accuracy']:.4f} ({baseline_train_eval['correct']}/{baseline_train_eval['total']})")
     print(f"  Test accuracy: {baseline_test_eval['accuracy']:.4f} ({baseline_test_eval['correct']}/{baseline_test_eval['total']})")
     
-    # Save baseline results
+    # Store baseline results (will be included in final results.json)
     baseline_results = {
         "train_accuracy": baseline_train_eval['accuracy'],
         "test_accuracy": baseline_test_eval['accuracy'],
@@ -309,7 +307,9 @@ def run_evolution(
         "test_correct": baseline_test_eval['correct'],
         "test_total": baseline_test_eval['total'],
     }
-    (output_path / "baseline_results.json").write_text(json.dumps(baseline_results, indent=2))
+    
+    # Track all candidate results across iterations for finding overall best
+    all_candidate_results = []  # List of dicts with iteration, candidate_idx, train_acc, test_acc
     
     # Log baseline to wandb at step=0
     if wandb is not None:
@@ -321,6 +321,18 @@ def run_evolution(
     
     # Initialize best program tracking with baseline
     best_fitness = baseline_train_eval['accuracy']
+    
+    # Track overall best across all iterations
+    overall_best_train = {
+        "train_accuracy": baseline_train_eval['accuracy'],
+        "test_accuracy": baseline_test_eval['accuracy'],
+        "program_id": "baseline"
+    }
+    overall_best_test = {
+        "train_accuracy": baseline_train_eval['accuracy'],
+        "test_accuracy": baseline_test_eval['accuracy'],
+        "program_id": "baseline"
+    }
     
     # Evolution loop
     for iteration in range(n_iterations):
@@ -376,16 +388,27 @@ def run_evolution(
             train_eval = evaluate_program(choose_fn, train_trials)
             test_eval = evaluate_program(choose_fn, test_trials)
             
+            train_acc = train_eval["accuracy"]
+            test_acc = test_eval["accuracy"]
+            
             candidate_results.append({
                 "idx": idx,
                 "code": code,
-                "train_acc": train_eval["accuracy"],
-                "test_acc": test_eval["accuracy"],
+                "train_acc": train_acc,
+                "test_acc": test_acc,
                 "train_correct": train_eval["correct"],
                 "test_correct": test_eval["correct"],
                 "train_total": train_eval["total"],
                 "test_total": test_eval["total"],
                 "valid": True,
+            })
+            
+            # Track for overall best (only valid candidates)
+            all_candidate_results.append({
+                "iteration": iteration,
+                "candidate_idx": idx,
+                "train_acc": train_acc,
+                "test_acc": test_acc,
             })
         
         # Report results
@@ -416,17 +439,33 @@ def run_evolution(
             print(f"  Train accuracy: {best_result['train_acc']:.4f}")
             print(f"  Test accuracy: {best_result['test_acc']:.4f}")
             
-            # Save best program
-            (iter_dir / "best_program.py").write_text(parent_program)
+            # Update overall best tracking
+            if best_result['train_acc'] > overall_best_train["train_accuracy"]:
+                overall_best_train = {
+                    "train_accuracy": best_result['train_acc'],
+                    "test_accuracy": best_result['test_acc'],
+                    "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                }
+            if best_result['test_acc'] > overall_best_test["test_accuracy"]:
+                overall_best_test = {
+                    "train_accuracy": best_result['train_acc'],
+                    "test_accuracy": best_result['test_acc'],
+                    "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                }
         else:
             print("\nWarning: No valid programs generated in this iteration!")
             print("Continuing with previous parent program...")
         
         # Save iteration results
+        best_program_id = None
+        if valid_results:
+            best_program_id = f"iteration_{iteration}_candidate_{valid_results[0]['idx']}"
+        
         metrics = {
             "iteration": iteration,
             "n_candidates": n_candidates_per_iteration,
             "n_valid": len(valid_results),
+            "best_program_id": best_program_id,
             "candidate_results": [
                 {
                     "idx": r["idx"],
@@ -463,16 +502,48 @@ def run_evolution(
                 log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
             wandb.log(log_dict, step=iteration + 1)  # Step starts at 1 (baseline is step=0)
     
-    # Final summary
+    # Final summary and save comprehensive results.json
     print(f"\n{'='*80}")
     print("Evolution Complete")
     print(f"{'='*80}")
+    
+    # Check all candidates to find true overall best (in case best wasn't selected as parent)
+    for candidate in all_candidate_results:
+        if candidate['train_acc'] > overall_best_train["train_accuracy"]:
+            overall_best_train = {
+                "train_accuracy": candidate['train_acc'],
+                "test_accuracy": candidate['test_acc'],
+                "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+            }
+        if candidate['test_acc'] > overall_best_test["test_accuracy"]:
+            overall_best_test = {
+                "train_accuracy": candidate['train_acc'],
+                "test_accuracy": candidate['test_acc'],
+                "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+            }
+    
+    # Create comprehensive results.json
+    results = {
+        "baseline": baseline_results,
+        "overall_best_train_accuracy": overall_best_train,
+        "overall_best_test_accuracy": overall_best_test,
+    }
+    (output_path / "results.json").write_text(json.dumps(results, indent=2))
+    
     if n_iterations > 0:
-        print(f"Final best train accuracy: {best_fitness:.4f}")
+        print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
+        print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
         print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
-        print(f"Improvement: {best_fitness - baseline_train_eval['accuracy']:.4f}")
-        print(f"\nFinal best program saved to: {output_path / f'iteration_{n_iterations-1}' / 'best_program.py'}")
-    print(f"Results saved to: {output_path}")
+        print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
+        print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
+    print(f"\nResults saved to: {output_path / 'results.json'}")
+    
+    # Return summary for participants summary file (just the essentials)
+    return {
+        "participant_id": participant_id,
+        "train_acc": overall_best_train['train_accuracy'],
+        "test_acc": overall_best_test['test_accuracy'],
+    }
 
 
 def main():
@@ -588,12 +659,50 @@ def main():
         # Multiple participants mode
         participants_to_process = list(range(args.num_agents_to_sample))
     
-    # Create base run directory if processing multiple participants and output_dir not specified
+    # Create base run directory and save seed program once
     base_run_dir = None
-    if args.output_dir is None and len(participants_to_process) > 1:
+    if args.output_dir is None:
+        # Auto-generated output: create base run directory
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
         base_run_dir = f"generated_outputs/choice13k_ROTE_evo_non_strict/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
+    elif len(participants_to_process) > 1:
+        # Multiple participants with custom output_dir: use that as base directory
+        base_run_dir = args.output_dir
+        Path(base_run_dir).mkdir(parents=True, exist_ok=True)
+    else:
+        # Single participant with custom output_dir: use parent directory if it looks like a participant dir
+        # Otherwise use the directory itself
+        output_path = Path(args.output_dir)
+        if output_path.name.startswith("participant_"):
+            # It's a participant directory, use parent as base
+            base_run_dir = str(output_path.parent)
+        else:
+            # It's already a base directory
+            base_run_dir = args.output_dir
+        Path(base_run_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Load and save seed program once in the experiment folder
+    seed_code = load_seed_program(args.seed_path)
+    (Path(base_run_dir) / "seed_program.py").write_text(seed_code)
+    print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
+    
+    # Initialize participants summary (list for CSV)
+    participants_summary = []
+    # Determine summary file location (use base_run_dir if available, otherwise use output_dir or its parent)
+    if base_run_dir is not None:
+        summary_file = Path(base_run_dir) / "participants_summary.csv"
+    elif args.output_dir is not None:
+        output_path = Path(args.output_dir)
+        if output_path.name.startswith("participant_"):
+            # It's a participant directory, use parent
+            summary_file = output_path.parent / "participants_summary.csv"
+        else:
+            # Use the directory itself
+            summary_file = output_path / "participants_summary.csv"
+    else:
+        # Auto-generated single participant - will be determined after first run
+        summary_file = None
     
     # Run evolution for each participant
     try:
@@ -606,7 +715,16 @@ def main():
                 participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
             else:
                 participant_output_dir = args.output_dir
-            run_evolution(
+            
+            # If summary_file is None (auto-generated single participant), determine it now
+            if summary_file is None and participant_output_dir is not None:
+                output_path = Path(participant_output_dir)
+                if output_path.name.startswith("participant_"):
+                    summary_file = output_path.parent / "participants_summary.csv"
+                else:
+                    summary_file = output_path / "participants_summary.csv"
+            
+            participant_summary = run_evolution(
                 seed_program_path=args.seed_path,
                 participant_id=participant_id,
                 n_iterations=args.n_iterations,
@@ -616,6 +734,16 @@ def main():
                 output_dir=participant_output_dir,
                 wandb=wandb,
             )
+            
+            # Update participants summary after each participant completes
+            if participant_summary is not None and summary_file is not None:
+                participants_summary.append(participant_summary)
+                # Write CSV file
+                with open(summary_file, 'w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=['participant_id', 'train_acc', 'test_acc'])
+                    writer.writeheader()
+                    writer.writerows(participants_summary)
+                print(f"\nParticipants summary updated: {summary_file}")
     finally:
         if wandb is not None:
             wandb.finish()
