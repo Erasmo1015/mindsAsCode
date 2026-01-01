@@ -28,4 +28,5 @@ Template Evolution (ROTE_evo)
 - Standalone implementation: Reimplements ROTE-style program generation and evaluation logic without direct imports from ROTE/evo modules.
 - Train/test split: Fixed 80:20 split (first 80% train, last 20% test), preserving temporal order.
 - ROTE_evo_non_strict: `ROTE_evo_non_strict.py` provides a variant that generates full program code without parameter restrictions (allows entirely new implementations, not just parameter tuning). Uses same `--num_agents_to_sample` argument, participant-specific wandb logging, and output structure as ROTE_evo.
+- Extracting best accuracies from old runs: For experiments without `participants_summary.csv`, use `python utils/extract_best_accuracies.py <run_dir>` to extract best train/test accuracies per participant from iteration metrics. Outputs CSV to `run_dir/participants_summary.csv`. Use `--include_program_ids` to see which iteration/candidate had best results.
 

@@ -44,6 +44,90 @@ from io import BytesIO
 import json
 from pathlib import Path
 
+def run_eval_with_seeds(eval_fn, args, n_seeds, *eval_args, **eval_kwargs):
+    """Run evaluation function multiple times and average numeric results.
+    
+    Args:
+        eval_fn: The evaluation function to call
+        args: Arguments object (needed for dataloader recreation)
+        n_seeds: Number of times to run evaluation
+        *eval_args: Positional arguments to pass to eval_fn
+        **eval_kwargs: Keyword arguments to pass to eval_fn
+    
+    Returns:
+        Averaged results (same structure as eval_fn return, but numeric values averaged)
+    """
+    import numpy as np
+    
+    if n_seeds == 1:
+        return eval_fn(*eval_args, **eval_kwargs)
+    
+    # Collect results from all seeds
+    all_results = []
+    for seed in range(n_seeds):
+        result = eval_fn(*eval_args, **eval_kwargs)
+        all_results.append(result)
+    
+    # Average numeric results
+    if isinstance(all_results[0], dict):
+        # Handle dictionary results (e.g., accuracies_dict)
+        averaged = {}
+        for key in all_results[0].keys():
+            if isinstance(all_results[0][key], dict):
+                # Nested dictionary (e.g., accuracies_dict[n_hyp])
+                averaged[key] = {}
+                for sub_key in all_results[0][key].keys():
+                    values = [r[key][sub_key] for r in all_results if key in r and sub_key in r[key]]
+                    if values and isinstance(values[0], (int, float)):
+                        averaged[key][sub_key] = np.mean(values)
+                    else:
+                        averaged[key][sub_key] = all_results[-1][key][sub_key]  # Use last result for non-numeric
+            elif isinstance(all_results[0][key], (int, float)):
+                values = [r[key] for r in all_results if key in r]
+                averaged[key] = np.mean(values) if values else all_results[-1][key]
+            else:
+                # Non-numeric: use last result
+                averaged[key] = all_results[-1][key]
+        return averaged
+    elif isinstance(all_results[0], tuple):
+        # Handle tuple results
+        num_elements = len(all_results[0])
+        averaged = []
+        for i in range(num_elements):
+            element = all_results[0][i]
+            if isinstance(element, dict):
+                # Dictionary element (e.g., accuracies_dict)
+                avg_dict = {}
+                for key in element.keys():
+                    if isinstance(element[key], dict):
+                        avg_dict[key] = {}
+                        for sub_key in element[key].keys():
+                            values = [r[i][key][sub_key] for r in all_results if i < len(r) and key in r[i] and sub_key in r[i][key]]
+                            if values and isinstance(values[0], (int, float)):
+                                avg_dict[key][sub_key] = np.mean(values)
+                            else:
+                                avg_dict[key][sub_key] = all_results[-1][i][key][sub_key]
+                    elif isinstance(element[key], (int, float)):
+                        values = [r[i][key] for r in all_results if i < len(r) and key in r[i]]
+                        avg_dict[key] = np.mean(values) if values else all_results[-1][i][key]
+                    else:
+                        avg_dict[key] = all_results[-1][i][key]
+                averaged.append(avg_dict)
+            elif isinstance(element, (int, float)):
+                values = [r[i] for r in all_results if i < len(r)]
+                averaged.append(np.mean(values) if values else all_results[-1][i])
+            else:
+                # Non-numeric: use last result (e.g., agent_id, env)
+                averaged.append(all_results[-1][i])
+        return tuple(averaged)
+    else:
+        # Single value result
+        if isinstance(all_results[0], (int, float)):
+            return np.mean(all_results)
+        else:
+            return all_results[-1]  # Use last result for non-numeric
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train baseline models for automaticity.")
@@ -104,6 +188,7 @@ def parse_args():
     parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
     parser.add_argument('--human_data', type=bool, default=False, help='Use human data')
     parser.add_argument('--participant_id', type=int, default=None, help='Specific participant ID to evaluate (0-indexed). If None, evaluates all participants from 0 to num_agents_to_sample-1.')
+    parser.add_argument('--n_eval_seeds', type=int, default=3, help='Number of evaluation runs per epoch (averaged for final accuracy). Default: 3')
     parser.add_argument('--prompt_mode', type=str, default="non_strict", choices=["strict", "non_strict"], help='Prompt mode for choice13k: "non_strict" (default) uses standard prompts, "strict" uses parametrized program prompts.')
     args = parser.parse_args()
     
@@ -1691,7 +1776,54 @@ def main():
         results_to_save = []
 
         if args.baseline_model in ["ROTE", "Oracle"] and args.bootstrap:
-            accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
+            # Recreate dataloader for each seed to ensure fresh data
+            if args.n_eval_seeds > 1:
+                results_list = []
+                for seed in range(args.n_eval_seeds):
+                    dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
+                    result = eval_fn(args, dataloader, model, episode_id=epoch)
+                    results_list.append(result)
+                # Average results
+                accuracies_dict = {}
+                program_lengths_dict = {}
+                action_times_dict = {}
+                first_step_accuracies_dict = {}
+                accuracies_after_flip_dict = {}
+                avg_prediction_times = []
+                avg_generation_times = []
+                avg_matching_states_list = []
+                mean_equal_actions_list = []
+                agent_id = results_list[-1][6]  # Use last agent_id
+                
+                for result in results_list:
+                    accuracies_dict_seed, program_lengths_dict_seed, action_times_dict_seed, avg_prediction_time_seed, first_step_accuracies_dict_seed, avg_generation_time_seed, _, accuracies_after_flip_dict_seed, avg_matching_states_seed, mean_equal_actions_seed = result
+                    avg_prediction_times.append(avg_prediction_time_seed)
+                    avg_generation_times.append(avg_generation_time_seed)
+                    avg_matching_states_list.append(avg_matching_states_seed)
+                    mean_equal_actions_list.append(mean_equal_actions_seed)
+                    
+                    for n_hyp in accuracies_dict_seed.keys():
+                        if n_hyp not in accuracies_dict:
+                            accuracies_dict[n_hyp] = []
+                            program_lengths_dict[n_hyp] = []
+                            first_step_accuracies_dict[n_hyp] = []
+                            accuracies_after_flip_dict[n_hyp] = []
+                        accuracies_dict[n_hyp].append(accuracies_dict_seed[n_hyp])
+                        program_lengths_dict[n_hyp].append(program_lengths_dict_seed.get(n_hyp, 0.0))
+                        first_step_accuracies_dict[n_hyp].append(first_step_accuracies_dict_seed.get(n_hyp, 0.0))
+                        accuracies_after_flip_dict[n_hyp].append(accuracies_after_flip_dict_seed.get(n_hyp, 0.0))
+                
+                # Average dictionaries
+                accuracies_dict = {k: np.mean(v) for k, v in accuracies_dict.items()}
+                program_lengths_dict = {k: np.mean(v) for k, v in program_lengths_dict.items()}
+                first_step_accuracies_dict = {k: np.mean(v) for k, v in first_step_accuracies_dict.items()}
+                accuracies_after_flip_dict = {k: np.mean(v) for k, v in accuracies_after_flip_dict.items()}
+                avg_prediction_time = np.mean(avg_prediction_times)
+                avg_generation_time = np.mean(avg_generation_times)
+                avg_matching_states = np.mean(avg_matching_states_list)
+                mean_equal_actions = np.mean(mean_equal_actions_list)
+            else:
+                accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1761,25 +1893,101 @@ def main():
                     results_to_save.append(result)
         else:
             if args.baseline_model in ["BC"]:
-                if args.multi_step_eval and args.baseline_model == "BC":
-                    current_accuracy, avg_prediction_time, first_step_accuracy, avg_matching_states, mean_equal_actions, accuracy_after_flip, env, gt_agent_script_id = eval_fn(args, dataloader, model, states, epoch, env)
+                if args.n_eval_seeds > 1:
+                    # Run multiple seeds and average
+                    accuracies_list = []
+                    avg_prediction_times_list = []
+                    first_step_accuracies_list = []
+                    avg_matching_states_list = []
+                    mean_equal_actions_list = []
+                    accuracy_after_flip_list = []
+                    for seed in range(args.n_eval_seeds):
+                        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
+                        if args.multi_step_eval and args.baseline_model == "BC":
+                            result = eval_fn(args, dataloader, model, states, epoch, env)
+                            acc, pred_time, first_step, match_states, mean_actions, acc_after_flip, env, gt_id = result
+                            accuracies_list.append(acc)
+                            avg_prediction_times_list.append(pred_time)
+                            first_step_accuracies_list.append(first_step)
+                            avg_matching_states_list.append(match_states)
+                            mean_equal_actions_list.append(mean_actions)
+                            accuracy_after_flip_list.append(acc_after_flip)
+                            gt_agent_script_id = gt_id  # Use last
+                        else:
+                            acc, pred_time = eval_fn(args, dataloader, model, states, epoch)
+                            accuracies_list.append(acc)
+                            avg_prediction_times_list.append(pred_time)
+                    current_accuracy = np.mean(accuracies_list)
+                    avg_prediction_time = np.mean(avg_prediction_times_list)
+                    if args.multi_step_eval and args.baseline_model == "BC":
+                        first_step_accuracy = np.mean(first_step_accuracies_list)
+                        avg_matching_states = np.mean(avg_matching_states_list)
+                        mean_equal_actions = np.mean(mean_equal_actions_list)
+                        accuracy_after_flip = np.mean(accuracy_after_flip_list)
+                    else:
+                        first_step_accuracy = None
+                        gt_agent_script_id = None
+                        accuracy_after_flip = None
+                        avg_matching_states = None
+                        mean_equal_actions = None
                 else:
-                    current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, states, epoch)
-                    first_step_accuracy = None
-                    gt_agent_script_id = None
-                    accuracy_after_flip = None
-                    avg_matching_states = None
-                    mean_equal_actions = None
+                    if args.multi_step_eval and args.baseline_model == "BC":
+                        current_accuracy, avg_prediction_time, first_step_accuracy, avg_matching_states, mean_equal_actions, accuracy_after_flip, env, gt_agent_script_id = eval_fn(args, dataloader, model, states, epoch, env)
+                    else:
+                        current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, states, epoch)
+                        first_step_accuracy = None
+                        gt_agent_script_id = None
+                        accuracy_after_flip = None
+                        avg_matching_states = None
+                        mean_equal_actions = None
             else:
-                if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
-                    current_accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip, avg_matching_states, mean_equal_actions, env = eval_fn(args, dataloader, model, episode_id=epoch, env=env)
+                if args.n_eval_seeds > 1:
+                    # Run multiple seeds and average
+                    accuracies_list = []
+                    avg_prediction_times_list = []
+                    first_step_accuracies_list = []
+                    accuracy_after_flip_list = []
+                    avg_matching_states_list = []
+                    mean_equal_actions_list = []
+                    for seed in range(args.n_eval_seeds):
+                        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
+                        if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
+                            result = eval_fn(args, dataloader, model, episode_id=epoch, env=env)
+                            acc, pred_time, first_step, gt_id, acc_after_flip, match_states, mean_actions, env = result
+                            accuracies_list.append(acc)
+                            avg_prediction_times_list.append(pred_time)
+                            first_step_accuracies_list.append(first_step)
+                            accuracy_after_flip_list.append(acc_after_flip)
+                            avg_matching_states_list.append(match_states)
+                            mean_equal_actions_list.append(mean_actions)
+                            gt_agent_script_id = gt_id  # Use last
+                        else:
+                            acc, pred_time = eval_fn(args, dataloader, model, episode_id=epoch)
+                            accuracies_list.append(acc)
+                            avg_prediction_times_list.append(pred_time)
+                    current_accuracy = np.mean(accuracies_list)
+                    avg_prediction_time = np.mean(avg_prediction_times_list)
+                    if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
+                        first_step_accuracy = np.mean(first_step_accuracies_list)
+                        accuracy_after_flip = np.mean(accuracy_after_flip_list)
+                        avg_matching_states = np.mean(avg_matching_states_list)
+                        mean_equal_actions = np.mean(mean_equal_actions_list)
+                    else:
+                        first_step_accuracy = None
+                        gt_agent_script_id = None
+                        accuracy_after_flip = None
+                        avg_matching_states = None
+                        mean_equal_actions = None
                 else:
-                    current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
-                    first_step_accuracy = None
-                    gt_agent_script_id = None
-                    accuracy_after_flip = None
-                    avg_matching_states = None
-                    mean_equal_actions = None
+                    if args.multi_step_eval and args.baseline_model in ["AutoToM", "NLLM"]:
+                        current_accuracy, avg_prediction_time, first_step_accuracy, gt_agent_script_id, accuracy_after_flip, avg_matching_states, mean_equal_actions, env = eval_fn(args, dataloader, model, episode_id=epoch, env=env)
+                    else:
+                        current_accuracy, avg_prediction_time = eval_fn(args, dataloader, model, episode_id=epoch)
+                        first_step_accuracy = None
+                        gt_agent_script_id = None
+                        accuracy_after_flip = None
+                        avg_matching_states = None
+                        mean_equal_actions = None
             include_prediction_time = True
             if os.path.exists(csv_path):
                 try:

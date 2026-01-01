@@ -126,25 +126,44 @@ def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, 
     return train_trials, test_trials, options
 
 
-def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False) -> Dict[str, float]:
-    """Evaluate a program on trials and return accuracy metrics."""
-    correct = 0
-    total = 0
-    errors = 0
-    for t in trials:
-        try:
-            pred = choose_fn(t["problem"], t["history"])
-            total += 1
-            if pred is not None and pred == t["action"]:
-                correct += 1
-        except Exception as e:
-            total += 1
-            errors += 1
-            if verbose and errors <= 3:  # Only print first 3 errors to avoid spam
-                print(f"  Evaluation error: {e}")
-    acc = correct / total if total > 0 else 0.0
-    result = {"accuracy": acc, "total": total, "correct": correct, "errors": errors}
-    if verbose and errors > 0:
+def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
+    """Evaluate a program on trials and return accuracy metrics.
+    
+    Args:
+        choose_fn: The program function to evaluate
+        trials: List of trial dictionaries
+        verbose: Whether to print verbose output
+        n_seeds: Number of evaluation runs to average (default: 1)
+    
+    Returns:
+        Dictionary with averaged accuracy metrics across n_seeds runs
+    """
+    accuracies = []
+    total = len(trials)
+    
+    for seed in range(n_seeds):
+        correct = 0
+        errors = 0
+        for t in trials:
+            try:
+                pred = choose_fn(t["problem"], t["history"])
+                if pred is not None and pred == t["action"]:
+                    correct += 1
+            except Exception as e:
+                errors += 1
+                if verbose and errors <= 3 and seed == 0:  # Only print first 3 errors from first seed
+                    print(f"  Evaluation error: {e}")
+        acc = correct / total if total > 0 else 0.0
+        accuracies.append(acc)
+    
+    # Average across seeds
+    avg_acc = np.mean(accuracies) if accuracies else 0.0
+    # Use first seed's error count for reporting
+    correct = int(avg_acc * total)
+    errors = total - correct if n_seeds == 1 else 0  # Error count only meaningful for single seed
+    
+    result = {"accuracy": avg_acc, "total": total, "correct": correct, "errors": errors}
+    if verbose and errors > 0 and n_seeds == 1:
         print(f"  Total evaluation errors: {errors}/{total}")
     return result
 
@@ -241,6 +260,7 @@ def run_evolution(
     client_kwargs: Optional[Dict[str, Any]] = None,
     output_dir: Optional[str] = None,
     wandb=None,
+    n_eval_seeds: int = 3,
 ):
     """
     Run iterative evolution loop over Choice13k programs.
@@ -291,8 +311,8 @@ def run_evolution(
         print("ERROR: Failed to compile baseline program!")
         return None
     
-    baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True)
-    baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True)
+    baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
+    baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
     
     print(f"\nBaseline Performance:")
     print(f"  Train accuracy: {baseline_train_eval['accuracy']:.4f} ({baseline_train_eval['correct']}/{baseline_train_eval['total']})")
@@ -384,9 +404,9 @@ def run_evolution(
                 })
                 continue
             
-            # Evaluate on train and test
-            train_eval = evaluate_program(choose_fn, train_trials)
-            test_eval = evaluate_program(choose_fn, test_trials)
+            # Evaluate on train and test (with multiple seeds)
+            train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+            test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
             
             train_acc = train_eval["accuracy"]
             test_acc = test_eval["accuracy"]
@@ -582,6 +602,12 @@ def main():
         help="Number of candidate programs per iteration",
     )
     parser.add_argument(
+        "--n_eval_seeds",
+        type=int,
+        default=3,
+        help="Number of evaluation runs per program (averaged for final accuracy). Default: 3",
+    )
+    parser.add_argument(
         "--model_name",
         type=str,
         default="deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
@@ -620,6 +646,9 @@ def main():
     
     args = parser.parse_args()
     
+    # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
+    timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+    
     # Optional wandb setup
     wandb_enabled = False
     wandb = None
@@ -627,7 +656,7 @@ def main():
         try:
             import wandb as _wandb
             wandb = _wandb
-            run_name = f"non_strict_{datetime.now():%y%m%d_%H%M%S}"
+            run_name = f"non_strict_{timestamp}"
             if args.participant_id is not None:
                 run_name = f"{run_name}_participant_{args.participant_id}"
             else:
@@ -662,8 +691,7 @@ def main():
     # Create base run directory and save seed program once
     base_run_dir = None
     if args.output_dir is None:
-        # Auto-generated output: create base run directory
-        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        # Auto-generated output: create base run directory (use same timestamp)
         base_run_dir = f"generated_outputs/choice13k_ROTE_evo_non_strict/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
     elif len(participants_to_process) > 1:
@@ -724,7 +752,7 @@ def main():
                 else:
                     summary_file = output_path / "participants_summary.csv"
             
-            participant_summary = run_evolution(
+            participant_summary =             participant_summary = run_evolution(
                 seed_program_path=args.seed_path,
                 participant_id=participant_id,
                 n_iterations=args.n_iterations,
@@ -733,6 +761,7 @@ def main():
                 client_kwargs=client_kwargs if client_kwargs else None,
                 output_dir=participant_output_dir,
                 wandb=wandb,
+                n_eval_seeds=args.n_eval_seeds,
             )
             
             # Update participants summary after each participant completes
