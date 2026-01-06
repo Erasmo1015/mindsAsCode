@@ -17,6 +17,12 @@ Choice13k (MindAsCode)
 - Prompt modes: `--prompt_mode strict` uses parametrized program prompts; `--prompt_mode non_strict` (default) uses standard prompts.
 - Iteration structure: Outer loop processes participants sequentially (0 to num_agents_to_sample-1). Inner loop runs `num_epochs` independent bootstrap iterations per participant (each epoch generates fresh programs and evaluates independently, like different random seeds).
 
+Gridworld evaluation modes
+
+- Loop mode: `--loop_mode random` (default) randomly samples problem configs and agent types per epoch. `--loop_mode sequential` systematically evaluates all (num_blocks, num_walls) combinations (3-7 blocks × 1-4 walls = 20 configs) and all 10 agent types in sequence.
+- Sequential mode: Each epoch evaluates one (problem config, agent type) combination. CSV saved to experiment folder (`generated_outputs/gridworld/run_XXX/results.csv`) with `num_blocks` and `num_walls` columns. Best programs tracked per agent type in `epoch_X_agent_types.json`.
+- Random mode: Preserves original behavior with random sampling per epoch. CSV saved to fixed location `results/ROTE/...`.
+
 Template Evolution (ROTE_evo)
 
 - Iterative evolution loop over executable Choice13k programs, combining ROTE's program-based modeling with evo's evolutionary control flow.

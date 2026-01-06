@@ -188,8 +188,9 @@ def parse_args():
     parser.add_argument('--flip_quarter', type=bool, default=True, help='reset the environment after 30 steps')
     parser.add_argument('--human_data', type=bool, default=False, help='Use human data')
     parser.add_argument('--participant_id', type=int, default=None, help='Specific participant ID to evaluate (0-indexed). If None, evaluates all participants from 0 to num_agents_to_sample-1.')
-    parser.add_argument('--n_eval_seeds', type=int, default=3, help='Number of evaluation runs per epoch (averaged for final accuracy). Default: 3')
+    parser.add_argument('--n_eval_seeds', type=int, default=1, help='Number of evaluation runs per epoch (averaged for final accuracy). Default: 3')
     parser.add_argument('--prompt_mode', type=str, default="non_strict", choices=["strict", "non_strict"], help='Prompt mode for choice13k: "non_strict" (default) uses standard prompts, "strict" uses parametrized program prompts.')
+    parser.add_argument('--loop_mode', type=str, default="random", choices=["random", "sequential"], help='Evaluation loop mode: "random" (default) uses random problem and agent sampling per epoch; "sequential" evaluates all problem configs and agent types systematically.')
     args = parser.parse_args()
     
     # Check if the selected baseline model is implemented
@@ -204,6 +205,14 @@ def parse_args():
 def initialize_environment(num_agents: int, num_blocks: int, num_walls: int, size: int = 10, max_steps: int = 100):
     env = AutomaticityEnv(num_agents=num_agents, size=size, max_steps=max_steps, num_blocks=num_blocks, num_walls=num_walls)
     return env
+
+def get_all_problem_configs():
+    """Generate all (num_blocks, num_walls) combinations in sequential order."""
+    configs = []
+    for num_blocks in range(3, 8):  # 3 to 7
+        for num_walls in range(1, 5):  # 1 to 4
+            configs.append((num_blocks, num_walls))
+    return configs
 
 
 def make_dataloader_human(args, num_agents_to_sample: int = 2, num_datapoints_per_agent_to_sample: int = 20, overfit: bool = False, training: bool = False, epoch: int = 0):
@@ -303,17 +312,28 @@ def make_dataloader_human(args, num_agents_to_sample: int = 2, num_datapoints_pe
             print("Reached end of human data, exiting successfully")
             exit(0)
 
-def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agent_to_sample: int = 20, overfit: bool = False, training: bool = False, epoch: int = 0):
-    """Load data from the dataset folders."""
+def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agent_to_sample: int = 20, overfit: bool = False, training: bool = False, epoch: int = 0, num_blocks: int = None, num_walls: int = None, agent_indices: list = None):
+    """Load data from the dataset folders.
+    
+    Args:
+        num_blocks: Optional. If provided, use this specific num_blocks (for sequential mode).
+        num_walls: Optional. If provided, use this specific num_walls (for sequential mode).
+        agent_indices: Optional. If provided, use these specific agent indices (for sequential mode).
+    """
     data_path = args.data_path
     as_images = args.as_images
 
     i = epoch
     while True:
         if not overfit:
-            i += 1
-            num_blocks = random.choice(list(range(3,8,1)))
-            num_walls = random.choice(list(range(1, 5, 1)))
+            if num_blocks is not None and num_walls is not None:
+                # Sequential mode: use provided values
+                pass  # num_blocks and num_walls already set
+            else:
+                # Random mode: choose randomly
+                i += 1
+                num_blocks = random.choice(list(range(3,8,1)))
+                num_walls = random.choice(list(range(1, 5, 1)))
         else:
             num_blocks = 4
             num_walls = 1
@@ -359,10 +379,16 @@ def make_dataloader(args, num_agents_to_sample: int = 2, num_datapoints_per_agen
         # print(f"Loaded data from {data_file}")
                 
         # Sample only what we need
-        if overfit:
-            agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=1, maxval=2)
+        if agent_indices is None:
+            # Not provided, use random sampling
+            if overfit:
+                agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=1, maxval=2)
+            else:
+                agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=0, maxval=loaded_data['states']['agent_locations'].shape[0])
         else:
-            agent_indices = jax.random.randint(jax.random.PRNGKey(i), (num_agents_to_sample,), minval=0, maxval=loaded_data['states']['agent_locations'].shape[0])
+            # Sequential mode: use provided agent_indices, convert to jax array if needed
+            if isinstance(agent_indices, list):
+                agent_indices = jnp.array(agent_indices)
         
         i += 1
         if training:  # for creating held out set
@@ -1200,6 +1226,9 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
         datapoint = next(dataloader) # Process one batch of data
         generation_times = 0
         num_generations = 0
+        
+        # Track agent type information for JSON output
+        agent_type_info = {}
 
         for a_idx in tqdm(range(args.num_agents_to_sample), desc="Multi-step Eval Samples"):
             data_sample = jax.tree.map(lambda x: x[a_idx, -1, :20+num_future_steps], datapoint) 
@@ -1270,8 +1299,66 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 print(f"Sample {a_idx}: No hypotheses generated, skipping.")
                 continue
             
+            # Track hypotheses for this agent type
+            # Get program save root if available
+            program_save_root = getattr(model, 'program_save_root', None)
+            hypotheses_info = []
+            hypothesis_weights = []
+            program_paths = []
+            
             # Get the number of available hypotheses
             num_available_hyp = len(compiled_agents)
+            
+            # Track all hypotheses that were successfully compiled
+            # Note: The hypothesis IDs in the file paths correspond to the order they were generated
+            # We need to track which ones actually compiled successfully
+            for hyp_idx in range(num_available_hyp):
+                # The hypothesis ID used in file paths is the original generation index
+                # We need to check what the actual hyp_id is - it should match the index in agent_probs
+                hyp_id = hyp_idx  # This should match the hyp_X folder name
+                hyp_weight = float(agent_probs[hyp_idx]) if hyp_idx < len(agent_probs) else 0.0
+                hypotheses_info.append(hyp_id)
+                hypothesis_weights.append(hyp_weight)
+                
+                # Construct program path (relative to program_save_root)
+                if program_save_root:
+                    # Try good first, then raw
+                    good_path = program_save_root / f"epoch_{episode_id}/hyp_{hyp_id}/good/program.py"
+                    raw_path = program_save_root / f"epoch_{episode_id}/hyp_{hyp_id}/raw/program.py"
+                    if good_path.exists():
+                        program_path = f"epoch_{episode_id}/hyp_{hyp_id}/good/program.py"
+                    elif raw_path.exists():
+                        program_path = f"epoch_{episode_id}/hyp_{hyp_id}/raw/program.py"
+                    else:
+                        # File might not exist yet, but we'll record the expected path
+                        program_path = f"epoch_{episode_id}/hyp_{hyp_id}/good/program.py"
+                    program_paths.append(program_path)
+                else:
+                    program_paths.append(None)
+            
+            # Find the highest-weighted hypothesis
+            if hypothesis_weights:
+                best_hyp_idx = np.argmax(hypothesis_weights)
+                best_hyp_id = hypotheses_info[best_hyp_idx]
+                best_hyp_weight = hypothesis_weights[best_hyp_idx]
+                best_program_path = program_paths[best_hyp_idx] if best_hyp_idx < len(program_paths) else None
+            else:
+                best_hyp_id = None
+                best_hyp_weight = 0.0
+                best_program_path = None
+            
+            # Store agent type information (will update ensemble accuracy later)
+            agent_type_info[f"agent_id_{agent_id}"] = {
+                "agent_id": int(agent_id),
+                "hypotheses": [int(h) for h in hypotheses_info],
+                "hypothesis_weights": [float(w) for w in hypothesis_weights],
+                "program_paths": program_paths,
+                "best_program": {
+                    "hypothesis_id": int(best_hyp_id) if best_hyp_id is not None else None,
+                    "weight": float(best_hyp_weight),
+                    "program_path": best_program_path
+                }
+            }
             
             # For each hypothesis count we want to evaluate
             for n_hyp in range(1, max_hypotheses + 1):
@@ -1561,8 +1648,13 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
             print(f"Hypotheses: {n_hyp}, Multi-Step Accuracy: {acc:.4f} ({results[n_hyp]['correct']}/{results[n_hyp]['total']}), First Step Accuracy: {first_step_accuracies[n_hyp]:.4f}, Avg Program Length: {program_lengths[n_hyp]:.1f}")
         print(f"Average prediction time per step: {avg_prediction_time:.4f} seconds")
         
+        # Update ensemble accuracy for each agent type (using max_hypotheses accuracy)
+        max_hyp_acc = accuracies.get(max_hypotheses, 0.0)
+        for agent_key in agent_type_info:
+            agent_type_info[agent_key]["ensemble_accuracy"] = float(max_hyp_acc)
+        
         # Return the full dictionary of accuracies and program lengths, plus timing info and first step accuracies
-        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id, accuracies_after_flip, avg_matching_states, mean_equal_actions
+        return accuracies, program_lengths, action_times, avg_prediction_time, first_step_accuracies, avg_generation_time, agent_id, accuracies_after_flip, avg_matching_states, mean_equal_actions, agent_type_info
 
 def main():
     """Main function to eval baseline models."""
@@ -1652,18 +1744,24 @@ def main():
     rejuvenation_extension = "_rejuvenation" if args.rejuvenation else ""
     human_data_extension = "_human_data" if args.human_data else ""
     
-    if args.baseline_model == "ROTE" and args.bootstrap:
-        if args.multi_step_eval:
-            csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime_Dec17.csv"
-        else: # Single-step ROTE bootstrap
-            csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}.csv"
-    else: # Non-bootstrap ROTE or other models
-        csv_path = f"results/{args.baseline_model}/results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}.csv"
-    
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    # Determine CSV path based on loop mode
+    if args.loop_mode == "sequential":
+        # For sequential mode, CSV will be saved in the experiment folder (set later when model is created)
+        csv_path = None  # Will be set after model.program_save_root is created
+    else:
+        # Random mode: use fixed location
+        if args.baseline_model == "ROTE" and args.bootstrap:
+            if args.multi_step_eval:
+                csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_multistep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}_steps{args.num_steps_to_predict}_actionTime_Dec17.csv"
+            else: # Single-step ROTE bootstrap
+                csv_path = f"results/{args.baseline_model}/results_rote_bootstrap_singlestep{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}_topk{args.top_k}.csv"
+        else: # Non-bootstrap ROTE or other models
+            csv_path = f"results/{args.baseline_model}/results_grid_{args.baseline_model}_{args.n_hypothesis}hyp{group_extension}{two_stage_extension}{structured_extension}{rejuvenation_extension}{human_data_extension}.csv"
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
     start_epoch = 0
-    if os.path.exists(csv_path):
+    # For sequential mode, csv_path will be set after model creation, so skip resume check here
+    if csv_path is not None and os.path.exists(csv_path):
         try:
             existing_df = pd.read_csv(csv_path)
             if not existing_df.empty:
@@ -1768,10 +1866,70 @@ def main():
 
     fsm_names = os.listdir(f'generated_outputs/hand_designed')
     fsm_names = [f.replace('.txt', '') for f in fsm_names]
+    num_agent_types = len(fsm_names)  # Total number of agent types (10)
     env = None
     assert args.dataset == "gridworld", "Gridworld epoch loop requires dataset=gridworld."
+    
+    # Setup for sequential mode
+    get_config_and_agent_for_epoch = None  # Initialize function variable
+    if args.loop_mode == "sequential":
+        # Set CSV path in experiment folder
+        if hasattr(model, 'program_save_root') and model.program_save_root:
+            csv_path = model.program_save_root / "results.csv"
+        else:
+            # Fallback: create a run directory
+            run_dir = Path(f"generated_outputs/gridworld/run_{datetime.now():%y%m%d_%H%M%S}")
+            run_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = run_dir / "results.csv"
+        os.makedirs(os.path.dirname(str(csv_path)), exist_ok=True)
+        
+        # Check for resume in sequential mode (after csv_path is set)
+        if os.path.exists(csv_path):
+            try:
+                existing_df = pd.read_csv(csv_path)
+                if not existing_df.empty:
+                    # Find max epoch from CSV
+                    if 'epoch' in existing_df.columns:
+                        start_epoch = existing_df['epoch'].astype(int).max() + 1
+                        print(f"Sequential mode: Resuming from epoch {start_epoch}")
+            except Exception as e:
+                print(f"Error reading CSV for resume in sequential mode: {e}. Starting from epoch 0.")
+        
+        # Generate all problem configs
+        all_problem_configs = get_all_problem_configs()
+        total_configs = len(all_problem_configs)  # 20 configs
+        actual_evaluations = min(args.num_epochs, total_configs * num_agent_types)
+        print(f"Sequential mode: Will evaluate {actual_evaluations} combination(s) (--num_epochs={args.num_epochs})")
+        
+        # Calculate which config and agent to use for each epoch
+        def get_config_and_agent_for_epoch(epoch_idx):
+            """Get (num_blocks, num_walls, agent_id) for a given epoch index."""
+            config_idx = epoch_idx // num_agent_types
+            agent_idx = epoch_idx % num_agent_types
+            if config_idx >= total_configs:
+                return None, None, None  # Out of bounds
+            num_blocks, num_walls = all_problem_configs[config_idx]
+            return num_blocks, num_walls, agent_idx
+    else:
+        # Random mode: CSV path already set above
+        pass
+    
     for epoch in tqdm(range(start_epoch, args.num_epochs), desc="Epochs"):
-        print(f"\nRunning epoch {epoch+1}/{args.num_epochs}")
+        # Determine problem config and agent type for this epoch
+        if args.loop_mode == "sequential":
+            num_blocks, num_walls, agent_idx = get_config_and_agent_for_epoch(epoch)
+            if num_blocks is None:
+                print(f"Epoch {epoch}: Out of problem configs, stopping.")
+                break
+            print(f"\nRunning epoch {epoch+1}/{args.num_epochs} - Problem: num_blocks={num_blocks}, num_walls={num_walls}, Agent: {agent_idx}")
+            # In sequential mode, evaluate only one agent type per epoch
+            agent_indices_to_use = [agent_idx]
+        else:
+            # Random mode: use default behavior
+            num_blocks = None
+            num_walls = None
+            agent_indices_to_use = None
+            print(f"\nRunning epoch {epoch+1}/{args.num_epochs}")
         
         results_to_save = []
 
@@ -1780,7 +1938,10 @@ def main():
             if args.n_eval_seeds > 1:
                 results_list = []
                 for seed in range(args.n_eval_seeds):
-                    dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
+                    if args.loop_mode == "sequential":
+                        dataloader = dataloader_fn(args, num_agents_to_sample=1, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch, num_blocks=num_blocks, num_walls=num_walls, agent_indices=agent_indices_to_use)
+                    else:
+                        dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
                     result = eval_fn(args, dataloader, model, episode_id=epoch)
                     results_list.append(result)
                 # Average results
@@ -1794,9 +1955,10 @@ def main():
                 avg_matching_states_list = []
                 mean_equal_actions_list = []
                 agent_id = results_list[-1][6]  # Use last agent_id
+                agent_type_info = results_list[-1][10] if len(results_list[-1]) > 10 else {}  # Use last agent_type_info
                 
                 for result in results_list:
-                    accuracies_dict_seed, program_lengths_dict_seed, action_times_dict_seed, avg_prediction_time_seed, first_step_accuracies_dict_seed, avg_generation_time_seed, _, accuracies_after_flip_dict_seed, avg_matching_states_seed, mean_equal_actions_seed = result
+                    accuracies_dict_seed, program_lengths_dict_seed, action_times_dict_seed, avg_prediction_time_seed, first_step_accuracies_dict_seed, avg_generation_time_seed, _, accuracies_after_flip_dict_seed, avg_matching_states_seed, mean_equal_actions_seed, _ = result
                     avg_prediction_times.append(avg_prediction_time_seed)
                     avg_generation_times.append(avg_generation_time_seed)
                     avg_matching_states_list.append(avg_matching_states_seed)
@@ -1823,7 +1985,21 @@ def main():
                 avg_matching_states = np.mean(avg_matching_states_list)
                 mean_equal_actions = np.mean(mean_equal_actions_list)
             else:
-                accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions = eval_fn(args, dataloader, model, episode_id=epoch)
+                if args.loop_mode == "sequential":
+                    dataloader = dataloader_fn(args, num_agents_to_sample=1, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch, num_blocks=num_blocks, num_walls=num_walls, agent_indices=agent_indices_to_use)
+                else:
+                    dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
+                accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions, agent_type_info = eval_fn(args, dataloader, model, episode_id=epoch)
+            
+            # Save agent type information to JSON file
+            if agent_type_info and hasattr(model, 'program_save_root') and model.program_save_root:
+                json_output = {
+                    "epoch": epoch,
+                    "agent_types": agent_type_info
+                }
+                json_file = model.program_save_root / f"epoch_{epoch}_agent_types.json"
+                json_file.write_text(json.dumps(json_output, indent=2))
+                print(f"Saved agent type information to {json_file}")
             
             if args.multi_step_eval:
                 for n_hyp, accuracy_val in accuracies_dict.items():
@@ -1840,7 +2016,7 @@ def main():
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
                         'group': args.group,
-                        'num_agents_evaluated': args.num_agents_to_sample,
+                        'num_agents_evaluated': args.num_agents_to_sample if args.loop_mode != "sequential" else 1,
                         'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                         'epoch': epoch,
                         'llm_model': args.model_name,
@@ -1858,6 +2034,21 @@ def main():
                         'mean_equal_actions': mean_equal_actions,
                     }
                     
+                    # Add num_blocks and num_walls if in sequential mode or if they're missing from CSV
+                    if args.loop_mode == "sequential":
+                        result['num_blocks'] = num_blocks
+                        result['num_walls'] = num_walls
+                    elif csv_path and os.path.exists(csv_path):
+                        # Check if columns exist, if not add None
+                        try:
+                            existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                            if 'num_blocks' not in existing_cols:
+                                result['num_blocks'] = None
+                            if 'num_walls' not in existing_cols:
+                                result['num_walls'] = None
+                        except:
+                            pass
+                    
                     if include_prediction_time:
                         result['avg_prediction_time'] = avg_prediction_time
                         result['avg_generation_time'] = avg_generation_time
@@ -1871,7 +2062,7 @@ def main():
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
                         'group': args.group,
-                        'num_agents_evaluated': args.num_agents_to_sample,
+                        'num_agents_evaluated': args.num_agents_to_sample if args.loop_mode != "sequential" else 1,
                         'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                         'epoch': epoch,
                         'llm_model': args.model_name,
@@ -1886,6 +2077,21 @@ def main():
                         'avg_matching_states': avg_matching_states,
                         'mean_equal_actions': mean_equal_actions,
                     }
+                    
+                    # Add num_blocks and num_walls if in sequential mode or if they're missing from CSV
+                    if args.loop_mode == "sequential":
+                        result['num_blocks'] = num_blocks
+                        result['num_walls'] = num_walls
+                    elif csv_path and os.path.exists(csv_path):
+                        # Check if columns exist, if not add None
+                        try:
+                            existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                            if 'num_blocks' not in existing_cols:
+                                result['num_blocks'] = None
+                            if 'num_walls' not in existing_cols:
+                                result['num_walls'] = None
+                        except:
+                            pass
                     
                     if include_prediction_time:
                         result['avg_prediction_time'] = avg_prediction_time
@@ -1989,7 +2195,7 @@ def main():
                         avg_matching_states = None
                         mean_equal_actions = None
             include_prediction_time = True
-            if os.path.exists(csv_path):
+            if csv_path and os.path.exists(csv_path):
                 try:
                     existing_cols = pd.read_csv(csv_path, nrows=0).columns
                     include_prediction_time = 'avg_prediction_time' in existing_cols
@@ -2000,7 +2206,7 @@ def main():
                 'model': args.baseline_model,
                 'accuracy': current_accuracy,
                 'group': args.group,
-                'num_agents_evaluated': args.num_agents_to_sample,
+                'num_agents_evaluated': args.num_agents_to_sample if args.loop_mode != "sequential" else 1,
                 'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                 'epoch': epoch,
                 'llm_model': args.model_name if args.baseline_model in ['AutoToM', 'ROTE', 'NLLM'] else 'N/A',
@@ -2015,6 +2221,22 @@ def main():
                 'avg_matching_states': avg_matching_states,
                 'mean_equal_actions': mean_equal_actions,
             }
+            
+            # Add num_blocks and num_walls if in sequential mode or if they're missing from CSV
+            if args.loop_mode == "sequential":
+                result['num_blocks'] = num_blocks
+                result['num_walls'] = num_walls
+            elif csv_path and os.path.exists(csv_path):
+                # Check if columns exist, if not add None
+                try:
+                    existing_cols = pd.read_csv(csv_path, nrows=0).columns
+                    if 'num_blocks' not in existing_cols:
+                        result['num_blocks'] = None
+                    if 'num_walls' not in existing_cols:
+                        result['num_walls'] = None
+                except:
+                    pass
+            
             if first_step_accuracy is not None:
                 result['first_step_accuracy'] = first_step_accuracy
             if accuracy_after_flip is not None:
@@ -2028,11 +2250,23 @@ def main():
         if results_to_save:
             df = pd.DataFrame(results_to_save)
             
-            if os.path.exists(csv_path):
+            # Ensure csv_path is set (for sequential mode, it's set above)
+            if csv_path is None and args.loop_mode == "sequential":
+                if hasattr(model, 'program_save_root') and model.program_save_root:
+                    csv_path = model.program_save_root / "results.csv"
+                else:
+                    csv_path = Path(f"generated_outputs/gridworld/run_{datetime.now():%y%m%d_%H%M%S}") / "results.csv"
+                os.makedirs(os.path.dirname(str(csv_path)), exist_ok=True)
+            
+            if csv_path and os.path.exists(csv_path):
                 try:
                     existing_df = pd.read_csv(csv_path)
                     if not existing_df.empty:
                         existing_cols = existing_df.columns.tolist()
+                        # Add num_blocks and num_walls if they don't exist in existing CSV
+                        for col in ['num_blocks', 'num_walls']:
+                            if col not in existing_cols and col in df.columns:
+                                existing_cols.append(col)
                         for col in existing_cols:
                             if col not in df.columns:
                                 df[col] = None
@@ -2040,18 +2274,19 @@ def main():
                 except Exception as e:
                     print(f"Error matching columns with existing CSV: {e}")
             
-            if os.path.exists(csv_path) and start_epoch <= epoch:
-                try:
-                    header_needed = pd.read_csv(csv_path, nrows=0).empty
-                except pd.errors.EmptyDataError:
-                    header_needed = True
-                except FileNotFoundError:
-                    header_needed = True
+            if csv_path:
+                if os.path.exists(csv_path) and start_epoch <= epoch:
+                    try:
+                        header_needed = pd.read_csv(csv_path, nrows=0).empty
+                    except pd.errors.EmptyDataError:
+                        header_needed = True
+                    except FileNotFoundError:
+                        header_needed = True
 
-                df.to_csv(csv_path, mode='a', header=header_needed, index=False)
-            else:
-                df.to_csv(csv_path, index=False)
-            print(f"Saved results for epoch {epoch+1} to {csv_path}")
+                    df.to_csv(csv_path, mode='a', header=header_needed, index=False)
+                else:
+                    df.to_csv(csv_path, index=False)
+                print(f"Saved results for epoch {epoch+1} to {csv_path}")
         else:
             print(f"No results to save for epoch {epoch+1}")
 
