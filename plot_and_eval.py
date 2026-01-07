@@ -1898,32 +1898,34 @@ def main():
         # Generate all problem configs
         all_problem_configs = get_all_problem_configs()
         total_configs = len(all_problem_configs)  # 20 configs
-        actual_evaluations = min(args.num_epochs, total_configs * num_agent_types)
-        print(f"Sequential mode: Will evaluate {actual_evaluations} combination(s) (--num_epochs={args.num_epochs})")
+        actual_evaluations = min(args.num_epochs, total_configs)
+        print(f"Sequential mode: Will evaluate {actual_evaluations} problem config(s) (--num_epochs={args.num_epochs}, --num_agents_to_sample={args.num_agents_to_sample})")
         
-        # Calculate which config and agent to use for each epoch
-        def get_config_and_agent_for_epoch(epoch_idx):
-            """Get (num_blocks, num_walls, agent_id) for a given epoch index."""
-            config_idx = epoch_idx // num_agent_types
-            agent_idx = epoch_idx % num_agent_types
-            if config_idx >= total_configs:
+        # Calculate which config and agent types to use for each epoch
+        def get_config_and_agents_for_epoch(epoch_idx):
+            """Get (num_blocks, num_walls, agent_indices_list) for a given epoch index.
+            Each epoch uses a different problem config, and evaluates num_agents_to_sample agent types."""
+            if epoch_idx >= total_configs:
                 return None, None, None  # Out of bounds
-            num_blocks, num_walls = all_problem_configs[config_idx]
-            return num_blocks, num_walls, agent_idx
+            num_blocks, num_walls = all_problem_configs[epoch_idx]
+            # Select agent types: always use the first num_agents_to_sample agent types
+            agent_indices = list(range(min(args.num_agents_to_sample, num_agent_types)))
+            return num_blocks, num_walls, agent_indices
     else:
         # Random mode: CSV path already set above
         pass
     
     for epoch in tqdm(range(start_epoch, args.num_epochs), desc="Epochs"):
-        # Determine problem config and agent type for this epoch
+        # Determine problem config and agent type(s) for this epoch
         if args.loop_mode == "sequential":
-            num_blocks, num_walls, agent_idx = get_config_and_agent_for_epoch(epoch)
+            num_blocks, num_walls, agent_indices_list = get_config_and_agents_for_epoch(epoch)
             if num_blocks is None:
                 print(f"Epoch {epoch}: Out of problem configs, stopping.")
                 break
-            print(f"\nRunning epoch {epoch+1}/{args.num_epochs} - Problem: num_blocks={num_blocks}, num_walls={num_walls}, Agent: {agent_idx}")
-            # In sequential mode, evaluate only one agent type per epoch
-            agent_indices_to_use = [agent_idx]
+            agent_str = f"Agents: {agent_indices_list}" if len(agent_indices_list) > 1 else f"Agent: {agent_indices_list[0]}"
+            print(f"\nRunning epoch {epoch+1}/{args.num_epochs} - Problem: num_blocks={num_blocks}, num_walls={num_walls}, {agent_str}")
+            # In sequential mode, evaluate num_agents_to_sample agent types per epoch
+            agent_indices_to_use = agent_indices_list
         else:
             # Random mode: use default behavior
             num_blocks = None
@@ -1939,7 +1941,7 @@ def main():
                 results_list = []
                 for seed in range(args.n_eval_seeds):
                     if args.loop_mode == "sequential":
-                        dataloader = dataloader_fn(args, num_agents_to_sample=1, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch, num_blocks=num_blocks, num_walls=num_walls, agent_indices=agent_indices_to_use)
+                        dataloader = dataloader_fn(args, num_agents_to_sample=len(agent_indices_to_use), num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch, num_blocks=num_blocks, num_walls=num_walls, agent_indices=agent_indices_to_use)
                     else:
                         dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
                     result = eval_fn(args, dataloader, model, episode_id=epoch)
@@ -1986,18 +1988,22 @@ def main():
                 mean_equal_actions = np.mean(mean_equal_actions_list)
             else:
                 if args.loop_mode == "sequential":
-                    dataloader = dataloader_fn(args, num_agents_to_sample=1, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch, num_blocks=num_blocks, num_walls=num_walls, agent_indices=agent_indices_to_use)
+                    dataloader = dataloader_fn(args, num_agents_to_sample=len(agent_indices_to_use), num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch, num_blocks=num_blocks, num_walls=num_walls, agent_indices=agent_indices_to_use)
                 else:
                     dataloader = dataloader_fn(args, num_agents_to_sample=args.num_agents_to_sample, num_datapoints_per_agent_to_sample=args.num_datapoints_per_agent_to_sample, training=False, epoch=epoch)
                 accuracies_dict, program_lengths_dict, action_times_dict, avg_prediction_time, first_step_accuracies_dict, avg_generation_time, agent_id, accuracies_after_flip_dict, avg_matching_states, mean_equal_actions, agent_type_info = eval_fn(args, dataloader, model, episode_id=epoch)
             
-            # Save agent type information to JSON file
+            # Save agent type information to JSON file (inside epoch directory)
             if agent_type_info and hasattr(model, 'program_save_root') and model.program_save_root:
                 json_output = {
                     "epoch": epoch,
                     "agent_types": agent_type_info
                 }
-                json_file = model.program_save_root / f"epoch_{epoch}_agent_types.json"
+                # Create epoch directory if it doesn't exist
+                epoch_dir = model.program_save_root / f"epoch_{epoch}"
+                epoch_dir.mkdir(parents=True, exist_ok=True)
+                # Save JSON inside the epoch directory
+                json_file = epoch_dir / f"epoch_{epoch}_agent_types.json"
                 json_file.write_text(json.dumps(json_output, indent=2))
                 print(f"Saved agent type information to {json_file}")
             
@@ -2016,7 +2022,7 @@ def main():
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
                         'group': args.group,
-                        'num_agents_evaluated': args.num_agents_to_sample if args.loop_mode != "sequential" else 1,
+                        'num_agents_evaluated': args.num_agents_to_sample,
                         'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                         'epoch': epoch,
                         'llm_model': args.model_name,
@@ -2062,7 +2068,7 @@ def main():
                         'model': args.baseline_model,
                         'accuracy': accuracy_val,
                         'group': args.group,
-                        'num_agents_evaluated': args.num_agents_to_sample if args.loop_mode != "sequential" else 1,
+                        'num_agents_evaluated': args.num_agents_to_sample,
                         'datapoints_per_agent': args.num_datapoints_per_agent_to_sample, 
                         'epoch': epoch,
                         'llm_model': args.model_name,

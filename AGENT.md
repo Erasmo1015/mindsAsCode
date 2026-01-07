@@ -19,9 +19,9 @@ Choice13k (MindAsCode)
 
 Gridworld evaluation modes
 
-- Loop mode: `--loop_mode random` (default) randomly samples problem configs and agent types per epoch. `--loop_mode sequential` systematically evaluates all (num_blocks, num_walls) combinations (3-7 blocks × 1-4 walls = 20 configs) and all 10 agent types in sequence.
-- Sequential mode: Each epoch evaluates one (problem config, agent type) combination. CSV saved to experiment folder (`generated_outputs/gridworld/run_XXX/results.csv`) with `num_blocks` and `num_walls` columns. Best programs tracked per agent type in `epoch_X_agent_types.json`.
-- Random mode: Preserves original behavior with random sampling per epoch. CSV saved to fixed location `results/ROTE/...`.
+- Loop mode: `--loop_mode random` (default) randomly samples problem configs and agent types per epoch. `--loop_mode sequential` systematically evaluates all (num_blocks, num_walls) combinations (3-7 blocks × 1-4 walls = 20 configs) sequentially.
+- Sequential mode: Each epoch uses a different problem config. The number of agent types evaluated per epoch is controlled by `--num_agents_to_sample` (default: 1). With `--num_agents_to_sample=1`, each epoch evaluates agent type 0 for that problem config. With `--num_agents_to_sample=10`, each epoch evaluates all 10 agent types for that problem config. CSV saved to experiment folder (`generated_outputs/gridworld/run_XXX/results.csv`) with `num_blocks` and `num_walls` columns. Best programs tracked per agent type in `epoch_X/epoch_X_agent_types.json` (saved inside each epoch directory). When multiple agents are evaluated, the JSON includes information for all agent types.
+- Random mode: Each epoch randomly samples a problem config and agent type(s). The number of agent types per epoch is controlled by `--num_agents_to_sample` (default: 1). CSV saved to fixed location `results/ROTE/...`.
 
 Template Evolution (ROTE_evo)
 
