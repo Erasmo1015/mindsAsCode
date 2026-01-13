@@ -1347,7 +1347,7 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                 best_hyp_weight = 0.0
                 best_program_path = None
             
-            # Store agent type information (will update ensemble accuracy later)
+            # Store agent type information (will update ensemble accuracy and best accuracy program later)
             agent_type_info[f"agent_id_{agent_id}"] = {
                 "agent_id": int(agent_id),
                 "hypotheses": [int(h) for h in hypotheses_info],
@@ -1358,6 +1358,117 @@ def eval_fsm_bootstrap(args, dataloader, model, episode_id: int = 0):
                     "weight": float(best_hyp_weight),
                     "program_path": best_program_path
                 }
+            }
+            
+            # Initialize individual hypothesis accuracy tracking for this agent type
+            # Track accuracy for each hypothesis individually (not ensemble)
+            individual_hyp_accuracies = {}  # hyp_id -> {'correct': int, 'total': int}
+            for hyp_id in hypotheses_info:
+                individual_hyp_accuracies[hyp_id] = {'correct': 0, 'total': 0}
+            
+            # Helper function to convert JAX arrays to numpy (for individual evaluation)
+            def to_numpy(x):
+                if isinstance(x, (jnp.ndarray, jax.Array)):
+                    return np.array(x)
+                return x
+            
+            # Evaluate each hypothesis individually to track individual accuracy
+            # (Do this once per agent type, using all available hypotheses)
+            for hyp_idx, hyp_agent in enumerate(compiled_agents):
+                hyp_id = hypotheses_info[hyp_idx]
+                hyp_correct = 0
+                hyp_total = 0
+                
+                # Reset simulation state for this hypothesis
+                current_sim_state_pytree = state_at_t14
+                current_sim_state_pytree = State(
+                    wall_locations=current_sim_state_pytree['wall_locations'],
+                    agent_locations=current_sim_state_pytree['agent_locations'],
+                    block_locations=current_sim_state_pytree['block_locations'],
+                    agent_inventory=current_sim_state_pytree['agent_inventory'],
+                    agent_inventory_colors=current_sim_state_pytree['agent_inventory_colors'],
+                    block_colors=current_sim_state_pytree['block_colors'],
+                    time=current_sim_state_pytree['time'],
+                    terminal=False,
+                    agent_id=-1
+                )
+                current_obs = env.get_observation(current_sim_state_pytree)[0]
+                
+                # Simulate future steps for this individual hypothesis
+                for step_idx in range(num_future_steps):
+                    if step_idx >= gt_future_actions.shape[0]:
+                        break
+                    
+                    try:
+                        # Get observation from ground truth data
+                        current_obs_raw = jax.tree.map(lambda x: x[19+step_idx+1], data_sample['states'])
+                        current_obs = jax.tree.map(to_numpy, current_obs_raw)
+                        current_obs['agent_id'] = 0
+                        
+                        # Get prediction from this individual hypothesis
+                        predicted_action = framework.execute_agent(hyp_agent, current_obs)
+                        
+                        # Extract ground truth action
+                        gt_action_this_step = gt_future_actions[step_idx]
+                        if hasattr(gt_action_this_step, '__len__') and len(gt_action_this_step) > 0:
+                            gt_action = int(gt_action_this_step[0])
+                        else:
+                            gt_action = int(gt_action_this_step)
+                        
+                        # Convert action to int
+                        action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+                        action_space_2 = ["stay", "right", "left", "down", "up", "interact"]
+                        
+                        if isinstance(predicted_action, tuple):
+                            predicted_action = list(predicted_action)
+                        elif isinstance(predicted_action, str):
+                            predicted_action = predicted_action.lower()
+                            predicted_action = action_space_2.index(predicted_action)
+                        else:
+                            predicted_action = int(predicted_action)
+                        
+                        if predicted_action in action_space:
+                            predicted_action = action_space.index(predicted_action)
+                        elif predicted_action in action_space_2:
+                            predicted_action = action_space_2.index(predicted_action)
+                        
+                        # Compare with ground truth
+                        for aid in range(num_env_agents):
+                            hyp_total += 1
+                            if predicted_action == gt_action:
+                                hyp_correct += 1
+                            
+                    except Exception as e:
+                        hyp_total += 1  # Count as incorrect
+                        continue
+                
+                # Update individual hypothesis accuracy tracking
+                if hyp_id in individual_hyp_accuracies:
+                    individual_hyp_accuracies[hyp_id]['correct'] += hyp_correct
+                    individual_hyp_accuracies[hyp_id]['total'] += hyp_total
+            
+            # Find the hypothesis with highest individual accuracy for this agent type
+            best_acc_hyp_id = None
+            best_acc_value = -1.0
+            best_acc_program_path = None
+            
+            for hyp_id, acc_data in individual_hyp_accuracies.items():
+                if acc_data['total'] > 0:
+                    acc_value = acc_data['correct'] / acc_data['total']
+                    if acc_value > best_acc_value:
+                        best_acc_value = acc_value
+                        best_acc_hyp_id = hyp_id
+                        # Find the program path for this hypothesis
+                        if best_acc_hyp_id is not None:
+                            hyp_idx_in_list = hypotheses_info.index(best_acc_hyp_id) if best_acc_hyp_id in hypotheses_info else None
+                            if hyp_idx_in_list is not None and hyp_idx_in_list < len(program_paths):
+                                best_acc_program_path = program_paths[hyp_idx_in_list]
+            
+            # Add best accuracy program to agent_type_info for this agent
+            agent_type_info[f"agent_id_{agent_id}"]["best_accuracy_program"] = {
+                "hypothesis_id": int(best_acc_hyp_id) if best_acc_hyp_id is not None else None,
+                "accuracy": float(best_acc_value) if best_acc_hyp_id is not None else 0.0,
+                "program_path": best_acc_program_path
             }
             
             # For each hypothesis count we want to evaluate

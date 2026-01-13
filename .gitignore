@@ -187,3 +187,5 @@ scripts/*
 wandb/
 generated_outputs/
 cluster/
+
+reference_repos/
