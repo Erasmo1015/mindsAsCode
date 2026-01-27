@@ -189,3 +189,7 @@ generated_outputs/
 cluster/
 
 reference_repos/
+analysis/data/
+
+cpc18_baselines.zip
+cpc18_baselines/

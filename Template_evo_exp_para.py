@@ -1,16 +1,18 @@
 """
-ROTE_evo_non_strict.py: Iterative evolution loop over executable Choice13k and Gridworld programs.
+ROTE_evo_exp_para.py: Iterative evolution loop over executable Choice13k and Gridworld programs.
 
-Non-strict version: Generates full program code without parameter restrictions.
-This version allows the LLM to generate entirely new choose(problem, history) implementations for Choice13k,
-or full FSMAgent class implementations for Gridworld, not restricted to parameter-only changes.
+Except-parameters version: Generates full program code but preserves original parameter values.
+This version allows the LLM to generate entirely new program implementations for Choice13k or Gridworld,
+but all parameter names and values from the seed program are preserved exactly.
 
 The evolution process:
 1. Starts with seed program (configurable via --seed_path)
-2. Generates candidate program variants per iteration (full code, not just parameters)
-3. Evaluates each program on dataset (Choice13k or Gridworld)
-4. Reports performance and selects best performers
-5. Uses best programs as parents for next generation
+2. Extracts parameters from seed program
+3. Generates candidate program variants per iteration (full code, but parameters are preserved)
+4. Injects original parameters back into generated code
+5. Evaluates each program on dataset (Choice13k or Gridworld)
+6. Reports performance and selects best performers
+7. Uses best programs as parents for next generation
 """
 
 import os
@@ -29,7 +31,6 @@ import flax
 
 # Import data loading (this is acceptable as it's a data module, not ROTE/evo code)
 from data_modules.choice13k import get_choice13k_experiments, Experiment, Block
-from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials, ParticipantData
 from agent import AgentExecutionFramework
 from plot_and_eval import get_all_problem_configs, make_dataloader
 from environment import AutomaticityEnv, State
@@ -50,6 +51,86 @@ def load_seed_program(seed_path: str) -> str:
     
     # Return as-is if no code blocks found
     return content
+
+
+def extract_parameters_from_template(template_code: str) -> Dict[str, float]:
+    """Extract parameter values from the template code.
+    
+    Only extracts parameters that appear in the "# Parameters" section
+    (the first few lines after the function definition).
+    """
+    params = {}
+    lines = template_code.split('\n')
+    in_parameters_section = False
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        
+        # Check if we're entering the parameters section
+        if 'parameters' in stripped.lower() and stripped.startswith('#'):
+            in_parameters_section = True
+            continue
+        
+        # Extract parameters until we hit another comment section or non-assignment code
+        if in_parameters_section:
+            # Stop if we hit another comment section (but not the Parameters comment itself)
+            # Ignore separator lines (lines with only dashes, equals, or whitespace)
+            if stripped.startswith('#'):
+                # Check if it's a separator line (only dashes/equals/whitespace after #)
+                separator_chars = set(stripped[1:].strip())  # Characters after #
+                if separator_chars.issubset({'-', '=', ' '}) or len(separator_chars) == 0:
+                    # It's a separator line, skip it and continue
+                    continue
+                elif 'parameters' not in stripped.lower():
+                    # Hit another comment section, stop extracting
+                    break
+            
+            # Extract parameter assignments
+            if '=' in stripped and not stripped.startswith('#'):
+                # Look for parameter assignments like "alpha = 0.85"
+                parts = stripped.split('=')
+                if len(parts) == 2:
+                    param_name = parts[0].strip()
+                    try:
+                        param_value = float(parts[1].strip())
+                        params[param_name] = param_value
+                    except ValueError:
+                        pass
+            # Stop if we hit code that's not a comment or assignment (like "if", "def", etc.)
+            elif stripped and not stripped.startswith('#') and '=' not in stripped:
+                # Check if this looks like control flow or function definition
+                if any(stripped.startswith(keyword) for keyword in ['if', 'def', 'for', 'while', 'return', 'class']):
+                    if params:  # If we've already found parameters, stop
+                        break
+    
+    return params
+
+
+def inject_parameters_into_template(template_code: str, params: Dict[str, float]) -> str:
+    """Inject parameter values into the template code, replacing existing values."""
+    lines = template_code.split('\n')
+    result_lines = []
+    param_names = set(params.keys())
+    
+    for line in lines:
+        original_line = line
+        stripped = line.strip()
+        
+        # Check if this line assigns a parameter we want to replace
+        if '=' in stripped and not stripped.startswith('#'):
+            parts = stripped.split('=')
+            if len(parts) == 2:
+                param_name = parts[0].strip()
+                if param_name in param_names:
+                    # Replace the parameter value
+                    indent = len(line) - len(line.lstrip())
+                    new_line = ' ' * indent + f"{param_name} = {params[param_name]}"
+                    result_lines.append(new_line)
+                    continue
+        
+        result_lines.append(original_line)
+    
+    return '\n'.join(result_lines)
 
 
 def find_template_program_for_gridworld(num_blocks: int, num_walls: int, agent_id: int) -> Optional[str]:
@@ -141,41 +222,21 @@ def compile_program(code_str: str) -> Optional[Callable]:
     return None
 
 
-def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13k") -> str:
-    """Convert trials to numbered text for prompt.
-    
-    Supports both Choice13k and CPC18 formats.
-    
-    Args:
-        trials: List of trial dictionaries
-        dataset: "choice13k" or "cpc18"
-    """
+def format_trials_to_text(trials: List[Dict[str, Any]]) -> str:
+    """Convert Choice13k trials to numbered text for prompt."""
     lines = []
     for idx, t in enumerate(trials):
-        if dataset == "cpc18":
-            # CPC18 format: problem has Ha, pHa, La, LotShapeA, LotNumA, Hb, pHb, Lb, LotShapeB, LotNumB, Amb, Corr
-            prob = t["problem"]
-            action = t["action"]
-            lines.append(
-                f"{idx+1}. Problem: Option A (Ha={prob['Ha']}, pHa={prob['pHa']}, La={prob['La']}, "
-                f"LotShapeA={prob['LotShapeA']}, LotNumA={prob['LotNumA']}); "
-                f"Option B (Hb={prob['Hb']}, pHb={prob['pHb']}, Lb={prob['Lb']}, "
-                f"LotShapeB={prob['LotShapeB']}, LotNumB={prob['LotNumB']}); "
-                f"Amb={prob['Amb']}, Corr={prob['Corr']}; Observed action: {action}"
-            )
-        else:
-            # Choice13k format
-            prob_a = t["problem"]["gamble_A"]["probs"]
-            rew_a = t["problem"]["gamble_A"]["rewards"]
-            prob_b = t["problem"]["gamble_B"]["probs"]
-            rew_b = t["problem"]["gamble_B"]["rewards"]
-            has_fb = t["problem"].get("has_feedback", False)
-            action = t["action"]
-            lines.append(
-                f"{idx+1}. Problem: Option A probs {prob_a} rewards {rew_a}; "
-                f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}; "
-                f"Observed action: {action}"
-            )
+        prob_a = t["problem"]["gamble_A"]["probs"]
+        rew_a = t["problem"]["gamble_A"]["rewards"]
+        prob_b = t["problem"]["gamble_B"]["probs"]
+        rew_b = t["problem"]["gamble_B"]["rewards"]
+        has_fb = t["problem"].get("has_feedback", False)
+        action = t["action"]
+        lines.append(
+            f"{idx+1}. Problem: Option A probs {prob_a} rewards {rew_a}; "
+            f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}; "
+            f"Observed action: {action}"
+        )
     return "\n".join(lines)
 
 
@@ -254,125 +315,6 @@ def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose:
     if verbose and errors > 0 and n_seeds == 1:
         print(f"  Total evaluation errors: {errors}/{total}")
     return result
-
-
-def evaluate_cpc18_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
-    """
-    Evaluate a CPC18 program on trials and return accuracy metrics (trial-level).
-    
-    This is the auxiliary accuracy metric for CPC18 Track II (not the official MSE metric).
-    Same interface as evaluate_program for consistency.
-    
-    Args:
-        choose_fn: The program function to evaluate (takes problem dict and history)
-        trials: List of trial dictionaries
-        verbose: Whether to print verbose output
-        n_seeds: Number of evaluation runs to average (default: 1)
-    
-    Returns:
-        Dictionary with averaged accuracy metrics across n_seeds runs
-    """
-    return evaluate_program(choose_fn, trials, verbose, n_seeds)
-
-
-def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]], 
-                       observed_blocks: Dict[int, np.ndarray], 
-                       verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
-    """
-    Evaluate CPC18 program and compute block-level MSE (official CPC18 metric).
-    
-    Computes MSE matching cpc18_baselines formula:
-    MSE = 100 * mean((predicted_block_rate - observed_block_rate)^2)
-    Averaged over all 5 blocks and all problems.
-    
-    Args:
-        choose_fn: The program function to evaluate
-        trials: List of trial dictionaries (must include problem_id and block_id)
-        observed_blocks: Dict mapping problem_id to observed B-rates (5-element array)
-        verbose: Whether to print verbose output
-        n_seeds: Number of evaluation runs to average (default: 1)
-    
-    Returns:
-        Dictionary with MSE and component metrics
-    """
-    # Group trials by problem_id
-    problems_dict = {}
-    for trial in trials:
-        problem_id = trial["problem_id"]
-        if problem_id not in problems_dict:
-            problems_dict[problem_id] = []
-        problems_dict[problem_id].append(trial)
-    
-    all_mse_per_problem = []
-    all_predicted_blocks = {}
-    all_observed_blocks = {}
-    
-    for seed in range(n_seeds):
-        predicted_blocks = {}  # problem_id -> array of 5 predicted B-rates
-        
-        for problem_id, problem_trials in problems_dict.items():
-            # Group trials by block_id
-            blocks_dict = {}
-            for trial in problem_trials:
-                block_id = trial["block_id"]
-                if block_id not in blocks_dict:
-                    blocks_dict[block_id] = []
-                blocks_dict[block_id].append(trial)
-            
-            # Predict for each block
-            predicted_rates = np.zeros(5)
-            for block_id in range(1, 6):
-                block_trials = blocks_dict.get(block_id, [])
-                if len(block_trials) > 0:
-                    # Run predictions for all trials in this block
-                    b_predictions = []
-                    for trial in block_trials:
-                        try:
-                            pred = choose_fn(trial["problem"], trial["history"])
-                            if pred is not None:
-                                b_predictions.append(int(pred == 1))  # 1 if B chosen, 0 if A
-                        except Exception as e:
-                            if verbose and seed == 0:
-                                print(f"  Prediction error for problem {problem_id}, block {block_id}: {e}")
-                            # On error, assume A (0) was chosen
-                            b_predictions.append(0)
-                    
-                    if len(b_predictions) > 0:
-                        predicted_rates[block_id - 1] = np.mean(b_predictions)
-            
-            predicted_blocks[problem_id] = predicted_rates
-        
-        # Compute MSE per problem (matching baseline formula)
-        mse_per_problem = []
-        for problem_id in predicted_blocks.keys():
-            if problem_id in observed_blocks:
-                pred_rates = predicted_blocks[problem_id]
-                obs_rates = observed_blocks[problem_id]
-                # MSE = 100 * mean((pred - obs)^2) per problem
-                mse = 100 * np.mean((pred_rates - obs_rates) ** 2)
-                mse_per_problem.append(mse)
-        
-        all_mse_per_problem.append(mse_per_problem)
-        
-        if seed == 0:
-            all_predicted_blocks = predicted_blocks.copy()
-            all_observed_blocks = observed_blocks.copy()
-    
-    # Average MSE across seeds
-    if all_mse_per_problem:
-        avg_mse_per_problem = np.mean(all_mse_per_problem, axis=0)
-        total_mse = np.mean(avg_mse_per_problem)
-    else:
-        total_mse = float('inf')
-        avg_mse_per_problem = []
-    
-    return {
-        "mse": total_mse,
-        "mse_per_problem": avg_mse_per_problem.tolist() if len(avg_mse_per_problem) > 0 else [],
-        "n_problems": len(problems_dict),
-        "predicted_blocks": {k: v.tolist() for k, v in all_predicted_blocks.items()},
-        "observed_blocks": {k: v.tolist() for k, v in all_observed_blocks.items()},
-    }
 
 
 def load_gridworld_data(data_path: str, num_blocks: int, num_walls: int, agent_id: int, 
@@ -706,10 +648,11 @@ def generate_gridworld_program_variants(
     n_variants: int = 10,
     max_tokens: int = 2000,
     parent_train_accuracies: Optional[List[float]] = None,
+    fixed_parameters: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """
-    Generate full program code variants for gridworld (non-strict mode).
-    The LLM modifies the entire program code, not just parameters.
+    Generate full program code variants for gridworld (except-parameters mode).
+    The LLM modifies the entire program code, but parameters are preserved.
     
     Args:
         template_code: Original template code
@@ -717,8 +660,9 @@ def generate_gridworld_program_variants(
         n_variants: Number of variants to generate
         max_tokens: Maximum tokens for generation
         parent_train_accuracies: List of training accuracies for each parent (for guidance)
+        fixed_parameters: Dictionary of parameter names and values to preserve (if None, extracted from template)
     
-    Returns a list of program code strings.
+    Returns a list of program code strings with original parameters injected.
     """
     # Load prompts from file
     PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
@@ -770,34 +714,54 @@ You need to implement python code to model the logic of the world as seen in the
         if num_parents > 1:
             performance_info += f"NOTE: You have {num_parents} parent programs to learn from. Combine the best ideas from each.\n"
     
-    base_prompt_template_final = f"""{base_prompt_template}
+    # Extract parameters if not provided
+    if fixed_parameters is None:
+        fixed_parameters = extract_parameters_from_template(template_code)
+    
+    # Format parameter preservation instruction
+    parameter_constraint = ""
+    if fixed_parameters:
+        param_list = ", ".join([f"{k} = {v}" for k, v in fixed_parameters.items()])
+        parameter_constraint = f"""
+CRITICAL CONSTRAINT: You MUST preserve these exact parameter assignments in your generated code:
+{param_list}
+
+These parameters and their values must appear exactly as shown above. You can change everything else
+(program logic, functions, control flow, etc.), but these parameter assignments must remain unchanged.
+"""
+    
+    base_prompt = f"""{base_prompt_template}
 
 {parent_programs_text}
 
 {performance_info}
+{parameter_constraint}
 
 Your task: Generate an improved program variant. The variant should:
 - Maintain the same class structure (FSMAgent with __init__ and act methods)
-- Improve the decision-making logic
+- Preserve the exact parameter assignments specified above
+- Improve the decision-making logic (everything except parameters)
 - Handle edge cases better
 - Be more efficient or accurate
 
 {code_template}
 
 Output format: Provide the variant as a code block marked with ```python and ```.
-The variant should be a complete, runnable program.
+The variant should be a complete, runnable program with the exact parameter values preserved.
 
 Generate the variant now:"""
 
     # Generate variants one at a time to avoid huge prompts (especially with multiple parents)
     variants = []
     best_parent = parent_codes[0] if parent_codes else ""
+    if fixed_parameters and best_parent:
+        best_parent = inject_parameters_into_template(best_parent, fixed_parameters)
     
     for _ in tqdm(range(n_variants), desc="Generating gridworld variants"):
         try:
             response = client.chat.completions.create(
                 model=model_name,
-                messages=[{"role": "user", "content": base_prompt_template_final}],
+                messages=[{"role": "user", "content": base_prompt}],
                 temperature=0.7,
                 max_tokens=max_tokens,  # Per variant - keep original max_tokens
             )
@@ -810,6 +774,9 @@ Generate the variant now:"""
             if matches:
                 code = matches[0].strip()
                 if 'class FSMAgent' in code or 'def act' in code:
+                    # Inject fixed parameters into generated code
+                    if fixed_parameters:
+                        code = inject_parameters_into_template(code, fixed_parameters)
                     variants.append(code)
                 else:
                     # If no valid code found, use parent
@@ -833,13 +800,14 @@ def generate_program_variants(
     n_variants: int = 10,
     max_tokens: int = 800,
     parent_train_accuracies: Optional[List[float]] = None,
-    dataset: str = "choice13k",
+    fixed_parameters: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
     
     This generates complete choose(problem, history) implementations without
     restrictions on structure or logic - only the function signature is fixed.
+    However, all parameters from the seed program are preserved exactly.
     """
     # Load prompts from file
     PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
@@ -894,16 +862,7 @@ def choose(problem, history):
 """
     
     # Format training trials for context
-    # Note: dataset parameter not available here, but this function is only called for Choice13k/CPC18
-    # We'll detect format from trial structure
-    if train_trials and "problem" in train_trials[0]:
-        if "gamble_A" in train_trials[0]["problem"]:
-            dataset_type = "choice13k"
-        else:
-            dataset_type = "cpc18"
-    else:
-        dataset_type = "choice13k"
-    state_text = format_trials_to_text(train_trials, dataset=dataset_type)
+    state_text = format_trials_to_text(train_trials)
     
     # Include parent programs as reference
     num_parents = len(parent_programs)
@@ -917,7 +876,19 @@ def choose(problem, history):
             parent_context += f"\nParent {i+1}{acc_str}:\n```python\n{parent_program}\n```\n"
         parent_context += "\nGenerate a variant that combines the best ideas from these parent programs.\n"
     
-    prompt_text = f"{base_prompt}\n{state_text}\n{parent_context}\n{code_template}"
+    # Format parameter preservation instruction
+    parameter_constraint = ""
+    if fixed_parameters:
+        param_list = ", ".join([f"{k} = {v}" for k, v in fixed_parameters.items()])
+        parameter_constraint = f"""
+CRITICAL CONSTRAINT: You MUST preserve these exact parameter assignments in your generated code:
+{param_list}
+
+These parameters and their values must appear exactly as shown above. You can change everything else
+(program logic, functions, control flow, etc.), but these parameter assignments must remain unchanged.
+"""
+    
+    prompt_text = f"{base_prompt}\n{state_text}\n{parent_context}\n{parameter_constraint}\n{code_template}"
     
     programs = []
     for _ in tqdm(range(n_variants), desc="Generating candidate programs"):
@@ -931,6 +902,9 @@ def choose(problem, history):
             content = resp.choices[0].message.content
             match = re.search(r"```python(.*?)```", content, re.DOTALL | re.IGNORECASE)
             code = match.group(1).strip() if match else content.strip()
+            # Inject fixed parameters into generated code
+            if fixed_parameters:
+                code = inject_parameters_into_template(code, fixed_parameters)
             programs.append(code)
         except Exception as e:
             print(f"Warning: Failed to generate program variant: {e}")
@@ -956,13 +930,13 @@ def run_evolution(
     sample_size: int = 10,
 ):
     """
-    Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
+    Run iterative evolution loop over programs (Choice13k or Gridworld, non-strict mode).
     
     Args:
         seed_program_path: Path to seed program
-        dataset: "choice13k", "gridworld", or "cpc18" (Track II)
-        participant_id: Which participant's data to use (0-indexed, for choice13k and cpc18)
-        data_path: Path to data directory (for gridworld) or CPC18 Track II data directory (for cpc18)
+        dataset: "choice13k" or "gridworld"
+        participant_id: Which participant's data to use (0-indexed, for choice13k)
+        data_path: Path to data directory (for gridworld)
         num_blocks: Number of blocks (for gridworld)
         num_walls: Number of walls (for gridworld)
         agent_id: Agent type ID (for gridworld)
@@ -982,6 +956,13 @@ def run_evolution(
     seed_code = load_seed_program(seed_program_path)
     parent_program = seed_code
     
+    # Extract parameters from seed program (to preserve them)
+    fixed_parameters = extract_parameters_from_template(seed_code)
+    if fixed_parameters:
+        print(f"Extracted {len(fixed_parameters)} parameters to preserve: {list(fixed_parameters.keys())}")
+    else:
+        print("No parameters found in seed program - will allow full code generation")
+    
     # Branch based on dataset
     if dataset == "gridworld":
         if num_blocks is None or num_walls is None or agent_id is None:
@@ -990,23 +971,6 @@ def run_evolution(
         train_trials = None  # Not used for gridworld
         test_trials = None
         options = None
-        test_observed_blocks = None
-    elif dataset == "cpc18":
-        # Load CPC18 Track II data
-        # Use datasets/cpc18 as default data_path if not specified
-        cpc18_data_path = data_path if data_path != "data" else "datasets/cpc18"
-        print(f"Loading CPC18 Track II data for participant {participant_id} from {cpc18_data_path}...")
-        participant_data = load_cpc18_track2_data(data_path=cpc18_data_path, participant_id=participant_id)
-        
-        # Split trials (familiar problems, split within each problem)
-        # Returns: train_trials (for accuracy), test_trials (for accuracy), test_observed_blocks (for MSE)
-        train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
-            participant_data, train_ratio=0.8
-        )
-        print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
-        print(f"Problems: {len(participant_data.problems)} total")
-        print(f"Test targets (for MSE): {len(test_observed_blocks)} problems")
-        options = None  # Not used for CPC18
     else:
         # Load Choice13k data
         print(f"Loading Choice13k data for participant {participant_id}...")
@@ -1016,17 +980,14 @@ def run_evolution(
         # Split trials
         train_trials, test_trials, options = split_trials(exp)
         print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
-        test_observed_blocks = None
     
     # Setup output directory
     if output_dir is None:
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
         if dataset == "gridworld":
-            output_dir = f"generated_outputs/gridworld_ROTE_evo_non_strict/run_{timestamp}/epoch_0/agent_{agent_id}"
-        elif dataset == "cpc18":
-            output_dir = f"generated_outputs/cpc18_ROTE_evo_non_strict/run_{timestamp}/participant_{participant_id}"
+            output_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}/epoch_0/agent_{agent_id}"
         else:
-            output_dir = f"generated_outputs/choice13k_ROTE_evo_non_strict/run_{timestamp}/participant_{participant_id}"
+            output_dir = f"generated_outputs/choice13k_ROTE_evo_exp_para/run_{timestamp}/participant_{participant_id}"
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -1053,18 +1014,6 @@ def run_evolution(
             num_datapoints=20, num_steps=20, verbose=True, n_seeds=n_eval_seeds,
             evaluate_on_observed=False  # Match ROTE's evaluation: evaluate on future steps
         )
-    elif dataset == "cpc18":
-        baseline_fn = compile_program(seed_code)
-        if baseline_fn is None:
-            print("ERROR: Failed to compile baseline program!")
-            return None
-        # Trial-level accuracy (auxiliary metric)
-        baseline_train_eval = evaluate_cpc18_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
-        baseline_test_eval = evaluate_cpc18_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
-        # Block-level MSE (official CPC18 metric) - only on test data using Data-to-predict-Track-2.csv targets
-        baseline_test_mse_eval = evaluate_cpc18_mse(
-            baseline_fn, test_trials, test_observed_blocks, verbose=True, n_seeds=n_eval_seeds
-        )
     else:
         baseline_fn = compile_program(seed_code)
         if baseline_fn is None:
@@ -1076,8 +1025,6 @@ def run_evolution(
     print(f"\nBaseline Performance:")
     print(f"  Train accuracy: {baseline_train_eval['accuracy']:.4f} ({baseline_train_eval['correct']}/{baseline_train_eval['total']})")
     print(f"  Test accuracy: {baseline_test_eval['accuracy']:.4f} ({baseline_test_eval['correct']}/{baseline_test_eval['total']})")
-    if dataset == "cpc18":
-        print(f"  Test MSE (official): {baseline_test_mse_eval['mse']:.4f}")
     
     # Store baseline results (will be included in final results.json)
     baseline_results = {
@@ -1088,8 +1035,6 @@ def run_evolution(
         "test_correct": baseline_test_eval['correct'],
         "test_total": baseline_test_eval['total'],
     }
-    if dataset == "cpc18":
-        baseline_results["test_mse"] = baseline_test_mse_eval['mse']
     
     # Track all candidate results across iterations for finding overall best
     all_candidate_results = []  # List of dicts with iteration, candidate_idx, train_acc, test_acc
@@ -1111,13 +1056,6 @@ def run_evolution(
                     f"gw_test_accuracy": baseline_test_eval["accuracy"],
                     f"gw_is_baseline": 1,
                 }
-        elif dataset == "cpc18":
-            baseline_log_dict = {
-                f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
-                f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
-                f"p{participant_id}_test_mse": baseline_test_mse_eval["mse"],
-                f"p{participant_id}_is_baseline": 1,
-            }
         else:
             baseline_log_dict = {
                 f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
@@ -1195,6 +1133,7 @@ def run_evolution(
                 parent_codes=parent_codes,
                 n_variants=n_candidates_per_iteration,
                 parent_train_accuracies=parent_train_accs,
+                fixed_parameters=fixed_parameters,
             )
         else:
             candidate_codes = generate_program_variants(
@@ -1203,8 +1142,8 @@ def run_evolution(
                 parent_programs=parent_codes,
                 train_trials=train_trials,
                 n_variants=n_candidates_per_iteration,
-                dataset=dataset,
                 parent_train_accuracies=parent_train_accs,
+                fixed_parameters=fixed_parameters,
             )
         
         # Evaluate candidates
@@ -1252,45 +1191,6 @@ def run_evolution(
                     "train_total": train_eval["total"],
                     "test_total": test_eval["total"],
                     "valid": train_eval["errors"] == 0,
-                })
-            elif dataset == "cpc18":
-                # CPC18 Track II: compile and evaluate with both accuracy and MSE
-                choose_fn = compile_program(code)
-                if choose_fn is None:
-                    candidate_results.append({
-                        "idx": idx,
-                        "code": code,
-                        "train_acc": 0.0,
-                        "test_acc": 0.0,
-                        "test_mse": float('inf'),
-                        "valid": False,
-                    })
-                    continue
-                
-                # Trial-level accuracy (auxiliary metric)
-                train_eval = evaluate_cpc18_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                test_eval = evaluate_cpc18_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
-                
-                # Block-level MSE (official CPC18 metric) - only on test data
-                test_mse_eval = evaluate_cpc18_mse(
-                    choose_fn, test_trials, test_observed_blocks, n_seeds=n_eval_seeds
-                )
-                
-                train_acc = train_eval["accuracy"]
-                test_acc = test_eval["accuracy"]
-                test_mse = test_mse_eval["mse"]
-                
-                candidate_results.append({
-                    "idx": idx,
-                    "code": code,
-                    "train_acc": train_acc,
-                    "test_acc": test_acc,
-                    "test_mse": test_mse,
-                    "train_correct": train_eval["correct"],
-                    "test_correct": test_eval["correct"],
-                    "train_total": train_eval["total"],
-                    "test_total": test_eval["total"],
-                    "valid": True,
                 })
             else:
                 # Choice13k: compile and evaluate
@@ -1345,11 +1245,10 @@ def run_evolution(
             
             print(f"\nTop performers (by train accuracy):")
             for i, result in enumerate(valid_results[:5]):
-                mse_str = f", test_mse={result['test_mse']:.4f}" if dataset == "cpc18" and "test_mse" in result else ""
                 print(
                     f"  {i+1}. Candidate {result['idx']}: "
                     f"train_acc={result['train_acc']:.4f}, "
-                    f"test_acc={result['test_acc']:.4f}{mse_str}"
+                    f"test_acc={result['test_acc']:.4f}"
                 )
             
             # Select best program as parent for next iteration
@@ -1452,17 +1351,6 @@ def run_evolution(
                         log_dict[f"gw_test_accuracy"] = valid_results[0]["test_acc"]
                         log_dict[f"gw_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         log_dict[f"gw_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-            elif dataset == "cpc18":
-                log_dict = {
-                    f"p{participant_id}_n_valid": len(valid_results),
-                }
-                if valid_results:
-                    log_dict[f"p{participant_id}_train_accuracy"] = best_fitness
-                    log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
-                    log_dict[f"p{participant_id}_test_mse"] = valid_results[0]["test_mse"]
-                    log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
-                    log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-                    log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r["test_mse"] for r in valid_results])
             else:
                 log_dict = {
                     f"p{participant_id}_n_valid": len(valid_results),
@@ -1518,44 +1406,39 @@ def run_evolution(
         print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
         print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
         print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
-        if dataset == "cpc18":
-            print(f"Baseline test MSE (official): {baseline_results['test_mse']:.4f}")
     print(f"\nResults saved to: {output_path / 'results.json'}")
     
     # Return summary for participants summary file (just the essentials)
-    result = {
-        "participant_id": participant_id if dataset in ["choice13k", "cpc18"] else agent_id,
+    return {
+        "participant_id": participant_id if dataset == "choice13k" else agent_id,
         "train_acc": overall_best_train['train_accuracy'],
         "test_acc": overall_best_test['test_accuracy'],
     }
-    if dataset == "cpc18":
-        result["test_mse"] = baseline_results.get('test_mse', float('inf'))
-    return result
 
 
 def main():
     """Main entry point."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="ROTE Evolution (Non-Strict): Iterative evolution of Choice13k and Gridworld programs")
+    parser = argparse.ArgumentParser(description="ROTE Evolution (Except-Parameters): Iterative evolution of Choice13k and Gridworld programs with parameter preservation")
     parser.add_argument(
         "--dataset",
         type=str,
         default="choice13k",
-        choices=["choice13k", "gridworld", "cpc18"],
-        help="Dataset to use: choice13k, gridworld, or cpc18 (Track II)",
+        choices=["choice13k", "gridworld"],
+        help="Dataset to use: choice13k or gridworld",
     )
     parser.add_argument(
         "--seed_path",
         type=str,
         default=None,
-        help="Path to seed program (starting persona). If not set, auto-detects from persona_code_example/gridworld/ for gridworld. Default for choice13k: persona_code_example/vanilla.py. Default for cpc18: persona_code_example/cpc18/hard.py",
+        help="Path to seed program (starting persona). If not set, auto-detects from persona_code_example/gridworld/ for gridworld. Default for choice13k: persona_code_example/hard.py",
     )
     parser.add_argument(
         "--data_path",
         type=str,
         default="data",
-        help="Path to data directory (for gridworld) or CPC18 Track II data directory (for cpc18, default: datasets/cpc18)",
+        help="Path to data directory (for gridworld)",
     )
     parser.add_argument(
         "--loop_mode",
@@ -1676,7 +1559,7 @@ def main():
             wandb = _wandb
             # Include dataset in run name
             dataset_prefix = "gridworld" if args.dataset == "gridworld" else "choice13k"
-            run_name = f"{dataset_prefix}_non_strict_{timestamp}"
+            run_name = f"{dataset_prefix}_exp_para_{timestamp}"
             if args.participant_id is not None:
                 run_name = f"{run_name}_participant_{args.participant_id}"
             else:
@@ -1714,9 +1597,9 @@ def main():
     if args.output_dir is None:
         # Auto-generated output: create base run directory (use same timestamp)
         if args.dataset == "gridworld":
-            base_run_dir = f"generated_outputs/gridworld_ROTE_evo_non_strict/run_{timestamp}"
+            base_run_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}"
         else:
-            base_run_dir = f"generated_outputs/choice13k_ROTE_evo_non_strict/run_{timestamp}"
+            base_run_dir = f"generated_outputs/choice13k_ROTE_evo_exp_para/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
     elif len(participants_to_process) > 1:
         # Multiple participants with custom output_dir: use that as base directory
@@ -1741,12 +1624,9 @@ def main():
             # For sequential mode, we'll determine this per epoch
             # For now, we'll handle it in the epoch loop
             seed_program_path = None
-        elif args.dataset == "cpc18":
-            # Default for CPC18 Track II
-            seed_program_path = "persona_code_example/cpc18/hard.py"
         else:
             # Default for choice13k
-            seed_program_path = "persona_code_example/vanilla.py"
+            seed_program_path = "persona_code_example/hard.py"
     else:
         seed_program_path = args.seed_path
     
@@ -1823,7 +1703,7 @@ def main():
                 if base_run_dir is not None:
                     agent_output_dir = os.path.join(base_run_dir, f"agent_{agent_id}")
                 else:
-                    agent_output_dir = f"generated_outputs/gridworld_ROTE_evo_non_strict/run_{timestamp}/agent_{agent_id}"
+                    agent_output_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}/agent_{agent_id}"
                 
                 agent_summary = run_evolution(
                     seed_program_path=agent_seed_path,
@@ -1911,7 +1791,7 @@ def main():
                 if base_run_dir is not None:
                     participant_output_dir = os.path.join(base_run_dir, f"epoch_{epoch}", f"agent_{agent_id}")
                 else:
-                    participant_output_dir = f"generated_outputs/gridworld_ROTE_evo_non_strict/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
+                    participant_output_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
                 
                 participant_summary = run_evolution(
                     seed_program_path=epoch_seed_path,
@@ -1986,10 +1866,8 @@ def main():
                         else:
                             print("Error: For gridworld without --seed_path, must provide --num_blocks, --num_walls, and --agent_id")
                             continue
-                    elif args.dataset == "cpc18":
-                        seed_program_path = "persona_code_example/cpc18/hard.py"
                     else:
-                        seed_program_path = "persona_code_example/vanilla.py"
+                        seed_program_path = "persona_code_example/hard.py"
                 else:
                     seed_program_path = args.seed_path
                 
