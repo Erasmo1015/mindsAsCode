@@ -788,6 +788,7 @@ def generate_parameter_variants(
     max_tokens: int = 200,
     exploration_factor: float = 1.0,
     parent_train_accuracies: Optional[List[float]] = None,
+    parent_train_mses: Optional[List[float]] = None,
     dataset: str = "choice13k",
 ) -> List[Dict[str, float]]:
     """
@@ -797,6 +798,8 @@ def generate_parameter_variants(
         parent_params_list: List of parent parameter dictionaries (elite programs from previous iterations)
         train_trials: Training dataset - list of trials containing problems, history, and observed actions
         parent_train_accuracies: List of training accuracies for each parent (used to guide exploration)
+        parent_train_mses: List of training MSEs for each parent (CPC18 only, used to guide exploration)
+        dataset: Dataset name ("choice13k", "gridworld", or "cpc18")
     
     Returns a list of parameter dictionaries, each containing the parameter values.
     """
@@ -815,13 +818,17 @@ def generate_parameter_variants(
             param_info += f"- {param_name}: currently {parent_params[param_name]}\n"
     else:
         param_info = f"Reference parent parameter sets ({num_parents} elite programs):\n"
-        for i, (params_dict, acc) in enumerate(zip(parent_params_list, parent_train_accuracies or [None] * num_parents)):
+        for i, params_dict in enumerate(parent_params_list):
+            acc = parent_train_accuracies[i] if parent_train_accuracies and i < len(parent_train_accuracies) else None
+            mse = parent_train_mses[i] if (dataset == "cpc18" and parent_train_mses and i < len(parent_train_mses)) else None
+            
             acc_str = f" (train_acc: {acc:.4f})" if acc is not None else ""
-            param_info += f"\nParent {i+1}{acc_str}:\n"
+            mse_str = f", train_block-MSE: {mse:.2f}" if mse is not None else ""
+            param_info += f"\nParent {i+1}{acc_str}{mse_str}:\n"
             for param_name in param_names:
                 param_info += f"  - {param_name}: {params_dict.get(param_name, 'N/A')}\n"
     
-    # Build performance feedback info for prompt (only train accuracy, NOT test)
+    # Build performance feedback info for prompt
     performance_info = ""
     if parent_train_accuracies:
         avg_acc = sum(parent_train_accuracies) / len(parent_train_accuracies)
@@ -829,13 +836,39 @@ def generate_parameter_variants(
         performance_info += f"\nParent performance on training data:\n"
         performance_info += f"- Average train accuracy: {avg_acc:.4f}\n"
         performance_info += f"- Best train accuracy: {max_acc:.4f}\n"
+        
+        # For CPC18: also include MSE metrics (official metric)
+        if dataset == "cpc18" and parent_train_mses:
+            avg_mse = sum(parent_train_mses) / len(parent_train_mses)
+            min_mse = min(parent_train_mses)
+            performance_info += f"- Average train block-MSE: {avg_mse:.2f}\n"
+            performance_info += f"- Best train block-MSE: {min_mse:.2f}\n"
+            performance_info += f"\nIMPORTANT for CPC18:\n"
+            performance_info += f"The official CPC18 metric is block-level MSE (lower is better).\n"
+            performance_info += f"Training accuracy alone is insufficient - you must reduce block-level MSE.\n"
+            performance_info += f"Goal: Reduce block-level MSE while keeping accuracy reasonable.\n"
+            performance_info += f"Current best: train_accuracy={max_acc:.4f}, train_block-MSE={min_mse:.2f}\n"
+        
         # Add guidance based on performance
-        if avg_acc < 0.5:
-            performance_info += f"\nNOTE: Current performance is LOW. Consider trying different parameter combinations.\n"
-        elif avg_acc > 0.8:
-            performance_info += f"\nNOTE: Current performance is HIGH. Make refined adjustments to improve further.\n"
+        if dataset == "cpc18":
+            # For CPC18, focus on MSE guidance
+            if parent_train_mses:
+                min_mse = min(parent_train_mses)
+                if min_mse > 50:
+                    performance_info += f"\nNOTE: Current MSE is HIGH (>50). Focus on reducing MSE significantly.\n"
+                elif min_mse > 30:
+                    performance_info += f"\nNOTE: Current MSE is MODERATE (30-50). Try to reduce MSE further.\n"
+                else:
+                    performance_info += f"\nNOTE: Current MSE is LOW (<30). Fine-tune to improve further.\n"
         else:
-            performance_info += f"\nNOTE: Current performance is MODERATE. Explore various parameter combinations.\n"
+            # For other datasets, use accuracy guidance
+            if avg_acc < 0.5:
+                performance_info += f"\nNOTE: Current performance is LOW. Consider trying different parameter combinations.\n"
+            elif avg_acc > 0.8:
+                performance_info += f"\nNOTE: Current performance is HIGH. Make refined adjustments to improve further.\n"
+            else:
+                performance_info += f"\nNOTE: Current performance is MODERATE. Explore various parameter combinations.\n"
+        
         if num_parents > 1:
             performance_info += f"NOTE: You have {num_parents} parent parameter sets to learn from. Combine the best ideas from each.\n"
     
@@ -1259,14 +1292,16 @@ def run_evolution(
         print(f"Loading CPC18 Track II data for participant {participant_id} from {cpc18_data_path}...")
         participant_data = load_cpc18_track2_data(data_path=cpc18_data_path, participant_id=participant_id)
         
-        # Split trials (familiar problems, split within each problem)
-        # Returns: train_trials (for accuracy), test_trials (for accuracy), test_observed_blocks (for MSE)
+        # CPC18 Track II: NO train/test split - use ALL trials
+        # Returns: train_trials (ALL trials for parameter evolution), test_trials (ALL trials for predictions), test_observed_blocks (for MSE)
+        # Note: train_ratio parameter is ignored - all trials are used for both train and test
         train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
-            participant_data, train_ratio=0.8
+            participant_data, train_ratio=0.8  # Parameter ignored for CPC18
         )
-        print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
+        print(f"CPC18 Track II: Using ALL {len(train_trials)} trials for training (no split)")
+        print(f"CPC18 Track II: Using ALL {len(test_trials)} trials for predictions (same trials, aggregated to block-level for MSE)")
         print(f"Problems: {len(participant_data.problems)} total")
-        print(f"Test targets (for MSE): {len(test_observed_blocks)} problems")
+        print(f"Test targets (block-level B-rates from Data-to-predict-Track-2.csv): {len(test_observed_blocks)} problems")
     else:
         # Choice13k: extract parameters
         baseline_params = extract_parameters_from_template(template_code)
@@ -1363,11 +1398,21 @@ def run_evolution(
             print("ERROR: Failed to compile baseline program!")
             return None
         
-        # Trial-level accuracy (auxiliary metric)
+        # Trial-level accuracy (auxiliary metric, not official)
+        # Note: train_trials and test_trials are the same (all trials) for CPC18
         baseline_train_acc_eval = evaluate_cpc18_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
         baseline_test_acc_eval = evaluate_cpc18_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
         
-        # Block-level MSE (official CPC18 metric) - only on test data using Data-to-predict-Track-2.csv targets
+        # Block-level MSE (official CPC18 metric)
+        # Training MSE: computed on train_trials (all trials) for LLM guidance
+        # Note: train_observed_blocks is the same as test_observed_blocks (both from Data-to-predict-Track-2.csv)
+        train_observed_blocks = test_observed_blocks  # Same observed blocks for all trials
+        baseline_train_mse_eval = evaluate_cpc18_mse(
+            baseline_fn, train_trials, train_observed_blocks, verbose=True, n_seeds=n_eval_seeds
+        )
+        
+        # Test MSE: uses all trials (test_trials) to generate predictions, aggregated to block-level
+        # Compared against observed block-level B-rates from Data-to-predict-Track-2.csv
         baseline_test_mse_eval = evaluate_cpc18_mse(
             baseline_fn, test_trials, test_observed_blocks, verbose=True, n_seeds=n_eval_seeds
         )
@@ -1376,6 +1421,7 @@ def run_evolution(
             "parameters": baseline_params,
             "train_accuracy": baseline_train_acc_eval['accuracy'],
             "test_accuracy": baseline_test_acc_eval['accuracy'],
+            "train_mse": baseline_train_mse_eval['mse'],
             "test_mse": baseline_test_mse_eval['mse'],
             "train_correct": baseline_train_acc_eval['correct'],
             "train_total": baseline_train_acc_eval['total'],
@@ -1411,6 +1457,7 @@ def run_evolution(
     print(f"  Train accuracy: {baseline_results['train_accuracy']:.4f} ({baseline_results['train_correct']}/{baseline_results['train_total']})")
     print(f"  Test accuracy: {baseline_results['test_accuracy']:.4f} ({baseline_results['test_correct']}/{baseline_results['test_total']})")
     if dataset == "cpc18":
+        print(f"  Train MSE: {baseline_results['train_mse']:.4f}")
         print(f"  Test MSE (official): {baseline_results['test_mse']:.4f}")
     
     # Track all candidate results across iterations for finding overall best
@@ -1424,6 +1471,7 @@ def run_evolution(
             f"p{participant_id}_is_baseline": 1,
         }
         if dataset == "cpc18":
+            log_dict[f"p{participant_id}_train_mse"] = baseline_results['train_mse']
             log_dict[f"p{participant_id}_test_mse"] = baseline_results['test_mse']
         wandb.log(log_dict, step=0)
     
@@ -1444,13 +1492,26 @@ def run_evolution(
     }
     
     # Track elite parents (top parameter sets across all iterations)
-    # Format: list of (params_dict, train_acc, test_acc, program_id) tuples, sorted by train_acc descending
-    elite_parents = [(
-        baseline_params.copy(),
-        baseline_results['train_accuracy'],
-        baseline_results['test_accuracy'],
-        "baseline"
-    )]
+    # Format: list of (params_dict, train_acc, test_acc, program_id, train_mse, test_mse) tuples, sorted by train_acc descending
+    # For CPC18: train_mse and test_mse are included; for other datasets: None
+    if dataset == "cpc18":
+        elite_parents = [(
+            baseline_params.copy(),
+            baseline_results['train_accuracy'],
+            baseline_results['test_accuracy'],
+            "baseline",
+            baseline_results['train_mse'],
+            baseline_results['test_mse'],
+        )]
+    else:
+        elite_parents = [(
+            baseline_params.copy(),
+            baseline_results['train_accuracy'],
+            baseline_results['test_accuracy'],
+            "baseline",
+            None,  # train_mse not applicable
+            None,  # test_mse not applicable
+        )]
     
     # Evolution loop with cooling schedule
     for iteration in range(n_iterations):
@@ -1493,9 +1554,22 @@ def run_evolution(
         parent_params_list = [p[0] for p in selected_parents]
         parent_train_accs = [p[1] for p in selected_parents]
         
+        # Extract train_mse and test_mse for CPC18 (if available)
+        parent_train_mses = None
+        parent_test_mses = None
+        if dataset == "cpc18":
+            parent_train_mses = [p[4] for p in selected_parents if p[4] is not None]
+            parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
+        
         print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
-        for i, (params_dict, train_acc, test_acc, prog_id) in enumerate(selected_parents):
-            print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc:.4f}, test_acc={test_acc:.4f})")
+        if dataset == "cpc18":
+            for i, parent_tuple in enumerate(selected_parents):
+                params_dict, train_acc, test_acc, prog_id, train_mse, test_mse = parent_tuple
+                mse_str = f", train_mse={train_mse:.2f}, test_mse={test_mse:.2f}" if train_mse is not None else ""
+                print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc:.4f}, test_acc={test_acc:.4f}{mse_str})")
+        else:
+            for i, (params_dict, train_acc, test_acc, prog_id, _, _) in enumerate(selected_parents):
+                print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc:.4f}, test_acc={test_acc:.4f})")
         
         # Generate candidates (parameter variants for both choice13k and gridworld - strict mode)
         if dataset == "gridworld":
@@ -1515,6 +1589,7 @@ def run_evolution(
                     n_variants=n_candidates_per_iteration,
                     exploration_factor=exploration_factor,
                     parent_train_accuracies=parent_train_accs,
+                    parent_train_mses=None,  # Not applicable for gridworld
                     dataset=dataset,
                 )
         else:
@@ -1528,6 +1603,7 @@ def run_evolution(
                 n_variants=n_candidates_per_iteration,
                 exploration_factor=exploration_factor,
                 parent_train_accuracies=parent_train_accs,
+                parent_train_mses=parent_train_mses if dataset == "cpc18" else None,
                 dataset=dataset,
             )
         
@@ -1586,17 +1662,28 @@ def run_evolution(
                     })
                     continue
                 
-                # Trial-level accuracy (auxiliary metric)
+                # Trial-level accuracy (auxiliary metric, not official)
+                # Note: train_trials and test_trials are the same (all trials) for CPC18
                 train_acc_eval = evaluate_cpc18_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                 test_acc_eval = evaluate_cpc18_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 
-                # Block-level MSE (official CPC18 metric) - only on test data using Data-to-predict-Track-2.csv targets
+                # Block-level MSE (official CPC18 metric)
+                # Training MSE: computed on train_trials (all trials) for LLM guidance
+                # Note: train_observed_blocks is the same as test_observed_blocks (both from Data-to-predict-Track-2.csv)
+                train_observed_blocks = test_observed_blocks  # Same observed blocks for all trials
+                train_mse_eval = evaluate_cpc18_mse(
+                    choose_fn, train_trials, train_observed_blocks, n_seeds=n_eval_seeds
+                )
+                
+                # Test MSE: uses all trials (test_trials) to generate predictions, aggregated to block-level
+                # Compared against observed block-level B-rates from Data-to-predict-Track-2.csv
                 test_mse_eval = evaluate_cpc18_mse(
                     choose_fn, test_trials, test_observed_blocks, n_seeds=n_eval_seeds
                 )
                 
                 train_acc = train_acc_eval["accuracy"]
                 test_acc = test_acc_eval["accuracy"]
+                train_mse = train_mse_eval["mse"]
                 test_mse = test_mse_eval["mse"]
                 
                 candidate_results.append({
@@ -1604,6 +1691,7 @@ def run_evolution(
                     "parameters": params,
                     "train_acc": train_acc,
                     "test_acc": test_acc,
+                    "train_mse": train_mse,
                     "test_mse": test_mse,
                     "train_correct": train_acc_eval["correct"],
                     "test_correct": test_acc_eval["correct"],
@@ -1666,12 +1754,24 @@ def run_evolution(
             
             # Add all valid candidates to elite parents
             for r in valid_results:
-                elite_parents.append((
-                    r["parameters"].copy(),
-                    r["train_acc"],
-                    r["test_acc"],
-                    f"iteration_{iteration}_candidate_{r['idx']}"
-                ))
+                if dataset == "cpc18":
+                    elite_parents.append((
+                        r["parameters"].copy(),
+                        r["train_acc"],
+                        r["test_acc"],
+                        f"iteration_{iteration}_candidate_{r['idx']}",
+                        r.get("train_mse", None),
+                        r.get("test_mse", None),
+                    ))
+                else:
+                    elite_parents.append((
+                        r["parameters"].copy(),
+                        r["train_acc"],
+                        r["test_acc"],
+                        f"iteration_{iteration}_candidate_{r['idx']}",
+                        None,  # train_mse not applicable
+                        None,  # test_mse not applicable
+                    ))
             
             # Sort elite parents by train accuracy and keep top N
             elite_parents.sort(key=lambda x: x[1], reverse=True)
@@ -1695,7 +1795,12 @@ def run_evolution(
                 }
             
             # Print compressed one-line summary
-            print(f"Iter {iteration + 1}: best_candidate={best_result['idx']}, train_acc={best_fitness:.4f}, test_acc={best_result['test_acc']:.4f}")
+            if dataset == "cpc18":
+                train_mse_str = f", train_mse={best_result.get('train_mse', None):.2f}" if best_result.get('train_mse') is not None else ""
+                test_mse_str = f", test_mse={best_result.get('test_mse', None):.2f}" if best_result.get('test_mse') is not None else ""
+                print(f"Iter {iteration + 1}: best_candidate={best_result['idx']}, train_acc={best_fitness:.4f}, test_acc={best_result['test_acc']:.4f}{train_mse_str}{test_mse_str}")
+            else:
+                print(f"Iter {iteration + 1}: best_candidate={best_result['idx']}, train_acc={best_fitness:.4f}, test_acc={best_result['test_acc']:.4f}")
         else:
             print(f"Iter {iteration + 1}: WARNING - No valid programs generated, continuing with previous parent")
         
@@ -1734,10 +1839,12 @@ def run_evolution(
                 log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]  # Best test accuracy
                 log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                 log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-                # CPC18: also log MSE metrics (test only, official metric)
+                # CPC18: also log MSE metrics (both train and test)
                 if dataset == "cpc18":
-                    log_dict[f"p{participant_id}_test_mse"] = valid_results[0]["test_mse"]
-                    log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r["test_mse"] for r in valid_results])
+                    log_dict[f"p{participant_id}_train_mse"] = valid_results[0].get("train_mse", None)
+                    log_dict[f"p{participant_id}_test_mse"] = valid_results[0].get("test_mse", None)
+                    log_dict[f"p{participant_id}_avg_train_mse"] = np.mean([r.get("train_mse", float('inf')) for r in valid_results])
+                    log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r.get("test_mse", float('inf')) for r in valid_results])
                 # Log best parameters with participant prefix (for both datasets, strict mode)
                 if parent_params:
                     for param_name, param_value in parent_params.items():
@@ -1781,8 +1888,8 @@ def run_evolution(
         print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_acc:.4f}")
         print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_acc:.4f}")
         if dataset == "cpc18":
-            # Find best MSE from all candidates (test only, official metric)
-            # Note: all_candidate_results doesn't track MSE, so we'll report baseline MSE
+            # Report MSE metrics (official CPC18 metric)
+            print(f"Baseline train MSE: {baseline_results['train_mse']:.4f}")
             print(f"Baseline test MSE (official): {baseline_results['test_mse']:.4f}")
     print(f"\nResults saved to: {output_path / 'results.json'}")
     
@@ -1934,7 +2041,9 @@ def main():
         try:
             import wandb as _wandb
             wandb = _wandb
-            run_name = timestamp
+            # Include dataset in run name
+            dataset_prefix = args.dataset if args.dataset else "choice13k"
+            run_name = f"{dataset_prefix}_strict_{timestamp}"
             if args.participant_id is not None:
                 run_name = f"{run_name}_participant_{args.participant_id}"
             else:

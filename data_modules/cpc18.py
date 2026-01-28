@@ -179,23 +179,27 @@ def load_cpc18_track2_data(data_path: str = "datasets/cpc18", participant_id: in
 
 def split_cpc18_trials(participant_data: ParticipantData, train_ratio: float = 0.8) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[int, np.ndarray]]:
     """
-    Split CPC18 Track II trials into train/test sets.
+    Prepare CPC18 Track II trials for training and evaluation.
     
-    For Track II:
-    - Problems are familiar (same problems in train and test)
-    - Split trials within each problem (not across problems)
-    - Build history exactly as in Choice13k (accumulating actions and feedback)
-    - Return trial-level data for accuracy computation
-    - Return test targets (block-level) for MSE computation
+    IMPORTANT: CPC18 Track II does NOT use a train/test split.
+    - ALL trials from raw-comp-set-data-Track-2.csv are used for training (parameter evolution)
+    - ALL trials are also used for generating predictions (aggregated to block-level for MSE)
+    - Block-level B-choice rates from Data-to-predict-Track-2.csv are used ONLY for MSE evaluation
+    
+    This matches the official CPC18 Track II protocol:
+    - No artificial 80:20 trial split
+    - Training uses all trial-level data to build histories
+    - Evaluation computes block-level MSE against observed rates
     
     Args:
         participant_data: ParticipantData object
-        train_ratio: Fraction of trials to use for training (default 0.8)
+        train_ratio: IGNORED for CPC18 (kept for API compatibility). All trials are used.
     
     Returns:
         Tuple of (train_trials, test_trials, test_observed_blocks)
-        - train_trials/test_trials: List of trial dicts for accuracy computation
-        - test_observed_blocks: Dict mapping problem_id to observed B-rates (5 blocks) for MSE
+        - train_trials: ALL trials (used for parameter evolution and auxiliary accuracy)
+        - test_trials: ALL trials (used for generating predictions for block-level MSE)
+        - test_observed_blocks: Dict mapping problem_id to observed B-rates (5 blocks) from Data-to-predict-Track-2.csv
     """
     train_trials = []
     test_trials = []
@@ -219,15 +223,12 @@ def split_cpc18_trials(participant_data: ParticipantData, train_ratio: float = 0
             "Corr": problem.Corr,
         }
         
-        # Split trials within this problem (maintain order)
-        n_trials = len(problem_trials)
-        split_point = int(n_trials * train_ratio)
-        
-        # Build history exactly as in Choice13k (accumulating actions and feedback)
+        # CPC18 Track II: Use ALL trials (no split)
+        # Build history sequentially (as in Choice13k, accumulating actions and feedback)
         history_accum = []
         
-        # Process train trials
-        for trial in problem_trials[:split_point]:
+        # Process ALL trials for training (used for parameter evolution)
+        for trial in problem_trials:
             train_trials.append({
                 "problem": problem_dict.copy(),
                 "history": list(history_accum),  # History up to (but not including) this trial
@@ -241,9 +242,10 @@ def split_cpc18_trials(participant_data: ParticipantData, train_ratio: float = 0
                 "feedback": trial.feedback,
             })
         
-        # Process test trials (continue history from train)
-        test_history = list(history_accum)
-        for trial in problem_trials[split_point:]:
+        # Process ALL trials for test (used for generating predictions for block-level MSE)
+        # Note: test_trials are NOT held-out - they're the same trials, used for predictions
+        test_history = []
+        for trial in problem_trials:
             test_trials.append({
                 "problem": problem_dict.copy(),
                 "history": list(test_history),  # History up to (but not including) this trial
@@ -258,6 +260,7 @@ def split_cpc18_trials(participant_data: ParticipantData, train_ratio: float = 0
             })
     
     # Get test targets for MSE computation (from Data-to-predict-Track-2.csv)
+    # These are block-level B-choice rates, NOT trial-level data
     test_observed_blocks = participant_data.test_targets.copy()
     
     return train_trials, test_trials, test_observed_blocks
