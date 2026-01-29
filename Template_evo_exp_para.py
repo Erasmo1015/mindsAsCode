@@ -984,10 +984,11 @@ def run_evolution(
     # Setup output directory
     if output_dir is None:
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        mode = "exp_para"  # Template_evo_exp_para.py uses exp_para mode
         if dataset == "gridworld":
-            output_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}/epoch_0/agent_{agent_id}"
+            output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/epoch_0/agent_{agent_id}"
         else:
-            output_dir = f"generated_outputs/choice13k_ROTE_evo_exp_para/run_{timestamp}/participant_{participant_id}"
+            output_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}/participant_{participant_id}"
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -1596,10 +1597,11 @@ def main():
     base_run_dir = None
     if args.output_dir is None:
         # Auto-generated output: create base run directory (use same timestamp)
+        mode = "exp_para"  # Template_evo_exp_para.py uses exp_para mode
         if args.dataset == "gridworld":
-            base_run_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}"
+            base_run_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}"
         else:
-            base_run_dir = f"generated_outputs/choice13k_ROTE_evo_exp_para/run_{timestamp}"
+            base_run_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
     elif len(participants_to_process) > 1:
         # Multiple participants with custom output_dir: use that as base directory
@@ -1703,7 +1705,8 @@ def main():
                 if base_run_dir is not None:
                     agent_output_dir = os.path.join(base_run_dir, f"agent_{agent_id}")
                 else:
-                    agent_output_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}/agent_{agent_id}"
+                    mode = "exp_para"  # Template_evo_exp_para.py uses exp_para mode
+                    agent_output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/agent_{agent_id}"
                 
                 agent_summary = run_evolution(
                     seed_program_path=agent_seed_path,
@@ -1791,7 +1794,8 @@ def main():
                 if base_run_dir is not None:
                     participant_output_dir = os.path.join(base_run_dir, f"epoch_{epoch}", f"agent_{agent_id}")
                 else:
-                    participant_output_dir = f"generated_outputs/gridworld_ROTE_evo_exp_para/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
+                    mode = "exp_para"  # Template_evo_exp_para.py uses exp_para mode
+                    participant_output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
                 
                 participant_summary = run_evolution(
                     seed_program_path=epoch_seed_path,

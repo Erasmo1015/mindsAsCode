@@ -33,13 +33,15 @@ class FSMAgent:
         '''
 
         # TODO: Implement the agent's decision-making logic here
-        # This is a placeholder implementation that returns a random action.
+        # IMPORTANT CONSTRAINTS:
+        # 1) Deterministic ONLY: do NOT use np.random, random, or any stochastic choice.
+        # 2) Prefer simple, rollout-stable logic based on the current observation.
+        # 3) If you add internal state, reset it when observation["time"] == 0.
+        # 4) Always return an int in {0,1,2,3,4,5}.
+        #
+        # Safe deterministic fallback if uncertain:
+        action = 0  # stay in place
 
-        if True:  # replace with your own conditions for taking actions that are not necessarily random
-            action = np.random.randint(self.num_actions)
-        else:
-            action = 0  # stay in place
-            
         ## DON'T CHANGE ANYTHING BELOW HERE
         return action
 ```
