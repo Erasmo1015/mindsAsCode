@@ -10,13 +10,16 @@ You will see a history of previous trials for the SAME participant and SAME prob
 Each problem consists of 25 trials, organized into 5 blocks of 5 trials.
 Feedback is only available after the first block.
 
-IMPORTANT — Evaluation Metric:
-The official CPC18 metric is BLOCK-LEVEL MEAN SQUARED ERROR (MSE).
+IMPORTANT — Evaluation metric (block-level MSE, not trial accuracy):
+CPC18 is evaluated using BLOCK-LEVEL MEAN SQUARED ERROR (MSE), not trial accuracy.
 
-For each problem:
-- Your program will be run on all trials.
-- For each block, the fraction of trials where Option B is chosen is computed.
-- MSE measures how close these predicted block-level choice rates are to human data.
+- Each problem has 5 blocks; each block contains multiple trials.
+- Your program outputs trial-level choices (0 = A, 1 = B).
+- These trial-level choices are aggregated into block-level B-choice rates (fraction of trials in that block where B was chosen).
+- The official metric is:
+  MSE = 100 * mean((predicted_block_B_rate − observed_block_B_rate)^2)
+  over all blocks and problems.
+- The goal is to MINIMIZE MSE (equivalently, maximize −MSE).
 
 Key implications:
 - Trial-level accuracy is NOT the optimization objective.
@@ -27,6 +30,11 @@ Key implications:
 Your goal:
 Write Python code that reproduces human behavior by MINIMIZING BLOCK-LEVEL MSE.
 This requires producing appropriate choice FREQUENCIES within each block.
+
+HARD CONSTRAINTS (your program must satisfy these):
+- The program MUST use problem fields (Ha, pHa, La, Hb, pHb, LotShapeA, LotNumA, LotShapeB, LotNumB, Amb, Corr).
+- Do NOT rely only on copying or smoothing history.action.
+- Do NOT implement pure inertia, majority-vote, or frequency-matching policies that ignore the problem.
 
 You must generate a program implementing:
 
@@ -56,14 +64,13 @@ def choose(problem, history):
     """
 
 Guidelines:
-- Use history to adapt behavior gradually.
+- Use both problem and history to adapt behavior.
 - Avoid sharp switches or rigid majority-vote rules.
-- Prefer smooth, inertia-based, or probabilistic decision logic.
 - Matching block-level choice proportions is more important than per-trial correctness.
 
 Constraints:
 - Pure Python.
-- Deterministic code only (no randomness unless derived deterministically from history).
+- Deterministic code only (no randomness unless derived deterministically from inputs).
 - Use only the provided problem and history.
 - Do not call external APIs.
 

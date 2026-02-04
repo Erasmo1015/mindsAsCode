@@ -2,6 +2,7 @@
 def choose(problem, history):
     """
     CPC18 Track II decision function.
+    Evaluated by block-level MSE: 100 * mean((predicted_block_B_rate − observed_block_B_rate)^2). Fitness = −MSE.
 
     problem: dict with keys
         - Ha: float      # high outcome of Option A

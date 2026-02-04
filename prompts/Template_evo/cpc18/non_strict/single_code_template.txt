@@ -2,6 +2,8 @@
 def choose(problem, history):
     """
     CPC18 Track II decision function.
+    Evaluated by BLOCK-LEVEL MSE: 100 * mean((predicted_block_B_rate − observed_block_B_rate)^2).
+    Goal: minimize MSE (maximize −MSE). Each problem has 5 blocks; trial-level choices are aggregated to block-level B-rates.
 
     problem: dict with keys
         - Ha: float      # high outcome of Option A
@@ -27,11 +29,10 @@ def choose(problem, history):
         int (0 = Option A, 1 = Option B)
     """
 
-    # Write your decision logic here.
-    # Use only the provided problem description and history.
-    # The function must be deterministic and return either 0 or 1.
+    # HARD: Use problem fields (Ha, pHa, La, Hb, pHb, etc.). Do NOT rely only on history.action.
+    # Do NOT implement pure inertia / majority / frequency-matching policies.
+    # Write your decision logic here. Must be deterministic; return 0 or 1.
 
     return 0
 
 ```
-

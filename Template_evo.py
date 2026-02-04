@@ -356,13 +356,16 @@ def evaluate_cpc18_program(choose_fn: Callable, trials: List[Dict[str, Any]], ve
 
 def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]], 
                        observed_blocks: Dict[int, np.ndarray], 
-                       verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
+                       verbose: bool = False, n_seeds: int = 1) -> Dict[str, Any]:
     """
     Evaluate CPC18 program and compute block-level MSE (official CPC18 metric).
     
     Computes MSE matching cpc18_baselines formula:
     MSE = 100 * mean((predicted_block_rate - observed_block_rate)^2)
     Averaged over all 5 blocks and all problems.
+    
+    If the program crashes or produces no valid prediction for any trial in a block,
+    the evaluation is marked invalid and MSE is set to Infinity (no silent default to A).
     
     Args:
         choose_fn: The program function to evaluate
@@ -372,7 +375,7 @@ def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]],
         n_seeds: Number of evaluation runs to average (default: 1)
     
     Returns:
-        Dictionary with MSE and component metrics
+        Dictionary with "mse", "valid", and component metrics. valid=False if any crash or invalid prediction.
     """
     # Group trials by problem_id
     problems_dict = {}
@@ -385,9 +388,11 @@ def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]],
     all_mse_per_problem = []
     all_predicted_blocks = {}
     all_observed_blocks = {}
+    evaluation_valid = True
     
     for seed in range(n_seeds):
         predicted_blocks = {}  # problem_id -> array of 5 predicted B-rates
+        seed_valid = True
         
         for problem_id, problem_trials in problems_dict.items():
             # Group trials by block_id
@@ -410,35 +415,47 @@ def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]],
                             pred = choose_fn(trial["problem"], trial["history"])
                             if pred is not None:
                                 b_predictions.append(int(pred == 1))  # 1 if B chosen, 0 if A
+                            else:
+                                seed_valid = False
                         except Exception as e:
                             if verbose and seed == 0:
                                 print(f"  Prediction error for problem {problem_id}, block {block_id}: {e}")
-                            # On error, assume A (0) was chosen
-                            b_predictions.append(0)
+                            seed_valid = False
                     
+                    if len(b_predictions) == 0 or len(b_predictions) < len(block_trials):
+                        seed_valid = False
                     if len(b_predictions) > 0:
                         predicted_rates[block_id - 1] = np.mean(b_predictions)
             
             predicted_blocks[problem_id] = predicted_rates
         
-        # Compute MSE for this seed
+        if not seed_valid:
+            evaluation_valid = False
+        
         if seed == 0:
             all_predicted_blocks = predicted_blocks.copy()
             all_observed_blocks = observed_blocks.copy()
         
-        # Compute MSE per problem (matching baseline formula)
         mse_per_problem = []
         for problem_id in predicted_blocks.keys():
             if problem_id in observed_blocks:
                 pred_rates = predicted_blocks[problem_id]
                 obs_rates = observed_blocks[problem_id]
-                # MSE = 100 * mean((pred - obs)^2) per problem
                 mse = 100 * np.mean((pred_rates - obs_rates) ** 2)
                 mse_per_problem.append(mse)
         
         all_mse_per_problem.append(mse_per_problem)
     
-    # Average MSE across seeds
+    if not evaluation_valid:
+        return {
+            "mse": float('inf'),
+            "mse_per_problem": [],
+            "n_problems": len(problems_dict),
+            "predicted_blocks": {k: v.tolist() for k, v in all_predicted_blocks.items()},
+            "observed_blocks": {k: v.tolist() for k, v in all_observed_blocks.items()},
+            "valid": False,
+        }
+    
     if all_mse_per_problem:
         avg_mse_per_problem = np.mean(all_mse_per_problem, axis=0)
         total_mse = np.mean(avg_mse_per_problem)
@@ -452,6 +469,7 @@ def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]],
         "n_problems": len(problems_dict),
         "predicted_blocks": {k: v.tolist() for k, v in all_predicted_blocks.items()},
         "observed_blocks": {k: v.tolist() for k, v in all_observed_blocks.items()},
+        "valid": True,
     }
 
 
@@ -1725,22 +1743,41 @@ def run_evolution(
                     choose_fn, test_trials, test_observed_blocks, n_seeds=n_eval_seeds
                 )
                 
+                # If program crashed or produced invalid predictions, mark candidate invalid (Infinity MSE, fitness = -Infinity)
+                mse_valid = train_mse_eval.get("valid", True) and test_mse_eval.get("valid", True)
+                if not mse_valid:
+                    candidate_results.append({
+                        "idx": idx,
+                        "parameters": params,
+                        "train_acc": train_acc_eval["accuracy"],
+                        "test_acc": test_acc_eval["accuracy"],
+                        "train_mse": float('inf'),
+                        "test_mse": float('inf'),
+                        "fitness": float('-inf'),
+                        "train_correct": train_acc_eval["correct"],
+                        "test_correct": test_acc_eval["correct"],
+                        "train_total": train_acc_eval["total"],
+                        "test_total": test_acc_eval["total"],
+                        "valid": False,
+                    })
+                    continue
+                
                 train_acc = train_acc_eval["accuracy"]
                 test_acc = test_acc_eval["accuracy"]
                 train_mse = train_mse_eval["mse"]
                 test_mse = test_mse_eval["mse"]
                 
-                # For CPC18: fitness = -MSE (higher is better)
+                # For CPC18: fitness = -train_mse (higher is better); parent selection and LLM use fitness only; accuracy is debug only
                 fitness = -train_mse
                 
                 candidate_results.append({
                     "idx": idx,
                     "parameters": params,
-                    "train_acc": train_acc,  # Keep for debugging
-                    "test_acc": test_acc,  # Keep for debugging
+                    "train_acc": train_acc,  # Logging/debug only, not used for selection
+                    "test_acc": test_acc,
                     "train_mse": train_mse,
                     "test_mse": test_mse,
-                    "fitness": fitness,  # Primary metric for CPC18: -MSE
+                    "fitness": fitness,  # Primary metric: -MSE
                     "train_correct": train_acc_eval["correct"],
                     "test_correct": test_acc_eval["correct"],
                     "train_total": train_acc_eval["total"],

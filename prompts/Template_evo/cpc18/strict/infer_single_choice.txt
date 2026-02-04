@@ -8,9 +8,11 @@ The same participant plays each problem repeatedly for 25 trials.
 Task characteristics:
 - Trials 1–5 have no feedback.
 - From trial 6 onward, full feedback is provided.
-- Trials are grouped into 5 blocks of 5 trials.
-- Performance is evaluated using block-level Mean Squared Error (MSE)
-  between predicted and observed B-choice rates.
+- Each problem has 5 blocks; each block contains multiple trials.
+- CPC18 is evaluated using block-level MSE, not trial accuracy.
+- Your program outputs trial-level choices, which are aggregated into block-level B-choice rates.
+- Official metric: MSE = 100 * mean((predicted_block_B_rate − observed_block_B_rate)^2).
+- The goal is to minimize MSE (equivalently maximize −MSE). Fitness for selection is −MSE; trial-level accuracy is for logging only.
 
 Your task is to write Python code that reproduces the participant’s behavior
 by implementing a PARAMETRIZED decision model.
