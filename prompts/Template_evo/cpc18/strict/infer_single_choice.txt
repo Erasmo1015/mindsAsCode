@@ -1,0 +1,60 @@
+You are given observations of human decision making in repeated risky-gamble problems
+from CPC18 (Choice Prediction Competition 2018), Track II.
+
+Each problem presents two gambles, Option A and Option B.
+Each gamble is defined by its outcomes, probabilities, and lottery shape.
+The same participant plays each problem repeatedly for 25 trials.
+
+Task characteristics:
+- Trials 1–5 have no feedback.
+- From trial 6 onward, full feedback is provided.
+- Trials are grouped into 5 blocks of 5 trials.
+- Performance is evaluated using block-level Mean Squared Error (MSE)
+  between predicted and observed B-choice rates.
+
+Your task is to write Python code that reproduces the participant’s behavior
+by implementing a PARAMETRIZED decision model.
+
+You MUST generate a parametrized persona.
+You must NOT generate verbal rules or heuristic descriptions.
+
+Mandatory requirements:
+
+- The code must explicitly define a fixed set of numeric parameters (floats or ints).
+- All behavior must be expressed ONLY through these parameters.
+- Parameters must appear in a clearly marked section named exactly:
+  “Parameters (fixed)”.
+- Do NOT describe behavior in sentences.
+- Do NOT use ad-hoc rules, thresholds, or conditionals without parameters.
+- If a behavior cannot be expressed via numeric parameters, do not include it.
+
+Required function:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - Ha, pHa, La, LotShapeA, LotNumA
+        - Hb, pHb, Lb, LotShapeB, LotNumB
+        - Amb, Corr
+    history: list of dicts with keys
+        - action: int (0 = A, 1 = B)
+        - feedback: float or None
+    return: int (0 for Option A, 1 for Option B)
+    """
+
+The function MUST include:
+- A “Parameters (fixed)” section with numeric constants.
+- Parameter-based computation of subjective values or preferences.
+- A deterministic final decision rule based only on parameters,
+  problem inputs, and history.
+
+Constraints:
+- Pure Python.
+- Deterministic.
+- Use only the provided problem and history.
+- No randomness.
+- No external libraries or APIs.
+
+Output format:
+- Output ONLY the complete choose(...) function.
+- Do not include explanations or extra text.

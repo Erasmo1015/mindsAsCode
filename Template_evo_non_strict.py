@@ -844,8 +844,12 @@ def generate_program_variants(
     """
     # Load prompts from file
     PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
-    prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "infer_single_choice.txt")
-    code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "single_code_template.txt")
+    if dataset == "cpc18":
+        prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "infer_single_choice.txt")
+        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "single_code_template.txt")
+    else:
+        prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "infer_single_choice.txt")
+        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "single_code_template.txt")
     
     try:
         base_prompt = open(prompt_path).read()
@@ -914,29 +918,28 @@ def choose(problem, history):
     else:
         parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
         for i, parent_program in enumerate(parent_programs):
-            acc = parent_train_accuracies[i] if parent_train_accuracies and i < len(parent_train_accuracies) else None
-            mse = parent_train_mses[i] if (dataset == "cpc18" and parent_train_mses and i < len(parent_train_mses)) else None
-            
-            acc_str = f" (train_acc: {acc:.4f})" if acc is not None else ""
-            mse_str = f", train_block-MSE: {mse:.2f}" if mse is not None else ""
-            parent_context += f"\nParent {i+1}{acc_str}{mse_str}:\n```python\n{parent_program}\n```\n"
+            if dataset == "cpc18":
+                # For CPC18: only show MSE, not accuracy
+                mse = parent_train_mses[i] if (parent_train_mses and i < len(parent_train_mses)) else None
+                mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
+                parent_context += f"\nParent {i+1}{mse_str}:\n```python\n{parent_program}\n```\n"
+            else:
+                # For Choice13k: show accuracy
+                acc = parent_train_accuracies[i] if parent_train_accuracies and i < len(parent_train_accuracies) else None
+                acc_str = f" (train_acc: {acc:.4f})" if acc is not None else ""
+                parent_context += f"\nParent {i+1}{acc_str}:\n```python\n{parent_program}\n```\n"
         
-        # Add performance guidance for CPC18
-        if dataset == "cpc18" and parent_train_accuracies and parent_train_mses:
-            avg_acc = sum(parent_train_accuracies) / len(parent_train_accuracies)
-            max_acc = max(parent_train_accuracies)
+        # Add performance guidance for CPC18 (MSE only)
+        if dataset == "cpc18" and parent_train_mses:
             avg_mse = sum(parent_train_mses) / len(parent_train_mses)
             min_mse = min(parent_train_mses)
             parent_context += f"\nParent performance on training data:\n"
-            parent_context += f"- Average train accuracy: {avg_acc:.4f}\n"
-            parent_context += f"- Best train accuracy: {max_acc:.4f}\n"
             parent_context += f"- Average train block-MSE: {avg_mse:.2f}\n"
             parent_context += f"- Best train block-MSE: {min_mse:.2f}\n"
             parent_context += f"\nIMPORTANT for CPC18:\n"
             parent_context += f"The official CPC18 metric is block-level MSE (lower is better).\n"
-            parent_context += f"Training accuracy alone is insufficient - you must reduce block-level MSE.\n"
-            parent_context += f"Goal: Reduce block-level MSE while keeping accuracy reasonable.\n"
-            parent_context += f"Current best: train_accuracy={max_acc:.4f}, train_block-MSE={min_mse:.2f}\n"
+            parent_context += f"Your goal is to reduce block-level MSE.\n"
+            parent_context += f"Current best: train_block-MSE={min_mse:.2f}\n"
             if min_mse > 50:
                 parent_context += f"\nNOTE: Current MSE is HIGH (>50). Focus on reducing MSE significantly.\n"
             elif min_mse > 30:
@@ -1158,11 +1161,13 @@ def run_evolution(
                 }
         elif dataset == "cpc18":
             baseline_log_dict = {
-                f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
-                f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
+                f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],  # -MSE (primary metric)
                 f"p{participant_id}_train_mse": baseline_train_mse_eval["mse"],
                 f"p{participant_id}_test_mse": baseline_test_mse_eval["mse"],
                 f"p{participant_id}_is_baseline": 1,
+                # Keep accuracy for debugging (not used for selection)
+                f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
+                f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
             }
         else:
             baseline_log_dict = {
@@ -1183,28 +1188,53 @@ def run_evolution(
                 f.write(json.dumps(baseline_entry) + "\n")
     
     # Initialize best program tracking with baseline
-    best_fitness = baseline_train_eval['accuracy']
+    # For CPC18: use -MSE as fitness (higher is better, so negate MSE)
+    # For other datasets: use accuracy
+    if dataset == "cpc18":
+        best_fitness = -baseline_train_mse_eval['mse']
+    else:
+        best_fitness = baseline_train_eval['accuracy']
     
     # Track overall best across all iterations
-    overall_best_train = {
-        "train_accuracy": baseline_train_eval['accuracy'],
-        "test_accuracy": baseline_test_eval['accuracy'],
-        "program_id": "baseline"
-    }
-    overall_best_test = {
-        "train_accuracy": baseline_train_eval['accuracy'],
-        "test_accuracy": baseline_test_eval['accuracy'],
-        "program_id": "baseline"
-    }
+    # For CPC18: track -MSE as fitness; for others: track accuracy
+    if dataset == "cpc18":
+        overall_best_train = {
+            "train_fitness": -baseline_train_mse_eval['mse'],  # -MSE (higher is better)
+            "train_mse": baseline_train_mse_eval['mse'],
+            "test_mse": baseline_test_mse_eval['mse'],
+            "train_accuracy": baseline_train_eval['accuracy'],  # Keep for debugging
+            "test_accuracy": baseline_test_eval['accuracy'],  # Keep for debugging
+            "program_id": "baseline"
+        }
+        overall_best_test = {
+            "train_fitness": -baseline_train_mse_eval['mse'],
+            "train_mse": baseline_train_mse_eval['mse'],
+            "test_mse": baseline_test_mse_eval['mse'],
+            "train_accuracy": baseline_train_eval['accuracy'],
+            "test_accuracy": baseline_test_eval['accuracy'],
+            "program_id": "baseline"
+        }
+    else:
+        overall_best_train = {
+            "train_accuracy": baseline_train_eval['accuracy'],
+            "test_accuracy": baseline_test_eval['accuracy'],
+            "program_id": "baseline"
+        }
+        overall_best_test = {
+            "train_accuracy": baseline_train_eval['accuracy'],
+            "test_accuracy": baseline_test_eval['accuracy'],
+            "program_id": "baseline"
+        }
     
     # Track elite parents (top programs across all iterations)
-    # Format: list of (code, train_acc, test_acc, program_id, train_mse, test_mse) tuples, sorted by train_acc descending
-    # For CPC18: train_mse and test_mse are included; for other datasets: None
+    # Format: list of (code, fitness, test_metric, program_id, train_mse, test_mse) tuples
+    # For CPC18: fitness = -train_mse (higher is better), sorted by fitness descending
+    # For other datasets: fitness = train_acc, sorted by fitness descending
     if dataset == "cpc18":
         elite_parents = [(
             seed_code,
-            baseline_train_eval['accuracy'],
-            baseline_test_eval['accuracy'],
+            -baseline_train_mse_eval['mse'],  # fitness = -MSE
+            baseline_test_mse_eval['mse'],  # test_metric = test_mse
             "baseline",
             baseline_train_mse_eval['mse'],
             baseline_test_mse_eval['mse'],
@@ -1212,8 +1242,8 @@ def run_evolution(
     else:
         elite_parents = [(
             seed_code,
-            baseline_train_eval['accuracy'],
-            baseline_test_eval['accuracy'],
+            baseline_train_eval['accuracy'],  # fitness = accuracy
+            baseline_test_eval['accuracy'],  # test_metric = test_acc
             "baseline",
             None,  # train_mse not applicable
             None,  # test_mse not applicable
@@ -1233,29 +1263,37 @@ def run_evolution(
         candidates_dir = iter_dir / "candidates"
         candidates_dir.mkdir(exist_ok=True)
         
-        # Select sample_size parents from elite set (sorted by train_acc descending)
+        # Select sample_size parents from elite set (sorted by fitness descending)
+        # For CPC18: fitness = -MSE (higher is better)
+        # For others: fitness = accuracy (higher is better)
         # Always include the best parent first
         num_parents_to_use = min(sample_size, len(elite_parents))
         selected_parents = elite_parents[:num_parents_to_use]
         parent_codes = [p[0] for p in selected_parents]
-        parent_train_accs = [p[1] for p in selected_parents]
         
         print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
         if dataset == "cpc18":
             for i, parent_tuple in enumerate(selected_parents):
-                code, train_acc, test_acc, prog_id, train_mse, test_mse = parent_tuple
-                mse_str = f", train_mse={train_mse:.2f}, test_mse={test_mse:.2f}" if train_mse is not None else ""
-                print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc:.4f}, test_acc={test_acc:.4f}{mse_str})")
+                code, fitness, test_mse, prog_id, train_mse, test_mse = parent_tuple
+                # fitness = -train_mse, so display train_mse and test_mse
+                print(f"  Parent {i+1}: {prog_id} (train_mse={train_mse:.2f}, test_mse={test_mse:.2f}, fitness={fitness:.2f})")
         else:
-            for i, (code, train_acc, test_acc, prog_id, _, _) in enumerate(selected_parents):
-                print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc:.4f}, test_acc={test_acc:.4f})")
+            for i, parent_tuple in enumerate(selected_parents):
+                code, fitness, test_acc, prog_id, _, _ = parent_tuple
+                # fitness = train_acc for non-CPC18
+                print(f"  Parent {i+1}: {prog_id} (train_acc={fitness:.4f}, test_acc={test_acc:.4f})")
         
-        # Extract train_mse and test_mse for CPC18 (if available)
+        # Extract metrics for LLM guidance
+        # For CPC18: pass only MSE (not accuracy)
+        # For others: pass accuracy
+        parent_train_accs = None
         parent_train_mses = None
         parent_test_mses = None
         if dataset == "cpc18":
             parent_train_mses = [p[4] for p in selected_parents if p[4] is not None]
             parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
+        else:
+            parent_train_accs = [p[1] for p in selected_parents]  # fitness = accuracy for non-CPC18
         
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
@@ -1276,7 +1314,7 @@ def run_evolution(
                 train_trials=train_trials,
                 n_variants=n_candidates_per_iteration,
                 dataset=dataset,
-                parent_train_accuracies=parent_train_accs,
+                parent_train_accuracies=parent_train_accs if dataset != "cpc18" else None,  # Don't pass accuracy for CPC18
                 parent_train_mses=parent_train_mses if dataset == "cpc18" else None,
             )
         
@@ -1337,6 +1375,7 @@ def run_evolution(
                         "test_acc": 0.0,
                         "train_mse": float('inf'),
                         "test_mse": float('inf'),
+                        "fitness": float('-inf'),  # Worst fitness for invalid program
                         "valid": False,
                     })
                     continue
@@ -1365,13 +1404,17 @@ def run_evolution(
                 train_mse = train_mse_eval["mse"]
                 test_mse = test_mse_eval["mse"]
                 
+                # For CPC18: fitness = -MSE (higher is better)
+                fitness = -train_mse
+                
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
-                    "train_acc": train_acc,
-                    "test_acc": test_acc,
+                    "train_acc": train_acc,  # Keep for debugging
+                    "test_acc": test_acc,  # Keep for debugging
                     "train_mse": train_mse,
                     "test_mse": test_mse,
+                    "fitness": fitness,  # Primary metric for CPC18: -MSE
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"],
                     "train_total": train_eval["total"],
@@ -1387,6 +1430,7 @@ def run_evolution(
                         "code": code,
                         "train_acc": 0.0,
                         "test_acc": 0.0,
+                        "fitness": 0.0,  # Worst fitness for invalid program
                         "valid": False,
                     })
                     continue
@@ -1398,11 +1442,15 @@ def run_evolution(
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"]
                 
+                # For non-CPC18: fitness = accuracy
+                fitness = train_acc
+                
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
                     "test_acc": test_acc,
+                    "fitness": fitness,  # Primary metric: accuracy
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"],
                     "train_total": train_eval["total"],
@@ -1412,12 +1460,21 @@ def run_evolution(
             
             # Track for overall best (only valid candidates)
             if candidate_results[-1]["valid"]:
-                all_candidate_results.append({
-                    "iteration": iteration,
-                    "candidate_idx": idx,
-                    "train_acc": candidate_results[-1]["train_acc"],
-                    "test_acc": candidate_results[-1]["test_acc"],
-                })
+                if dataset == "cpc18":
+                    all_candidate_results.append({
+                        "iteration": iteration,
+                        "candidate_idx": idx,
+                        "fitness": candidate_results[-1]["fitness"],  # -MSE
+                        "train_mse": candidate_results[-1]["train_mse"],
+                        "test_mse": candidate_results[-1]["test_mse"],
+                    })
+                else:
+                    all_candidate_results.append({
+                        "iteration": iteration,
+                        "candidate_idx": idx,
+                        "train_acc": candidate_results[-1]["train_acc"],
+                        "test_acc": candidate_results[-1]["test_acc"],
+                    })
         
         # Report results
         print(f"\n{'='*80}")
@@ -1426,32 +1483,41 @@ def run_evolution(
         
         valid_results = [r for r in candidate_results if r["valid"]]
         if valid_results:
-            # Sort by train accuracy
-            valid_results.sort(key=lambda x: x["train_acc"], reverse=True)
+            # Sort by fitness (for CPC18: -MSE, for others: accuracy)
+            valid_results.sort(key=lambda x: x["fitness"], reverse=True)
             
-            print(f"\nTop performers (by train accuracy):")
-            for i, result in enumerate(valid_results[:5]):
-                if dataset == "cpc18" and "train_mse" in result and "test_mse" in result:
-                    mse_str = f", train_mse={result['train_mse']:.2f}, test_mse={result['test_mse']:.2f}"
-                elif dataset == "cpc18" and "test_mse" in result:
-                    mse_str = f", test_mse={result['test_mse']:.2f}"
-                else:
-                    mse_str = ""
-                print(
-                    f"  {i+1}. Candidate {result['idx']}: "
-                    f"train_acc={result['train_acc']:.4f}, "
-                    f"test_acc={result['test_acc']:.4f}{mse_str}"
-                )
+            if dataset == "cpc18":
+                print(f"\nTop performers (by fitness = -train_MSE, higher is better):")
+                for i, result in enumerate(valid_results[:5]):
+                    print(
+                        f"  {i+1}. Candidate {result['idx']}: "
+                        f"train_mse={result['train_mse']:.2f}, "
+                        f"test_mse={result['test_mse']:.2f}, "
+                        f"fitness={result['fitness']:.2f}"
+                    )
+            else:
+                print(f"\nTop performers (by train accuracy):")
+                for i, result in enumerate(valid_results[:5]):
+                    print(
+                        f"  {i+1}. Candidate {result['idx']}: "
+                        f"train_acc={result['train_acc']:.4f}, "
+                        f"test_acc={result['test_acc']:.4f}"
+                    )
             
             # Select best program as parent for next iteration
             # Use top performer as parent
             best_result = valid_results[0]
             parent_program = best_result["code"]
-            best_fitness = best_result["train_acc"]
+            best_fitness = best_result["fitness"]
             
             print(f"\nBest program selected: Candidate {best_result['idx']}")
-            print(f"  Train accuracy: {best_result['train_acc']:.4f}")
-            print(f"  Test accuracy: {best_result['test_acc']:.4f}")
+            if dataset == "cpc18":
+                print(f"  Train MSE: {best_result['train_mse']:.2f}")
+                print(f"  Test MSE: {best_result['test_mse']:.2f}")
+                print(f"  Fitness (-MSE): {best_result['fitness']:.2f}")
+            else:
+                print(f"  Train accuracy: {best_result['train_acc']:.4f}")
+                print(f"  Test accuracy: {best_result['test_acc']:.4f}")
             
             # Add all valid candidates to elite set
             for result in valid_results:
@@ -1459,8 +1525,8 @@ def run_evolution(
                 if dataset == "cpc18":
                     elite_parents.append((
                         result["code"],
-                        result["train_acc"],
-                        result["test_acc"],
+                        result["fitness"],  # fitness = -train_mse
+                        result.get("test_mse", float('inf')),  # test_metric = test_mse
                         program_id,
                         result.get("train_mse", None),
                         result.get("test_mse", None),
@@ -1468,14 +1534,16 @@ def run_evolution(
                 else:
                     elite_parents.append((
                         result["code"],
-                        result["train_acc"],
-                        result["test_acc"],
+                        result["fitness"],  # fitness = train_acc
+                        result["test_acc"],  # test_metric = test_acc
                         program_id,
                         None,  # train_mse not applicable
                         None,  # test_mse not applicable
                     ))
             
-            # Sort elite set by train accuracy (descending) and keep top programs
+            # Sort elite set by fitness (descending) and keep top programs
+            # For CPC18: fitness = -MSE (higher is better)
+            # For others: fitness = accuracy (higher is better)
             # Keep at least sample_size * 2 programs to have diversity
             elite_parents.sort(key=lambda x: x[1], reverse=True)
             max_elite_size = max(sample_size * 2, 20)  # Keep at least 20 or 2x sample_size
@@ -1484,18 +1552,39 @@ def run_evolution(
             print(f"\nElite set updated: {len(elite_parents)} programs (top {max_elite_size} kept)")
             
             # Update overall best tracking
-            if best_result['train_acc'] > overall_best_train["train_accuracy"]:
-                overall_best_train = {
-                    "train_accuracy": best_result['train_acc'],
-                    "test_accuracy": best_result['test_acc'],
-                    "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
-                }
-            if best_result['test_acc'] > overall_best_test["test_accuracy"]:
-                overall_best_test = {
-                    "train_accuracy": best_result['train_acc'],
-                    "test_accuracy": best_result['test_acc'],
-                    "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
-                }
+            # For CPC18: compare by fitness (-MSE), for others: compare by accuracy
+            if dataset == "cpc18":
+                if best_result['fitness'] > overall_best_train["train_fitness"]:
+                    overall_best_train = {
+                        "train_fitness": best_result['fitness'],
+                        "train_mse": best_result['train_mse'],
+                        "test_mse": best_result['test_mse'],
+                        "train_accuracy": best_result['train_acc'],  # Keep for debugging
+                        "test_accuracy": best_result['test_acc'],  # Keep for debugging
+                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                    }
+                if best_result['test_mse'] < overall_best_test["test_mse"]:  # Lower test_mse is better
+                    overall_best_test = {
+                        "train_fitness": best_result['fitness'],
+                        "train_mse": best_result['train_mse'],
+                        "test_mse": best_result['test_mse'],
+                        "train_accuracy": best_result['train_acc'],
+                        "test_accuracy": best_result['test_acc'],
+                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                    }
+            else:
+                if best_result['train_acc'] > overall_best_train["train_accuracy"]:
+                    overall_best_train = {
+                        "train_accuracy": best_result['train_acc'],
+                        "test_accuracy": best_result['test_acc'],
+                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                    }
+                if best_result['test_acc'] > overall_best_test["test_accuracy"]:
+                    overall_best_test = {
+                        "train_accuracy": best_result['train_acc'],
+                        "test_accuracy": best_result['test_acc'],
+                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                    }
         else:
             print("\nWarning: No valid programs generated in this iteration!")
             print("Continuing with previous parent program...")
@@ -1505,32 +1594,62 @@ def run_evolution(
         if valid_results:
             best_program_id = f"iteration_{iteration}_candidate_{valid_results[0]['idx']}"
         
-        metrics = {
-            "iteration": iteration,
-            "n_candidates": n_candidates_per_iteration,
-            "n_valid": len(valid_results),
-            "best_program_id": best_program_id,
-            "candidate_results": [
-                {
-                    "idx": r["idx"],
-                    "train_acc": r["train_acc"],
-                    "test_acc": r["test_acc"],
-                    "valid": r["valid"],
-                }
-                for r in candidate_results
-            ],
-            "best_train_acc": best_fitness if valid_results else None,
-            "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-        }
+        if dataset == "cpc18":
+            metrics = {
+                "iteration": iteration,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(valid_results),
+                "best_program_id": best_program_id,
+                "candidate_results": [
+                    {
+                        "idx": r["idx"],
+                        "train_mse": r.get("train_mse", None),
+                        "test_mse": r.get("test_mse", None),
+                        "fitness": r.get("fitness", None),
+                        "valid": r["valid"],
+                    }
+                    for r in candidate_results
+                ],
+                "best_train_fitness": best_fitness if valid_results else None,  # -MSE
+                "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
+                "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
+            }
+        else:
+            metrics = {
+                "iteration": iteration,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(valid_results),
+                "best_program_id": best_program_id,
+                "candidate_results": [
+                    {
+                        "idx": r["idx"],
+                        "train_acc": r["train_acc"],
+                        "test_acc": r["test_acc"],
+                        "valid": r["valid"],
+                    }
+                    for r in candidate_results
+                ],
+                "best_train_acc": best_fitness if valid_results else None,
+                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+            }
         (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         
         # Save summary
-        summary = {
-            "iteration": iteration,
-            "best_train_acc": best_fitness if valid_results else None,
-            "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-            "n_valid": len(valid_results),
-        }
+        if dataset == "cpc18":
+            summary = {
+                "iteration": iteration,
+                "best_train_fitness": best_fitness if valid_results else None,  # -MSE
+                "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
+                "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
+                "n_valid": len(valid_results),
+            }
+        else:
+            summary = {
+                "iteration": iteration,
+                "best_train_acc": best_fitness if valid_results else None,
+                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+                "n_valid": len(valid_results),
+            }
         print(f"\nSummary: {json.dumps(summary, indent=2)}")
         
         # Log to wandb (use dataset-specific metric names)
@@ -1560,15 +1679,16 @@ def run_evolution(
                     f"p{participant_id}_n_valid": len(valid_results),
                 }
                 if valid_results:
-                    log_dict[f"p{participant_id}_train_accuracy"] = best_fitness
-                    log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
-                    log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
-                    log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-                    # CPC18: also log MSE metrics (both train and test)
+                    # CPC18: log fitness (-MSE) as primary metric, and MSE values
+                    log_dict[f"p{participant_id}_train_fitness"] = best_fitness  # -train_mse (higher is better)
                     log_dict[f"p{participant_id}_train_mse"] = valid_results[0].get("train_mse", None)
                     log_dict[f"p{participant_id}_test_mse"] = valid_results[0].get("test_mse", None)
+                    log_dict[f"p{participant_id}_avg_train_fitness"] = np.mean([r["fitness"] for r in valid_results])
                     log_dict[f"p{participant_id}_avg_train_mse"] = np.mean([r.get("train_mse", float('inf')) for r in valid_results])
                     log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r.get("test_mse", float('inf')) for r in valid_results])
+                    # Keep accuracy for debugging (not used for selection)
+                    log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0].get("train_acc", None)
+                    log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0].get("test_acc", None)
             else:
                 log_dict = {
                     f"p{participant_id}_n_valid": len(valid_results),
@@ -1597,46 +1717,80 @@ def run_evolution(
     
     # Check all candidates to find true overall best (in case best wasn't selected as parent)
     for candidate in all_candidate_results:
-        if candidate['train_acc'] > overall_best_train["train_accuracy"]:
-            overall_best_train = {
-                "train_accuracy": candidate['train_acc'],
-                "test_accuracy": candidate['test_acc'],
-                "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
-            }
-        if candidate['test_acc'] > overall_best_test["test_accuracy"]:
-            overall_best_test = {
-                "train_accuracy": candidate['train_acc'],
-                "test_accuracy": candidate['test_acc'],
-                "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
-            }
+        if dataset == "cpc18":
+            if candidate['fitness'] > overall_best_train["train_fitness"]:
+                overall_best_train = {
+                    "train_fitness": candidate['fitness'],
+                    "train_mse": candidate['train_mse'],
+                    "test_mse": candidate['test_mse'],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+                }
+            if candidate['test_mse'] < overall_best_test["test_mse"]:  # Lower test_mse is better
+                overall_best_test = {
+                    "train_fitness": candidate['fitness'],
+                    "train_mse": candidate['train_mse'],
+                    "test_mse": candidate['test_mse'],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+                }
+        else:
+            if candidate['train_acc'] > overall_best_train["train_accuracy"]:
+                overall_best_train = {
+                    "train_accuracy": candidate['train_acc'],
+                    "test_accuracy": candidate['test_acc'],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+                }
+            if candidate['test_acc'] > overall_best_test["test_accuracy"]:
+                overall_best_test = {
+                    "train_accuracy": candidate['train_acc'],
+                    "test_accuracy": candidate['test_acc'],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+                }
     
     # Create comprehensive results.json
-    results = {
-        "baseline": baseline_results,
-        "overall_best_train_accuracy": overall_best_train,
-        "overall_best_test_accuracy": overall_best_test,
-    }
+    if dataset == "cpc18":
+        results = {
+            "baseline": baseline_results,
+            "overall_best_train": overall_best_train,  # Contains train_fitness, train_mse, etc.
+            "overall_best_test": overall_best_test,  # Contains test_mse, etc.
+        }
+    else:
+        results = {
+            "baseline": baseline_results,
+            "overall_best_train_accuracy": overall_best_train,
+            "overall_best_test_accuracy": overall_best_test,
+        }
     (output_path / "results.json").write_text(json.dumps(results, indent=2))
     
     if n_iterations > 0:
-        print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
-        print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
-        print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
-        print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
-        print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
         if dataset == "cpc18":
+            print(f"Final best train MSE: {overall_best_train['train_mse']:.2f} (fitness={overall_best_train['train_fitness']:.2f}) (from {overall_best_train['program_id']})")
+            print(f"Final best test MSE: {overall_best_test['test_mse']:.2f} (from {overall_best_test['program_id']})")
             print(f"Baseline train MSE: {baseline_results['train_mse']:.4f}")
             print(f"Baseline test MSE (official): {baseline_results['test_mse']:.4f}")
+            print(f"Train MSE improvement: {baseline_results['train_mse'] - overall_best_train['train_mse']:.4f}")
+            print(f"Test MSE improvement: {baseline_results['test_mse'] - overall_best_test['test_mse']:.4f}")
+        else:
+            print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
+            print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
+            print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
+            print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
+            print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
     print(f"\nResults saved to: {output_path / 'results.json'}")
     
     # Return summary for participants summary file (just the essentials)
-    result = {
-        "participant_id": participant_id if dataset in ["choice13k", "cpc18"] else agent_id,
-        "train_acc": overall_best_train['train_accuracy'],
-        "test_acc": overall_best_test['test_accuracy'],
-    }
     if dataset == "cpc18":
-        result["test_mse"] = baseline_results.get('test_mse', float('inf'))
+        result = {
+            "participant_id": participant_id,
+            "train_mse": overall_best_train['train_mse'],
+            "test_mse": overall_best_test['test_mse'],
+            "train_fitness": overall_best_train['train_fitness'],  # -MSE
+        }
+    else:
+        result = {
+            "participant_id": participant_id if dataset in ["choice13k", "cpc18"] else agent_id,
+            "train_acc": overall_best_train['train_accuracy'],
+            "test_acc": overall_best_test['test_accuracy'],
+        }
     return result
 
 

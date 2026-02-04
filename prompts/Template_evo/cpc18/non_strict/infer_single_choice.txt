@@ -1,0 +1,70 @@
+You are given observations of human choices in the CPC18 Track II task (Individual behavior).
+
+Each problem presents two gambles: Option A and Option B.
+Each gamble is defined by:
+- a high outcome and its probability,
+- a low outcome,
+- a lottery shape and number of outcomes.
+
+You will see a history of previous trials for the SAME participant and SAME problem.
+Each problem consists of 25 trials, organized into 5 blocks of 5 trials.
+Feedback is only available after the first block.
+
+IMPORTANT — Evaluation Metric:
+The official CPC18 metric is BLOCK-LEVEL MEAN SQUARED ERROR (MSE).
+
+For each problem:
+- Your program will be run on all trials.
+- For each block, the fraction of trials where Option B is chosen is computed.
+- MSE measures how close these predicted block-level choice rates are to human data.
+
+Key implications:
+- Trial-level accuracy is NOT the optimization objective.
+- Simply repeating the most frequent past action may increase accuracy but often WORSENS MSE.
+- Deterministic always-A or always-B strategies perform poorly on block-level MSE.
+- Good solutions match HUMAN CHOICE RATES over blocks, not individual decisions.
+
+Your goal:
+Write Python code that reproduces human behavior by MINIMIZING BLOCK-LEVEL MSE.
+This requires producing appropriate choice FREQUENCIES within each block.
+
+You must generate a program implementing:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - Ha: float
+        - pHa: float
+        - La: float
+        - LotShapeA: str
+        - LotNumA: int
+
+        - Hb: float
+        - pHb: float
+        - Lb: float
+        - LotShapeB: str
+        - LotNumB: int
+
+        - Amb: int   # ambiguity indicator
+        - Corr: int  # correlation indicator
+
+    history: list of dicts with keys
+        - action: int (0 = A, 1 = B)
+        - feedback: float or None
+
+    return: int (0 = A, 1 = B)
+    """
+
+Guidelines:
+- Use history to adapt behavior gradually.
+- Avoid sharp switches or rigid majority-vote rules.
+- Prefer smooth, inertia-based, or probabilistic decision logic.
+- Matching block-level choice proportions is more important than per-trial correctness.
+
+Constraints:
+- Pure Python.
+- Deterministic code only (no randomness unless derived deterministically from history).
+- Use only the provided problem and history.
+- Do not call external APIs.
+
+Provide only the code for choose(...) as a complete function body.
