@@ -1842,9 +1842,8 @@ def run_evolution(
             # Sort by fitness (for CPC18: -MSE, for others: accuracy)
             valid_results.sort(key=lambda x: x["fitness"], reverse=True)
             
-            # Select best as parent for next iteration (strict mode: always use parameters)
+            # Select best for tracking (but use elite_parents pool for actual parent selection)
             best_result = valid_results[0]
-            parent_params = best_result["parameters"].copy()
             best_fitness = best_result["fitness"]
             
             # Add all valid candidates to elite parents
@@ -1875,7 +1874,7 @@ def run_evolution(
             elite_parents = elite_parents[:max(sample_size * 2, 20)]  # Keep a reasonable number
             
             # Save best parameters (only JSON, no .py files) - for both datasets
-            (iter_dir / "best_parameters.json").write_text(json.dumps(parent_params, indent=2))
+            (iter_dir / "best_parameters.json").write_text(json.dumps(best_result["parameters"], indent=2))
             
             # Update overall best tracking
             # For CPC18: compare by fitness (-MSE), for others: compare by accuracy

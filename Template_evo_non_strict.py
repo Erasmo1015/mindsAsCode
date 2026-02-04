@@ -1038,7 +1038,6 @@ def run_evolution(
     # Load seed program
     print(f"Loading seed program from {seed_program_path}...")
     seed_code = load_seed_program(seed_program_path)
-    parent_program = seed_code
     
     # Branch based on dataset
     if dataset == "gridworld":
@@ -1275,10 +1274,7 @@ def run_evolution(
             None,  # test_mse not applicable
         )]
     
-    # Initialize parent_program for first iteration
-    parent_program = seed_code
-    
-    # Evolution loop
+    # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     for iteration in range(n_iterations):
         print(f"\n{'='*80}")
         print(f"Iteration {iteration + 1}/{n_iterations}")
@@ -1562,10 +1558,8 @@ def run_evolution(
                         f"test_acc={result['test_acc']:.4f}"
                     )
             
-            # Select best program as parent for next iteration
-            # Use top performer as parent
+            # Select best program for tracking (but use elite_parents pool for actual parent selection)
             best_result = valid_results[0]
-            parent_program = best_result["code"]
             best_fitness = best_result["fitness"]
             
             print(f"\nBest program selected: Candidate {best_result['idx']}")
@@ -1645,7 +1639,7 @@ def run_evolution(
                     }
         else:
             print("\nWarning: No valid programs generated in this iteration!")
-            print("Continuing with previous parent program...")
+            print("Continuing with elite parents pool from previous iterations...")
         
         # Save iteration results
         best_program_id = None
@@ -2166,13 +2160,14 @@ def main():
                     sample_size=args.sample_size,
                 )
                 
-                # Update summary
+                # Update summary (build row with only CSV columns; agent_summary uses 'participant_id' key)
                 if agent_summary is not None and summary_file is not None:
                     participants_summary.append({
-                        **agent_summary,
                         'agent_id': agent_id,
                         'num_blocks': num_blocks_arg,
                         'num_walls': num_walls_arg,
+                        'train_acc': agent_summary.get('train_acc'),
+                        'test_acc': agent_summary.get('test_acc'),
                     })
                     # Write CSV file
                     with open(summary_file, 'w', newline='') as f:
@@ -2255,14 +2250,15 @@ def main():
                     sample_size=args.sample_size,
                 )
                 
-                # Update summary (for gridworld, we might want a different summary structure)
+                # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
                 if participant_summary is not None and summary_file is not None:
                     participants_summary.append({
-                        **participant_summary,
                         'epoch': epoch,
                         'num_blocks': num_blocks,
                         'num_walls': num_walls,
                         'agent_id': agent_id,
+                        'train_acc': participant_summary.get('train_acc'),
+                        'test_acc': participant_summary.get('test_acc'),
                     })
                     # Write CSV file
                     with open(summary_file, 'w', newline='') as f:
