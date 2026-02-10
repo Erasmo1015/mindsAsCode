@@ -258,6 +258,40 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
     return "\n".join(lines)
 
 
+def load_mixed_gambles_data(csv_path: str, participant_id: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
+    
+    Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
+    action = took_gamble (1 = choose gamble A, 0 = choose certain B). history = [] (no temporal dependence).
+    """
+    option_keys = [0, 1]  # 0 = certain B, 1 = gamble A
+    all_trials = []
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if int(row["subject"]) != participant_id:
+                continue
+            gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
+            took_gamble = int(row["took_gamble"])
+            all_trials.append({
+                "problem": {
+                    "gamble_A": {"rewards": [gain, loss], "probs": [0.5, 0.5]},
+                    "gamble_B": {"rewards": [cert], "probs": [1.0]},
+                    "option_keys": option_keys,
+                    "has_feedback": False,
+                },
+                "history": [],
+                "options": option_keys,
+                "action": took_gamble,
+            })
+    if len(all_trials) == 0:
+        raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+    split_point = int(len(all_trials) * 0.8)
+    train_trials = all_trials[:split_point]
+    test_trials = all_trials[split_point:]
+    return train_trials, test_trials, option_keys
+
+
 def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
     """Split trials into train/test 80/20 (fixed split, matching ROTE); return (train, test, options)."""
     options = exp.blocks[0].option_keys
@@ -970,6 +1004,7 @@ def generate_parameter_variants(
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "strict", "single_code_template.txt")
     else:
+        # choice13k and mixed_gambles use same strict prompts
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "strict", "single_code_template.txt")
     
@@ -1209,7 +1244,7 @@ def run_evolution(
         model_name: LLM model name for generation
         client_kwargs: Optional OpenAI client kwargs (for local vLLM server)
         output_dir: Optional output directory for saving results
-        dataset: "choice13k", "gridworld", or "cpc18" (Track II)
+        dataset: "choice13k", "gridworld", "cpc18" (Track II), or "mixed_gambles"
         data_path: Path to data directory (for gridworld) or CPC18 baseline directory (for cpc18)
         num_blocks: Number of blocks (for gridworld)
         num_walls: Number of walls (for gridworld)
@@ -1321,6 +1356,34 @@ def run_evolution(
         print(f"CPC18 Track II: Using ALL {len(test_trials)} trials for predictions (same trials, aggregated to block-level for MSE)")
         print(f"Problems: {len(participant_data.problems)} total")
         print(f"Test targets (block-level B-rates from Data-to-predict-Track-2.csv): {len(test_observed_blocks)} problems")
+    elif dataset == "mixed_gambles":
+        # Mixed gambles: same parameter extraction as choice13k, load CSV
+        baseline_params = extract_parameters_from_template(template_code)
+        if not baseline_params:
+            print("Warning: Parameter extraction returned empty dict. Trying fallback extraction...")
+            import re
+            param_pattern = r'(\w+)\s*=\s*([0-9]+\.?[0-9]*)'
+            matches = re.findall(param_pattern, template_code)
+            for param_name, param_value in matches:
+                param_pos = template_code.find(f"{param_name} = {param_value}")
+                first_def_pos = template_code.find("def ", template_code.find("def choose"))
+                if param_pos < first_def_pos or first_def_pos == -1:
+                    try:
+                        baseline_params[param_name] = float(param_value)
+                    except ValueError:
+                        pass
+        if not baseline_params:
+            print("ERROR: Could not extract any parameters from template!")
+            print("Template preview (first 10 lines):")
+            print("\n".join(template_code.split("\n")[:10]))
+            return None
+        print(f"Baseline parameters: {baseline_params}")
+        baseline_code = inject_parameters_into_template(template_code, baseline_params)
+        parent_params = baseline_params.copy()
+        csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
+        print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
+        train_trials, test_trials, options = load_mixed_gambles_data(csv_path, participant_id)
+        print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
     else:
         # Choice13k: extract parameters
         baseline_params = extract_parameters_from_template(template_code)
@@ -1369,6 +1432,8 @@ def run_evolution(
             output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/epoch_{participant_id}"
         elif dataset == "cpc18":
             output_dir = f"generated_outputs/cpc18/{mode}/run_{timestamp}/participant_{participant_id}"
+        elif dataset == "mixed_gambles":
+            output_dir = f"generated_outputs/mixed_gambles/{mode}/run_{timestamp}/participant_{participant_id}"
         else:
             output_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}/participant_{participant_id}"
     output_path = Path(output_dir)
@@ -1806,11 +1871,13 @@ def run_evolution(
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"]
                 
+                # For choice13k / mixed_gambles: fitness = train_acc
                 candidate_results.append({
                     "idx": idx,
                     "parameters": params,
                     "train_acc": train_acc,
                     "test_acc": test_acc,
+                    "fitness": train_acc,
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"],
                     "train_total": train_eval["total"],
@@ -2050,14 +2117,14 @@ def main():
         "--dataset",
         type=str,
         default="choice13k",
-        choices=["choice13k", "gridworld", "cpc18"],
-        help="Dataset to use: choice13k, gridworld, or cpc18 (Track II)",
+        choices=["choice13k", "gridworld", "cpc18", "mixed_gambles"],
+        help="Dataset to use: choice13k, gridworld, cpc18 (Track II), or mixed_gambles",
     )
     parser.add_argument(
         "--seed_path",
         type=str,
         default=None,
-        help="Path to seed program (starting persona). If not set, auto-detects from persona_code_example/gridworld/ for gridworld. Default for choice13k: persona_code_example/vanilla.py. Default for cpc18: persona_code_example/cpc18/hard.py",
+        help="Path to seed program (starting persona). If not set, auto-detects from persona_code_example/gridworld/ for gridworld. Default for choice13k: persona_code_example/vanilla.py. Default for cpc18: persona_code_example/cpc18/hard.py. Default for mixed_gambles: persona_code_example/hard_Qwen.py",
     )
     parser.add_argument(
         "--data_path",
@@ -2224,6 +2291,8 @@ def main():
             base_run_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}"
         elif args.dataset == "cpc18":
             base_run_dir = f"generated_outputs/cpc18/{mode}/run_{timestamp}"
+        elif args.dataset == "mixed_gambles":
+            base_run_dir = f"generated_outputs/mixed_gambles/{mode}/run_{timestamp}"
         else:
             base_run_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
@@ -2253,6 +2322,8 @@ def main():
         elif args.dataset == "cpc18":
             # Default for CPC18 Track II
             seed_program_path = "persona_code_example/cpc18/hard.py"
+        elif args.dataset == "mixed_gambles":
+            seed_program_path = "persona_code_example/hard_Qwen.py"
         else:
             # Default for choice13k
             seed_program_path = "persona_code_example/vanilla.py"

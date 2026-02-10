@@ -179,6 +179,40 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
     return "\n".join(lines)
 
 
+def load_mixed_gambles_data(csv_path: str, participant_id: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
+
+    Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
+    action = took_gamble (1 = choose gamble A, 0 = choose certain B). history = [] (no temporal dependence).
+    """
+    option_keys = [0, 1]  # 0 = certain B, 1 = gamble A
+    all_trials = []
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if int(row["subject"]) != participant_id:
+                continue
+            gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
+            took_gamble = int(row["took_gamble"])
+            all_trials.append({
+                "problem": {
+                    "gamble_A": {"rewards": [gain, loss], "probs": [0.5, 0.5]},
+                    "gamble_B": {"rewards": [cert], "probs": [1.0]},
+                    "option_keys": option_keys,
+                    "has_feedback": False,
+                },
+                "history": [],
+                "options": option_keys,
+                "action": took_gamble,
+            })
+    if len(all_trials) == 0:
+        raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+    split_point = int(len(all_trials) * 0.8)
+    train_trials = all_trials[:split_point]
+    test_trials = all_trials[split_point:]
+    return train_trials, test_trials, option_keys
+
+
 def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
     """Split trials into train/test 80/20 (fixed split, matching ROTE); return (train, test, options)."""
     options = exp.blocks[0].option_keys
@@ -724,6 +758,171 @@ def evaluate_gridworld_program(agent_code: str, data_path: str, num_blocks: int,
     return result
 
 
+def _normalize_gridworld_action(predicted_action: Any) -> int:
+    """Normalize agent output to action index 0-5 (stay, right, left, down, up, interact)."""
+    action_space = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1)]
+    action_space_2 = ["stay", "right", "left", "down", "up", "interact"]
+    if isinstance(predicted_action, tuple):
+        predicted_action = list(predicted_action)
+    elif isinstance(predicted_action, str):
+        predicted_action = predicted_action.lower()
+        predicted_action = action_space_2.index(predicted_action)
+    else:
+        predicted_action = int(predicted_action)
+    if predicted_action in action_space:
+        return action_space.index(predicted_action)
+    if predicted_action in action_space_2:
+        return action_space_2.index(predicted_action)
+    return int(predicted_action)
+
+
+def evaluate_gridworld_ensemble_test(
+    agent_codes: List[str],
+    data_path: str,
+    num_blocks: int,
+    num_walls: int,
+    agent_id: int,
+    num_datapoints: int = 20,
+    num_steps: int = 20,
+    verbose: bool = False,
+    n_seeds: int = 1,
+) -> Dict[str, float]:
+    """Evaluate an ensemble of gridworld programs on future steps with majority vote.
+    
+    Same data and step logic as evaluate_gridworld_program(..., evaluate_on_observed=False).
+    For each (datapoint, future_step), collects one prediction per program, takes majority
+    vote, and compares to ground truth. Returns ensemble test accuracy.
+    
+    Args:
+        agent_codes: List of K program code strings (ensemble members)
+        data_path, num_blocks, num_walls, agent_id: Same as evaluate_gridworld_program
+        num_datapoints: Test datapoints (default 20, i.e. indices 80-99)
+        num_steps: Future steps to evaluate (default 20)
+        verbose: Whether to print verbose output
+        n_seeds: Number of evaluation runs to average (default: 1)
+    
+    Returns:
+        Dictionary with accuracy, total, correct, errors (0 if all agents compiled).
+    """
+    from collections import Counter
+    framework = AgentExecutionFramework()
+    agents = []
+    for code in agent_codes:
+        try:
+            agent = framework.compile_agent(code, num_agents=1, num_blocks=num_blocks)
+            agents.append(agent)
+        except Exception as e:
+            if verbose:
+                print(f"  Ensemble member compile error: {e}")
+            agents.append(None)
+    if not agents or all(a is None for a in agents):
+        return {"accuracy": 0.0, "total": 0, "correct": 0, "errors": 1}
+
+    class DummyArgs:
+        def __init__(self):
+            self.data_path = data_path
+            self.num_agents = 1
+            self.num_datapoints_per_agent = num_datapoints
+            self.num_steps = num_steps
+            self.group = False
+            self.flip_quarter = True
+            self.env_size = 10
+            self.as_images = False
+
+    dummy_args = DummyArgs()
+    accuracies = []
+    total_steps = 0
+    correct_steps = 0
+
+    def to_numpy(x):
+        if isinstance(x, (jnp.ndarray, jax.Array)):
+            return np.array(x)
+        return x
+
+    for seed in range(n_seeds):
+        try:
+            dataloader = make_dataloader(
+                dummy_args,
+                num_agents_to_sample=1,
+                num_datapoints_per_agent_to_sample=num_datapoints,
+                training=False,
+                epoch=0,
+                num_blocks=num_blocks,
+                num_walls=num_walls,
+                agent_indices=[agent_id],
+            )
+            datapoint = next(dataloader)
+            seed_correct = 0
+            seed_total = 0
+
+            for dp_idx in range(num_datapoints):
+                try:
+                    data_sample = jax.tree.map(lambda x: x[0, dp_idx, :20 + num_steps], datapoint)
+                    initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
+                    gt_future_actions = data_sample['actions'][19:]
+                    if gt_future_actions.shape[0] < num_steps:
+                        actual_num_steps = min(gt_future_actions.shape[0], num_steps)
+                    else:
+                        actual_num_steps = num_steps
+
+                    for step_idx in range(actual_num_steps):
+                        if step_idx >= gt_future_actions.shape[0]:
+                            break
+                        try:
+                            current_obs_raw = jax.tree.map(lambda x: x[19 + step_idx + 1], data_sample['states'])
+                            current_obs = jax.tree.map(to_numpy, current_obs_raw)
+                            current_obs['agent_id'] = 0
+
+                            gt_action_this_step = gt_future_actions[step_idx]
+                            if hasattr(gt_action_this_step, '__len__') and len(gt_action_this_step) > 0:
+                                gt_action = int(gt_action_this_step[0])
+                            else:
+                                gt_action = int(gt_action_this_step)
+
+                            votes = []
+                            for agent in agents:
+                                if agent is None:
+                                    continue
+                                try:
+                                    pred = framework.execute_agent(agent, current_obs)
+                                    votes.append(_normalize_gridworld_action(pred))
+                                except Exception:
+                                    pass
+                            if not votes:
+                                seed_total += 1
+                                continue
+                            # Majority vote (mode); tie-break by smallest action index
+                            counts = Counter(votes)
+                            ensemble_pred = max(counts.keys(), key=lambda a: (counts[a], -a))
+
+                            if ensemble_pred == gt_action:
+                                seed_correct += 1
+                            seed_total += 1
+                        except Exception as e:
+                            seed_total += 1
+                            if verbose:
+                                print(f"  Step error dp={dp_idx} step={step_idx}: {e}")
+                except Exception as e:
+                    if verbose:
+                        print(f"  Error processing datapoint {dp_idx}: {e}")
+                    seed_total += num_steps
+                    continue
+        except Exception as e:
+            if verbose:
+                print(f"  Data loading error: {e}")
+            seed_correct = 0
+            seed_total = 1
+
+        acc = seed_correct / seed_total if seed_total > 0 else 0.0
+        accuracies.append(acc)
+        total_steps = seed_total
+        correct_steps = seed_correct
+
+    avg_acc = np.mean(accuracies) if accuracies else 0.0
+    correct = int(avg_acc * total_steps) if total_steps > 0 else 0
+    return {"accuracy": avg_acc, "total": total_steps, "correct": correct, "errors": 0}
+
+
 def generate_gridworld_program_variants(
     client: OpenAI,
     model_name: str,
@@ -1066,6 +1265,12 @@ def run_evolution(
         print(f"Problems: {len(participant_data.problems)} total")
         print(f"Test targets (block-level B-rates from Data-to-predict-Track-2.csv): {len(test_observed_blocks)} problems")
         options = None  # Not used for CPC18
+    elif dataset == "mixed_gambles":
+        csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
+        print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
+        train_trials, test_trials, options = load_mixed_gambles_data(csv_path, participant_id)
+        print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
+        test_observed_blocks = None
     else:
         # Load Choice13k data
         print(f"Loading Choice13k data for participant {participant_id}...")
@@ -1085,6 +1290,8 @@ def run_evolution(
             output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/epoch_0/agent_{agent_id}"
         elif dataset == "cpc18":
             output_dir = f"generated_outputs/cpc18/{mode}/run_{timestamp}/participant_{participant_id}"
+        elif dataset == "mixed_gambles":
+            output_dir = f"generated_outputs/mixed_gambles/{mode}/run_{timestamp}/participant_{participant_id}"
         else:
             output_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}/participant_{participant_id}"
     output_path = Path(output_dir)
@@ -1374,12 +1581,13 @@ def run_evolution(
                 
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"]
-                
+                # For gridworld: fitness = train_acc (used for sorting/selection)
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
                     "test_acc": test_acc,
+                    "fitness": train_acc,
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"],
                     "train_total": train_eval["total"],
@@ -1846,6 +2054,186 @@ def run_evolution(
     return result
 
 
+def run_evolution_gridworld_ensemble(
+    seed_program_path: str,
+    participant_id: int = 0,
+    data_path: str = "data",
+    num_blocks: Optional[int] = None,
+    num_walls: Optional[int] = None,
+    agent_id: Optional[int] = None,
+    n_iterations: int = 5,
+    n_candidates_per_iteration: int = 10,
+    model_name: str = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+    client_kwargs: Optional[Dict[str, Any]] = None,
+    output_dir: Optional[str] = None,
+    wandb=None,
+    n_eval_seeds: int = 3,
+    sample_size: int = 3,
+):
+    """
+    Run gridworld evolution with K independent ensemble members; test = majority vote over K programs.
+    Reuses same data, evaluation (evaluate_gridworld_program), and evolution logic as gridworld.
+    K = sample_size (number of ensemble members). No cross-breeding between members.
+    """
+    if num_blocks is None or num_walls is None or agent_id is None:
+        raise ValueError("For gridworld_ensemble, num_blocks, num_walls, and agent_id must be provided")
+    K = sample_size  # ensemble size
+    print(f"Gridworld ensemble mode: K={K} independent programs, test = majority vote. num_blocks={num_blocks}, num_walls={num_walls}, agent_id={agent_id}")
+
+    if client_kwargs is None:
+        client_kwargs = {}
+    client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+    seed_code = load_seed_program(seed_program_path)
+
+    if output_dir is None:
+        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        mode = "non_strict"
+        output_dir = f"generated_outputs/gridworld_ensemble/{mode}/run_{timestamp}/agent_{agent_id}"
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    log_file_path = output_path / "wandb_metrics.jsonl" if wandb is not None else None
+
+    # Baseline: single seed (train + test)
+    print(f"\n{'='*80}\nBASELINE EVALUATION (seed program, single)\n{'='*80}")
+    baseline_train_eval = evaluate_gridworld_program(
+        seed_code, data_path, num_blocks, num_walls, agent_id,
+        num_datapoints=80, num_steps=20, verbose=True, n_seeds=n_eval_seeds,
+        evaluate_on_observed=True,
+    )
+    baseline_test_eval = evaluate_gridworld_program(
+        seed_code, data_path, num_blocks, num_walls, agent_id,
+        num_datapoints=20, num_steps=20, verbose=True, n_seeds=n_eval_seeds,
+        evaluate_on_observed=False,
+    )
+    print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}, test: {baseline_test_eval['accuracy']:.4f}")
+
+    baseline_results = {
+        "train_accuracy": baseline_train_eval["accuracy"],
+        "test_accuracy": baseline_test_eval["accuracy"],
+        "train_correct": baseline_train_eval["correct"],
+        "train_total": baseline_train_eval["total"],
+        "test_correct": baseline_test_eval["correct"],
+        "test_total": baseline_test_eval["total"],
+    }
+    if wandb is not None:
+        wandb.log({
+            f"a{agent_id}_train_accuracy": baseline_train_eval["accuracy"],
+            f"a{agent_id}_test_accuracy": baseline_test_eval["accuracy"],
+            f"a{agent_id}_is_baseline": 1,
+        }, step=0)
+        if log_file_path is not None:
+            with open(log_file_path, "a") as f:
+                f.write(json.dumps({"step": 0, "iteration": -1, f"a{agent_id}_train_accuracy": baseline_train_eval["accuracy"], f"a{agent_id}_test_accuracy": baseline_test_eval["accuracy"], f"a{agent_id}_is_baseline": 1}) + "\n")
+
+    # K elite pools; each element (code, fitness=train_acc, test_acc, program_id, None, None)
+    elite_pools = []
+    for k in range(K):
+        elite_pools.append([
+            (seed_code, baseline_train_eval["accuracy"], baseline_test_eval["accuracy"], "baseline", None, None)
+        ])
+
+    max_elite_size = max(sample_size * 2, 20)
+
+    for iteration in range(n_iterations):
+        print(f"\n{'='*80}\nIteration {iteration + 1}/{n_iterations} (ensemble size K={K})\n{'='*80}")
+        iter_dir = output_path / f"iteration_{iteration}"
+        iter_dir.mkdir(exist_ok=True)
+
+        for k in range(K):
+            candidates_dir = iter_dir / f"member_{k}"
+            candidates_dir.mkdir(exist_ok=True)
+
+            num_parents_to_use = min(sample_size, len(elite_pools[k]))
+            selected_parents = elite_pools[k][:num_parents_to_use]
+            parent_codes = [p[0] for p in selected_parents]
+            parent_train_accs = [p[1] for p in selected_parents]
+
+            candidate_codes = generate_gridworld_program_variants(
+                client=client,
+                model_name=model_name,
+                template_code=seed_code,
+                parent_codes=parent_codes,
+                n_variants=n_candidates_per_iteration,
+                parent_train_accuracies=parent_train_accs,
+            )
+
+            candidate_results = []
+            for idx, code in enumerate(candidate_codes):
+                (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
+                if not code:
+                    candidate_results.append({"idx": idx, "code": "", "train_acc": 0.0, "test_acc": 0.0, "fitness": 0.0, "valid": False})
+                    continue
+                train_eval = evaluate_gridworld_program(
+                    code, data_path, num_blocks, num_walls, agent_id,
+                    num_datapoints=80, num_steps=20, n_seeds=n_eval_seeds,
+                    evaluate_on_observed=True,
+                )
+                test_eval = evaluate_gridworld_program(
+                    code, data_path, num_blocks, num_walls, agent_id,
+                    num_datapoints=20, num_steps=20, n_seeds=n_eval_seeds,
+                    evaluate_on_observed=False,
+                )
+                train_acc = train_eval["accuracy"]
+                test_acc = test_eval["accuracy"]
+                candidate_results.append({
+                    "idx": idx, "code": code, "train_acc": train_acc, "test_acc": test_acc,
+                    "fitness": train_acc,
+                    "train_correct": train_eval["correct"], "test_correct": test_eval["correct"],
+                    "train_total": train_eval["total"], "test_total": test_eval["total"],
+                    "valid": train_eval["errors"] == 0,
+                })
+
+            valid_results = [r for r in candidate_results if r["valid"]]
+            if valid_results:
+                valid_results.sort(key=lambda x: x["fitness"], reverse=True)
+                for r in valid_results:
+                    program_id = f"iteration_{iteration}_member_{k}_candidate_{r['idx']}"
+                    elite_pools[k].append((r["code"], r["fitness"], r["test_acc"], program_id, None, None))
+                elite_pools[k].sort(key=lambda x: x[1], reverse=True)
+                elite_pools[k] = elite_pools[k][:max_elite_size]
+
+        if wandb is not None and K > 0 and elite_pools[0]:
+            avg_train = np.mean([elite_pools[k][0][1] for k in range(K)])
+            avg_test_single = np.mean([elite_pools[k][0][2] for k in range(K)])
+            wandb.log({
+                f"a{agent_id}_train_accuracy": avg_train,
+                f"a{agent_id}_test_accuracy_single": avg_test_single,
+            }, step=iteration + 1)
+            if log_file_path is not None:
+                with open(log_file_path, "a") as f:
+                    f.write(json.dumps({"step": iteration + 1, "iteration": iteration, f"a{agent_id}_train_accuracy": avg_train, f"a{agent_id}_test_accuracy_single": avg_test_single}) + "\n")
+
+    # Best program per member
+    best_codes = [elite_pools[k][0][0] for k in range(K)]
+    ensemble_test_eval = evaluate_gridworld_ensemble_test(
+        best_codes, data_path, num_blocks, num_walls, agent_id,
+        num_datapoints=20, num_steps=20, verbose=True, n_seeds=n_eval_seeds,
+    )
+    mean_train_acc = np.mean([elite_pools[k][0][1] for k in range(K)])
+    ensemble_test_acc = ensemble_test_eval["accuracy"]
+
+    results = {
+        "baseline": baseline_results,
+        "overall_best_train_accuracy": {"train_accuracy": mean_train_acc, "test_accuracy": ensemble_test_acc, "program_id": "ensemble"},
+        "overall_best_test_accuracy": {"train_accuracy": mean_train_acc, "test_accuracy": ensemble_test_acc, "program_id": "ensemble"},
+        "ensemble_test_accuracy": ensemble_test_acc,
+        "ensemble_size": K,
+    }
+    (output_path / "results.json").write_text(json.dumps(results, indent=2))
+
+    print(f"\n{'='*80}\nEvolution Complete (gridworld_ensemble)\n{'='*80}")
+    print(f"Mean train accuracy (over K best): {mean_train_acc:.4f}")
+    print(f"Ensemble test accuracy (majority vote): {ensemble_test_acc:.4f}")
+    print(f"Baseline test accuracy (single): {baseline_test_eval['accuracy']:.4f}")
+    print(f"Results saved to: {output_path / 'results.json'}")
+
+    return {
+        "participant_id": agent_id,
+        "train_acc": mean_train_acc,
+        "test_acc": ensemble_test_acc,
+    }
+
+
 def main():
     """Main entry point."""
     import argparse
@@ -1855,14 +2243,14 @@ def main():
         "--dataset",
         type=str,
         default="choice13k",
-        choices=["choice13k", "gridworld", "cpc18"],
-        help="Dataset to use: choice13k, gridworld, or cpc18 (Track II)",
+        choices=["choice13k", "gridworld", "gridworld_ensemble", "cpc18", "mixed_gambles"],
+        help="Dataset to use: choice13k, gridworld, gridworld_ensemble (ensemble ablation), cpc18 (Track II), or mixed_gambles",
     )
     parser.add_argument(
         "--seed_path",
         type=str,
         default=None,
-        help="Path to seed program (starting persona). If not set, auto-detects from persona_code_example/gridworld/ for gridworld. Default for choice13k: persona_code_example/vanilla.py. Default for cpc18: persona_code_example/cpc18/hard.py",
+        help="Path to seed program (starting persona). If not set, auto-detects from persona_code_example/gridworld/ for gridworld. Default for choice13k: persona_code_example/vanilla.py. Default for cpc18: persona_code_example/cpc18/hard.py. Default for mixed_gambles: persona_code_example/hard_Qwen.py",
     )
     parser.add_argument(
         "--data_path",
@@ -2029,8 +2417,12 @@ def main():
         mode = "non_strict"  # Template_evo_non_strict.py uses non_strict mode
         if args.dataset == "gridworld":
             base_run_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}"
+        elif args.dataset == "gridworld_ensemble":
+            base_run_dir = f"generated_outputs/gridworld_ensemble/{mode}/run_{timestamp}"
         elif args.dataset == "cpc18":
             base_run_dir = f"generated_outputs/cpc18/{mode}/run_{timestamp}"
+        elif args.dataset == "mixed_gambles":
+            base_run_dir = f"generated_outputs/mixed_gambles/{mode}/run_{timestamp}"
         else:
             base_run_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
@@ -2052,14 +2444,14 @@ def main():
     
     # Determine seed program path
     if args.seed_path is None:
-        if args.dataset == "gridworld":
-            # Auto-detect template program for gridworld
-            # For sequential mode, we'll determine this per epoch
-            # For now, we'll handle it in the epoch loop
+        if args.dataset == "gridworld" or args.dataset == "gridworld_ensemble":
+            # Auto-detect template program for gridworld / gridworld_ensemble (per epoch or per agent)
             seed_program_path = None
         elif args.dataset == "cpc18":
             # Default for CPC18 Track II
             seed_program_path = "persona_code_example/cpc18/hard.py"
+        elif args.dataset == "mixed_gambles":
+            seed_program_path = "persona_code_example/hard_Qwen.py"
         else:
             # Default for choice13k
             seed_program_path = "persona_code_example/vanilla.py"
@@ -2182,11 +2574,78 @@ def main():
                 wandb.finish()
             return
     
-    # Handle sequential mode for gridworld
-    if args.dataset == "gridworld" and args.loop_mode == "sequential":
+    # Handle gridworld_ensemble: same as gridworld multi-agent but with run_evolution_gridworld_ensemble
+    if args.dataset == "gridworld_ensemble":
+        num_blocks_arg = getattr(args, 'num_blocks', None)
+        num_walls_arg = getattr(args, 'num_walls', None)
+        agent_id_arg = getattr(args, 'agent_id', None)
+        if (num_blocks_arg is not None and num_walls_arg is not None and
+            args.loop_mode != "sequential" and
+            (args.num_agents_to_sample > 1 or agent_id_arg is None)):
+            print(f"\n{'='*80}")
+            print(f"Processing gridworld_ensemble: {args.num_agents_to_sample} agent types for problem: num_blocks={num_blocks_arg}, num_walls={num_walls_arg}")
+            print(f"{'='*80}")
+            if agent_id_arg is not None and args.num_agents_to_sample == 1:
+                agent_types_to_process = [agent_id_arg]
+            else:
+                agent_types_to_process = list(range(args.num_agents_to_sample))
+            for agent_id in tqdm(agent_types_to_process, desc="Agent types"):
+                print(f"\n{'='*80}\nProcessing agent type {agent_id} (gridworld_ensemble)\n{'='*80}")
+                if args.seed_path is None:
+                    detected_seed_path = find_template_program_for_gridworld(num_blocks_arg, num_walls_arg, agent_id)
+                    if detected_seed_path is None:
+                        print(f"Warning: Could not auto-detect template for agent_id={agent_id}, skipping...")
+                        continue
+                    agent_seed_path = detected_seed_path
+                    print(f"Auto-detected seed program: {agent_seed_path}")
+                else:
+                    agent_seed_path = args.seed_path
+                if base_run_dir is not None:
+                    agent_output_dir = os.path.join(base_run_dir, f"agent_{agent_id}")
+                else:
+                    mode = "non_strict"
+                    agent_output_dir = f"generated_outputs/gridworld_ensemble/{mode}/run_{timestamp}/agent_{agent_id}"
+                agent_summary = run_evolution_gridworld_ensemble(
+                    seed_program_path=agent_seed_path,
+                    participant_id=agent_id,
+                    data_path=args.data_path,
+                    num_blocks=num_blocks_arg,
+                    num_walls=num_walls_arg,
+                    agent_id=agent_id,
+                    n_iterations=args.n_iterations,
+                    n_candidates_per_iteration=args.n_candidates,
+                    model_name=args.model_name,
+                    client_kwargs=client_kwargs if client_kwargs else None,
+                    output_dir=agent_output_dir,
+                    wandb=wandb,
+                    n_eval_seeds=args.n_eval_seeds,
+                    sample_size=args.sample_size,
+                )
+                if agent_summary is not None and summary_file is not None:
+                    participants_summary.append({
+                        'agent_id': agent_id,
+                        'num_blocks': num_blocks_arg,
+                        'num_walls': num_walls_arg,
+                        'train_acc': agent_summary.get('train_acc'),
+                        'test_acc': agent_summary.get('test_acc'),
+                    })
+                    with open(summary_file, 'w', newline='') as f:
+                        fieldnames = ['agent_id', 'num_blocks', 'num_walls', 'train_acc', 'test_acc']
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(participants_summary)
+                    print(f"\nSummary updated: {summary_file}")
+            if wandb is not None:
+                wandb.finish()
+            return
+    
+    # Handle sequential mode for gridworld or gridworld_ensemble
+    if (args.dataset == "gridworld" or args.dataset == "gridworld_ensemble") and args.loop_mode == "sequential":
         all_problem_configs = get_all_problem_configs()
         num_agent_types = 10  # Total number of agent types
         total_configs = len(all_problem_configs)
+        use_ensemble = args.dataset == "gridworld_ensemble"
+        out_subdir = "gridworld_ensemble" if use_ensemble else "gridworld"
         
         # Calculate which config and agent to use for each epoch
         def get_config_and_agents_for_epoch(epoch_idx):
@@ -2208,7 +2667,7 @@ def main():
             # Process all agent types for this epoch
             for agent_id in agent_indices:
                 print(f"\n{'='*80}")
-                print(f"Processing epoch {epoch+1}/{epochs_to_process} - Problem: num_blocks={num_blocks}, num_walls={num_walls}, Agent: {agent_id}")
+                print(f"Processing epoch {epoch+1}/{epochs_to_process} - Problem: num_blocks={num_blocks}, num_walls={num_walls}, Agent: {agent_id}" + (" (gridworld_ensemble)" if use_ensemble else ""))
                 print(f"{'='*80}")
                 
                 # Determine seed program path for this agent type
@@ -2229,26 +2688,44 @@ def main():
                 if base_run_dir is not None:
                     participant_output_dir = os.path.join(base_run_dir, f"epoch_{epoch}", f"agent_{agent_id}")
                 else:
-                    mode = "non_strict"  # Template_evo_non_strict.py uses non_strict mode
-                    participant_output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
+                    mode = "non_strict"
+                    participant_output_dir = f"generated_outputs/{out_subdir}/{mode}/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
                 
-                participant_summary = run_evolution(
-                    seed_program_path=epoch_seed_path,
-                    dataset=args.dataset,
-                    participant_id=agent_id,  # Use agent_id for tracking
-                    data_path=args.data_path,
-                    num_blocks=num_blocks,
-                    num_walls=num_walls,
-                    agent_id=agent_id,
-                    n_iterations=args.n_iterations,
-                    n_candidates_per_iteration=args.n_candidates,
-                    model_name=args.model_name,
-                    client_kwargs=client_kwargs if client_kwargs else None,
-                    output_dir=participant_output_dir,
-                    wandb=wandb,
-                    n_eval_seeds=args.n_eval_seeds,
-                    sample_size=args.sample_size,
-                )
+                if use_ensemble:
+                    participant_summary = run_evolution_gridworld_ensemble(
+                        seed_program_path=epoch_seed_path,
+                        participant_id=agent_id,
+                        data_path=args.data_path,
+                        num_blocks=num_blocks,
+                        num_walls=num_walls,
+                        agent_id=agent_id,
+                        n_iterations=args.n_iterations,
+                        n_candidates_per_iteration=args.n_candidates,
+                        model_name=args.model_name,
+                        client_kwargs=client_kwargs if client_kwargs else None,
+                        output_dir=participant_output_dir,
+                        wandb=wandb,
+                        n_eval_seeds=args.n_eval_seeds,
+                        sample_size=args.sample_size,
+                    )
+                else:
+                    participant_summary = run_evolution(
+                        seed_program_path=epoch_seed_path,
+                        dataset=args.dataset,
+                        participant_id=agent_id,
+                        data_path=args.data_path,
+                        num_blocks=num_blocks,
+                        num_walls=num_walls,
+                        agent_id=agent_id,
+                        n_iterations=args.n_iterations,
+                        n_candidates_per_iteration=args.n_candidates,
+                        model_name=args.model_name,
+                        client_kwargs=client_kwargs if client_kwargs else None,
+                        output_dir=participant_output_dir,
+                        wandb=wandb,
+                        n_eval_seeds=args.n_eval_seeds,
+                        sample_size=args.sample_size,
+                    )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
                 if participant_summary is not None and summary_file is not None:
@@ -2291,7 +2768,7 @@ def main():
                 
                 # Determine seed program path
                 if args.seed_path is None:
-                    if args.dataset == "gridworld":
+                    if args.dataset == "gridworld" or args.dataset == "gridworld_ensemble":
                         num_blocks = getattr(args, 'num_blocks', None)
                         num_walls = getattr(args, 'num_walls', None)
                         agent_id = getattr(args, 'agent_id', None)
@@ -2304,32 +2781,58 @@ def main():
                             seed_program_path = detected_seed_path
                             print(f"Auto-detected seed program: {seed_program_path}")
                         else:
-                            print("Error: For gridworld without --seed_path, must provide --num_blocks, --num_walls, and --agent_id")
+                            print("Error: For gridworld/gridworld_ensemble without --seed_path, must provide --num_blocks, --num_walls, and --agent_id")
                             continue
                     elif args.dataset == "cpc18":
                         seed_program_path = "persona_code_example/cpc18/hard.py"
+                    elif args.dataset == "mixed_gambles":
+                        seed_program_path = "persona_code_example/hard_Qwen.py"
                     else:
                         seed_program_path = "persona_code_example/vanilla.py"
                 else:
                     seed_program_path = args.seed_path
                 
-                participant_summary = run_evolution(
-                    seed_program_path=seed_program_path,
-                    dataset=args.dataset,
-                    participant_id=participant_id,
-                    data_path=args.data_path,
-                    num_blocks=getattr(args, 'num_blocks', None),
-                    num_walls=getattr(args, 'num_walls', None),
-                    agent_id=getattr(args, 'agent_id', None),
-                    n_iterations=args.n_iterations,
-                    n_candidates_per_iteration=args.n_candidates,
-                    model_name=args.model_name,
-                    client_kwargs=client_kwargs if client_kwargs else None,
-                    output_dir=participant_output_dir,
-                    wandb=wandb,
-                    n_eval_seeds=args.n_eval_seeds,
-                    sample_size=args.sample_size,
-                )
+                if args.dataset == "gridworld_ensemble":
+                    num_blocks = getattr(args, 'num_blocks', None)
+                    num_walls = getattr(args, 'num_walls', None)
+                    agent_id = getattr(args, 'agent_id', participant_id)
+                    if num_blocks is None or num_walls is None:
+                        print("Error: For gridworld_ensemble must provide --num_blocks and --num_walls")
+                        continue
+                    participant_summary = run_evolution_gridworld_ensemble(
+                        seed_program_path=seed_program_path,
+                        participant_id=participant_id,
+                        data_path=args.data_path,
+                        num_blocks=num_blocks,
+                        num_walls=num_walls,
+                        agent_id=agent_id,
+                        n_iterations=args.n_iterations,
+                        n_candidates_per_iteration=args.n_candidates,
+                        model_name=args.model_name,
+                        client_kwargs=client_kwargs if client_kwargs else None,
+                        output_dir=participant_output_dir,
+                        wandb=wandb,
+                        n_eval_seeds=args.n_eval_seeds,
+                        sample_size=args.sample_size,
+                    )
+                else:
+                    participant_summary = run_evolution(
+                        seed_program_path=seed_program_path,
+                        dataset=args.dataset,
+                        participant_id=participant_id,
+                        data_path=args.data_path,
+                        num_blocks=getattr(args, 'num_blocks', None),
+                        num_walls=getattr(args, 'num_walls', None),
+                        agent_id=getattr(args, 'agent_id', None),
+                        n_iterations=args.n_iterations,
+                        n_candidates_per_iteration=args.n_candidates,
+                        model_name=args.model_name,
+                        client_kwargs=client_kwargs if client_kwargs else None,
+                        output_dir=participant_output_dir,
+                        wandb=wandb,
+                        n_eval_seeds=args.n_eval_seeds,
+                        sample_size=args.sample_size,
+                    )
                 
                 # Update participants summary after each participant completes
                 if participant_summary is not None and summary_file is not None:
