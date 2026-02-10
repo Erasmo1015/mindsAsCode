@@ -1,0 +1,39 @@
+You are given observations of human choices in mixed-gamble problems.
+
+Each problem presents two options:
+- One risky gamble with possible gains and losses
+- One certain outcome
+
+All information about outcomes and probabilities is fully described in the problem.
+Each decision is independent.
+
+IMPORTANT DATA PROPERTIES:
+- has_feedback is always False
+- history does NOT contain useful information
+- There is NO outcome realization shown to the participant
+- Choices depend only on the current gamble, not past trials
+
+Write Python code that reproduces the observed behavior.
+
+You must generate a complete program implementing:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys
+        - has_feedback: bool
+    history: unused (may be empty)
+    return: int, 0 for Option A or 1 for Option B
+    """
+
+REQUIREMENTS:
+- Pure Python, deterministic
+- Use ONLY information from the current problem
+- Do NOT rely on history or feedback
+- Prefer simple, consistent decision rules
+- Avoid symmetric rules that treat both options identically
+
+Output ONLY the complete choose(...) function.
+

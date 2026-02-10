@@ -1003,8 +1003,10 @@ def generate_parameter_variants(
     if dataset == "cpc18":
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "strict", "single_code_template.txt")
+    elif dataset == "mixed_gambles":
+        prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "strict", "infer_single_choice.txt")
+        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "strict", "single_code_template.txt")
     else:
-        # choice13k and mixed_gambles use same strict prompts
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "strict", "single_code_template.txt")
     

@@ -1,0 +1,13 @@
+```python
+def choose(problem, history):
+    """
+    problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
+    history: list of dicts with keys action (int) and feedback (float or None)
+    return: int index (0 for Option A, 1 for Option B)
+    """
+    # Write your decision logic here.
+    # You can use probabilities, rewards, and history.
+    # Must return 0 or 1.
+    return 0
+```
+

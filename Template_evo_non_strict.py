@@ -1072,6 +1072,9 @@ def generate_program_variants(
     if dataset == "cpc18":
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "single_code_template.txt")
+    elif dataset == "mixed_gambles":
+        prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "infer_single_choice.txt")
+        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "single_code_template.txt")
     else:
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "single_code_template.txt")
