@@ -776,35 +776,146 @@ def _normalize_gridworld_action(predicted_action: Any) -> int:
     return int(predicted_action)
 
 
+def _gridworld_correct_counts_first20(
+    agent_codes: List[str],
+    data_path: str,
+    num_blocks: int,
+    num_walls: int,
+    agent_id: int,
+    num_datapoints: int = 80,
+    n_seeds: int = 1,
+) -> List[float]:
+    """Compute number of correct predictions per program on first 20 observed steps (train data).
+    Same data/step logic as evaluate_gridworld_program(..., evaluate_on_observed=True).
+    No epsilon smoothing: each step is correct (1) or wrong (0). Returns list of K scores.
+    When n_seeds > 1, returns mean correct count per program across seeds.
+    """
+    framework = AgentExecutionFramework()
+    agents = []
+    for code in agent_codes:
+        try:
+            agent = framework.compile_agent(code, num_agents=1, num_blocks=num_blocks)
+            agents.append(agent)
+        except Exception:
+            agents.append(None)
+    if not agents or all(a is None for a in agents):
+        return [0.0] * len(agent_codes)
+
+    class DummyArgs:
+        def __init__(self):
+            self.data_path = data_path
+            self.num_agents = 1
+            self.num_datapoints_per_agent = num_datapoints
+            self.num_steps = 20
+            self.group = False
+            self.flip_quarter = True
+            self.env_size = 10
+            self.as_images = False
+
+    dummy_args = DummyArgs()
+
+    def to_numpy(x):
+        if isinstance(x, (jnp.ndarray, jax.Array)):
+            return np.array(x)
+        return x
+
+    correct_counts_per_seed = []
+    for seed in range(n_seeds):
+        try:
+            dataloader = make_dataloader(
+                dummy_args,
+                num_agents_to_sample=1,
+                num_datapoints_per_agent_to_sample=num_datapoints,
+                training=False,
+                epoch=0,
+                num_blocks=num_blocks,
+                num_walls=num_walls,
+                agent_indices=[agent_id],
+            )
+            datapoint = next(dataloader)
+            correct_sum = [1e-6] * len(agents)
+            for dp_idx in range(num_datapoints):
+                try:
+                    data_sample = jax.tree.map(lambda x: x[0, dp_idx, :20 + 20], datapoint)
+                    initial_states_traj = jax.tree.map(lambda x: x[:20], data_sample['states'])
+                    initial_actions_traj = jax.tree.map(lambda x: x[:20], data_sample['actions'])
+                    for timestep in range(initial_actions_traj.shape[0] - 1):
+                        state = jax.tree.map(lambda x: x[timestep], initial_states_traj)
+                        state = jax.tree.map(to_numpy, state)
+                        if len(state['agent_locations']) == 1:
+                            state['agent_id'] = 0
+                        gt_action = int(initial_actions_traj[timestep][0])
+                        for k, agent in enumerate(agents):
+                            if agent is None:
+                                continue
+                            try:
+                                pred = framework.execute_agent(agent, state)
+                                pred_idx = _normalize_gridworld_action(pred)
+                                if pred_idx == gt_action:
+                                    correct_sum[k] += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    continue
+            correct_counts_per_seed.append(correct_sum)
+        except Exception:
+            correct_counts_per_seed.append([0] * len(agents))
+    if not correct_counts_per_seed:
+        return [0.0] * len(agent_codes)
+    scores = np.mean(correct_counts_per_seed, axis=0)
+    return scores.tolist()
+
+
+def compute_gridworld_ensemble_weights(
+    agent_codes: List[str],
+    data_path: str,
+    num_blocks: int,
+    num_walls: int,
+    agent_id: int,
+    num_datapoints: int = 80,
+    n_seeds: int = 1,
+) -> List[float]:
+    """Compute weights from correct-count scores on first 20 steps (ROTE-aligned).
+    score_h = number of correct predictions on first 20 steps (no epsilon).
+    scores = scores - max(scores); weights = exp(scores); weights = weights / sum(weights).
+    """
+    scores = np.array(
+        _gridworld_correct_counts_first20(
+            agent_codes, data_path, num_blocks, num_walls, agent_id,
+            num_datapoints=num_datapoints, n_seeds=n_seeds,
+        ),
+        dtype=np.float64,
+    )
+    scores = scores - np.max(scores)
+    weights = np.exp(scores)
+    weights = weights / weights.sum()
+    return weights.tolist()
+
+
 def evaluate_gridworld_ensemble_test(
     agent_codes: List[str],
     data_path: str,
     num_blocks: int,
     num_walls: int,
     agent_id: int,
+    weights: List[float],
+    top_k: int = 0,
     num_datapoints: int = 20,
     num_steps: int = 20,
     verbose: bool = False,
     n_seeds: int = 1,
 ) -> Dict[str, float]:
-    """Evaluate an ensemble of gridworld programs on future steps with majority vote.
+    """Evaluate an ensemble of gridworld programs on future steps (ROTE bootstrap–aligned).
     
-    Same data and step logic as evaluate_gridworld_program(..., evaluate_on_observed=False).
-    For each (datapoint, future_step), collects one prediction per program, takes majority
-    vote, and compares to ground truth. Returns ensemble test accuracy.
-    
-    Args:
-        agent_codes: List of K program code strings (ensemble members)
-        data_path, num_blocks, num_walls, agent_id: Same as evaluate_gridworld_program
-        num_datapoints: Test datapoints (default 20, i.e. indices 80-99)
-        num_steps: Future steps to evaluate (default 20)
-        verbose: Whether to print verbose output
-        n_seeds: Number of evaluation runs to average (default: 1)
-    
-    Returns:
-        Dictionary with accuracy, total, correct, errors (0 if all agents compiled).
+    Hypothesis selection: use first n_hyp = len(agent_codes) (order preserved by fitness).
+    If top_k > 0 and top_k < n_hyp: keep top_k programs by weight, renormalize.
+    Aggregation: pi[action] += weight for each program's predicted action (weighted one-hot).
+    Accuracy: tie-aware — if pi[gt] == max(pi), add 1/num_max where num_max = count of actions at max.
+    Uses teacher-forced states: obs = dataset_states[t+1] for each future step.
     """
-    from collections import Counter
+    num_actions = 6
+    if len(weights) != len(agent_codes):
+        raise ValueError("weights must have same length as agent_codes")
     framework = AgentExecutionFramework()
     agents = []
     for code in agent_codes:
@@ -817,6 +928,18 @@ def evaluate_gridworld_ensemble_test(
             agents.append(None)
     if not agents or all(a is None for a in agents):
         return {"accuracy": 0.0, "total": 0, "correct": 0, "errors": 1}
+
+    # top_k: within prefix (first n_hyp), keep top_k by weight and renormalize
+    curr_weights = list(weights)
+    curr_agents = list(agents)
+    n_hyp = len(curr_agents)
+    if top_k > 0 and top_k < n_hyp:
+        idx_by_weight = np.argsort(curr_weights)[::-1]
+        keep_idx = idx_by_weight[:top_k]
+        curr_agents = [curr_agents[i] for i in keep_idx]
+        w = np.array([curr_weights[i] for i in keep_idx], dtype=np.float64)
+        w = w / w.sum()
+        curr_weights = w.tolist()
 
     class DummyArgs:
         def __init__(self):
@@ -879,24 +1002,24 @@ def evaluate_gridworld_ensemble_test(
                             else:
                                 gt_action = int(gt_action_this_step)
 
-                            votes = []
-                            for agent in agents:
+                            # ROTE-aligned: weighted one-hot ensemble distribution pi
+                            pi = np.zeros(num_actions, dtype=np.float64)
+                            for agent, weight in zip(curr_agents, curr_weights):
                                 if agent is None:
                                     continue
                                 try:
                                     pred = framework.execute_agent(agent, current_obs)
-                                    votes.append(_normalize_gridworld_action(pred))
+                                    a = _normalize_gridworld_action(pred)
+                                    if 0 <= a < num_actions:
+                                        pi[a] += weight
                                 except Exception:
                                     pass
-                            if not votes:
-                                seed_total += 1
-                                continue
-                            # Majority vote (mode); tie-break by smallest action index
-                            counts = Counter(votes)
-                            ensemble_pred = max(counts.keys(), key=lambda a: (counts[a], -a))
-
-                            if ensemble_pred == gt_action:
-                                seed_correct += 1
+                            # Tie-aware accuracy (ROTE): if gt is among max, add 1/num_max
+                            max_prob = float(np.max(pi))
+                            tol = 1e-9
+                            num_max = int(np.sum(np.abs(pi - max_prob) < tol))
+                            if num_max > 0 and gt_action < num_actions and abs(pi[gt_action] - max_prob) < tol:
+                                seed_correct += 1.0 / num_max
                             seed_total += 1
                         except Exception as e:
                             seed_total += 1
@@ -919,7 +1042,7 @@ def evaluate_gridworld_ensemble_test(
         correct_steps = seed_correct
 
     avg_acc = np.mean(accuracies) if accuracies else 0.0
-    correct = int(avg_acc * total_steps) if total_steps > 0 else 0
+    correct = avg_acc * total_steps if total_steps > 0 else 0.0  # fractional due to tie-aware scoring
     return {"accuracy": avg_acc, "total": total_steps, "correct": correct, "errors": 0}
 
 
@@ -2072,16 +2195,17 @@ def run_evolution_gridworld_ensemble(
     wandb=None,
     n_eval_seeds: int = 3,
     sample_size: int = 3,
+    top_k: int = 0,
 ):
     """
-    Run gridworld evolution with K independent ensemble members; test = majority vote over K programs.
-    Reuses same data, evaluation (evaluate_gridworld_program), and evolution logic as gridworld.
-    K = sample_size (number of ensemble members). No cross-breeding between members.
+    Run gridworld evolution with K independent ensemble members; test = ROTE-aligned weighted ensemble.
+    Hypothesis selection: first K programs (by fitness). If top_k > 0 and top_k < K, use top_k by weight.
+    Weights from first-20-step log-likelihood; tie-aware accuracy; teacher-forced states.
     """
     if num_blocks is None or num_walls is None or agent_id is None:
         raise ValueError("For gridworld_ensemble, num_blocks, num_walls, and agent_id must be provided")
-    K = sample_size  # ensemble size
-    print(f"Gridworld ensemble mode: K={K} independent programs, test = majority vote. num_blocks={num_blocks}, num_walls={num_walls}, agent_id={agent_id}")
+    K = sample_size  # ensemble size (n_hyp)
+    print(f"Gridworld ensemble mode: K={K} programs, ROTE-aligned weighted eval. num_blocks={num_blocks}, num_walls={num_walls}, agent_id={agent_id}")
 
     if client_kwargs is None:
         client_kwargs = {}
@@ -2195,21 +2319,45 @@ def run_evolution_gridworld_ensemble(
                 elite_pools[k].sort(key=lambda x: x[1], reverse=True)
                 elite_pools[k] = elite_pools[k][:max_elite_size]
 
-        if wandb is not None and K > 0 and elite_pools[0]:
+        # After all K members updated: compute weights from first-20-step log-likelihood, then ensemble test
+        if K > 0 and elite_pools[0]:
+            best_codes_iter = [elite_pools[k][0][0] for k in range(K)]
+            weights_iter = compute_gridworld_ensemble_weights(
+                best_codes_iter, data_path, num_blocks, num_walls, agent_id,
+                num_datapoints=80, n_seeds=n_eval_seeds,
+            )
+            ensemble_test_eval_iter = evaluate_gridworld_ensemble_test(
+                best_codes_iter, data_path, num_blocks, num_walls, agent_id,
+                weights=weights_iter,
+                top_k=top_k,
+                num_datapoints=20, num_steps=20, verbose=False, n_seeds=n_eval_seeds,
+            )
+            ensemble_test_acc_iter = ensemble_test_eval_iter["accuracy"]
+            # Best individual program ID this iteration (member with highest train acc)
+            best_k = max(range(K), key=lambda k: elite_pools[k][0][1])
+            best_program_id = elite_pools[best_k][0][3]
             avg_train = np.mean([elite_pools[k][0][1] for k in range(K)])
-            avg_test_single = np.mean([elite_pools[k][0][2] for k in range(K)])
-            wandb.log({
-                f"a{agent_id}_train_accuracy": avg_train,
-                f"a{agent_id}_test_accuracy_single": avg_test_single,
-            }, step=iteration + 1)
-            if log_file_path is not None:
-                with open(log_file_path, "a") as f:
-                    f.write(json.dumps({"step": iteration + 1, "iteration": iteration, f"a{agent_id}_train_accuracy": avg_train, f"a{agent_id}_test_accuracy_single": avg_test_single}) + "\n")
+            if wandb is not None:
+                log_dict = {
+                    f"a{agent_id}_train_accuracy": avg_train,
+                    f"a{agent_id}_test_accuracy": ensemble_test_acc_iter,
+                    f"a{agent_id}_best_program_id": best_program_id,
+                }
+                wandb.log(log_dict, step=iteration + 1)
+                if log_file_path is not None:
+                    with open(log_file_path, "a") as f:
+                        f.write(json.dumps({"step": iteration + 1, "iteration": iteration, **log_dict}) + "\n")
 
-    # Best program per member
+    # Best program per member; weights from log-likelihood on first 20 steps
     best_codes = [elite_pools[k][0][0] for k in range(K)]
+    final_weights = compute_gridworld_ensemble_weights(
+        best_codes, data_path, num_blocks, num_walls, agent_id,
+        num_datapoints=80, n_seeds=n_eval_seeds,
+    )
     ensemble_test_eval = evaluate_gridworld_ensemble_test(
         best_codes, data_path, num_blocks, num_walls, agent_id,
+        weights=final_weights,
+        top_k=top_k,
         num_datapoints=20, num_steps=20, verbose=True, n_seeds=n_eval_seeds,
     )
     mean_train_acc = np.mean([elite_pools[k][0][1] for k in range(K)])
@@ -2226,7 +2374,7 @@ def run_evolution_gridworld_ensemble(
 
     print(f"\n{'='*80}\nEvolution Complete (gridworld_ensemble)\n{'='*80}")
     print(f"Mean train accuracy (over K best): {mean_train_acc:.4f}")
-    print(f"Ensemble test accuracy (majority vote): {ensemble_test_acc:.4f}")
+    print(f"Ensemble test accuracy (weighted, tie-aware): {ensemble_test_acc:.4f}")
     print(f"Baseline test accuracy (single): {baseline_test_eval['accuracy']:.4f}")
     print(f"Results saved to: {output_path / 'results.json'}")
 
@@ -2321,6 +2469,12 @@ def main():
         type=int,
         default=3,
         help="Number of parent programs to use when generating each child (default: 3)",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=0,
+        help="For gridworld_ensemble: if > 0 and < sample_size, use top_k programs by weight only (0 = use all)",
     )
     parser.add_argument(
         "--n_eval_seeds",
@@ -2623,6 +2777,7 @@ def main():
                     wandb=wandb,
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
+                    top_k=getattr(args, 'top_k', 0),
                 )
                 if agent_summary is not None and summary_file is not None:
                     participants_summary.append({
@@ -2710,6 +2865,7 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
+                        top_k=getattr(args, 'top_k', 0),
                     )
                 else:
                     participant_summary = run_evolution(
@@ -2817,6 +2973,7 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
+                        top_k=getattr(args, 'top_k', 0),
                     )
                 else:
                     participant_summary = run_evolution(
