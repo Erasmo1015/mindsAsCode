@@ -286,9 +286,15 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int) -> Tuple[List[Di
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+    # Random train/test split (reproducible).
+    # The dataset is ordered by stimulus structure,
+    # so row-order split creates artificial distribution shift.
+    rng = np.random.default_rng(42)
+    indices = np.arange(len(all_trials))
+    rng.shuffle(indices)
     split_point = int(len(all_trials) * 0.8)
-    train_trials = all_trials[:split_point]
-    test_trials = all_trials[split_point:]
+    train_trials = [all_trials[i] for i in indices[:split_point]]
+    test_trials = [all_trials[i] for i in indices[split_point:]]
     return train_trials, test_trials, option_keys
 
 
@@ -320,10 +326,15 @@ def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, 
                 }
             )
             history_accum.append(history_entry)
-    # Fixed 80:20 split (matching ROTE's approach in plot_and_eval.py)
+    # Random train/test split (reproducible).
+    # The dataset is ordered by stimulus structure,
+    # so row-order split creates artificial distribution shift.
+    rng = np.random.default_rng(42)
+    indices = np.arange(len(all_trials))
+    rng.shuffle(indices)
     split_point = int(len(all_trials) * 0.8)
-    train_trials = all_trials[:split_point]
-    test_trials = all_trials[split_point:]
+    train_trials = [all_trials[i] for i in indices[:split_point]]
+    test_trials = [all_trials[i] for i in indices[split_point:]]
     return train_trials, test_trials, options
 
 
@@ -1385,7 +1396,7 @@ def run_evolution(
         csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
         print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
         train_trials, test_trials, options = load_mixed_gambles_data(csv_path, participant_id)
-        print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
+        print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     else:
         # Choice13k: extract parameters
         baseline_params = extract_parameters_from_template(template_code)
@@ -1424,7 +1435,7 @@ def run_evolution(
         
         # Split trials
         train_trials, test_trials, options = split_trials(exp)
-        print(f"Split trials: {len(train_trials)} train, {len(test_trials)} test")
+        print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     
     # Setup output directory
     if output_dir is None:

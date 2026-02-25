@@ -79,9 +79,15 @@ def load_mixed_gambles_data(
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+    # Random train/test split (reproducible).
+    # The dataset is ordered by stimulus structure,
+    # so row-order split creates artificial distribution shift.
+    rng = np.random.default_rng(42)
+    indices = np.arange(len(all_trials))
+    rng.shuffle(indices)
     split_point = int(len(all_trials) * 0.8)
-    train_trials = all_trials[:split_point]
-    test_trials = all_trials[split_point:]
+    train_trials = [all_trials[i] for i in indices[:split_point]]
+    test_trials = [all_trials[i] for i in indices[split_point:]]
     return train_trials, test_trials, option_keys
 
 
@@ -333,8 +339,9 @@ def main() -> None:
     if not program_path.exists():
         raise FileNotFoundError(f"Program not found: {args.program_path}")
 
-    # Load data (same split as Template_evo_non_strict)
+    # Load data (same random split as Template_evo_non_strict, seed=42)
     train_trials, test_trials, _ = load_mixed_gambles_data(str(csv_path), args.participant_id)
+    print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     choose_fn = load_choose_function(str(program_path))
     iter_id, cand_id = parse_program_path(str(program_path))
     iter_s = str(iter_id) if iter_id is not None else "NA"
