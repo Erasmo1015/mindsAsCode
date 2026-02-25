@@ -1609,11 +1609,12 @@ def run_evolution(
     
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     for iteration in range(n_iterations):
+        iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
         print(f"\n{'='*80}")
-        print(f"Iteration {iteration + 1}/{n_iterations}")
+        print(f"Iteration {iteration_step}/{n_iterations}")
         print(f"{'='*80}")
         
-        iter_dir = output_path / f"iteration_{iteration}"
+        iter_dir = output_path / f"iteration_{iteration_step}"
         iter_dir.mkdir(exist_ok=True)
         candidates_dir = iter_dir / "candidates"
         candidates_dir.mkdir(exist_ok=True)
@@ -1850,7 +1851,7 @@ def run_evolution(
             if candidate_results[-1]["valid"]:
                 if dataset == "cpc18":
                     all_candidate_results.append({
-                        "iteration": iteration,
+                        "iteration": iteration_step,
                         "candidate_idx": idx,
                         "fitness": candidate_results[-1]["fitness"],  # -MSE
                         "train_mse": candidate_results[-1]["train_mse"],
@@ -1858,7 +1859,7 @@ def run_evolution(
                     })
                 else:
                     all_candidate_results.append({
-                        "iteration": iteration,
+                        "iteration": iteration_step,
                         "candidate_idx": idx,
                         "train_acc": candidate_results[-1]["train_acc"],
                         "test_acc": candidate_results[-1]["test_acc"],
@@ -1907,7 +1908,7 @@ def run_evolution(
             
             # Add all valid candidates to elite set
             for result in valid_results:
-                program_id = f"iteration_{iteration}_candidate_{result['idx']}"
+                program_id = f"iteration_{iteration_step}_candidate_{result['idx']}"
                 if dataset == "cpc18":
                     elite_parents.append((
                         result["code"],
@@ -1947,7 +1948,7 @@ def run_evolution(
                         "test_mse": best_result['test_mse'],
                         "train_accuracy": best_result['train_acc'],  # Keep for debugging
                         "test_accuracy": best_result['test_acc'],  # Keep for debugging
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
                 if best_result['test_mse'] < overall_best_test["test_mse"]:  # Lower test_mse is better
                     overall_best_test = {
@@ -1956,20 +1957,20 @@ def run_evolution(
                         "test_mse": best_result['test_mse'],
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
                     overall_best_train = {
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
                 if best_result['test_acc'] > overall_best_test["test_accuracy"]:
                     overall_best_test = {
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
         else:
             print("\nWarning: No valid programs generated in this iteration!")
@@ -1978,11 +1979,11 @@ def run_evolution(
         # Save iteration results
         best_program_id = None
         if valid_results:
-            best_program_id = f"iteration_{iteration}_candidate_{valid_results[0]['idx']}"
+            best_program_id = f"iteration_{iteration_step}_candidate_{valid_results[0]['idx']}"
         
         if dataset == "cpc18":
             metrics = {
-                "iteration": iteration,
+                "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_valid": len(valid_results),
                 "best_program_id": best_program_id,
@@ -2002,7 +2003,7 @@ def run_evolution(
             }
         else:
             metrics = {
-                "iteration": iteration,
+                "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_valid": len(valid_results),
                 "best_program_id": best_program_id,
@@ -2023,7 +2024,7 @@ def run_evolution(
         # Save summary
         if dataset == "cpc18":
             summary = {
-                "iteration": iteration,
+                "iteration": iteration_step,
                 "best_train_fitness": best_fitness if valid_results else None,  # -MSE
                 "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
                 "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
@@ -2031,7 +2032,7 @@ def run_evolution(
             }
         else:
             summary = {
-                "iteration": iteration,
+                "iteration": iteration_step,
                 "best_train_acc": best_fitness if valid_results else None,
                 "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
                 "n_valid": len(valid_results),
@@ -2090,7 +2091,7 @@ def run_evolution(
             if log_file_path is not None:
                 log_entry = {
                     "step": iteration + 1,
-                    "iteration": iteration,
+                    "iteration": iteration_step,
                     **log_dict
                 }
                 with open(log_file_path, "a") as f:
@@ -2262,8 +2263,9 @@ def run_evolution_gridworld_ensemble(
     max_elite_size = max(sample_size * 2, 20)
 
     for iteration in range(n_iterations):
-        print(f"\n{'='*80}\nIteration {iteration + 1}/{n_iterations} (ensemble size K={K})\n{'='*80}")
-        iter_dir = output_path / f"iteration_{iteration}"
+        iteration_step = iteration + 1  # 1-indexed to match wandb
+        print(f"\n{'='*80}\nIteration {iteration_step}/{n_iterations} (ensemble size K={K})\n{'='*80}")
+        iter_dir = output_path / f"iteration_{iteration_step}"
         iter_dir.mkdir(exist_ok=True)
 
         for k in range(K):
@@ -2314,7 +2316,7 @@ def run_evolution_gridworld_ensemble(
             if valid_results:
                 valid_results.sort(key=lambda x: x["fitness"], reverse=True)
                 for r in valid_results:
-                    program_id = f"iteration_{iteration}_member_{k}_candidate_{r['idx']}"
+                    program_id = f"iteration_{iteration_step}_member_{k}_candidate_{r['idx']}"
                     elite_pools[k].append((r["code"], r["fitness"], r["test_acc"], program_id, None, None))
                 elite_pools[k].sort(key=lambda x: x[1], reverse=True)
                 elite_pools[k] = elite_pools[k][:max_elite_size]
@@ -2346,7 +2348,7 @@ def run_evolution_gridworld_ensemble(
                 wandb.log(log_dict, step=iteration + 1)
                 if log_file_path is not None:
                     with open(log_file_path, "a") as f:
-                        f.write(json.dumps({"step": iteration + 1, "iteration": iteration, **log_dict}) + "\n")
+                        f.write(json.dumps({"step": iteration + 1, "iteration": iteration_step, **log_dict}) + "\n")
 
     # Best program per member; weights from log-likelihood on first 20 steps
     best_codes = [elite_pools[k][0][0] for k in range(K)]

@@ -1635,7 +1635,8 @@ def run_evolution(
     
     # Evolution loop with cooling schedule
     for iteration in range(n_iterations):
-        iter_dir = output_path / f"iteration_{iteration}"
+        iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
+        iter_dir = output_path / f"iteration_{iteration_step}"
         iter_dir.mkdir(exist_ok=True)
         candidates_dir = iter_dir / "candidates"
         candidates_dir.mkdir(exist_ok=True)
@@ -1656,7 +1657,7 @@ def run_evolution(
         
         # Log exploration factor for monitoring
         print(f"\n{'='*80}")
-        print(f"Iteration {iteration + 1}/{n_iterations} - Exploration factor: {exploration_factor:.3f}")
+        print(f"Iteration {iteration_step}/{n_iterations} - Exploration factor: {exploration_factor:.3f}")
         if exploration_factor >= 0.7:
             print(f"Mode: EXTREMELY AGGRESSIVE - exploring wide parameter ranges")
         elif exploration_factor >= 0.4:
@@ -1891,7 +1892,7 @@ def run_evolution(
             if candidate_results[-1]["valid"]:
                 if dataset == "cpc18":
                     all_candidate_results.append({
-                        "iteration": iteration,
+                        "iteration": iteration_step,
                         "candidate_idx": idx,
                         "fitness": candidate_results[-1]["fitness"],  # -MSE
                         "train_mse": candidate_results[-1]["train_mse"],
@@ -1899,7 +1900,7 @@ def run_evolution(
                     })
                 else:
                     all_candidate_results.append({
-                        "iteration": iteration,
+                        "iteration": iteration_step,
                         "candidate_idx": idx,
                         "train_acc": candidate_results[-1]["train_acc"],
                         "test_acc": candidate_results[-1]["test_acc"],
@@ -1922,7 +1923,7 @@ def run_evolution(
                         r["parameters"].copy(),
                         r["fitness"],  # fitness = -train_mse
                         r.get("test_mse", float('inf')),  # test_metric = test_mse
-                        f"iteration_{iteration}_candidate_{r['idx']}",
+                        f"iteration_{iteration_step}_candidate_{r['idx']}",
                         r.get("train_mse", None),
                         r.get("test_mse", None),
                     ))
@@ -1931,7 +1932,7 @@ def run_evolution(
                         r["parameters"].copy(),
                         r["fitness"],  # fitness = train_acc
                         r["test_acc"],  # test_metric = test_acc
-                        f"iteration_{iteration}_candidate_{r['idx']}",
+                        f"iteration_{iteration_step}_candidate_{r['idx']}",
                         None,  # train_mse not applicable
                         None,  # test_mse not applicable
                     ))
@@ -1955,7 +1956,7 @@ def run_evolution(
                         "test_mse": best_result['test_mse'],
                         "train_accuracy": best_result['train_acc'],  # Keep for debugging
                         "test_accuracy": best_result['test_acc'],  # Keep for debugging
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
                 if best_result['test_mse'] < overall_best_test["test_mse"]:  # Lower test_mse is better
                     overall_best_test = {
@@ -1964,20 +1965,20 @@ def run_evolution(
                         "test_mse": best_result['test_mse'],
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
                     overall_best_train = {
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
                 if best_result['test_acc'] > overall_best_test["test_accuracy"]:
                     overall_best_test = {
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
-                        "program_id": f"iteration_{iteration}_candidate_{best_result['idx']}"
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
             
             # Print compressed one-line summary
@@ -1991,10 +1992,10 @@ def run_evolution(
         # Save iteration results (convert parameters to JSON-serializable format)
         best_program_id = None
         if valid_results:
-            best_program_id = f"iteration_{iteration}_candidate_{valid_results[0]['idx']}"
+            best_program_id = f"iteration_{iteration_step}_candidate_{valid_results[0]['idx']}"
         
         metrics = {
-            "iteration": iteration,
+            "iteration": iteration_step,
             "n_candidates": n_candidates_per_iteration,
             "n_valid": len(valid_results),
             "exploration_factor": exploration_factor,
