@@ -1067,6 +1067,514 @@ def evaluate_gridworld_ensemble_test(
     return {"accuracy": avg_acc, "total": total_steps, "correct": correct, "errors": 0}
 
 
+# ROTE Gridworld code setting: prefix length and future steps (match plot_and_eval.py)
+# Prefix length must always be 20 for Gridworld; do not allow it to vary.
+GRIDWORLD_PREFIX_LEN = 20
+GRIDWORLD_NUM_FUTURE_STEPS = 20
+
+
+def _gridworld_state_to_text_single(state: Dict[str, Any]) -> str:
+    """Convert a single timestep state dict to ROTE-style text (match gridROTE.convert_state_to_text)."""
+    def to_list(x):
+        if isinstance(x, (jnp.ndarray, np.ndarray)):
+            return np.array(x).tolist()
+        return x
+    text = ""
+    text += f"The agents' inventory is {to_list(state.get('agent_inventory', []))}.\n"
+    text += f"The agents' inventory colors are {to_list(state.get('agent_inventory_colors', []))}.\n"
+    text += f"The agents' location is {to_list(state.get('agent_locations', []))}.\n"
+    text += f"The block colors are {to_list(state.get('block_colors', []))}.\n"
+    text += f"The block locations are {to_list(state.get('block_locations', []))}.\n"
+    text += f"The wall locations are {to_list(state.get('wall_locations', []))}.\n"
+    return text.strip()
+
+
+def gridworld_prefix_to_text(prefix_states: Dict[str, Any], prefix_actions: Any) -> str:
+    """Format exactly the first 20 (state, action) steps as ROTE-style text for prompting.
+    Prefix length is always 20 for Gridworld. Deterministic, step-indexed; includes key state
+    fields and action name mapping. Injected into initial candidate generation and all evolution prompts.
+    """
+    action_names = ["stay", "right", "left", "down", "up", "interact"]
+    prefix_len = GRIDWORLD_PREFIX_LEN  # Always 20; do not vary
+    lines = []
+    for t in range(prefix_len):
+        state_t = jax.tree.map(lambda x: x[t] if hasattr(x, '__getitem__') and hasattr(x, 'shape') and len(x.shape) > 0 else x, prefix_states)
+        state_t = jax.tree.map(lambda x: np.array(x).tolist() if isinstance(x, (jnp.ndarray, np.ndarray)) else x, state_t)
+        text = _gridworld_state_to_text_single(state_t)
+        act = prefix_actions[t]
+        if hasattr(act, '__len__') and len(act) > 0:
+            act = int(act[0])
+        else:
+            act = int(act)
+        action_str = action_names[act] if 0 <= act < 6 else str(act)
+        lines.append(f"Step {t+1}. State: {text}. Action: {action_str}")
+    return "\n-------\n".join(lines)
+
+
+def evaluate_gridworld_program_on_prefix(
+    agent_code: str,
+    prefix_states: Dict[str, Any],
+    prefix_actions: Any,
+    num_blocks: int,
+) -> Dict[str, Any]:
+    """Evaluate one program on a single episode's prefix (exactly first 20 steps).
+    Returns accuracy and mismatch summary. Used for fitness only; LLM sees only this (train_acc).
+    test_acc is never included in prompts or selection.
+    """
+    framework = AgentExecutionFramework()
+    try:
+        agent = framework.compile_agent(agent_code, num_agents=1, num_blocks=num_blocks)
+    except Exception:
+        return {"accuracy": 0.0, "correct": 0, "total": 0, "mismatch_summary": [], "errors": 1}
+
+    def to_numpy(x):
+        if isinstance(x, (jnp.ndarray, jax.Array)):
+            return np.array(x)
+        return x
+
+    prefix_len = GRIDWORLD_PREFIX_LEN  # Always 20
+    correct = 0
+    total = 0
+    mismatch_summary = []
+    # Predict steps 0..prefix_len-2 (19 steps); compare to GT at each step
+    for timestep in range(prefix_len - 1):
+        try:
+            state = jax.tree.map(lambda x: x[timestep] if hasattr(x, '__getitem__') else x, prefix_states)
+            state = jax.tree.map(to_numpy, state)
+            if isinstance(state, dict) and 'agent_locations' in state and hasattr(state['agent_locations'], 'shape'):
+                if state['agent_locations'].ndim >= 1 and state['agent_locations'].shape[0] == 1:
+                    state = dict(state)
+                    state['agent_id'] = 0
+            gt_action = int(prefix_actions[timestep][0]) if hasattr(prefix_actions[timestep], '__len__') else int(prefix_actions[timestep])
+            predicted_action = framework.execute_agent(agent, state)
+            pred_idx = _normalize_gridworld_action(predicted_action)
+            if pred_idx == gt_action:
+                correct += 1
+            else:
+                mismatch_summary.append({"step": timestep + 1, "pred": pred_idx, "gt": gt_action})
+            total += 1
+        except Exception:
+            total += 1
+    acc = correct / total if total > 0 else 0.0
+    return {"accuracy": acc, "correct": correct, "total": total, "mismatch_summary": mismatch_summary, "errors": 0}
+
+
+def evaluate_gridworld_ensemble_on_future(
+    agent_codes: List[str],
+    weights: List[float],
+    future_states: Dict[str, Any],
+    future_actions: Any,
+    num_blocks: int,
+    num_walls: int,
+    num_future_steps: int = GRIDWORLD_NUM_FUTURE_STEPS,
+) -> Dict[str, float]:
+    """Evaluate ensemble on future steps with teacher-forced GT states (ROTE plot_and_eval multi-step).
+    Freeze weights; no reweighting during steps 21..T.
+    """
+    num_actions = 6
+    if len(weights) != len(agent_codes):
+        raise ValueError("weights must have same length as agent_codes")
+    framework = AgentExecutionFramework()
+    agents = []
+    for code in agent_codes:
+        try:
+            agent = framework.compile_agent(code, num_agents=1, num_blocks=num_blocks)
+            agents.append(agent)
+        except Exception:
+            agents.append(None)
+    if not agents or all(a is None for a in agents):
+        return {"accuracy": 0.0, "total": 0, "correct": 0.0}
+
+    def to_numpy(x):
+        if isinstance(x, (jnp.ndarray, jax.Array)):
+            return np.array(x)
+        return x
+
+    n_steps = min(num_future_steps, future_actions.shape[0] if hasattr(future_actions, 'shape') else len(future_actions))
+    seed_correct = 0.0
+    seed_total = 0
+    for step_idx in range(n_steps):
+        try:
+            current_obs = jax.tree.map(lambda x: x[step_idx] if hasattr(x, '__getitem__') else x, future_states)
+            current_obs = jax.tree.map(to_numpy, current_obs)
+            if isinstance(current_obs, dict):
+                current_obs = dict(current_obs)
+                current_obs['agent_id'] = 0
+            gt_action = int(future_actions[step_idx][0]) if hasattr(future_actions[step_idx], '__len__') else int(future_actions[step_idx])
+            pi = np.zeros(num_actions, dtype=np.float64)
+            for agent, weight in zip(agents, weights):
+                if agent is None:
+                    continue
+                try:
+                    pred = framework.execute_agent(agent, current_obs)
+                    a = _normalize_gridworld_action(pred)
+                    if 0 <= a < num_actions:
+                        pi[a] += weight
+                except Exception:
+                    pass
+            max_prob = float(np.max(pi))
+            tol = 1e-9
+            num_max = int(np.sum(np.abs(pi - max_prob) < tol))
+            if num_max > 0 and gt_action < num_actions and abs(pi[gt_action] - max_prob) < tol:
+                seed_correct += 1.0 / num_max
+            seed_total += 1
+        except Exception:
+            seed_total += 1
+    acc = seed_correct / seed_total if seed_total > 0 else 0.0
+    return {"accuracy": acc, "total": seed_total, "correct": seed_correct}
+
+
+def generate_gridworld_initial_candidates(
+    client: OpenAI,
+    model_name: str,
+    template_code: str,
+    prefix_text: str,
+    n_candidates: int,
+    max_tokens: int = 2000,
+) -> List[str]:
+    """Generate K initial candidate programs for one episode. Prompt injects episode prefix (ROTE-style).
+    Used at episode start; no parent code, only environment description + prefix observations + template.
+    """
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
+    prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "gridworld", "non_strict", "infer_single_fsm.txt")
+    code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "gridworld", "non_strict", "single_code_template.txt")
+    try:
+        base_prompt = open(prompt_path).read()
+        code_template = open(code_template_path).read()
+    except FileNotFoundError:
+        base_prompt = "You are a robot viewing agents acting in an object-centric environment. Model the agent's behavior as FSM code. Experiences (state, action):"
+        code_template = "Implement the FSM code. Actions: [0,1,2,3,4,5] = stay, right, left, down, up, interact."
+    full_prompt = f"""{base_prompt}
+
+Observed trajectory (first 20 steps) for this episode:
+{prefix_text}
+
+{code_template}
+
+Output: one complete Python program in a ```python ... ``` block. Generate the variant now:"""
+    candidates = []
+    for _ in range(n_candidates):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": full_prompt}],
+                temperature=0.7,
+                max_tokens=max_tokens,
+            )
+            content = response.choices[0].message.content
+            code_pattern = r'```(?:python)?(.*?)```'
+            matches = re.findall(code_pattern, content, re.DOTALL)
+            if matches:
+                code = matches[0].strip()
+                if 'class FSMAgent' in code or 'def act' in code:
+                    candidates.append(code)
+                else:
+                    candidates.append(template_code)
+            else:
+                candidates.append(template_code)
+        except Exception:
+            candidates.append(template_code)
+    return candidates
+
+
+def generate_gridworld_evolution_variants(
+    client: OpenAI,
+    model_name: str,
+    parent_codes: List[str],
+    parent_train_accuracies: List[float],
+    parent_prefix_correct_counts: List[int],
+    prefix_mismatch_summary: List[Dict[str, Any]],
+    prefix_text: str,
+    n_variants: int = 10,
+    max_tokens: int = 2000,
+) -> List[str]:
+    """Generate evolution variants. Prompt MUST include: serialized prefix trajectory, parent code, prefix accuracy (X/20), optional mismatch summary.
+    test_acc is NEVER included.
+    """
+    # Build prompt with prefix trajectory first (required in ALL evolution prompts)
+    obs_section = f"""Observed trajectory (first 20 steps):
+{prefix_text}
+
+"""
+    parent_section = ""
+    for i, (code, acc, correct_count) in enumerate(zip(parent_codes, parent_train_accuracies, parent_prefix_correct_counts)):
+        parent_section += f"""Current program (parent {i+1}):
+```python
+{code}
+```
+
+Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
+
+"""
+    mismatch_str = "None"
+    if prefix_mismatch_summary:
+        lines = [f"Step {m['step']}: predicted {m['pred']}, ground truth {m['gt']}" for m in prefix_mismatch_summary[:15]]
+        mismatch_str = "\n".join(lines)
+    mismatch_section = f"Mismatches (pred vs gt):\n{mismatch_str}\n\n"
+    full_prompt = f"""Improve the following agent program. Use only prefix (first 20 steps) performance; do not use any future-step metrics.
+
+{obs_section}{parent_section}{mismatch_section}Generate an improved program variant. Output a complete Python program in a ```python ... ``` block. Actions: 0=stay, 1=right, 2=left, 3=down, 4=up, 5=interact. Generate now:"""
+    variants = []
+    for _ in range(n_variants):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": full_prompt}],
+                temperature=0.7,
+                max_tokens=max_tokens,
+            )
+            content = response.choices[0].message.content
+            code_pattern = r'```(?:python)?(.*?)```'
+            matches = re.findall(code_pattern, content, re.DOTALL)
+            if matches:
+                code = matches[0].strip()
+                if 'class FSMAgent' in code or 'def act' in code:
+                    variants.append(code)
+                else:
+                    variants.append(parent_codes[0])
+            else:
+                variants.append(parent_codes[0])
+        except Exception:
+            variants.append(parent_codes[0])
+    return variants
+
+
+def _make_gridworld_dataloader_args(data_path: str, num_blocks: int, num_walls: int, num_steps: int = 100):
+    """Build args object for plot_and_eval.make_dataloader (Gridworld test split)."""
+    class Args:
+        pass
+    args = Args()
+    args.data_path = data_path
+    args.num_agents = 1
+    args.num_datapoints_per_agent = 100
+    args.num_steps = num_steps
+    args.group = False
+    args.flip_quarter = True
+    args.env_size = 10
+    args.as_images = False
+    return args
+
+
+def get_one_gridworld_episode_from_test(
+    data_path: str,
+    num_blocks: int,
+    num_walls: int,
+    agent_id: int,
+    episode_idx: int,
+    num_steps: int = 100,
+) -> Tuple[Dict[str, Any], Any, Dict[str, Any], Any, Dict[str, Any]]:
+    """Sample one trajectory from Gridworld TEST split (last 20% datapoints), same as ROTE plot_and_eval.
+    Returns (prefix_states, prefix_actions, future_states, future_actions, meta).
+    """
+    args = _make_gridworld_dataloader_args(data_path, num_blocks, num_walls, num_steps)
+    dataloader = make_dataloader(
+        args,
+        num_agents_to_sample=1,
+        num_datapoints_per_agent_to_sample=1,
+        training=False,
+        epoch=episode_idx,
+        num_blocks=num_blocks,
+        num_walls=num_walls,
+        agent_indices=[agent_id],
+    )
+    datapoint = next(dataloader)
+    # datapoint['states']: (1, 1, num_steps, ...), 'actions': (1, 1, num_steps, 1)
+    data_sample = jax.tree.map(lambda x: x[0, 0, :] if hasattr(x, 'shape') and len(x.shape) >= 3 else x, datapoint)
+    # Prefix = exactly first 20 steps (GRIDWORLD_PREFIX_LEN); do not vary
+    prefix_states = jax.tree.map(lambda x: x[:GRIDWORLD_PREFIX_LEN] if hasattr(x, '__getitem__') else x, data_sample['states'])
+    prefix_actions = data_sample['actions'][:GRIDWORLD_PREFIX_LEN]
+    future_len = min(GRIDWORLD_NUM_FUTURE_STEPS, data_sample['actions'].shape[0] - GRIDWORLD_PREFIX_LEN)
+    future_states = jax.tree.map(
+        lambda x: x[GRIDWORLD_PREFIX_LEN:GRIDWORLD_PREFIX_LEN + future_len] if hasattr(x, '__getitem__') else x,
+        data_sample['states'],
+    )
+    future_actions = data_sample['actions'][GRIDWORLD_PREFIX_LEN:GRIDWORLD_PREFIX_LEN + future_len]
+    meta = {
+        "num_blocks": num_blocks,
+        "num_walls": num_walls,
+        "agent_id": agent_id,
+        "episode_idx": episode_idx,
+        "prefix_len": GRIDWORLD_PREFIX_LEN,
+        "num_future_steps": future_len,
+    }
+    return prefix_states, prefix_actions, future_states, future_actions, meta
+
+
+def run_evolution_gridworld_rote_episodes(
+    seed_program_path: str,
+    data_path: str,
+    num_blocks: int,
+    num_walls: int,
+    agent_id: int,
+    num_episodes: int,
+    K: int,
+    N: int,
+    n_candidates_per_iteration: int,
+    model_name: str,
+    client: OpenAI,
+    output_dir: str,
+    wandb: Optional[Any] = None,
+) -> Tuple[List[Dict[str, Any]], float]:
+    """
+    ROTE-aligned Gridworld: episode loop. For each episode:
+    1) Sample one trajectory from test split (make_dataloader training=False, same as ROTE plot_and_eval).
+    2) Prefix = exactly first 20 steps; generate K candidates conditioned on this episode's prefix (candidate generation inside episode loop).
+    3) Evolve each candidate for N iters; fitness = prefix accuracy only (train_acc); test_acc is never in prompts or parent selection.
+    4) Ensemble weights = softmax(prefix_score_i) where prefix_score_i = number of correct predicted actions on first 20 steps; freeze weights; evaluate on future steps (teacher-forced).
+    5) Append episode row to episodes_summary.csv.
+    Returns (list of episode result dicts, mean episode_test_acc).
+    """
+    seed_code = load_seed_program(seed_program_path)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    summary_rows = []
+    episode_results = []
+
+    for episode_idx in tqdm(range(num_episodes), desc="Episodes"):
+        prefix_states, prefix_actions, future_states, future_actions, meta = get_one_gridworld_episode_from_test(
+            data_path, num_blocks, num_walls, agent_id, episode_idx,
+        )
+        prefix_text = gridworld_prefix_to_text(prefix_states, prefix_actions)
+        episode_dir = output_path / f"episode_{episode_idx}"
+        episode_dir.mkdir(exist_ok=True)
+        with open(episode_dir / "meta.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
+        # Generate K initial candidates conditioned on this episode's prefix (inside episode loop; not global)
+        initial_candidates = generate_gridworld_initial_candidates(
+            client, model_name, seed_code, prefix_text, n_candidates=K,
+        )
+        final_programs = []
+        # Ensemble weights use raw prefix correct counts only (integers 0..19). Do NOT use train_acc or any normalized metric.
+        prefix_scores = []  # prefix_score_i = correct_prefix_predictions (integer)
+
+        for cand_idx in range(K):
+            cand_dir = episode_dir / f"candidate_{cand_idx}"
+            cand_dir.mkdir(exist_ok=True)
+            current_code = initial_candidates[cand_idx] if cand_idx < len(initial_candidates) else seed_code
+            iter_dir_0 = cand_dir / "iteration_0"
+            iter_dir_0.mkdir(exist_ok=True)
+            (iter_dir_0 / "candidates").mkdir(exist_ok=True)
+            (iter_dir_0 / "candidates" / "candidate_0.py").write_text(current_code)
+            eval_0 = evaluate_gridworld_program_on_prefix(current_code, prefix_states, prefix_actions, num_blocks)
+            # metrics.json: train_acc only; test_acc is never included (not for LLM or selection)
+            with open(iter_dir_0 / "metrics.json", "w") as f:
+                json.dump({"train_acc": eval_0["accuracy"]}, f, indent=2)
+
+            for iteration in range(1, N + 1):
+                iter_dir = cand_dir / f"iteration_{iteration}"
+                iter_dir.mkdir(exist_ok=True)
+                (iter_dir / "parents").mkdir(exist_ok=True)
+                (iter_dir / "candidates").mkdir(exist_ok=True)
+                # Parent naming to avoid collision: parent_{iteration}.py
+                (iter_dir / "parents" / f"parent_{iteration}.py").write_text(current_code)
+                parent_eval = evaluate_gridworld_program_on_prefix(current_code, prefix_states, prefix_actions, num_blocks)
+                parent_train_acc = parent_eval["accuracy"]
+                parent_correct_count = parent_eval["correct"]  # raw count for "Prefix accuracy: X / 20"
+                parent_mismatch = parent_eval.get("mismatch_summary", [])
+
+                variants = generate_gridworld_evolution_variants(
+                    client, model_name,
+                    parent_codes=[current_code],
+                    parent_train_accuracies=[parent_train_acc],
+                    parent_prefix_correct_counts=[parent_correct_count],
+                    prefix_mismatch_summary=parent_mismatch,
+                    prefix_text=prefix_text,
+                    n_variants=n_candidates_per_iteration,
+                )
+                best_acc = parent_train_acc
+                best_code = current_code
+                for m, code in enumerate(variants):
+                    (iter_dir / "candidates" / f"candidate_{m}.py").write_text(code)
+                    ev = evaluate_gridworld_program_on_prefix(code, prefix_states, prefix_actions, num_blocks)
+                    if ev["accuracy"] > best_acc:
+                        best_acc = ev["accuracy"]
+                        best_code = code
+                current_code = best_code
+                # Parent selection uses train_acc only; test_acc never in metrics or LLM
+                with open(iter_dir / "metrics.json", "w") as f:
+                    json.dump({"train_acc": best_acc}, f, indent=2)
+
+                if wandb is not None:
+                    wandb.log({f"episode_{episode_idx}_cand_{cand_idx}_train_acc": best_acc, f"episode_{episode_idx}_iteration": iteration}, step=episode_idx * N * K + cand_idx * N + iteration)
+
+            final_dir = cand_dir / "final"
+            final_dir.mkdir(exist_ok=True)
+            (final_dir / "evolved_program.py").write_text(current_code)
+            final_prefix_eval = evaluate_gridworld_program_on_prefix(current_code, prefix_states, prefix_actions, num_blocks)
+            correct_prefix_predictions = final_prefix_eval["correct"]  # raw count (integer); used for ensemble weights only
+            prefix_scores.append(correct_prefix_predictions)
+            final_programs.append(current_code)
+            with open(final_dir / "final_metrics.json", "w") as f:
+                json.dump({
+                    "train_acc": final_prefix_eval["accuracy"],
+                    "test_acc": None,
+                    "prefix_score": correct_prefix_predictions,
+                    "ensemble_weight": None,
+                }, f, indent=2)
+
+        # Weights = softmax(prefix_score_i). prefix_score_i = raw correct_prefix_predictions (integer). Do NOT use train_acc.
+        score = np.array(prefix_scores, dtype=np.float64)
+        weights = np.exp(score - score.max())
+        weights = weights / weights.sum()
+        weights = weights.tolist()
+
+        for cand_idx, w in enumerate(weights):
+            final_metrics_path = episode_dir / f"candidate_{cand_idx}" / "final" / "final_metrics.json"
+            with open(final_metrics_path, "r") as f:
+                fm = json.load(f)
+            fm["ensemble_weight"] = w
+            with open(final_metrics_path, "w") as f:
+                json.dump(fm, f, indent=2)
+
+        ensemble_eval = evaluate_gridworld_ensemble_on_future(
+            final_programs, weights, future_states, future_actions, num_blocks, num_walls,
+        )
+        episode_train_acc = np.mean([evaluate_gridworld_program_on_prefix(c, prefix_states, prefix_actions, num_blocks)["accuracy"] for c in final_programs])
+        episode_test_acc = ensemble_eval["accuracy"]
+
+        ensemble_dir = episode_dir / "ensemble"
+        ensemble_dir.mkdir(exist_ok=True)
+        with open(ensemble_dir / "weights.json", "w") as f:
+            json.dump({"weights": weights}, f, indent=2)
+        with open(ensemble_dir / "ensemble_metrics.json", "w") as f:
+            json.dump({
+                "episode_train_acc": episode_train_acc,
+                "episode_test_acc": episode_test_acc,
+                "ensemble_test_acc": episode_test_acc,
+            }, f, indent=2)
+
+        row = {
+            "episode_id": episode_idx,
+            "agent_id": agent_id,
+            "num_blocks": num_blocks,
+            "num_walls": num_walls,
+            "K": K,
+            "N": N,
+            "episode_train_acc": episode_train_acc,
+            "episode_test_acc": episode_test_acc,
+            "ensemble_test_acc": episode_test_acc,
+        }
+        summary_rows.append(row)
+        episode_results.append(row)
+
+        if wandb is not None:
+            wandb.log({
+                f"episode_{episode_idx}_train_acc": episode_train_acc,
+                f"episode_{episode_idx}_test_acc": episode_test_acc,
+                f"episode_{episode_idx}_best_train_acc": max(prefix_scores) / max(1, (GRIDWORLD_PREFIX_LEN - 1)),
+            }, step=episode_idx)
+
+    with open(output_path / "episodes_summary.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["episode_id", "agent_id", "num_blocks", "num_walls", "K", "N", "episode_train_acc", "episode_test_acc", "ensemble_test_acc"])
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    mean_test_acc = float(np.mean([r["episode_test_acc"] for r in episode_results])) if episode_results else 0.0
+    print(f"\nROTE Gridworld: mean episode_test_acc (ensemble) = {mean_test_acc:.4f} over {num_episodes} episodes")
+    return episode_results, mean_test_acc
+
+
 def generate_gridworld_program_variants(
     client: OpenAI,
     model_name: str,
@@ -2489,6 +2997,12 @@ def main():
         help="Number of candidate programs per iteration",
     )
     parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=10,
+        help="Gridworld (ROTE): number of episodes to evaluate (test-split trajectories). Default: 10",
+    )
+    parser.add_argument(
         "--sample_size",
         type=int,
         default=3,
@@ -2667,100 +3181,47 @@ def main():
         # Auto-generated single participant - will be determined after first run
         summary_file = None
     
-    # Handle gridworld: check if we have a single problem config with multiple agent types
-    # This happens when num_blocks and num_walls are provided but not in sequential mode
-    # AND num_agents_to_sample > 1 (or agent_id is not set, meaning process all)
-    if args.dataset == "gridworld":
+    # Handle gridworld: ROTE code setting (episode-based, test split, prefix=20, ensemble from prefix only)
+    if args.dataset == "gridworld" and args.loop_mode != "sequential":
         num_blocks_arg = getattr(args, 'num_blocks', None)
         num_walls_arg = getattr(args, 'num_walls', None)
-        agent_id_arg = getattr(args, 'agent_id', None)
-        
-        # Check if we're processing multiple agent types for a single problem config
-        # Condition: not sequential mode, have problem config, and either:
-        #   - num_agents_to_sample > 1, OR
-        #   - agent_id is not set (process all agent types)
-        if (num_blocks_arg is not None and num_walls_arg is not None and 
-            args.loop_mode != "sequential" and 
-            (args.num_agents_to_sample > 1 or agent_id_arg is None)):
-            # Process all agent types for this single problem config
-            print(f"\n{'='*80}")
-            print(f"Processing {args.num_agents_to_sample} agent types for problem: num_blocks={num_blocks_arg}, num_walls={num_walls_arg}")
-            print(f"{'='*80}")
-            
-            # Determine which agent types to process
-            if agent_id_arg is not None and args.num_agents_to_sample == 1:
-                # Single agent type specified
-                agent_types_to_process = [agent_id_arg]
-            else:
-                # Process all agent types up to num_agents_to_sample
-                agent_types_to_process = list(range(args.num_agents_to_sample))
-            
-            for agent_id in tqdm(agent_types_to_process, desc="Agent types"):
-                print(f"\n{'='*80}")
-                print(f"Processing agent type {agent_id}/{args.num_agents_to_sample-1}")
-                print(f"{'='*80}")
-                
-                # Auto-detect template program for this agent type
-                if args.seed_path is None:
-                    detected_seed_path = find_template_program_for_gridworld(num_blocks_arg, num_walls_arg, agent_id)
-                    if detected_seed_path is None:
-                        print(f"Warning: Could not auto-detect template program for num_blocks={num_blocks_arg}, num_walls={num_walls_arg}, agent_id={agent_id}")
-                        print(f"Expected location: persona_code_example/gridworld/num_blocks{num_blocks_arg}_num_walls{num_walls_arg}/")
-                        print("Skipping this agent type...")
-                        continue
-                    agent_seed_path = detected_seed_path
-                    print(f"Auto-detected seed program: {agent_seed_path}")
-                else:
-                    agent_seed_path = args.seed_path
-                
-                # Construct output directory
-                if base_run_dir is not None:
-                    agent_output_dir = os.path.join(base_run_dir, f"agent_{agent_id}")
-                else:
-                    mode = "non_strict"  # Template_evo_non_strict.py uses non_strict mode
-                    agent_output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/agent_{agent_id}"
-                
-                agent_summary = run_evolution(
-                    seed_program_path=agent_seed_path,
-                    dataset=args.dataset,
-                    participant_id=agent_id,  # Use agent_id as participant_id for tracking
-                    data_path=args.data_path,
-                    num_blocks=num_blocks_arg,
-                    num_walls=num_walls_arg,
-                    agent_id=agent_id,
-                    n_iterations=args.n_iterations,
-                    n_candidates_per_iteration=args.n_candidates,
-                    model_name=args.model_name,
-                    client_kwargs=client_kwargs if client_kwargs else None,
-                    output_dir=agent_output_dir,
-                    wandb=wandb,
-                    n_eval_seeds=args.n_eval_seeds,
-                    sample_size=args.sample_size,
-                    filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
-                )
-                
-                # Update summary (build row with only CSV columns; agent_summary uses 'participant_id' key)
-                if agent_summary is not None and summary_file is not None:
-                    participants_summary.append({
-                        'agent_id': agent_id,
-                        'num_blocks': num_blocks_arg,
-                        'num_walls': num_walls_arg,
-                        'train_acc': agent_summary.get('train_acc'),
-                        'test_acc': agent_summary.get('test_acc'),
-                    })
-                    # Write CSV file
-                    with open(summary_file, 'w', newline='') as f:
-                        fieldnames = ['agent_id', 'num_blocks', 'num_walls', 'train_acc', 'test_acc']
-                        writer = csv.DictWriter(f, fieldnames=fieldnames)
-                        writer.writeheader()
-                        writer.writerows(participants_summary)
-                    print(f"\nSummary updated: {summary_file}")
-            
-            # Finished processing all agent types
+        agent_id_arg = getattr(args, 'agent_id', 0)
+        if num_blocks_arg is None or num_walls_arg is None:
+            print("Error: For gridworld (ROTE) provide --num_blocks and --num_walls.")
             if wandb is not None:
                 wandb.finish()
             return
-    
+        seed_path = args.seed_path
+        if seed_path is None:
+            seed_path = find_template_program_for_gridworld(num_blocks_arg, num_walls_arg, agent_id_arg)
+            if seed_path is None:
+                print(f"Warning: No template found for num_blocks={num_blocks_arg}, num_walls={num_walls_arg}, agent_id={agent_id_arg}; using default.")
+                seed_path = "persona_code_example/vanilla.py"
+            else:
+                print(f"Auto-detected seed program: {seed_path}")
+        output_dir = base_run_dir if base_run_dir else f"generated_outputs/gridworld/non_strict/run_{timestamp}"
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        episode_results, mean_test_acc = run_evolution_gridworld_rote_episodes(
+            seed_program_path=seed_path,
+            data_path=args.data_path,
+            num_blocks=num_blocks_arg,
+            num_walls=num_walls_arg,
+            agent_id=agent_id_arg,
+            num_episodes=getattr(args, 'num_episodes', 10),
+            K=args.n_candidates,
+            N=args.n_iterations,
+            n_candidates_per_iteration=max(1, args.n_candidates // 2),
+            model_name=args.model_name,
+            client=client,
+            output_dir=output_dir,
+            wandb=wandb,
+        )
+        if wandb is not None:
+            wandb.log({"gridworld_mean_episode_test_acc": mean_test_acc})
+            wandb.finish()
+        return
+
     # Handle gridworld_ensemble: same as gridworld multi-agent but with run_evolution_gridworld_ensemble
     if args.dataset == "gridworld_ensemble":
         num_blocks_arg = getattr(args, 'num_blocks', None)

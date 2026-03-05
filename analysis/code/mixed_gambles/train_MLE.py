@@ -57,6 +57,16 @@ def nll(params: np.ndarray, G: np.ndarray, L: np.ndarray, y: np.ndarray) -> floa
     return -np.sum(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
 
 
+def accuracy_at_params(omega: float, lam: float, G: np.ndarray, L: np.ndarray, y: np.ndarray) -> float:
+    """Compute prediction accuracy for given (omega, lambda) on (G, L, y)."""
+    if len(y) == 0:
+        return float("nan")
+    utility = G - omega * L
+    p = sigmoid(lam * utility)
+    pred = (p >= 0.5).astype(np.float64)
+    return float(np.mean(pred == y))
+
+
 def fit_participant(G: np.ndarray, L: np.ndarray, y: np.ndarray):
     """Fit (omega, lambda) by MLE. Returns (omega_hat, lambda_hat, nll, accuracy)."""
     bounds = [(1e-5, 10.0), (1e-5, 20.0)]
@@ -67,10 +77,7 @@ def fit_participant(G: np.ndarray, L: np.ndarray, y: np.ndarray):
         bounds=bounds,
     )
     omega_hat, lam_hat = res.x[0], res.x[1]
-    utility = G - omega_hat * L
-    p = sigmoid(lam_hat * utility)
-    pred = (p >= 0.5).astype(np.float64)
-    acc = np.mean(pred == y)
+    acc = accuracy_at_params(omega_hat, lam_hat, G, L, y)
     return omega_hat, lam_hat, float(res.fun), float(acc)
 
 
@@ -87,23 +94,35 @@ def main():
     participant_ids = sorted(trials_by_participant.keys())
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(42)
     rows = []
     for pid in participant_ids:
         triples = trials_by_participant[pid]
-        G = np.array([t[0] for t in triples], dtype=np.float64)
-        L = np.array([t[1] for t in triples], dtype=np.float64)
-        y = np.array([t[2] for t in triples], dtype=np.float64)
-        omega_hat, lam_hat, nll_val, acc = fit_participant(G, L, y)
+        n = len(triples)
+        perm = rng.permutation(n)
+        n_train = max(1, int(0.8 * n))
+        train_idx, test_idx = perm[:n_train], perm[n_train:]
+        triples_train = [triples[i] for i in train_idx]
+        triples_test = [triples[i] for i in test_idx]
+        G_train = np.array([t[0] for t in triples_train], dtype=np.float64)
+        L_train = np.array([t[1] for t in triples_train], dtype=np.float64)
+        y_train = np.array([t[2] for t in triples_train], dtype=np.float64)
+        G_test = np.array([t[0] for t in triples_test], dtype=np.float64)
+        L_test = np.array([t[1] for t in triples_test], dtype=np.float64)
+        y_test = np.array([t[2] for t in triples_test], dtype=np.float64)
+        omega_hat, lam_hat, nll_val, acc = fit_participant(G_train, L_train, y_train)
+        test_acc = accuracy_at_params(omega_hat, lam_hat, G_test, L_test, y_test)
         rows.append({
             "participant_id": pid,
             "omega": omega_hat,
             "lambda": lam_hat,
             "nll": nll_val,
             "accuracy": acc,
+            "test_accuracy": test_acc,
         })
 
     with open(OUT_CSV, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["participant_id", "omega", "lambda", "nll", "accuracy"])
+        w = csv.DictWriter(f, fieldnames=["participant_id", "omega", "lambda", "nll", "accuracy", "test_accuracy"])
         w.writeheader()
         w.writerows(rows)
 
