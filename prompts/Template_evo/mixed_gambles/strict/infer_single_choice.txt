@@ -1,60 +1,49 @@
-You are given observations of human choices in risky-gamble problems.
-Each problem presents two gambles: Option A and Option B, with outcomes and probabilities.
+You are given observations of human choices in mixed-gamble problems.
 
-You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
+Each problem presents two options:
+- Option A: a risky mixed gamble with possible gain and possible loss (with probabilities provided)
+- Option B: reject the gamble and take a certain outcome (typically $0)
 
-Write Python code that reproduces the observed behavior by implementing a parametrized decision model.
+IMPORTANT DATA PROPERTIES:
+- has_feedback is always False
+- history does NOT contain useful information
+- There is NO outcome realization shown
+- Choices depend only on the current gamble, not past trials
 
-You MUST generate a parametrized persona, not a verbal or heuristic description.
+Write Python code that reproduces the observed behavior by implementing a PARAMETRIZED decision model.
+
+You MUST generate a parametrized persona (a small set of numeric parameters), not a verbal or ad-hoc rule.
 
 Mandatory requirements:
-
-The code must explicitly define a fixed set of numeric parameters (floats or ints).
-
-All behavior must be expressed only through these parameters.
-
-Parameters must appear in a clearly marked section named exactly:
-“Parameters (fixed)”.
-
-Do NOT describe behavior in sentences.
-
-Do NOT use ad-hoc rules without parameters.
+- The code must explicitly define a fixed set of numeric parameters (floats or ints).
+- All behavior must be expressed only through these parameters.
+- Parameters must appear in a clearly marked section named exactly:
+  “Parameters (fixed)”.
 
 Required function:
 
 def choose(problem, history):
-"""
-problem: dict with keys
-- gamble_A: {"probs": List[float], "rewards": List[float]}
-- gamble_B: {"probs": List[float], "rewards": List[float]}
-- option_keys
-- has_feedback: bool
-history: list of dicts with keys
-- action: int (0 or 1)
-- feedback: float or None
-return: int (0 or 1)
-"""
+    """
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}   # risky mixed gamble
+        - gamble_B: {"probs": List[float], "rewards": List[float]}   # certain option (often single reward)
+        - option_keys
+        - has_feedback: bool
+    history: unused (may be empty)
+    return: int (0 or 1)  # 0 for A, 1 for B
+    """
+
+Model guidance (must be parameterized, deterministic):
+- Compute a utility for accepting the gamble using a weighted gain–loss form (e.g., G - omega * L).
+- Use a logistic / sigmoid decision rule with a consistency parameter (e.g., lambda).
+- Make a deterministic choice by thresholding at 0.5.
 
 Constraints:
-
-Pure Python
-
-Deterministic
-
-Use only problem and history
-
-No external APIs
+- Pure Python
+- Deterministic
+- Use ONLY information from the current problem
+- Do NOT use history or feedback
+- No external libraries/APIs
 
 Output format:
-
-Output ONLY the complete choose(...) function
-
-The function must include:
-
-A “Parameters (fixed)” section with numeric constants
-
-Parameter-based subjective value computation
-
-A deterministic final decision rule
-
-If a behavior cannot be expressed using parameters, do not include it.
+Output ONLY the complete choose(...) function.

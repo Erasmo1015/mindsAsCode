@@ -52,10 +52,15 @@ ACCEPT_ACTION = 1  # "accepted gamble" in dataset and for overlays
 def load_mixed_gambles_data(
     csv_path: str,
     participant_id: int,
+    filter_gain_loss_only: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
     """Load mixed_gambles CSV, filter by subject == participant_id, 80/20 split.
     Each row: Option A (gamble) = [gain, loss] probs [0.5, 0.5]; Option B (certain) = [cert] probs [1.0].
     action = took_gamble (1 = accept gamble A, 0 = take certain B).
+
+    Args:
+        filter_gain_loss_only: If True, keep only gamble_type == "gain_loss" trials (Section 4.2).
+            If False (default), include all trial types.
     """
     option_keys = [0, 1]
     all_trials = []
@@ -63,6 +68,9 @@ def load_mixed_gambles_data(
         reader = csv.DictReader(f)
         for row in reader:
             if int(row["subject"]) != participant_id:
+                continue
+            # Optional: use only mixed-gamble trials (gain_loss). Section 4.2 models 165 mixed gambles per participant.
+            if filter_gain_loss_only and row.get("gamble_type") != "gain_loss":
                 continue
             gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
             took_gamble = int(row["took_gamble"])
@@ -79,6 +87,9 @@ def load_mixed_gambles_data(
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+    if filter_gain_loss_only and not getattr(load_mixed_gambles_data, "_printed_gain_loss", False):
+        print("[Mixed Gambles] Using gain_loss trials only.")
+        load_mixed_gambles_data._printed_gain_loss = True
     # Random train/test split (reproducible).
     # The dataset is ordered by stimulus structure,
     # so row-order split creates artificial distribution shift.
@@ -318,6 +329,7 @@ def main() -> None:
     parser.add_argument("--gain_max", type=int, default=16, help="Max gain for axes and full grid (book uses 1..16)")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--csv_path", type=str, default="datasets/mixed_gambles/data_all_2021-01-08.csv", help="Path to mixed_gambles CSV (relative to cwd)")
+    parser.add_argument("--filter_mixed_gambles", action="store_true", help="Keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).")
     args = parser.parse_args()
 
     if args.dataset != "mixed_gambles":
@@ -340,7 +352,7 @@ def main() -> None:
         raise FileNotFoundError(f"Program not found: {args.program_path}")
 
     # Load data (same random split as Template_evo_non_strict, seed=42)
-    train_trials, test_trials, _ = load_mixed_gambles_data(str(csv_path), args.participant_id)
+    train_trials, test_trials, _ = load_mixed_gambles_data(str(csv_path), args.participant_id, filter_gain_loss_only=args.filter_mixed_gambles)
     print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     choose_fn = load_choose_function(str(program_path))
     iter_id, cand_id = parse_program_path(str(program_path))

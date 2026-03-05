@@ -258,11 +258,15 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
     return "\n".join(lines)
 
 
-def load_mixed_gambles_data(csv_path: str, participant_id: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+def load_mixed_gambles_data(csv_path: str, participant_id: int, filter_gain_loss_only: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
     """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
     
     Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
     action = took_gamble (1 = choose gamble A, 0 = choose certain B). history = [] (no temporal dependence).
+
+    Args:
+        filter_gain_loss_only: If True, keep only gamble_type == "gain_loss" trials (Section 4.2 mixed gambles).
+            If False (default), include all trial types.
     """
     option_keys = [0, 1]  # 0 = certain B, 1 = gamble A
     all_trials = []
@@ -270,6 +274,9 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int) -> Tuple[List[Di
         reader = csv.DictReader(f)
         for row in reader:
             if int(row["subject"]) != participant_id:
+                continue
+            # Optional: use only mixed-gamble trials (gain_loss). Section 4.2 models 165 mixed gambles per participant.
+            if filter_gain_loss_only and row.get("gamble_type") != "gain_loss":
                 continue
             gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
             took_gamble = int(row["took_gamble"])
@@ -286,6 +293,9 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int) -> Tuple[List[Di
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+    if filter_gain_loss_only and not getattr(load_mixed_gambles_data, "_printed_gain_loss", False):
+        print("[Mixed Gambles] Using gain_loss trials only.")
+        load_mixed_gambles_data._printed_gain_loss = True
     # Random train/test split (reproducible).
     # The dataset is ordered by stimulus structure,
     # so row-order split creates artificial distribution shift.
@@ -1245,6 +1255,7 @@ def run_evolution(
     num_walls: Optional[int] = None,
     agent_id: Optional[int] = None,
     sample_size: int = 3,
+    filter_mixed_gambles: bool = False,
 ):
     """
     Run iterative evolution loop over Choice13k, Gridworld, or CPC18 Track II programs.
@@ -1395,7 +1406,7 @@ def run_evolution(
         parent_params = baseline_params.copy()
         csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
         print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
-        train_trials, test_trials, options = load_mixed_gambles_data(csv_path, participant_id)
+        train_trials, test_trials, options = load_mixed_gambles_data(csv_path, participant_id, filter_gain_loss_only=filter_mixed_gambles)
         print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     else:
         # Choice13k: extract parameters
@@ -2249,6 +2260,11 @@ def main():
         action="store_true",
         help="Disable wandb logging. Default is enabled.",
     )
+    parser.add_argument(
+        "--filter_mixed_gambles",
+        action="store_true",
+        help="For mixed_gambles dataset: keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).",
+    )
     
     args = parser.parse_args()
     
@@ -2443,6 +2459,7 @@ def main():
                 num_blocks=num_blocks,
                 num_walls=num_walls,
                 agent_id=agent_id,
+                filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
             )
             
             # Update summary (for gridworld, we might want a different summary structure)
@@ -2521,6 +2538,7 @@ def main():
                     num_walls=getattr(args, 'num_walls', None),
                     agent_id=getattr(args, 'agent_id', None),
                     sample_size=args.sample_size,
+                    filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
                 )
                 
                 # Update participants summary after each participant completes

@@ -1,4 +1,3 @@
-```python
 def choose(problem, history):
     """
     Logistic gain–loss seed (deterministic boundary).
@@ -20,8 +19,6 @@ def choose(problem, history):
     # ----------------------------
     # Parameters (fixed)
     # ----------------------------
-    # Duplicate the parameters here to match the strict prompt format.
-    # Keep names identical to top-level for clarity.
     omega = 1.0
     lam = 1.0
     bias = 0.0
@@ -49,4 +46,3 @@ def choose(problem, history):
         return 0
     else:
         return 1
-```
