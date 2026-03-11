@@ -303,7 +303,11 @@ def plot_fig46_generalization_heatmap(
         ax.scatter(L_design[accepted_obs], G_design[accepted_obs], facecolors="none", edgecolors="black", s=40, linewidths=1, marker="o", zorder=3, label="Observed accept")
         plt.colorbar(im, ax=ax, label="P(accept)", shrink=0.7)
 
-    ax.plot([0, loss_max], [0, gain_max], "k--", alpha=0.7, linewidth=1, label="Gain = Loss")
+    # Dashed boundary Gain = Loss (G = L) in G–L space.
+    # Axes are Loss on x in [0, loss_max], Gain on y in [0, gain_max], so the correct diagonal
+    # is from (0,0) up to (min(gain_max, loss_max), min(gain_max, loss_max)).
+    lim = min(gain_max, loss_max)
+    ax.plot([0, lim], [0, lim], "k--", alpha=0.7, linewidth=1, label="Gain = Loss")
     ax.set_xlabel("Loss")
     ax.set_ylabel("Gain")
     ax.set_xlim(0, loss_max)
