@@ -260,6 +260,14 @@ def plot_fig46_generalization_heatmap(
     L_design = np.array([trial_to_gl(t)[1] for t in trials])
     accepted_obs = np.array([t["action"] == ACCEPT_ACTION for t in trials])
 
+    # Visual swap experiment:
+    # - background (model decision regions) uses the lighter symbol palette
+    # - observed symbols use the stronger RdYlGn-like colors
+    pastel_green = "#b7f0b7"
+    pastel_red = "#f2b1b1"
+    from matplotlib.colors import ListedColormap
+    swapped_cmap = ListedColormap([pastel_red, pastel_green])
+
     if grid_mode == "design":
         # Use unique design points only
         unique_gl = {}
@@ -278,8 +286,29 @@ def plot_fig46_generalization_heatmap(
         P_vals = np.array([unique_gl[k] for k in unique_gl])
         # For "heatmap" over design we still do scatter with color
         fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-        sc = ax.scatter(L_vals, G_vals, c=P_vals, cmap="RdYlGn", vmin=0, vmax=1, s=100, marker="s", edgecolors="gray")
-        ax.scatter(L_design[accepted_obs], G_design[accepted_obs], facecolors="none", edgecolors="black", s=100, linewidths=1.5, marker="o", zorder=3, label="Observed accept")
+        sc = ax.scatter(L_vals, G_vals, c=P_vals, cmap=swapped_cmap, vmin=0, vmax=1, s=100, marker="s", edgecolors="gray")
+        # Observed gambles overlay (match Fig 4.3 styling): accepted = green circles, rejected = red crosses.
+        ax.scatter(
+            L_design[accepted_obs],
+            G_design[accepted_obs],
+            facecolors="none",
+            edgecolors="green",
+            s=100,
+            linewidths=1.5,
+            marker="o",
+            zorder=3,
+            label="Observed accept",
+        )
+        ax.scatter(
+            L_design[~accepted_obs],
+            G_design[~accepted_obs],
+            marker="x",
+            c="red",
+            s=60,
+            linewidths=1.5,
+            zorder=3,
+            label="Observed reject",
+        )
     else:
         # Full grid: G in [1, gain_max], L in [1, loss_max]
         G_grid = np.arange(1, gain_max + 1, dtype=float)
@@ -299,8 +328,29 @@ def plot_fig46_generalization_heatmap(
         # For shading='flat', Z.shape must be (len(G_edges)-1, len(L_edges)-1)
         L_edges = np.arange(0, loss_max + 1)
         G_edges = np.arange(0, gain_max + 1)
-        im = ax.pcolormesh(L_edges, G_edges, PP.T, cmap="RdYlGn", vmin=0, vmax=1, shading="flat")
-        ax.scatter(L_design[accepted_obs], G_design[accepted_obs], facecolors="none", edgecolors="black", s=40, linewidths=1, marker="o", zorder=3, label="Observed accept")
+        im = ax.pcolormesh(L_edges, G_edges, PP.T, cmap=swapped_cmap, vmin=0, vmax=1, shading="flat")
+        # Observed gambles overlay (match Fig 4.3 styling): accepted = green circles, rejected = red crosses.
+        ax.scatter(
+            L_design[accepted_obs],
+            G_design[accepted_obs],
+            facecolors="none",
+            edgecolors="green",
+            s=40,
+            linewidths=1,
+            marker="o",
+            zorder=3,
+            label="Observed accept",
+        )
+        ax.scatter(
+            L_design[~accepted_obs],
+            G_design[~accepted_obs],
+            marker="x",
+            c="red",
+            s=40,
+            linewidths=1,
+            zorder=3,
+            label="Observed reject",
+        )
         plt.colorbar(im, ax=ax, label="P(accept)", shrink=0.7)
 
     # Dashed boundary Gain = Loss (G = L) in G–L space.
