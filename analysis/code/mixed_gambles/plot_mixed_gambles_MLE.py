@@ -58,7 +58,7 @@ def load_mle_params(mle_csv_path: Path, participant_id: int) -> Tuple[float, flo
 
 
 def make_mle_choose(omega: float, lam: float) -> Callable:
-    """Return choose(problem, history) that implements logistic MLE: 1 if P(accept) >= 0.5 else 0."""
+    """Return choose(problem, history): logistic MLE P(choose gamble_A); return ACCEPT_ACTION if P >= 0.5 else the other option."""
 
     def choose(problem: Dict[str, Any], history: List[Any]) -> int:
         r = problem["gamble_A"]["rewards"]

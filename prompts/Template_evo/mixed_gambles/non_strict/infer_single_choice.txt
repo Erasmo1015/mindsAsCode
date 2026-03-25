@@ -4,6 +4,12 @@ Each problem presents two options:
 - One risky gamble with possible gains and losses
 - One certain outcome
 
+Option convention:
+- Option A = gamble
+- Option B = certain
+- return 0 = gamble_A
+- return 1 = gamble_B
+
 All information about outcomes and probabilities is fully described in the problem.
 Each decision is independent.
 
@@ -25,7 +31,8 @@ def choose(problem, history):
         - option_keys
         - has_feedback: bool
     history: unused (may be empty)
-    return: int, 0 for Option A or 1 for Option B
+    return 0 to choose gamble_A (accept the gamble)
+    return 1 to choose gamble_B (choose the certain option / reject the gamble)
     """
 
 REQUIREMENTS:

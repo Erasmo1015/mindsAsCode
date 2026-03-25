@@ -262,13 +262,14 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int, filter_gain_loss
     """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
     
     Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
-    action = took_gamble (1 = choose gamble A, 0 = choose certain B). history = [] (no temporal dependence).
+    Raw CSV `took_gamble`: 1 = chose gamble, 0 = chose certain. TE option index: action = 1 - took_gamble
+    (0 = Option A gamble_A / accept gamble, 1 = Option B gamble_B / certain). history = [] (no temporal dependence).
 
     Args:
         filter_gain_loss_only: If True, keep only gamble_type == "gain_loss" trials (Section 4.2 mixed gambles).
             If False (default), include all trial types.
     """
-    option_keys = [0, 1]  # 0 = certain B, 1 = gamble A
+    option_keys = [0, 1]  # 0 = Option A (gamble_A), 1 = Option B (gamble_B certain)
     all_trials = []
     with open(csv_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -280,6 +281,7 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int, filter_gain_loss
                 continue
             gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
             took_gamble = int(row["took_gamble"])
+            action = 1 - took_gamble
             all_trials.append({
                 "problem": {
                     "gamble_A": {"rewards": [gain, loss], "probs": [0.5, 0.5]},
@@ -289,7 +291,7 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int, filter_gain_loss
                 },
                 "history": [],
                 "options": option_keys,
-                "action": took_gamble,
+                "action": action,
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")

@@ -3,7 +3,12 @@ def choose(problem, history):
     """
     problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
     history: list of dicts with keys action (int) and feedback (float or None)
-    return: int index (0 for Option A, 1 for Option B)
+    Option A = gamble
+    Option B = certain
+    return 0 = gamble_A
+    return 1 = gamble_B
+    return 0 to choose gamble_A (accept the gamble)
+    return 1 to choose gamble_B (choose the certain option / reject the gamble)
     """
     # Write your decision logic here.
     # You can use probabilities, rewards, and history.

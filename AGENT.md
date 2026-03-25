@@ -69,9 +69,12 @@ CPC18 Track II (Individual Behavior):
 
 Mixed Gambles:
 - Dataset: `--dataset mixed_gambles`. CSV at `datasets/mixed_gambles/data_all_2021-01-08.csv`. Rows filtered by `subject == participant_id`. Each row is one independent trial (no temporal dependence; history always empty).
-- Trial format (choice13k-compatible): Option A = gamble `rewards [gain, loss]`, `probs [0.5, 0.5]`; Option B = certain `rewards [cert]`, `probs [1.0]`; `action = took_gamble` (1 = gamble A, 0 = certain B); fixed 80/20 train/test split by row order.
-- Strict mode (`Template_evo.py`): Parameter-only evolution. Prompts from `prompts/Template_evo/choice13k/strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Run: `python Template_evo.py --dataset mixed_gambles --participant_id 101`.
-- Non-strict mode (`Template_evo_non_strict.py`): Full program evolution. Prompts from `prompts/Template_evo/choice13k/non_strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Output: `generated_outputs/mixed_gambles/non_strict/run_TIMESTAMP/participant_{id}/`.
+- Trial format (choice13k-compatible): Option A = gamble `rewards [gain, loss]`, `probs [0.5, 0.5]`; Option B = certain `rewards [cert]`, `probs [1.0]`.
+- Raw CSV encoding: `took_gamble` with `1` = chose the gamble, `0` = chose the certain option.
+- TE mixed-gambles trial `action` after conversion: `action = 1 - took_gamble`, so `0` = `gamble_A` (accept the gamble), `1` = `gamble_B` (certain / reject the gamble). This matches the general TE option index (`0` = Option A, `1` = Option B).
+- Fixed 80/20 train/test split (reproducible shuffle, RNG seed 42), not raw row order.
+- Strict mode (`Template_evo.py`): Parameter-only evolution. Prompts from `prompts/Template_evo/mixed_gambles/strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Run: `python Template_evo.py --dataset mixed_gambles --participant_id 101`.
+- Non-strict mode (`Template_evo_non_strict.py`): Full program evolution. Prompts from `prompts/Template_evo/mixed_gambles/non_strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Output: `generated_outputs/mixed_gambles/non_strict/run_TIMESTAMP/participant_{id}/`.
 
 Collecting ROTE programs for Template_evo:
 - After running ROTE on gridworld, use `python utils/collect_template_program.py --exp_folder generated_outputs/gridworld/run_XXX --epoch 0` to extract best programs from ROTE output.

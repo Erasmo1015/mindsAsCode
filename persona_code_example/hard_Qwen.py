@@ -8,7 +8,9 @@ def choose(problem, history):
     history: list of dicts with keys
         - action: int (0 or 1)
         - feedback: float or None
-    return: int (0 or 1)
+    return: int — TE option index: 0 = Option A (gamble_A), 1 = Option B (gamble_B).
+    For mixed_gambles, Option A is the risky gamble and Option B is the certain outcome
+    (prefer A when sv_A >= sv_B; else B).
     """
 
     # ----------------------------

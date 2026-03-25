@@ -14,7 +14,12 @@ def choose(problem, history):
         - option_keys
         - has_feedback: bool
     history: unused
-    return: int (0 for Option A (gamble), 1 for Option B (certain))
+    Option A = gamble
+    Option B = certain
+    return 0 = gamble_A
+    return 1 = gamble_B
+    return 0 to choose gamble_A (accept the gamble)
+    return 1 to choose gamble_B (choose the certain option / reject the gamble)
     """
 
     # ----------------------------

@@ -29,7 +29,8 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
 
 
 def load_all_participant_trials(csv_path: Path, filter_gain_loss_only: bool = False):
-    """Load CSV; return dict participant_id -> list of (G, L, y). G=gain, L=abs(loss), y=took_gamble (0/1).
+    """Load CSV; return dict participant_id -> list of (G, L, y). G=gain, L=abs(loss), y=raw CSV took_gamble (1=chose gamble, 0=certain).
+    This script fits P(chose gamble) = sigmoid(...); TE trials elsewhere use action = 1 - took_gamble (0=gamble_A, 1=gamble_B).
     If filter_gain_loss_only is True, keep only gamble_type == 'gain_loss' trials (Section 4.2). Default: False (use all).
     """
     trials_by_participant = {}

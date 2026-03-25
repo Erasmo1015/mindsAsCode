@@ -13,7 +13,7 @@ def choose(problem, history):
         - option_keys
         - has_feedback: bool
     history: unused
-    return: int (0 for Option A (gamble), 1 for Option B (certain))
+    return: int — TE option index: 0 = gamble_A (accept risky gamble), 1 = gamble_B (certain / reject gamble)
     """
 
     # ----------------------------

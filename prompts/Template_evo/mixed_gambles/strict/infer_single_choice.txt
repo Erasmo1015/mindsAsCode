@@ -4,6 +4,12 @@ Each problem presents two options:
 - Option A: a risky mixed gamble with possible gain and possible loss (with probabilities provided)
 - Option B: reject the gamble and take a certain outcome (typically $0)
 
+Option convention:
+- Option A = gamble
+- Option B = certain
+- return 0 = gamble_A
+- return 1 = gamble_B
+
 IMPORTANT DATA PROPERTIES:
 - has_feedback is always False
 - history does NOT contain useful information
@@ -30,7 +36,8 @@ def choose(problem, history):
         - option_keys
         - has_feedback: bool
     history: unused (may be empty)
-    return: int (0 or 1)  # 0 for A, 1 for B
+    return 0 to choose gamble_A (accept the gamble)
+    return 1 to choose gamble_B (choose the certain option / reject the gamble)
     """
 
 Model guidance (must be parameterized, deterministic):

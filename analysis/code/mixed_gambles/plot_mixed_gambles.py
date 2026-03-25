@@ -9,8 +9,9 @@ For ONE participant and ONE evaluated program (choose(problem, history)), produc
 
 Dataset and split logic match Template_evo_non_strict.py (mixed_gambles):
 - gamble_A = risky [gain, loss], probs [0.5, 0.5]; gamble_B = certain [cert], probs [1.0].
-- action 1 = accept gamble (choose A), action 0 = take certain (choose B).
-- 80/20 train/test split by row order.
+- TE option index: action 0 = choose gamble_A (accept gamble); action 1 = choose gamble_B (certain / reject gamble).
+- Raw CSV `took_gamble` is converted at load: action = 1 - took_gamble.
+- 80/20 train/test split with RNG seed 42 (shuffled indices), not raw row order.
 
 Usage examples:
   # Default: all trials combined, save to analysis/figures/mixed_gambles_p{id}_iter{iter}_cand{cand}/
@@ -44,9 +45,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 # Dataset: same format and split as Template_evo_non_strict.py
 # -----------------------------------------------------------------------------
 
-# From Template_evo_non_strict.py: option_keys = [0, 1]; 0 = certain B, 1 = gamble A.
-# action = took_gamble (1 = choose gamble A = accept gamble, 0 = choose certain B = reject).
-ACCEPT_ACTION = 1  # "accepted gamble" in dataset and for overlays
+# TE option index (mixed gambles): 0 = gamble_A (accept), 1 = gamble_B (certain). Loader sets action = 1 - took_gamble.
+ACCEPT_ACTION = 0  # predicted / observed "accept gamble" matches action == 0
 
 
 def load_mixed_gambles_data(
@@ -56,7 +56,7 @@ def load_mixed_gambles_data(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
     """Load mixed_gambles CSV, filter by subject == participant_id, 80/20 split.
     Each row: Option A (gamble) = [gain, loss] probs [0.5, 0.5]; Option B (certain) = [cert] probs [1.0].
-    action = took_gamble (1 = accept gamble A, 0 = take certain B).
+    Raw CSV `took_gamble`: 1 = chose gamble, 0 = chose certain. Stored action = 1 - took_gamble (0 = gamble_A, 1 = gamble_B).
 
     Args:
         filter_gain_loss_only: If True, keep only gamble_type == "gain_loss" trials (Section 4.2).
@@ -74,6 +74,7 @@ def load_mixed_gambles_data(
                 continue
             gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
             took_gamble = int(row["took_gamble"])
+            action = 1 - took_gamble
             all_trials.append({
                 "problem": {
                     "gamble_A": {"rewards": [gain, loss], "probs": [0.5, 0.5]},
@@ -83,7 +84,7 @@ def load_mixed_gambles_data(
                 },
                 "history": [],
                 "options": option_keys,
-                "action": took_gamble,
+                "action": action,
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
@@ -201,7 +202,7 @@ def plot_fig45_design_heatmap(
     loss_max: float,
     dpi: int = 300,
 ) -> None:
-    """Heatmap over unique (G,L) design points: color = program prediction (red=0, green=1). Black dots = observed accepted."""
+    """Heatmap over unique (G,L) design points: color = P(predict accept) with red=0, green=1 (accept = pred == ACCEPT_ACTION). Black dots = observed accepted."""
     # Unique (G,L) and program prediction
     seen = {}
     for t in trials:
