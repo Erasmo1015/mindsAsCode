@@ -17,6 +17,7 @@ import os
 import re
 import json
 import csv
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from datetime import datetime
@@ -26,9 +27,11 @@ from tqdm import tqdm
 import jax
 import jax.numpy as jnp
 import flax
+from datasets import load_dataset
 
 # Import data loading (this is acceptable as it's a data module, not ROTE/evo code)
 from data_modules.choice13k import get_choice13k_experiments, Experiment, Block
+from data_modules import choice13k as choice13k_module
 from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials, ParticipantData
 from agent import AgentExecutionFramework
 from plot_and_eval import get_all_problem_configs, make_dataloader
@@ -1871,6 +1874,7 @@ def run_evolution(
     filter_mixed_gambles: bool = False,
     save_artifacts: bool = True,
     all_data_mode: bool = False,
+    choice13k_experiment: Optional[Experiment] = None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -1934,8 +1938,11 @@ def run_evolution(
     else:
         # Load Choice13k data
         print(f"Loading Choice13k data for participant {participant_id}...")
-        experiments = get_choice13k_experiments(n_participants=participant_id + 1)
-        exp = experiments[participant_id]
+        if choice13k_experiment is not None:
+            exp = choice13k_experiment
+        else:
+            experiments = get_choice13k_experiments(n_participants=participant_id + 1)
+            exp = experiments[participant_id]
         
         # Split trials
         train_trials, test_trials, options = split_trials(exp)
@@ -2069,11 +2076,17 @@ def run_evolution(
                     f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
                 }
         else:
-            baseline_log_dict = {
-                f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
-                f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
-                f"p{participant_id}_is_baseline": 1,
-            }
+            if all_data_mode:
+                baseline_log_dict = {
+                    f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
+                    f"p{participant_id}_test_fitness": baseline_test_eval["accuracy"],
+                }
+            else:
+                baseline_log_dict = {
+                    f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
+                    f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
+                    f"p{participant_id}_is_baseline": 1,
+                }
         wandb.log(baseline_log_dict, step=0)
         
         # Also save baseline to local JSONL file
@@ -2629,14 +2642,20 @@ def run_evolution(
                         log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0].get("train_acc", None)
                         log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0].get("test_acc", None)
             else:
-                log_dict = {
-                    f"p{participant_id}_n_valid": len(valid_results),
-                }
-                if valid_results:
-                    log_dict[f"p{participant_id}_train_accuracy"] = best_fitness
-                    log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
-                    log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
-                    log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
+                if all_data_mode:
+                    log_dict = {}
+                    if valid_results:
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness
+                        log_dict[f"p{participant_id}_test_fitness"] = valid_results[0]["test_acc"]
+                else:
+                    log_dict = {
+                        f"p{participant_id}_n_valid": len(valid_results),
+                    }
+                    if valid_results:
+                        log_dict[f"p{participant_id}_train_accuracy"] = best_fitness
+                        log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
+                        log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
             wandb.log(log_dict, step=iteration + 1)  # Step starts at 1 (baseline is step=0)
             
             # Also save to local JSONL file
@@ -2731,9 +2750,13 @@ def run_evolution(
         }
     else:
         result = {
-            "participant_id": participant_id if dataset in ["choice13k", "cpc18"] else agent_id,
+            "participant_id": participant_id if dataset in ["choice13k", "cpc18", "mixed_gambles"] else agent_id,
             "train_acc": overall_best_train['train_accuracy'],
             "test_acc": overall_best_test['test_accuracy'],
+            "train_fitness": overall_best_train['train_accuracy'],
+            "test_fitness": overall_best_test['test_accuracy'],
+            "seed_program_train_fitness": baseline_results['train_accuracy'],
+            "seed_program_test_fitness": baseline_results['test_accuracy'],
         }
     return result
 
@@ -3095,6 +3118,7 @@ def main():
     )
     
     args = parser.parse_args()
+    num_agents_arg_explicit = "--num_agents_to_sample" in sys.argv
     
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
@@ -3197,53 +3221,94 @@ def main():
         if not args.all_data:
             print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
 
-    # cpc18 all-data mode: process all participants and save compact CSV outputs only
+    # all-data mode: process all participants and save compact CSV outputs only
     if args.all_data:
-        if args.dataset != "cpc18":
-            print("Error: --all_data is currently supported only for --dataset cpc18.")
+        if args.dataset not in ["cpc18", "choice13k", "mixed_gambles"]:
+            print("Error: --all_data is currently supported only for --dataset cpc18, --dataset choice13k, or --dataset mixed_gambles.")
             if wandb is not None:
                 wandb.finish()
             return
 
-        cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
-        raw_file = Path(cpc18_data_path) / "raw-comp-set-data-Track-2.csv"
-        if not raw_file.exists():
-            print(f"Error: Could not find CPC18 raw data file: {raw_file}")
-            if wandb is not None:
-                wandb.finish()
-            return
-
-        unique_subj_ids = set()
-        with open(raw_file, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                unique_subj_ids.add(int(row["SubjID"]))
-        all_participant_ids = list(range(len(unique_subj_ids)))
-
-        # Validate participants upfront to avoid runtime failures from missing train/test data.
+        all_participant_ids = []
         valid_participant_ids = []
-        invalid_participants = []
-        for participant_id in all_participant_ids:
-            try:
-                participant_data = load_cpc18_track2_data(
-                    data_path=cpc18_data_path,
-                    participant_id=participant_id,
-                )
-                train_trials, test_trials, _ = split_cpc18_trials(participant_data, train_ratio=0.8)
-                if len(train_trials) == 0 or len(test_trials) == 0:
-                    invalid_participants.append({
-                        "participant_id": participant_id,
-                        "reason": f"empty train/test (train={len(train_trials)}, test={len(test_trials)})",
-                    })
+        choice13k_experiments_all = {}
+
+        if args.dataset == "cpc18":
+            cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
+            raw_file = Path(cpc18_data_path) / "raw-comp-set-data-Track-2.csv"
+            if not raw_file.exists():
+                print(f"Error: Could not find CPC18 raw data file: {raw_file}")
+                if wandb is not None:
+                    wandb.finish()
+                return
+            unique_subj_ids = set()
+            with open(raw_file, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    unique_subj_ids.add(int(row["SubjID"]))
+            all_participant_ids = list(range(len(unique_subj_ids)))
+
+            # Validate participants upfront to avoid runtime failures from missing train/test data.
+            for participant_id in all_participant_ids:
+                try:
+                    participant_data = load_cpc18_track2_data(
+                        data_path=cpc18_data_path,
+                        participant_id=participant_id,
+                    )
+                    train_trials, test_trials, _ = split_cpc18_trials(participant_data, train_ratio=0.8)
+                    if len(train_trials) == 0 or len(test_trials) == 0:
+                        continue
+                    valid_participant_ids.append(participant_id)
+                except Exception:
                     continue
-                valid_participant_ids.append(participant_id)
-            except Exception as e:
-                invalid_participants.append({
-                    "participant_id": participant_id,
-                    "reason": str(e),
-                })
+        elif args.dataset == "choice13k":
+            # choice13k: enumerate all candidate participant indices from dataset length,
+            # then validate/convert each index safely (skip malformed rows).
+            dataset = load_dataset("marcelbinz/Psych-101-test")
+            test_split = dataset["test"]
+            choices13k_ds = test_split.filter(lambda ex: ex["experiment"] == "peterson2021using/exp1.csv")
+            all_participant_ids = list(range(len(choices13k_ds)))
+            for participant_id in all_participant_ids:
+                try:
+                    exp = choice13k_module._convert_to_experiment(choices13k_ds[participant_id])
+                    train_trials, test_trials, _ = split_trials(exp)
+                    if len(train_trials) > 0 and len(test_trials) > 0:
+                        valid_participant_ids.append(participant_id)
+                        choice13k_experiments_all[participant_id] = exp
+                except Exception:
+                    continue
+        else:
+            # mixed_gambles: collect all unique subject IDs first, then validate non-empty splits.
+            mixed_csv_path = Path("datasets/mixed_gambles/data_all_2021-01-08.csv")
+            if not mixed_csv_path.exists():
+                print(f"Error: Could not find mixed_gambles CSV file: {mixed_csv_path}")
+                if wandb is not None:
+                    wandb.finish()
+                return
+            unique_subject_ids = set()
+            with open(mixed_csv_path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    unique_subject_ids.add(int(row["subject"]))
+            all_participant_ids = sorted(unique_subject_ids)
+            for participant_id in all_participant_ids:
+                try:
+                    train_trials, test_trials, _ = load_mixed_gambles_data(
+                        str(mixed_csv_path),
+                        participant_id,
+                        filter_gain_loss_only=getattr(args, "filter_mixed_gambles", False),
+                    )
+                    if len(train_trials) == 0 or len(test_trials) == 0:
+                        continue
+                    valid_participant_ids.append(participant_id)
+                except Exception:
+                    continue
 
         participants_to_process = valid_participant_ids
+        # In --all_data mode, apply participant cap only when user explicitly provides --num_agents_to_sample.
+        if num_agents_arg_explicit and args.num_agents_to_sample is not None:
+            cap = max(0, int(args.num_agents_to_sample))
+            participants_to_process = participants_to_process[:cap]
 
         details_file = Path(base_run_dir) / "participants_details.csv"
         summary_file = Path(base_run_dir) / "summary.csv"
@@ -3273,6 +3338,11 @@ def main():
                     filter_mixed_gambles=getattr(args, "filter_mixed_gambles", False),
                     save_artifacts=False,
                     all_data_mode=True,
+                    choice13k_experiment=(
+                        choice13k_experiments_all.get(participant_id)
+                        if args.dataset == "choice13k"
+                        else None
+                    ),
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 

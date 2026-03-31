@@ -76,6 +76,15 @@ Mixed Gambles:
 - Strict mode (`Template_evo.py`): Parameter-only evolution. Prompts from `prompts/Template_evo/mixed_gambles/strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Run: `python Template_evo.py --dataset mixed_gambles --participant_id 101`.
 - Non-strict mode (`Template_evo_non_strict.py`): Full program evolution. Prompts from `prompts/Template_evo/mixed_gambles/non_strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Output: `generated_outputs/mixed_gambles/non_strict/run_TIMESTAMP/participant_{id}/`.
 
+`--all_data` mode (Template_evo_non_strict.py):
+- Supported datasets: `choice13k`, `cpc18`, `mixed_gambles`.
+- Startup prints one line: `All data mode activated by --all_data. All participants will be processed. Total num of valid participants: XX.`
+- Output is compact and updated after each participant: only `seed_program.py`, `participants_details.csv`, and `summary.csv` are kept in the run folder (no per-participant `iteration_*`, candidate code, or `results.json` artifacts).
+- `participants_details.csv` schema: `participant_id, train_fitness, test_fitness, total_runtime, seed_program_train_fitness, seed_program_test_fitness`.
+- `summary.csv` schema: `num_of_participants, avg_train_fitness, avg_test_fitness` (single row).
+- Wandb in `--all_data` logs only two participant metrics: `pX_train_fitness` and `pX_test_fitness`.
+- Participant scope in `--all_data`: if `--num_agents_to_sample` is explicitly provided, process at most that many valid participants; otherwise process all valid participants (ignoring the parser default).
+
 Collecting ROTE programs for Template_evo:
 - After running ROTE on gridworld, use `python utils/collect_template_program.py --exp_folder generated_outputs/gridworld/run_XXX --epoch 0` to extract best programs from ROTE output.
 - This organizes programs by problem config (num_blocks, num_walls) in `persona_code_example/gridworld/num_blocksX_num_wallsY/` with names like `block_cycle_agent0.py`.
