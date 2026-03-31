@@ -1869,6 +1869,8 @@ def run_evolution(
     n_eval_seeds: int = 3,
     sample_size: int = 10,
     filter_mixed_gambles: bool = False,
+    save_artifacts: bool = True,
+    all_data_mode: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -1953,11 +1955,12 @@ def run_evolution(
         else:
             output_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}/participant_{participant_id}"
     output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    if save_artifacts:
+        output_path.mkdir(parents=True, exist_ok=True)
     
     # Set up local log file for wandb metrics (if wandb is enabled)
     log_file_path = None
-    if wandb is not None:
+    if wandb is not None and save_artifacts:
         log_file_path = output_path / "wandb_metrics.jsonl"
     
     # ===== BASELINE EVALUATION =====
@@ -2050,15 +2053,21 @@ def run_evolution(
                     f"gw_is_baseline": 1,
                 }
         elif dataset == "cpc18":
-            baseline_log_dict = {
-                f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],  # -MSE (primary metric)
-                f"p{participant_id}_train_mse": baseline_train_mse_eval["mse"],
-                f"p{participant_id}_test_mse": baseline_test_mse_eval["mse"],
-                f"p{participant_id}_is_baseline": 1,
-                # Keep accuracy for debugging (not used for selection)
-                f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
-                f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
-            }
+            if all_data_mode:
+                baseline_log_dict = {
+                    f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],  # -MSE (higher is better)
+                    f"p{participant_id}_test_fitness": -baseline_test_mse_eval["mse"],   # -MSE (higher is better)
+                }
+            else:
+                baseline_log_dict = {
+                    f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],  # -MSE (primary metric)
+                    f"p{participant_id}_train_mse": baseline_train_mse_eval["mse"],
+                    f"p{participant_id}_test_mse": baseline_test_mse_eval["mse"],
+                    f"p{participant_id}_is_baseline": 1,
+                    # Keep accuracy for debugging (not used for selection)
+                    f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
+                    f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
+                }
         else:
             baseline_log_dict = {
                 f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
@@ -2146,10 +2155,13 @@ def run_evolution(
         print(f"Iteration {iteration_step}/{n_iterations}")
         print(f"{'='*80}")
         
-        iter_dir = output_path / f"iteration_{iteration_step}"
-        iter_dir.mkdir(exist_ok=True)
-        candidates_dir = iter_dir / "candidates"
-        candidates_dir.mkdir(exist_ok=True)
+        iter_dir = None
+        candidates_dir = None
+        if save_artifacts:
+            iter_dir = output_path / f"iteration_{iteration_step}"
+            iter_dir.mkdir(exist_ok=True)
+            candidates_dir = iter_dir / "candidates"
+            candidates_dir.mkdir(exist_ok=True)
         
         # Select sample_size parents from elite set (sorted by fitness descending)
         # For CPC18: fitness = -MSE (higher is better)
@@ -2211,7 +2223,8 @@ def run_evolution(
         candidate_results = []
         for idx, code in enumerate(tqdm(candidate_codes, desc="Evaluating")):
             # Save candidate code
-            (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
+            if save_artifacts and candidates_dir is not None:
+                (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
             
             if not code:
                 candidate_results.append({
@@ -2551,7 +2564,8 @@ def run_evolution(
                 "best_train_acc": best_fitness if valid_results else None,
                 "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
             }
-        (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        if save_artifacts and iter_dir is not None:
+            (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         
         # Save summary
         if dataset == "cpc18":
@@ -2594,20 +2608,26 @@ def run_evolution(
                         log_dict[f"gw_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         log_dict[f"gw_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
             elif dataset == "cpc18":
-                log_dict = {
-                    f"p{participant_id}_n_valid": len(valid_results),
-                }
-                if valid_results:
-                    # CPC18: log fitness (-MSE) as primary metric, and MSE values
-                    log_dict[f"p{participant_id}_train_fitness"] = best_fitness  # -train_mse (higher is better)
-                    log_dict[f"p{participant_id}_train_mse"] = valid_results[0].get("train_mse", None)
-                    log_dict[f"p{participant_id}_test_mse"] = valid_results[0].get("test_mse", None)
-                    log_dict[f"p{participant_id}_avg_train_fitness"] = np.mean([r["fitness"] for r in valid_results])
-                    log_dict[f"p{participant_id}_avg_train_mse"] = np.mean([r.get("train_mse", float('inf')) for r in valid_results])
-                    log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r.get("test_mse", float('inf')) for r in valid_results])
-                    # Keep accuracy for debugging (not used for selection)
-                    log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0].get("train_acc", None)
-                    log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0].get("test_acc", None)
+                if all_data_mode:
+                    log_dict = {}
+                    if valid_results:
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness  # -train_mse (higher is better)
+                        log_dict[f"p{participant_id}_test_fitness"] = -valid_results[0].get("test_mse", float("inf"))
+                else:
+                    log_dict = {
+                        f"p{participant_id}_n_valid": len(valid_results),
+                    }
+                    if valid_results:
+                        # CPC18: log fitness (-MSE) as primary metric, and MSE values
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness  # -train_mse (higher is better)
+                        log_dict[f"p{participant_id}_train_mse"] = valid_results[0].get("train_mse", None)
+                        log_dict[f"p{participant_id}_test_mse"] = valid_results[0].get("test_mse", None)
+                        log_dict[f"p{participant_id}_avg_train_fitness"] = np.mean([r["fitness"] for r in valid_results])
+                        log_dict[f"p{participant_id}_avg_train_mse"] = np.mean([r.get("train_mse", float('inf')) for r in valid_results])
+                        log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r.get("test_mse", float('inf')) for r in valid_results])
+                        # Keep accuracy for debugging (not used for selection)
+                        log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0].get("train_acc", None)
+                        log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0].get("test_acc", None)
             else:
                 log_dict = {
                     f"p{participant_id}_n_valid": len(valid_results),
@@ -2620,7 +2640,7 @@ def run_evolution(
             wandb.log(log_dict, step=iteration + 1)  # Step starts at 1 (baseline is step=0)
             
             # Also save to local JSONL file
-            if log_file_path is not None:
+            if save_artifacts and log_file_path is not None:
                 log_entry = {
                     "step": iteration + 1,
                     "iteration": iteration_step,
@@ -2678,7 +2698,8 @@ def run_evolution(
             "overall_best_train_accuracy": overall_best_train,
             "overall_best_test_accuracy": overall_best_test,
         }
-    (output_path / "results.json").write_text(json.dumps(results, indent=2))
+    if save_artifacts:
+        (output_path / "results.json").write_text(json.dumps(results, indent=2))
     
     if n_iterations > 0:
         if dataset == "cpc18":
@@ -2694,7 +2715,8 @@ def run_evolution(
             print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
             print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
             print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
-    print(f"\nResults saved to: {output_path / 'results.json'}")
+    if save_artifacts:
+        print(f"\nResults saved to: {output_path / 'results.json'}")
     
     # Return summary for participants summary file (just the essentials)
     if dataset == "cpc18":
@@ -2703,6 +2725,9 @@ def run_evolution(
             "train_mse": overall_best_train['train_mse'],
             "test_mse": overall_best_test['test_mse'],
             "train_fitness": overall_best_train['train_fitness'],  # -MSE
+            "test_fitness": -overall_best_test['test_mse'],
+            "seed_program_train_fitness": -baseline_results['train_mse'],
+            "seed_program_test_fitness": -baseline_results['test_mse'],
         }
     else:
         result = {
@@ -3063,6 +3088,11 @@ def main():
         action="store_true",
         help="For mixed_gambles dataset: keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).",
     )
+    parser.add_argument(
+        "--all_data",
+        action="store_true",
+        help="For cpc18 only: run all participants and save only participants_details.csv and summary.csv.",
+    )
     
     args = parser.parse_args()
     
@@ -3164,7 +3194,127 @@ def main():
     if seed_program_path is not None:
         seed_code = load_seed_program(seed_program_path)
         (Path(base_run_dir) / "seed_program.py").write_text(seed_code)
-        print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
+        if not args.all_data:
+            print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
+
+    # cpc18 all-data mode: process all participants and save compact CSV outputs only
+    if args.all_data:
+        if args.dataset != "cpc18":
+            print("Error: --all_data is currently supported only for --dataset cpc18.")
+            if wandb is not None:
+                wandb.finish()
+            return
+
+        cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
+        raw_file = Path(cpc18_data_path) / "raw-comp-set-data-Track-2.csv"
+        if not raw_file.exists():
+            print(f"Error: Could not find CPC18 raw data file: {raw_file}")
+            if wandb is not None:
+                wandb.finish()
+            return
+
+        unique_subj_ids = set()
+        with open(raw_file, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                unique_subj_ids.add(int(row["SubjID"]))
+        all_participant_ids = list(range(len(unique_subj_ids)))
+
+        # Validate participants upfront to avoid runtime failures from missing train/test data.
+        valid_participant_ids = []
+        invalid_participants = []
+        for participant_id in all_participant_ids:
+            try:
+                participant_data = load_cpc18_track2_data(
+                    data_path=cpc18_data_path,
+                    participant_id=participant_id,
+                )
+                train_trials, test_trials, _ = split_cpc18_trials(participant_data, train_ratio=0.8)
+                if len(train_trials) == 0 or len(test_trials) == 0:
+                    invalid_participants.append({
+                        "participant_id": participant_id,
+                        "reason": f"empty train/test (train={len(train_trials)}, test={len(test_trials)})",
+                    })
+                    continue
+                valid_participant_ids.append(participant_id)
+            except Exception as e:
+                invalid_participants.append({
+                    "participant_id": participant_id,
+                    "reason": str(e),
+                })
+
+        participants_to_process = valid_participant_ids
+
+        details_file = Path(base_run_dir) / "participants_details.csv"
+        summary_file = Path(base_run_dir) / "summary.csv"
+        participant_details = []
+
+        print(f"All data mode activated by --all_data. All participants will be processed. Total num of valid participants: {len(participants_to_process)}.")
+
+        try:
+            for participant_id in tqdm(participants_to_process, desc="Participants"):
+                participant_start = datetime.now()
+                participant_summary = run_evolution(
+                    seed_program_path=seed_program_path,
+                    dataset=args.dataset,
+                    participant_id=participant_id,
+                    data_path=args.data_path,
+                    num_blocks=getattr(args, "num_blocks", None),
+                    num_walls=getattr(args, "num_walls", None),
+                    agent_id=getattr(args, "agent_id", None),
+                    n_iterations=args.n_iterations,
+                    n_candidates_per_iteration=args.n_candidates,
+                    model_name=args.model_name,
+                    client_kwargs=client_kwargs if client_kwargs else None,
+                    output_dir=base_run_dir,
+                    wandb=wandb,
+                    n_eval_seeds=args.n_eval_seeds,
+                    sample_size=args.sample_size,
+                    filter_mixed_gambles=getattr(args, "filter_mixed_gambles", False),
+                    save_artifacts=False,
+                    all_data_mode=True,
+                )
+                runtime_sec = (datetime.now() - participant_start).total_seconds()
+
+                participant_details.append({
+                    "participant_id": participant_id,
+                    "train_fitness": participant_summary.get("train_fitness"),
+                    "test_fitness": participant_summary.get("test_fitness"),
+                    "total_runtime": runtime_sec,
+                    "seed_program_train_fitness": participant_summary.get("seed_program_train_fitness"),
+                    "seed_program_test_fitness": participant_summary.get("seed_program_test_fitness"),
+                })
+
+                with open(details_file, "w", newline="") as f:
+                    fieldnames = [
+                        "participant_id",
+                        "train_fitness",
+                        "test_fitness",
+                        "total_runtime",
+                        "seed_program_train_fitness",
+                        "seed_program_test_fitness",
+                    ]
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(participant_details)
+
+                avg_train_fitness = float(np.mean([d["train_fitness"] for d in participant_details]))
+                avg_test_fitness = float(np.mean([d["test_fitness"] for d in participant_details]))
+                with open(summary_file, "w", newline="") as f:
+                    writer = csv.DictWriter(
+                        f,
+                        fieldnames=["num_of_participants", "avg_train_fitness", "avg_test_fitness"],
+                    )
+                    writer.writeheader()
+                    writer.writerow({
+                        "num_of_participants": len(participant_details),
+                        "avg_train_fitness": avg_train_fitness,
+                        "avg_test_fitness": avg_test_fitness,
+                    })
+        finally:
+            if wandb is not None:
+                wandb.finish()
+        return
     
     # Initialize participants summary (list for CSV)
     participants_summary = []
@@ -3494,7 +3644,7 @@ def main():
                     participants_summary.append(participant_summary)
                     # Write CSV file
                     with open(summary_file, 'w', newline='') as f:
-                        writer = csv.DictWriter(f, fieldnames=['participant_id', 'train_acc', 'test_acc'])
+                        writer = csv.DictWriter(f, fieldnames=list(participant_summary.keys()))
                         writer.writeheader()
                         writer.writerows(participants_summary)
                     print(f"\nParticipants summary updated: {summary_file}")
