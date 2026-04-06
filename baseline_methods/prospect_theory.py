@@ -357,6 +357,11 @@ def main() -> None:
         help="Number of participants to process when --participant_id is None.",
     )
     parser.add_argument(
+        "--all_data",
+        action="store_true",
+        help="Process all valid participants for the selected dataset.",
+    )
+    parser.add_argument(
         "--data_path",
         type=str,
         default="data",
@@ -379,6 +384,7 @@ def main() -> None:
         help="Disable wandb logging. Default is enabled.",
     )
     args = parser.parse_args()
+    num_agents_arg_explicit = "--num_agents_to_sample" in sys.argv
 
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
 
@@ -392,6 +398,8 @@ def main() -> None:
             run_name = f"{dataset_prefix}_prospect_theory_{timestamp}"
             if args.participant_id is not None:
                 run_name = f"{run_name}_participant_{args.participant_id}"
+            elif args.all_data:
+                run_name = f"{run_name}_all_data"
             else:
                 run_name = f"{run_name}_participants_0to{args.num_agents_to_sample-1}"
 
@@ -406,7 +414,71 @@ def main() -> None:
             wandb = None
 
     # Determine which participants to process
-    if args.participant_id is not None:
+    choice13k_exp_cache: Dict[int, Any] = {}
+    if args.all_data:
+        valid_participants: List[int] = []
+        if args.dataset == "cpc18":
+            cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
+            raw_file = Path(cpc18_data_path) / "raw-comp-set-data-Track-2.csv"
+            if not raw_file.exists():
+                raise FileNotFoundError(f"Could not find CPC18 raw data file: {raw_file}")
+            unique_subj_ids = set()
+            with open(raw_file, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    unique_subj_ids.add(int(row["SubjID"]))
+            cpc18_mod = _load_data_module("cpc18.py", "cpc18_data_module")
+            for participant_id in range(len(unique_subj_ids)):
+                try:
+                    participant_data = cpc18_mod.load_cpc18_track2_data(
+                        data_path=cpc18_data_path, participant_id=participant_id
+                    )
+                    train_trials, test_trials, _ = cpc18_mod.split_cpc18_trials(
+                        participant_data, train_ratio=0.8
+                    )
+                    if len(train_trials) > 0 and len(test_trials) > 0:
+                        valid_participants.append(participant_id)
+                except Exception:
+                    continue
+        elif args.dataset == "mixed_gambles":
+            csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
+            unique_subjects = set()
+            with open(csv_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    unique_subjects.add(int(row["subject"]))
+            for participant_id in sorted(unique_subjects):
+                try:
+                    train_trials, test_trials, _ = load_mixed_gambles_data(
+                        csv_path, participant_id, filter_gain_loss_only=args.filter_mixed_gambles
+                    )
+                    if len(train_trials) > 0 and len(test_trials) > 0:
+                        valid_participants.append(participant_id)
+                except Exception:
+                    continue
+        else:
+            choice13k_mod = _load_data_module("choice13k.py", "choice13k_data_module")
+            dataset = choice13k_mod.load_dataset("marcelbinz/Psych-101-test")
+            test_split = dataset["test"]
+            choices13k_ds = test_split.filter(lambda ex: ex["experiment"] == "peterson2021using/exp1.csv")
+            for participant_id in range(len(choices13k_ds)):
+                try:
+                    exp = choice13k_mod._convert_to_experiment(choices13k_ds[participant_id])
+                    train_trials, test_trials, _ = split_trials(exp)
+                    if len(train_trials) > 0 and len(test_trials) > 0:
+                        valid_participants.append(participant_id)
+                        choice13k_exp_cache[participant_id] = exp
+                except Exception:
+                    continue
+
+        if num_agents_arg_explicit:
+            valid_participants = valid_participants[: max(0, int(args.num_agents_to_sample))]
+        participants_to_process = valid_participants
+        print(
+            f"All data mode activated by --all_data. All participants will be processed. "
+            f"Total num of valid participants: {len(participants_to_process)}."
+        )
+    elif args.participant_id is not None:
         participants_to_process = [args.participant_id]
     else:
         participants_to_process = list(range(args.num_agents_to_sample))
@@ -434,21 +506,31 @@ def main() -> None:
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
 
     assert base_run_dir is not None
-    summary_file = Path(base_run_dir) / "participants_summary.csv"
+    summary_file = Path(base_run_dir) / ("summary.csv" if args.all_data else "participants_summary.csv")
+    details_file = Path(base_run_dir) / "participants_details.csv"
 
     participants_summary: List[Dict[str, Any]] = []
-    summary_fieldnames = (
-        ["participant_id", "train_fitness", "train_mse", "test_mse"]
-        if args.dataset == "cpc18"
-        else ["participant_id", "train_acc", "test_acc"]
-    )
+    if args.all_data:
+        summary_fieldnames = ["num_of_participants", "avg_train_fitness", "avg_test_fitness"]
+        details_fieldnames = ["participant_id", "train_fitness", "test_fitness", "total_runtime"]
+        participants_details: List[Dict[str, Any]] = []
+    else:
+        summary_fieldnames = (
+            ["participant_id", "train_fitness", "train_mse", "test_mse"]
+            if args.dataset == "cpc18"
+            else ["participant_id", "train_acc", "test_acc"]
+        )
 
     for participant_id in tqdm(participants_to_process, desc="Participants"):
+        participant_start = datetime.now()
         # Load data (TE conventions)
         if args.dataset == "choice13k":
-            choice13k_mod = _load_data_module("choice13k.py", "choice13k_data_module")
-            experiments = choice13k_mod.get_choice13k_experiments(n_participants=participant_id + 1)
-            exp = experiments[participant_id]
+            if args.all_data and participant_id in choice13k_exp_cache:
+                exp = choice13k_exp_cache[participant_id]
+            else:
+                choice13k_mod = _load_data_module("choice13k.py", "choice13k_data_module")
+                experiments = choice13k_mod.get_choice13k_experiments(n_participants=participant_id + 1)
+                exp = experiments[participant_id]
             train_trials, test_trials, _ = split_trials(exp)
         elif args.dataset == "cpc18":
             cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
@@ -625,32 +707,69 @@ def main() -> None:
         else:
             raise AssertionError("Unreachable")
 
-        # Save outputs in TE-like structure
-        participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
-        Path(participant_output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(participant_output_dir) / "results.json").write_text(json.dumps(results, indent=2))
-
-        # Update participants summary with TE-compatible fieldnames (CPC18 uses fitness/MSE)
         if args.dataset == "cpc18":
-            train_mse = float(results.get("train_mse", float("nan")))
-            test_mse = float(results.get("test_mse", float("nan")))
+            train_fitness = -float(results.get("train_mse", float("nan")))
+            test_fitness = -float(results.get("test_mse", float("nan")))
             row = {
                 "participant_id": participant_id,
-                "train_fitness": -train_mse,  # TE convention: fitness = -MSE
-                "train_mse": train_mse,
-                "test_mse": test_mse,
+                "train_fitness": train_fitness,
+                "train_mse": float(results.get("train_mse", float("nan"))),
+                "test_mse": float(results.get("test_mse", float("nan"))),
             }
         else:
+            train_fitness = float(results.get("train_accuracy", float("nan")))
+            test_fitness = float(results.get("test_accuracy", float("nan")))
             row = {
                 "participant_id": participant_id,
-                "train_acc": float(results.get("train_accuracy", float("nan"))),
-                "test_acc": float(results.get("test_accuracy", float("nan"))),
+                "train_acc": train_fitness,
+                "test_acc": test_fitness,
             }
-        participants_summary.append(row)
-        with open(summary_file, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=summary_fieldnames)
-            writer.writeheader()
-            writer.writerows(participants_summary)
+
+        if args.all_data:
+            runtime_sec = (datetime.now() - participant_start).total_seconds()
+            details_row = {
+                "participant_id": participant_id,
+                "train_fitness": train_fitness,
+                "test_fitness": test_fitness,
+                "total_runtime": runtime_sec,
+            }
+            participants_details.append(details_row)
+            with open(details_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=details_fieldnames)
+                writer.writeheader()
+                writer.writerows(participants_details)
+
+            avg_train_fitness = float(np.mean([r["train_fitness"] for r in participants_details])) if participants_details else 0.0
+            avg_test_fitness = float(np.mean([r["test_fitness"] for r in participants_details])) if participants_details else 0.0
+            with open(summary_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=summary_fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "num_of_participants": len(participants_details),
+                        "avg_train_fitness": avg_train_fitness,
+                        "avg_test_fitness": avg_test_fitness,
+                    }
+                )
+        else:
+            participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
+            Path(participant_output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(participant_output_dir) / "results.json").write_text(json.dumps(results, indent=2))
+
+            if args.dataset == "cpc18":
+                participants_summary.append(row)
+            else:
+                participants_summary.append(
+                    {
+                        "participant_id": participant_id,
+                        "train_acc": float(results.get("train_accuracy", float("nan"))),
+                        "test_acc": float(results.get("test_accuracy", float("nan"))),
+                    }
+                )
+            with open(summary_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=summary_fieldnames)
+                writer.writeheader()
+                writer.writerows(participants_summary)
 
         # W&B logging (TE-aligned keys)
         if wandb is not None:
@@ -662,7 +781,6 @@ def main() -> None:
                         f"{prefix}_train_mse": float(row["train_mse"]),
                         f"{prefix}_test_mse": float(row["test_mse"]),
                         f"{prefix}_is_baseline": 1,
-                        # Keep accuracy for debugging (not used for selection)
                         f"{prefix}_train_accuracy": float(results.get("train_accuracy", float("nan"))),
                         f"{prefix}_test_accuracy": float(results.get("test_accuracy", float("nan"))),
                     },
@@ -682,7 +800,13 @@ def main() -> None:
         wandb.finish()
 
     # Final mean across processed participants (TE-style reporting)
-    if args.dataset == "cpc18":
+    if args.all_data:
+        train_mean = float(np.mean([r["train_fitness"] for r in participants_details])) if participants_details else 0.0
+        test_mean = float(np.mean([r["test_fitness"] for r in participants_details])) if participants_details else 0.0
+        print(f"\n[Prospect Theory baseline] dataset={args.dataset} participants={participants_to_process}")
+        print(f"Mean train fitness: {train_mean:.4f}")
+        print(f"Mean test fitness:  {test_mean:.4f}")
+    elif args.dataset == "cpc18":
         train_mean = float(np.mean([r["train_fitness"] for r in participants_summary])) if participants_summary else 0.0
         test_mean = float(np.mean([r["test_mse"] for r in participants_summary])) if participants_summary else 0.0
         print(f"\n[Prospect Theory baseline] dataset={args.dataset} participants={participants_to_process}")
