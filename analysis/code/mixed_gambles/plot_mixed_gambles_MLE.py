@@ -83,7 +83,12 @@ def main() -> None:
     parser.add_argument("--gain_max", type=int, default=16, help="Max gain for axes and full grid")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--csv_path", type=str, default="datasets/mixed_gambles/data_all_2021-01-08.csv", help="Path to mixed_gambles CSV (relative to cwd or repo root)")
-    parser.add_argument("--filter_mixed_gambles", action="store_true", help="Keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).")
+    parser.add_argument(
+        "--filter_mixed_gambles",
+        action="store_true",
+        default=False,
+        help="Keep only gain_loss trials. Default False: all trial types.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(os.getcwd())
@@ -105,7 +110,10 @@ def main() -> None:
     omega, lam = load_mle_params(mle_csv_path, args.participant_id)
     choose_fn = make_mle_choose(omega, lam)
 
-    train_trials, test_trials, _ = load_mixed_gambles_data(str(csv_path), args.participant_id, filter_gain_loss_only=args.filter_mixed_gambles)
+    filter_gain = bool(getattr(args, "filter_mixed_gambles", False))
+    train_trials, test_trials, _ = load_mixed_gambles_data(
+        str(csv_path), args.participant_id, filter_gain_loss_only=filter_gain
+    )
     print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     print(f"[MLE] participant_id={args.participant_id} omega={omega:.4f} lambda={lam:.4f}")
 

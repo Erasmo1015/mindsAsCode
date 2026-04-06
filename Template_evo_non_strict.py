@@ -11,6 +11,14 @@ The evolution process:
 3. Evaluates each program on dataset (Choice13k or Gridworld)
 4. Reports performance and selects best performers
 5. Uses best programs as parents for next generation
+
+Participant selection (choice13k / cpc18 / mixed_gambles):
+- --participant_scope single (default): one raw id via --single_participant_id (must be in
+  datasets/*/valid_participant_ids.json from utils/tools/collect_participant_ids.py).
+- --participant_scope range: raw ids = valid_list[--range_start_ordinal : --range_end_ordinal+1]
+  (inclusive end, 0-based ordinals into that JSON list).
+- --participant_scope all: every raw id in JSON, optional cap --all_max_participants (first N).
+- Gridworld / gridworld_ensemble: use --num_agents_to_sample and --agent_id; participant_scope is ignored.
 """
 
 import os
@@ -34,6 +42,83 @@ from data_modules.choice13k import get_choice13k_experiments, Experiment, Block
 from data_modules import choice13k as choice13k_module
 from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials, ParticipantData
 from agent import AgentExecutionFramework
+
+# Repo root for datasets/*/valid_participant_ids.json (ordinal resolution for choice13k / cpc18 / mixed_gambles).
+_REPO_ROOT = Path(__file__).resolve().parent
+_PARTICIPANT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
+
+
+def load_valid_participant_ids_from_json(
+    dataset: str, repo_root: Path, filter_mixed_gambles: bool
+) -> List[int]:
+    """Load precomputed valid raw participant ids (same ordering as utils/tools/collect_participant_ids.py)."""
+    if dataset == "choice13k":
+        path = repo_root / "datasets" / "choice13k" / "valid_participant_ids.json"
+    elif dataset == "cpc18":
+        path = repo_root / "datasets" / "cpc18" / "valid_participant_ids.json"
+    elif dataset == "mixed_gambles":
+        name = (
+            "valid_participant_ids_gain_loss.json"
+            if filter_mixed_gambles
+            else "valid_participant_ids.json"
+        )
+        path = repo_root / "datasets" / "mixed_gambles" / name
+    else:
+        raise ValueError(f"load_valid_participant_ids_from_json: unsupported dataset {dataset!r}")
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing valid participant list: {path}. "
+            f"Generate it with: python utils/tools/collect_participant_ids.py --dataset {dataset}"
+            + (" --filter_mixed_gambles" if dataset == "mixed_gambles" and filter_mixed_gambles else "")
+        )
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return list(data["valid_participant_ids"])
+
+
+def resolve_participants_for_scope(
+    *,
+    dataset: str,
+    repo_root: Path,
+    participant_scope: str,
+    single_participant_id: int,
+    range_start_ordinal: Optional[int],
+    range_end_ordinal: Optional[int],
+    all_max_participants: Optional[int],
+    filter_mixed_gambles: bool,
+) -> List[int]:
+    """
+    Build the list of raw participant ids to process for choice13k / cpc18 / mixed_gambles.
+
+    - participant_scope=single: one raw id (--single_participant_id).
+    - participant_scope=range: inclusive ordinal slice into valid_participant_ids.json.
+    - participant_scope=all: all raw ids from JSON, optionally capped by --all_max_participants (first N valid).
+    """
+    valid = load_valid_participant_ids_from_json(dataset, repo_root, filter_mixed_gambles)
+    if participant_scope == "single":
+        if single_participant_id not in valid:
+            raise ValueError(
+                f"--single_participant_id={single_participant_id} is not in the precomputed valid list "
+                f"({len(valid)} ids). Check datasets/*/valid_participant_ids.json or your id."
+            )
+        return [single_participant_id]
+    if participant_scope == "range":
+        if range_start_ordinal is None or range_end_ordinal is None:
+            raise ValueError(
+                "--participant_scope range requires --range_start_ordinal and --range_end_ordinal (inclusive)."
+            )
+        if range_start_ordinal < 0 or range_end_ordinal >= len(valid) or range_start_ordinal > range_end_ordinal:
+            raise ValueError(
+                f"Invalid ordinal range [{range_start_ordinal}, {range_end_ordinal}] "
+                f"for valid list of length {len(valid)} (0-based inclusive end)."
+            )
+        return valid[range_start_ordinal : range_end_ordinal + 1]
+    if participant_scope == "all":
+        if all_max_participants is not None:
+            n = max(0, int(all_max_participants))
+            return valid[:n]
+        return list(valid)
+    raise ValueError(f"Unknown participant_scope: {participant_scope!r}")
 from plot_and_eval import get_all_problem_configs, make_dataloader
 from environment import AutomaticityEnv, State
 
@@ -3023,16 +3108,47 @@ def main():
         help="Agent type ID to evaluate (0-indexed, for gridworld). If None and num_agents_to_sample > 1, processes all agent types.",
     )
     parser.add_argument(
-        "--participant_id",
+        "--participant_scope",
+        type=str,
+        default="single",
+        choices=["single", "range", "all"],
+        help=(
+            "For choice13k / cpc18 / mixed_gambles: how to select participants. "
+            "'single' uses --single_participant_id (raw id). "
+            "'range' uses --range_start_ordinal/--range_end_ordinal (inclusive) into datasets/*/valid_participant_ids.json. "
+            "'all' runs all raw ids from that JSON, optionally capped by --all_max_participants. "
+            "Ignored for gridworld (use --num_agents_to_sample / --agent_id)."
+        ),
+    )
+    parser.add_argument(
+        "--single_participant_id",
+        type=int,
+        default=0,
+        help="Raw participant id when --participant_scope single (must appear in valid_participant_ids.json). Default 0.",
+    )
+    parser.add_argument(
+        "--range_start_ordinal",
         type=int,
         default=None,
-        help="Specific participant ID to evaluate (0-indexed). If None, evaluates all participants from 0 to num_agents_to_sample-1.",
+        help="0-based start index into valid_participant_ids.json when --participant_scope range.",
+    )
+    parser.add_argument(
+        "--range_end_ordinal",
+        type=int,
+        default=None,
+        help="0-based inclusive end index into valid_participant_ids.json when --participant_scope range.",
+    )
+    parser.add_argument(
+        "--all_max_participants",
+        type=int,
+        default=None,
+        help="When --participant_scope all: use only the first N valid raw ids from JSON. Omit to run all valids.",
     )
     parser.add_argument(
         "--num_agents_to_sample",
         type=int,
         default=1,
-        help="Number of participants/agent types to process (0-indexed, from 0 to num_agents_to_sample-1). Used when participant_id/agent_id is None.",
+        help="Gridworld / gridworld_ensemble only: number of agent types (0 .. num-1) when --agent_id is None. Ignored for choice13k/cpc18/mixed_gambles.",
     )
     parser.add_argument(
         "--n_iterations",
@@ -3109,17 +3225,16 @@ def main():
     parser.add_argument(
         "--filter_mixed_gambles",
         action="store_true",
-        help="For mixed_gambles dataset: keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).",
+        default=False,
+        help=(
+            "For mixed_gambles: keep only gain_loss trials. Default False (all trial types). "
+            "Affects which valid_participant_ids.json variant is used for ordinal resolution."
+        ),
     )
-    parser.add_argument(
-        "--all_data",
-        action="store_true",
-        help="For cpc18 only: run all participants and save only participants_details.csv and summary.csv.",
-    )
-    
+
     args = parser.parse_args()
-    num_agents_arg_explicit = "--num_agents_to_sample" in sys.argv
-    
+    mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
+
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     
@@ -3134,10 +3249,20 @@ def main():
             # Include dataset in run name
             dataset_prefix = args.dataset if args.dataset else "choice13k"
             run_name = f"{dataset_prefix}_non_strict_{timestamp}"
-            if args.participant_id is not None:
-                run_name = f"{run_name}_participant_{args.participant_id}"
+            if args.dataset in _PARTICIPANT_DATASETS:
+                if args.participant_scope == "single":
+                    run_name = f"{run_name}_participant_{args.single_participant_id}"
+                elif args.participant_scope == "range":
+                    run_name = (
+                        f"{run_name}_ordinals_{args.range_start_ordinal}_to_{args.range_end_ordinal}"
+                    )
+                else:
+                    run_name = f"{run_name}_all_valid"
             else:
-                run_name = f"{run_name}_participants_0to{args.num_agents_to_sample-1}"
+                if args.agent_id is not None:
+                    run_name = f"{run_name}_agent_{args.agent_id}"
+                else:
+                    run_name = f"{run_name}_agents_0to{args.num_agents_to_sample-1}"
             wandb.init(
                 project="ROTE_evo",
                 name=run_name,
@@ -3159,12 +3284,50 @@ def main():
         }
     
     # Determine which participants to process
-    if args.participant_id is not None:
-        # Single participant mode (backward compatible)
-        participants_to_process = [args.participant_id]
+    if args.dataset in _PARTICIPANT_DATASETS:
+        try:
+            participants_to_process = resolve_participants_for_scope(
+                dataset=args.dataset,
+                repo_root=_REPO_ROOT,
+                participant_scope=args.participant_scope,
+                single_participant_id=args.single_participant_id,
+                range_start_ordinal=args.range_start_ordinal,
+                range_end_ordinal=args.range_end_ordinal,
+                all_max_participants=args.all_max_participants,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+            )
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            return
+        except ValueError as e:
+            print(f"Error: {e}")
+            return
     else:
-        # Multiple participants mode
-        participants_to_process = list(range(args.num_agents_to_sample))
+        if args.agent_id is not None:
+            participants_to_process = [args.agent_id]
+        else:
+            participants_to_process = list(range(args.num_agents_to_sample))
+
+    if args.dataset in _PARTICIPANT_DATASETS:
+        if args.participant_scope == "single":
+            print(
+                f"Participant scope: single -> using raw participant id "
+                f"{args.single_participant_id}."
+            )
+        elif args.participant_scope == "range":
+            print(
+                "Participant scope: range -> using inclusive ordinal slice "
+                f"[{args.range_start_ordinal}, {args.range_end_ordinal}] from valid_participant_ids.json."
+            )
+        else:
+            cap_text = (
+                f"first {args.all_max_participants} valid ids"
+                if args.all_max_participants is not None
+                else "all valid ids"
+            )
+            print(
+                f"Participant scope: all -> using {cap_text} from valid_participant_ids.json."
+            )
     
     # Create base run directory and save seed program once
     base_run_dir = None
@@ -3218,103 +3381,19 @@ def main():
     if seed_program_path is not None:
         seed_code = load_seed_program(seed_program_path)
         (Path(base_run_dir) / "seed_program.py").write_text(seed_code)
-        if not args.all_data:
+        if args.participant_scope != "all":
             print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
 
-    # all-data mode: process all participants and save compact CSV outputs only
-    if args.all_data:
-        if args.dataset not in ["cpc18", "choice13k", "mixed_gambles"]:
-            print("Error: --all_data is currently supported only for --dataset cpc18, --dataset choice13k, or --dataset mixed_gambles.")
-            if wandb is not None:
-                wandb.finish()
-            return
-
-        all_participant_ids = []
-        valid_participant_ids = []
-        choice13k_experiments_all = {}
-
-        if args.dataset == "cpc18":
-            cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
-            raw_file = Path(cpc18_data_path) / "raw-comp-set-data-Track-2.csv"
-            if not raw_file.exists():
-                print(f"Error: Could not find CPC18 raw data file: {raw_file}")
-                if wandb is not None:
-                    wandb.finish()
-                return
-            unique_subj_ids = set()
-            with open(raw_file, "r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    unique_subj_ids.add(int(row["SubjID"]))
-            all_participant_ids = list(range(len(unique_subj_ids)))
-
-            # Validate participants upfront to avoid runtime failures from missing train/test data.
-            for participant_id in all_participant_ids:
-                try:
-                    participant_data = load_cpc18_track2_data(
-                        data_path=cpc18_data_path,
-                        participant_id=participant_id,
-                    )
-                    train_trials, test_trials, _ = split_cpc18_trials(participant_data, train_ratio=0.8)
-                    if len(train_trials) == 0 or len(test_trials) == 0:
-                        continue
-                    valid_participant_ids.append(participant_id)
-                except Exception:
-                    continue
-        elif args.dataset == "choice13k":
-            # choice13k: enumerate all candidate participant indices from dataset length,
-            # then validate/convert each index safely (skip malformed rows).
-            dataset = load_dataset("marcelbinz/Psych-101-test")
-            test_split = dataset["test"]
-            choices13k_ds = test_split.filter(lambda ex: ex["experiment"] == "peterson2021using/exp1.csv")
-            all_participant_ids = list(range(len(choices13k_ds)))
-            for participant_id in all_participant_ids:
-                try:
-                    exp = choice13k_module._convert_to_experiment(choices13k_ds[participant_id])
-                    train_trials, test_trials, _ = split_trials(exp)
-                    if len(train_trials) > 0 and len(test_trials) > 0:
-                        valid_participant_ids.append(participant_id)
-                        choice13k_experiments_all[participant_id] = exp
-                except Exception:
-                    continue
-        else:
-            # mixed_gambles: collect all unique subject IDs first, then validate non-empty splits.
-            mixed_csv_path = Path("datasets/mixed_gambles/data_all_2021-01-08.csv")
-            if not mixed_csv_path.exists():
-                print(f"Error: Could not find mixed_gambles CSV file: {mixed_csv_path}")
-                if wandb is not None:
-                    wandb.finish()
-                return
-            unique_subject_ids = set()
-            with open(mixed_csv_path, "r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    unique_subject_ids.add(int(row["subject"]))
-            all_participant_ids = sorted(unique_subject_ids)
-            for participant_id in all_participant_ids:
-                try:
-                    train_trials, test_trials, _ = load_mixed_gambles_data(
-                        str(mixed_csv_path),
-                        participant_id,
-                        filter_gain_loss_only=getattr(args, "filter_mixed_gambles", False),
-                    )
-                    if len(train_trials) == 0 or len(test_trials) == 0:
-                        continue
-                    valid_participant_ids.append(participant_id)
-                except Exception:
-                    continue
-
-        participants_to_process = valid_participant_ids
-        # In --all_data mode, apply participant cap only when user explicitly provides --num_agents_to_sample.
-        if num_agents_arg_explicit and args.num_agents_to_sample is not None:
-            cap = max(0, int(args.num_agents_to_sample))
-            participants_to_process = participants_to_process[:cap]
-
+    # participant_scope=all: process listed participants and save compact CSV outputs only (no per-participant artifacts)
+    if args.dataset in _PARTICIPANT_DATASETS and args.participant_scope == "all":
         details_file = Path(base_run_dir) / "participants_details.csv"
         summary_file = Path(base_run_dir) / "summary.csv"
         participant_details = []
 
-        print(f"All data mode activated by --all_data. All participants will be processed. Total num of valid participants: {len(participants_to_process)}.")
+        print(
+            f"Participant scope=all using precomputed valid ids. "
+            f"Total participants to process: {len(participants_to_process)}."
+        )
 
         try:
             for participant_id in tqdm(participants_to_process, desc="Participants"):
@@ -3335,14 +3414,10 @@ def main():
                     wandb=wandb,
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
-                    filter_mixed_gambles=getattr(args, "filter_mixed_gambles", False),
+                    filter_mixed_gambles=mixed_gambles_gain_loss_only,
                     save_artifacts=False,
                     all_data_mode=True,
-                    choice13k_experiment=(
-                        choice13k_experiments_all.get(participant_id)
-                        if args.dataset == "choice13k"
-                        else None
-                    ),
+                    choice13k_experiment=None,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -3597,7 +3672,7 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
-                        filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
+                        filter_mixed_gambles=mixed_gambles_gain_loss_only,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -3706,7 +3781,7 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
-                        filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
+                        filter_mixed_gambles=mixed_gambles_gain_loss_only,
                     )
                 
                 # Update participants summary after each participant completes

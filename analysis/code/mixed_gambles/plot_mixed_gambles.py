@@ -384,7 +384,12 @@ def main() -> None:
     parser.add_argument("--gain_max", type=int, default=16, help="Max gain for axes and full grid (book uses 1..16)")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--csv_path", type=str, default="datasets/mixed_gambles/data_all_2021-01-08.csv", help="Path to mixed_gambles CSV (relative to cwd)")
-    parser.add_argument("--filter_mixed_gambles", action="store_true", help="Keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).")
+    parser.add_argument(
+        "--filter_mixed_gambles",
+        action="store_true",
+        default=False,
+        help="Keep only gain_loss trials. Default False: all trial types.",
+    )
     args = parser.parse_args()
 
     if args.dataset != "mixed_gambles":
@@ -407,7 +412,10 @@ def main() -> None:
         raise FileNotFoundError(f"Program not found: {args.program_path}")
 
     # Load data (same random split as Template_evo_non_strict, seed=42)
-    train_trials, test_trials, _ = load_mixed_gambles_data(str(csv_path), args.participant_id, filter_gain_loss_only=args.filter_mixed_gambles)
+    filter_gain = bool(getattr(args, "filter_mixed_gambles", False))
+    train_trials, test_trials, _ = load_mixed_gambles_data(
+        str(csv_path), args.participant_id, filter_gain_loss_only=filter_gain
+    )
     print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
     choose_fn = load_choose_function(str(program_path))
     iter_id, cand_id = parse_program_path(str(program_path))

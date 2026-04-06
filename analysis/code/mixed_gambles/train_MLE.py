@@ -84,13 +84,22 @@ def fit_participant(G: np.ndarray, L: np.ndarray, y: np.ndarray):
 
 def main():
     parser = argparse.ArgumentParser(description="Fit logistic gain-loss MLE for mixed gambles")
-    parser.add_argument("--filter_mixed_gambles", action="store_true", help="Keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).")
+    parser.add_argument(
+        "--filter_mixed_gambles",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep only gain_loss trial type (Section 4.2). Default False: use all trial types "
+            "(more participants when enumerating)."
+        ),
+    )
     args = parser.parse_args()
+    filter_gain = bool(getattr(args, "filter_mixed_gambles", False))
 
     if not CSV_PATH.exists():
         raise FileNotFoundError(f"Dataset not found: {CSV_PATH}")
-    trials_by_participant = load_all_participant_trials(CSV_PATH, filter_gain_loss_only=args.filter_mixed_gambles)
-    if args.filter_mixed_gambles:
+    trials_by_participant = load_all_participant_trials(CSV_PATH, filter_gain_loss_only=filter_gain)
+    if filter_gain:
         print("[Mixed Gambles] Using gain_loss trials only.")
     participant_ids = sorted(trials_by_participant.keys())
 

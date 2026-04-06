@@ -2265,11 +2265,16 @@ def main():
     parser.add_argument(
         "--filter_mixed_gambles",
         action="store_true",
-        help="For mixed_gambles dataset: keep only gain_loss trial type (Section 4.2). Default: disabled (use all trial types).",
+        default=False,
+        help=(
+            "For mixed_gambles: keep only gain_loss trials. Default False (all trial types; "
+            "more participants pass validation when applicable)."
+        ),
     )
-    
+
     args = parser.parse_args()
-    
+    mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
+
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     
@@ -2461,7 +2466,7 @@ def main():
                 num_blocks=num_blocks,
                 num_walls=num_walls,
                 agent_id=agent_id,
-                filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
             )
             
             # Update summary (for gridworld, we might want a different summary structure)
@@ -2540,7 +2545,7 @@ def main():
                     num_walls=getattr(args, 'num_walls', None),
                     agent_id=getattr(args, 'agent_id', None),
                     sample_size=args.sample_size,
-                    filter_mixed_gambles=getattr(args, 'filter_mixed_gambles', False),
+                    filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 )
                 
                 # Update participants summary after each participant completes

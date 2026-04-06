@@ -45,6 +45,12 @@ Gridworld:
 - Evaluation: Uses the same evaluation logic as ROTE (`eval_fsm_bootstrap` from `plot_and_eval.py`). Uses `make_dataloader` for consistent data loading, ground truth observations from data (not simulated), and exact action extraction/comparison matching ROTE's logic.
 - Strict mode (`Template_evo.py`): Parameter-only evolution (even if template has no parameters, keeps definition consistent). For Gridworld, this means the LLM is prompted to generate parameter values, but the program structure remains fixed.
 - Non-strict mode (`Template_evo_non_strict.py`): Full program code evolution. Generates entirely new program implementations, not just parameter tuning.
+- Non-strict participant scope (choice13k / cpc18 / mixed_gambles):
+  - `--participant_scope single` (default): use raw id via `--single_participant_id`.
+  - `--participant_scope range`: use `--range_start_ordinal` / `--range_end_ordinal` (inclusive), where ordinals index into `datasets/*/valid_participant_ids.json`.
+  - `--participant_scope all`: run all valid ids from JSON; optional cap via `--all_max_participants` (first N).
+  - `--filter_mixed_gambles` is optional (default off). When enabled, mixed-gambles ordinals resolve against `datasets/mixed_gambles/valid_participant_ids_gain_loss.json`; otherwise they use `datasets/mixed_gambles/valid_participant_ids.json`.
+  - Legacy participant-selection flags (`--participant_id`, `--all_data`) were replaced in non-strict mode by the scope-based API above.
 - Except-parameters mode (`Template_evo_exp_para.py`): Full program code evolution while preserving all parameter values from the seed program. Parameters are extracted from the seed program and injected back into all generated variants. This allows exploring different program structures and logic while keeping parameter values fixed. Example: `python Template_evo_exp_para.py --dataset gridworld --num_blocks 3 --num_walls 1 --agent_id 0 --n_iterations 100 --n_candidates 10 --mode local --model_name Qwen/Qwen2.5-7B-Instruct`. Results saved to `generated_outputs/gridworld_ROTE_evo_exp_para/run_TIMESTAMP/agent_{agent_id}/`.
 - Single problem config (multiple agent types): When `--num_blocks` and `--num_walls` are provided without `--loop_mode sequential`, you can process multiple agent types for that single problem config. Use `--num_agents_to_sample N` to process agent types 0 to N-1. Example: `python Template_evo_non_strict.py --dataset gridworld --num_blocks 3 --num_walls 1 --num_agents_to_sample 10 --n_iterations 100` will process all 10 agent types for the (3 blocks, 1 wall) problem config. Wandb metrics use agent-specific keys (e.g., `a0_train_accuracy`, `a1_train_accuracy`, etc.). Results saved to `generated_outputs/gridworld_ROTE_evo_non_strict/run_TIMESTAMP/agent_{agent_id}/`.
 - Sequential mode (`--loop_mode sequential`): Evaluates multiple problem configs sequentially. Each epoch uses a different (num_blocks, num_walls) combination. With `--num_agents_to_sample 10`, each epoch processes all 10 agent types for that problem config. Results saved to `generated_outputs/gridworld_ROTE_evo/run_TIMESTAMP/epoch_X/agent_{agent_id}/` where X is the epoch (problem config) number.
@@ -76,14 +82,14 @@ Mixed Gambles:
 - Strict mode (`Template_evo.py`): Parameter-only evolution. Prompts from `prompts/Template_evo/mixed_gambles/strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Run: `python Template_evo.py --dataset mixed_gambles --participant_id 101`.
 - Non-strict mode (`Template_evo_non_strict.py`): Full program evolution. Prompts from `prompts/Template_evo/mixed_gambles/non_strict/`. Default seed: `persona_code_example/hard_Qwen.py`. Output: `generated_outputs/mixed_gambles/non_strict/run_TIMESTAMP/participant_{id}/`.
 
-`--all_data` mode (Template_evo_non_strict.py):
+`--participant_scope all` mode (Template_evo_non_strict.py):
 - Supported datasets: `choice13k`, `cpc18`, `mixed_gambles`.
-- Startup prints one line: `All data mode activated by --all_data. All participants will be processed. Total num of valid participants: XX.`
+- Startup prints one line indicating scope=all and total participants from precomputed valid-id JSON.
 - Output is compact and updated after each participant: only `seed_program.py`, `participants_details.csv`, and `summary.csv` are kept in the run folder (no per-participant `iteration_*`, candidate code, or `results.json` artifacts).
 - `participants_details.csv` schema: `participant_id, train_fitness, test_fitness, total_runtime, seed_program_train_fitness, seed_program_test_fitness`.
 - `summary.csv` schema: `num_of_participants, avg_train_fitness, avg_test_fitness` (single row).
-- Wandb in `--all_data` logs only two participant metrics: `pX_train_fitness` and `pX_test_fitness`.
-- Participant scope in `--all_data`: if `--num_agents_to_sample` is explicitly provided, process at most that many valid participants; otherwise process all valid participants (ignoring the parser default).
+- Wandb in scope=all logs only two participant metrics: `pX_train_fitness` and `pX_test_fitness`.
+- Optional cap for scope=all: `--all_max_participants N` (first N valid ids in JSON order).
 
 Collecting ROTE programs for Template_evo:
 - After running ROTE on gridworld, use `python utils/collect_template_program.py --exp_folder generated_outputs/gridworld/run_XXX --epoch 0` to extract best programs from ROTE output.

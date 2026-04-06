@@ -370,7 +370,11 @@ def main() -> None:
     parser.add_argument(
         "--filter_mixed_gambles",
         action="store_true",
-        help="For mixed_gambles dataset: keep only gain_loss trials (matches Template_evo_non_strict).",
+        default=False,
+        help=(
+            "For mixed_gambles: keep only gain_loss trials. Default False (all trial types; "
+            "larger valid-participant set under --all_data and in collect_participant_ids)."
+        ),
     )
     parser.add_argument(
         "--output_dir",
@@ -385,6 +389,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     num_agents_arg_explicit = "--num_agents_to_sample" in sys.argv
+    mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
 
@@ -450,7 +455,7 @@ def main() -> None:
             for participant_id in sorted(unique_subjects):
                 try:
                     train_trials, test_trials, _ = load_mixed_gambles_data(
-                        csv_path, participant_id, filter_gain_loss_only=args.filter_mixed_gambles
+                        csv_path, participant_id, filter_gain_loss_only=mixed_gambles_gain_loss_only
                     )
                     if len(train_trials) > 0 and len(test_trials) > 0:
                         valid_participants.append(participant_id)
@@ -544,7 +549,7 @@ def main() -> None:
         elif args.dataset == "mixed_gambles":
             csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
             train_trials, test_trials, _ = load_mixed_gambles_data(
-                csv_path, participant_id, filter_gain_loss_only=args.filter_mixed_gambles
+                csv_path, participant_id, filter_gain_loss_only=mixed_gambles_gain_loss_only
             )
         else:
             raise ValueError(f"Unsupported dataset: {args.dataset}")
