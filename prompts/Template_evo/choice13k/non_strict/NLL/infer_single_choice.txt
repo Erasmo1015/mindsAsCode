@@ -1,0 +1,29 @@
+You are given observations of human choices in risky-gamble problems.
+Each problem presents two gambles: Option A and Option B. A gamble has outcomes and their probabilities (percent).
+You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
+
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys: e.g., ["A","B"]
+        - has_feedback: bool
+    history: list of dicts with keys
+        - action: int (0 for A, 1 for B)
+        - feedback: float or None
+    return: float, probability of choosing option 1 (Option B)
+    """
+
+Constraints:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Return a single float in [0, 1].
+- The returned value must be the probability of choosing option 1 (Option B).
+- Higher returned values should mean the participant is more likely to choose Option B.
+- Do not sample or use randomness.
+
+Provide only the code for choose(...) as a complete function body.

@@ -401,6 +401,77 @@ def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose:
     return result
 
 
+def evaluate_choice13k_program(
+    choose_fn: Callable,
+    trials: List[Dict[str, Any]],
+    verbose: bool = False,
+    n_seeds: int = 1,
+) -> Dict[str, Any]:
+    """
+    Evaluate Choice13k programs where choose(problem, history) returns p = P(action = 1).
+
+    Per-trial: validates p is a Python float in [0, 1] (no int/bool/np float); clamps for log-density;
+    accumulates average Bernoulli log-likelihood and threshold accuracy (pred = 1 if p >= 0.5 else 0).
+    Averages metrics across n_seeds full passes (same pattern as evaluate_program).
+
+    Raises:
+        TypeError: if model output is not an instance of float.
+        ValueError: if model output is not in [0.0, 1.0].
+    """
+    total = len(trials)
+    seed_avg_accs: List[float] = []
+    seed_avg_logliks: List[float] = []
+    first_seed_errors = 0
+
+    def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
+        loglik_acc = 0.0
+        correct = 0
+        errors = 0
+        for t in trials:
+            y = int(t["action"])
+            try:
+                p_raw = choose_fn(t["problem"], t["history"])
+            except Exception as e:
+                errors += 1
+                if verbose and errors <= 3 and seed_idx == 0:
+                    print(f"  Evaluation error: {e}")
+                p = 0.5
+                p_clamped = min(max(p, 1e-9), 1.0 - 1e-9)
+                loglik_acc += y * np.log(p_clamped) + (1 - y) * np.log(1.0 - p_clamped)
+                pred = 1 if p >= 0.5 else 0
+                correct += int(pred == y)
+                continue
+
+            assert isinstance(p_raw, float)
+            assert 0.0 <= p_raw <= 1.0
+            p = min(max(p_raw, 1e-9), 1.0 - 1e-9)
+            loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
+            pred = 1 if p_raw >= 0.5 else 0
+            correct += int(pred == y)
+
+        avg_ll = loglik_acc / total if total > 0 else 0.0
+        acc = correct / total if total > 0 else 0.0
+        return avg_ll, acc, errors
+
+    for seed in range(n_seeds):
+        avg_ll, acc, errs = _one_pass(seed)
+        seed_avg_logliks.append(avg_ll)
+        seed_avg_accs.append(acc)
+        if seed == 0:
+            first_seed_errors = errs
+
+    avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
+    avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
+    correct = int(round(avg_acc * total))
+    return {
+        "accuracy": avg_acc,
+        "avg_loglik": avg_loglik,
+        "total": total,
+        "correct": correct,
+        "errors": first_seed_errors if n_seeds == 1 else 0,
+    }
+
+
 def evaluate_cpc18_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
     """
     Evaluate a CPC18 program on trials and return accuracy metrics (trial-level).
@@ -1960,6 +2031,7 @@ def run_evolution(
     save_artifacts: bool = True,
     all_data_mode: bool = False,
     choice13k_experiment: Optional[Experiment] = None,
+    fitness_metric: str = "accuracy",
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -1978,6 +2050,11 @@ def run_evolution(
         client_kwargs: Optional OpenAI client kwargs (for local vLLM server)
         output_dir: Optional output directory for saving results
     """
+    if fitness_metric not in ("accuracy", "loglik"):
+        raise ValueError(f"Invalid fitness_metric: {fitness_metric!r} (expected 'accuracy' or 'loglik')")
+    if fitness_metric == "loglik" and dataset != "choice13k":
+        raise ValueError("fitness_metric='loglik' is only supported when dataset='choice13k'")
+
     # Initialize client
     if client_kwargs is None:
         client_kwargs = {}
@@ -2101,12 +2178,25 @@ def run_evolution(
         if baseline_fn is None:
             print("ERROR: Failed to compile baseline program!")
             return None
-        baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
-        baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
+        if dataset == "choice13k":
+            baseline_train_eval = evaluate_choice13k_program(
+                baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds
+            )
+            baseline_test_eval = evaluate_choice13k_program(
+                baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
+            )
+        else:
+            baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
+            baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
     
     print(f"\nBaseline Performance:")
     print(f"  Train accuracy: {baseline_train_eval['accuracy']:.4f} ({baseline_train_eval['correct']}/{baseline_train_eval['total']})")
     print(f"  Test accuracy: {baseline_test_eval['accuracy']:.4f} ({baseline_test_eval['correct']}/{baseline_test_eval['total']})")
+    if dataset == "choice13k":
+        print(
+            f"  Train avg log-likelihood: {baseline_train_eval['avg_loglik']:.6f}, "
+            f"test: {baseline_test_eval['avg_loglik']:.6f}"
+        )
     if dataset == "cpc18":
         print(f"  Train MSE: {baseline_train_mse_eval['mse']:.4f}")
         print(f"  Test MSE (official): {baseline_test_mse_eval['mse']:.4f}")
@@ -2123,6 +2213,9 @@ def run_evolution(
     if dataset == "cpc18":
         baseline_results["train_mse"] = baseline_train_mse_eval['mse']
         baseline_results["test_mse"] = baseline_test_mse_eval['mse']
+    if dataset == "choice13k":
+        baseline_results["train_loglik"] = baseline_train_eval["avg_loglik"]
+        baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
     
     # Track all candidate results across iterations for finding overall best
     all_candidate_results = []  # List of dicts with iteration, candidate_idx, train_acc, test_acc
@@ -2162,16 +2255,36 @@ def run_evolution(
                 }
         else:
             if all_data_mode:
-                baseline_log_dict = {
-                    f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
-                    f"p{participant_id}_test_fitness": baseline_test_eval["accuracy"],
-                }
+                if dataset == "choice13k" and fitness_metric == "loglik":
+                    baseline_log_dict = {
+                        f"p{participant_id}_train_fitness": baseline_train_eval["avg_loglik"],
+                        f"p{participant_id}_test_fitness": baseline_test_eval["avg_loglik"],
+                        f"p{participant_id}_train_acc": baseline_train_eval["accuracy"],
+                        f"p{participant_id}_test_acc": baseline_test_eval["accuracy"],
+                        f"p{participant_id}_train_loglik": baseline_train_eval["avg_loglik"],
+                        f"p{participant_id}_test_loglik": baseline_test_eval["avg_loglik"],
+                    }
+                else:
+                    baseline_log_dict = {
+                        f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
+                        f"p{participant_id}_test_fitness": baseline_test_eval["accuracy"],
+                    }
+                    if dataset == "choice13k":
+                        baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
+                        baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
+                        baseline_log_dict[f"p{participant_id}_train_loglik"] = baseline_train_eval["avg_loglik"]
+                        baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
             else:
                 baseline_log_dict = {
                     f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
                     f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
                     f"p{participant_id}_is_baseline": 1,
                 }
+                if dataset == "choice13k":
+                    baseline_log_dict[f"p{participant_id}_train_loglik"] = baseline_train_eval["avg_loglik"]
+                    baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
+                    baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
+                    baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
         wandb.log(baseline_log_dict, step=0)
         
         # Also save baseline to local JSONL file
@@ -2189,8 +2302,10 @@ def run_evolution(
     # For other datasets: use accuracy
     if dataset == "cpc18":
         best_fitness = -baseline_train_mse_eval['mse']
+    elif dataset == "choice13k" and fitness_metric == "loglik":
+        best_fitness = baseline_train_eval["avg_loglik"]
     else:
-        best_fitness = baseline_train_eval['accuracy']
+        best_fitness = baseline_train_eval["accuracy"]
     
     # Track overall best across all iterations
     # For CPC18: track -MSE as fitness; for others: track accuracy
@@ -2222,6 +2337,11 @@ def run_evolution(
             "test_accuracy": baseline_test_eval['accuracy'],
             "program_id": "baseline"
         }
+        if dataset == "choice13k":
+            overall_best_train["train_loglik"] = baseline_train_eval["avg_loglik"]
+            overall_best_train["test_loglik"] = baseline_test_eval["avg_loglik"]
+            overall_best_test["train_loglik"] = baseline_train_eval["avg_loglik"]
+            overall_best_test["test_loglik"] = baseline_test_eval["avg_loglik"]
     
     # Track elite parents (top programs across all iterations)
     # Format: list of (code, fitness, test_metric, program_id, train_mse, test_mse) tuples
@@ -2237,14 +2357,31 @@ def run_evolution(
             baseline_test_mse_eval['mse'],
         )]
     else:
-        elite_parents = [(
-            seed_code,
-            baseline_train_eval['accuracy'],  # fitness = accuracy
-            baseline_test_eval['accuracy'],  # test_metric = test_acc
-            "baseline",
-            None,  # train_mse not applicable
-            None,  # test_mse not applicable
-        )]
+        if dataset == "choice13k":
+            _baseline_fit = (
+                baseline_train_eval["avg_loglik"]
+                if fitness_metric == "loglik"
+                else baseline_train_eval["accuracy"]
+            )
+            elite_parents = [(
+                seed_code,
+                _baseline_fit,
+                baseline_test_eval["accuracy"],
+                "baseline",
+                None,
+                None,
+                baseline_train_eval["accuracy"],
+            )]
+        else:
+            elite_parents = [(
+                seed_code,
+                baseline_train_eval['accuracy'],  # fitness = accuracy
+                baseline_test_eval['accuracy'],  # test_metric = test_acc
+                "baseline",
+                None,  # train_mse not applicable
+                None,  # test_mse not applicable
+                baseline_train_eval["accuracy"],
+            )]
     
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     for iteration in range(n_iterations):
@@ -2277,9 +2414,9 @@ def run_evolution(
                 print(f"  Parent {i+1}: {prog_id} (train_mse={train_mse:.2f}, test_mse={test_mse:.2f}, fitness={fitness:.2f})")
         else:
             for i, parent_tuple in enumerate(selected_parents):
-                code, fitness, test_acc, prog_id, _, _ = parent_tuple
-                # fitness = train_acc for non-CPC18
-                print(f"  Parent {i+1}: {prog_id} (train_acc={fitness:.4f}, test_acc={test_acc:.4f})")
+                code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
+                # train_acc_prompt is always train accuracy for LLM context; fitness is the selection metric for choice13k when using loglik
+                print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
         
         # Extract metrics for LLM guidance
         # For CPC18: pass only MSE (not accuracy)
@@ -2291,7 +2428,7 @@ def run_evolution(
             parent_train_mses = [p[4] for p in selected_parents if p[4] is not None]
             parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
         else:
-            parent_train_accs = [p[1] for p in selected_parents]  # fitness = accuracy for non-CPC18
+            parent_train_accs = [p[6] for p in selected_parents]  # train accuracy for prompts (index 6)
         
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
@@ -2325,13 +2462,18 @@ def run_evolution(
                 (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
             
             if not code:
-                candidate_results.append({
+                empty_row: Dict[str, Any] = {
                     "idx": idx,
                     "code": "",
                     "train_acc": 0.0,
                     "test_acc": 0.0,
                     "valid": False,
-                })
+                }
+                if dataset == "choice13k":
+                    empty_row["train_loglik"] = float("-inf")
+                    empty_row["test_loglik"] = float("-inf")
+                    empty_row["fitness"] = float("-inf") if fitness_metric == "loglik" else 0.0
+                candidate_results.append(empty_row)
                 continue
             
             if dataset == "gridworld":
@@ -2453,8 +2595,57 @@ def run_evolution(
                     "test_total": test_eval["total"],
                     "valid": True,
                 })
+            elif dataset == "choice13k":
+                choose_fn = compile_program(code)
+                _worst = float("-inf") if fitness_metric == "loglik" else 0.0
+                if choose_fn is None:
+                    candidate_results.append({
+                        "idx": idx,
+                        "code": code,
+                        "train_acc": 0.0,
+                        "test_acc": 0.0,
+                        "train_loglik": float("-inf"),
+                        "test_loglik": float("-inf"),
+                        "fitness": _worst,
+                        "valid": False,
+                    })
+                    continue
+                try:
+                    train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                except AssertionError:
+                    candidate_results.append({
+                        "idx": idx,
+                        "code": code,
+                        "train_acc": 0.0,
+                        "test_acc": 0.0,
+                        "train_loglik": float("-inf"),
+                        "test_loglik": float("-inf"),
+                        "fitness": _worst,
+                        "valid": False,
+                    })
+                    continue
+                train_acc = train_eval["accuracy"]
+                test_acc = test_eval["accuracy"]
+                train_loglik = train_eval["avg_loglik"]
+                test_loglik = test_eval["avg_loglik"]
+                fitness = train_loglik if fitness_metric == "loglik" else train_acc
+                candidate_results.append({
+                    "idx": idx,
+                    "code": code,
+                    "train_acc": train_acc,
+                    "test_acc": test_acc,
+                    "train_loglik": train_loglik,
+                    "test_loglik": test_loglik,
+                    "fitness": fitness,
+                    "train_correct": train_eval["correct"],
+                    "test_correct": test_eval["correct"],
+                    "train_total": train_eval["total"],
+                    "test_total": test_eval["total"],
+                    "valid": True,
+                })
             else:
-                # Choice13k: compile and evaluate
+                # mixed_gambles: integer action match (evaluate_program)
                 choose_fn = compile_program(code)
                 if choose_fn is None:
                     candidate_results.append({
@@ -2462,27 +2653,21 @@ def run_evolution(
                         "code": code,
                         "train_acc": 0.0,
                         "test_acc": 0.0,
-                        "fitness": 0.0,  # Worst fitness for invalid program
+                        "fitness": 0.0,
                         "valid": False,
                     })
                     continue
-                
-                # Evaluate on train and test (with multiple seeds)
                 train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                 test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
-                
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"]
-                
-                # For non-CPC18: fitness = accuracy
                 fitness = train_acc
-                
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
                     "test_acc": test_acc,
-                    "fitness": fitness,  # Primary metric: accuracy
+                    "fitness": fitness,
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"],
                     "train_total": train_eval["total"],
@@ -2499,6 +2684,15 @@ def run_evolution(
                         "fitness": candidate_results[-1]["fitness"],  # -MSE
                         "train_mse": candidate_results[-1]["train_mse"],
                         "test_mse": candidate_results[-1]["test_mse"],
+                    })
+                elif dataset == "choice13k":
+                    all_candidate_results.append({
+                        "iteration": iteration_step,
+                        "candidate_idx": idx,
+                        "train_acc": candidate_results[-1]["train_acc"],
+                        "test_acc": candidate_results[-1]["test_acc"],
+                        "train_loglik": candidate_results[-1]["train_loglik"],
+                        "test_loglik": candidate_results[-1]["test_loglik"],
                     })
                 else:
                     all_candidate_results.append({
@@ -2527,6 +2721,16 @@ def run_evolution(
                         f"test_mse={result['test_mse']:.2f}, "
                         f"fitness={result['fitness']:.2f}"
                     )
+            elif dataset == "choice13k" and fitness_metric == "loglik":
+                print(f"\nTop performers (by train avg log-likelihood, higher is better):")
+                for i, result in enumerate(valid_results[:5]):
+                    print(
+                        f"  {i+1}. Candidate {result['idx']}: "
+                        f"train_loglik={result['train_loglik']:.6f}, "
+                        f"test_loglik={result['test_loglik']:.6f}, "
+                        f"train_acc={result['train_acc']:.4f}, "
+                        f"test_acc={result['test_acc']:.4f}"
+                    )
             else:
                 print(f"\nTop performers (by train accuracy):")
                 for i, result in enumerate(valid_results[:5]):
@@ -2545,6 +2749,13 @@ def run_evolution(
                 print(f"  Train MSE: {best_result['train_mse']:.2f}")
                 print(f"  Test MSE: {best_result['test_mse']:.2f}")
                 print(f"  Fitness (-MSE): {best_result['fitness']:.2f}")
+            elif dataset == "choice13k":
+                print(f"  Train accuracy: {best_result['train_acc']:.4f}")
+                print(f"  Test accuracy: {best_result['test_acc']:.4f}")
+                print(
+                    f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
+                    f"test: {best_result['test_loglik']:.6f}"
+                )
             else:
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
                 print(f"  Test accuracy: {best_result['test_acc']:.4f}")
@@ -2564,11 +2775,12 @@ def run_evolution(
                 else:
                     elite_parents.append((
                         result["code"],
-                        result["fitness"],  # fitness = train_acc
-                        result["test_acc"],  # test_metric = test_acc
+                        result["fitness"],
+                        result["test_acc"],
                         program_id,
-                        None,  # train_mse not applicable
-                        None,  # test_mse not applicable
+                        None,
+                        None,
+                        result["train_acc"],
                     ))
             
             # Sort elite set by fitness (descending) and keep top programs
@@ -2601,6 +2813,27 @@ def run_evolution(
                         "train_accuracy": best_result['train_acc'],
                         "test_accuracy": best_result['test_acc'],
                         "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
+                    }
+            elif dataset == "choice13k":
+                if fitness_metric == "loglik":
+                    _train_better = best_result["train_loglik"] > overall_best_train["train_loglik"]
+                else:
+                    _train_better = best_result["train_acc"] > overall_best_train["train_accuracy"]
+                if _train_better:
+                    overall_best_train = {
+                        "train_accuracy": best_result["train_acc"],
+                        "test_accuracy": best_result["test_acc"],
+                        "train_loglik": best_result["train_loglik"],
+                        "test_loglik": best_result["test_loglik"],
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                    }
+                if best_result["test_acc"] > overall_best_test["test_accuracy"]:
+                    overall_best_test = {
+                        "train_accuracy": best_result["train_acc"],
+                        "test_accuracy": best_result["test_acc"],
+                        "train_loglik": best_result["train_loglik"],
+                        "test_loglik": best_result["test_loglik"],
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
                     }
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
@@ -2644,6 +2877,30 @@ def run_evolution(
                 "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
                 "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
             }
+        elif dataset == "choice13k":
+            metrics = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(valid_results),
+                "best_program_id": best_program_id,
+                "candidate_results": [
+                    {
+                        "idx": r["idx"],
+                        "train_acc": r["train_acc"],
+                        "test_acc": r["test_acc"],
+                        "train_loglik": r.get("train_loglik"),
+                        "test_loglik": r.get("test_loglik"),
+                        "fitness": r.get("fitness"),
+                        "valid": r["valid"],
+                    }
+                    for r in candidate_results
+                ],
+                "best_train_fitness": best_fitness if valid_results else None,
+                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
+                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
+                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
+            }
         else:
             metrics = {
                 "iteration": iteration_step,
@@ -2672,6 +2929,16 @@ def run_evolution(
                 "best_train_fitness": best_fitness if valid_results else None,  # -MSE
                 "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
                 "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
+                "n_valid": len(valid_results),
+            }
+        elif dataset == "choice13k":
+            summary = {
+                "iteration": iteration_step,
+                "best_train_fitness": best_fitness if valid_results else None,
+                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
+                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
+                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
                 "n_valid": len(valid_results),
             }
         else:
@@ -2726,6 +2993,39 @@ def run_evolution(
                         # Keep accuracy for debugging (not used for selection)
                         log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0].get("train_acc", None)
                         log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0].get("test_acc", None)
+            elif dataset == "choice13k":
+                if all_data_mode:
+                    log_dict = {}
+                    if valid_results:
+                        if fitness_metric == "loglik":
+                            log_dict[f"p{participant_id}_train_fitness"] = best_fitness
+                            log_dict[f"p{participant_id}_test_fitness"] = valid_results[0]["test_loglik"]
+                        else:
+                            log_dict[f"p{participant_id}_train_fitness"] = best_fitness
+                            log_dict[f"p{participant_id}_test_fitness"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
+                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
+                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                else:
+                    log_dict = {
+                        f"p{participant_id}_n_valid": len(valid_results),
+                    }
+                    if valid_results:
+                        log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0]["train_acc"]
+                        log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
+                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
+                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness
+                        log_dict[f"p{participant_id}_test_fitness"] = (
+                            valid_results[0]["test_loglik"]
+                            if fitness_metric == "loglik"
+                            else valid_results[0]["test_acc"]
+                        )
+                        log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
+                        log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
             else:
                 if all_data_mode:
                     log_dict = {}
@@ -2775,6 +3075,27 @@ def run_evolution(
                     "test_mse": candidate['test_mse'],
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
                 }
+        elif dataset == "choice13k":
+            if fitness_metric == "loglik":
+                _better = candidate["train_loglik"] > overall_best_train["train_loglik"]
+            else:
+                _better = candidate["train_acc"] > overall_best_train["train_accuracy"]
+            if _better:
+                overall_best_train = {
+                    "train_accuracy": candidate["train_acc"],
+                    "test_accuracy": candidate["test_acc"],
+                    "train_loglik": candidate["train_loglik"],
+                    "test_loglik": candidate["test_loglik"],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
+                }
+            if candidate["test_acc"] > overall_best_test["test_accuracy"]:
+                overall_best_test = {
+                    "train_accuracy": candidate["train_acc"],
+                    "test_accuracy": candidate["test_acc"],
+                    "train_loglik": candidate["train_loglik"],
+                    "test_loglik": candidate["test_loglik"],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
+                }
         else:
             if candidate['train_acc'] > overall_best_train["train_accuracy"]:
                 overall_best_train = {
@@ -2813,6 +3134,24 @@ def run_evolution(
             print(f"Baseline test MSE (official): {baseline_results['test_mse']:.4f}")
             print(f"Train MSE improvement: {baseline_results['train_mse'] - overall_best_train['train_mse']:.4f}")
             print(f"Test MSE improvement: {baseline_results['test_mse'] - overall_best_test['test_mse']:.4f}")
+        elif dataset == "choice13k":
+            print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
+            print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
+            print(
+                f"Final best train avg log-likelihood: {overall_best_train['train_loglik']:.6f}, "
+                f"test: {overall_best_test['test_loglik']:.6f}"
+            )
+            print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
+            print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
+            print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
+            print(
+                f"Train avg log-likelihood improvement: "
+                f"{overall_best_train['train_loglik'] - baseline_train_eval['avg_loglik']:.6f}"
+            )
+            print(
+                f"Test avg log-likelihood improvement: "
+                f"{overall_best_test['test_loglik'] - baseline_test_eval['avg_loglik']:.6f}"
+            )
         else:
             print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
             print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
@@ -2832,6 +3171,34 @@ def run_evolution(
             "test_fitness": -overall_best_test['test_mse'],
             "seed_program_train_fitness": -baseline_results['train_mse'],
             "seed_program_test_fitness": -baseline_results['test_mse'],
+        }
+    elif dataset == "choice13k":
+        result = {
+            "participant_id": participant_id,
+            "train_acc": overall_best_train["train_accuracy"],
+            "test_acc": overall_best_test["test_accuracy"],
+            "train_loglik": overall_best_train["train_loglik"],
+            "test_loglik": overall_best_test["test_loglik"],
+            "train_fitness": (
+                overall_best_train["train_loglik"]
+                if fitness_metric == "loglik"
+                else overall_best_train["train_accuracy"]
+            ),
+            "test_fitness": (
+                overall_best_test["test_loglik"]
+                if fitness_metric == "loglik"
+                else overall_best_test["test_accuracy"]
+            ),
+            "seed_program_train_fitness": (
+                baseline_results["train_loglik"]
+                if fitness_metric == "loglik"
+                else baseline_results["train_accuracy"]
+            ),
+            "seed_program_test_fitness": (
+                baseline_results["test_loglik"]
+                if fitness_metric == "loglik"
+                else baseline_results["test_accuracy"]
+            ),
         }
     else:
         result = {
@@ -3231,8 +3598,18 @@ def main():
             "Affects which valid_participant_ids.json variant is used for ordinal resolution."
         ),
     )
+    parser.add_argument(
+        "--fitness_metric",
+        type=str,
+        default="accuracy",
+        choices=["accuracy", "loglik"],
+        help="Choice13k only: fitness for selection (default: accuracy). loglik = mean Bernoulli log-likelihood on train.",
+    )
 
     args = parser.parse_args()
+    if args.fitness_metric == "loglik" and args.dataset != "choice13k":
+        print("Error: --fitness_metric loglik is only supported with --dataset choice13k.")
+        return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
@@ -3388,7 +3765,10 @@ def main():
     if args.dataset in _PARTICIPANT_DATASETS and args.participant_scope == "all":
         details_file = Path(base_run_dir) / "participants_details.csv"
         summary_file = Path(base_run_dir) / "summary.csv"
+        details_loglik_file = Path(base_run_dir) / "participant_details_loglik.csv"
+        summary_loglik_file = Path(base_run_dir) / "summary_loglik.csv"
         participant_details = []
+        participant_details_loglik = []
 
         print(
             f"Participant scope=all using precomputed valid ids. "
@@ -3418,6 +3798,7 @@ def main():
                     save_artifacts=False,
                     all_data_mode=True,
                     choice13k_experiment=None,
+                    fitness_metric=args.fitness_metric,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -3428,6 +3809,11 @@ def main():
                     "total_runtime": runtime_sec,
                     "seed_program_train_fitness": participant_summary.get("seed_program_train_fitness"),
                     "seed_program_test_fitness": participant_summary.get("seed_program_test_fitness"),
+                })
+                participant_details_loglik.append({
+                    "participant_id": participant_id,
+                    "train_loglik": participant_summary.get("train_loglik"),
+                    "test_loglik": participant_summary.get("test_loglik"),
                 })
 
                 with open(details_file, "w", newline="") as f:
@@ -3456,6 +3842,32 @@ def main():
                         "avg_train_fitness": avg_train_fitness,
                         "avg_test_fitness": avg_test_fitness,
                     })
+
+                with open(details_loglik_file, "w", newline="") as f:
+                    fieldnames = ["participant_id", "train_loglik", "test_loglik"]
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(participant_details_loglik)
+
+                train_loglik_values = [
+                    d["train_loglik"] for d in participant_details_loglik if d["train_loglik"] is not None
+                ]
+                test_loglik_values = [
+                    d["test_loglik"] for d in participant_details_loglik if d["test_loglik"] is not None
+                ]
+                avg_train_loglik = float(np.mean(train_loglik_values)) if train_loglik_values else None
+                avg_test_loglik = float(np.mean(test_loglik_values)) if test_loglik_values else None
+                with open(summary_loglik_file, "w", newline="") as f:
+                    writer = csv.DictWriter(
+                        f,
+                        fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
+                    )
+                    writer.writeheader()
+                    writer.writerow({
+                        "num_of_participants": len(participant_details_loglik),
+                        "avg_train_loglik": avg_train_loglik,
+                        "avg_test_loglik": avg_test_loglik,
+                    })
         finally:
             if wandb is not None:
                 wandb.finish()
@@ -3463,6 +3875,7 @@ def main():
     
     # Initialize participants summary (list for CSV)
     participants_summary = []
+    participants_loglik_summary = []
     # Determine summary file location (use base_run_dir if available, otherwise use output_dir or its parent)
     if base_run_dir is not None:
         summary_file = Path(base_run_dir) / "participants_summary.csv"
@@ -3477,6 +3890,16 @@ def main():
     else:
         # Auto-generated single participant - will be determined after first run
         summary_file = None
+    summary_loglik_file = (
+        Path(base_run_dir) / "summary_loglik.csv"
+        if base_run_dir is not None
+        else None
+    )
+    details_loglik_file = (
+        Path(base_run_dir) / "participant_details_loglik.csv"
+        if base_run_dir is not None
+        else None
+    )
     
     # Handle gridworld: ROTE code setting (episode-based, test split, prefix=20, ensemble from prefix only)
     if args.dataset == "gridworld" and args.loop_mode != "sequential":
@@ -3673,6 +4096,7 @@ def main():
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                        fitness_metric=args.fitness_metric,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -3711,8 +4135,12 @@ def main():
                     output_path = Path(participant_output_dir)
                     if output_path.name.startswith("participant_"):
                         summary_file = output_path.parent / "participants_summary.csv"
+                        summary_loglik_file = output_path.parent / "summary_loglik.csv"
+                        details_loglik_file = output_path.parent / "participant_details_loglik.csv"
                     else:
                         summary_file = output_path / "participants_summary.csv"
+                        summary_loglik_file = output_path / "summary_loglik.csv"
+                        details_loglik_file = output_path / "participant_details_loglik.csv"
                 
                 # Determine seed program path
                 if args.seed_path is None:
@@ -3782,6 +4210,7 @@ def main():
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                        fitness_metric=args.fitness_metric,
                     )
                 
                 # Update participants summary after each participant completes
@@ -3793,6 +4222,38 @@ def main():
                         writer.writeheader()
                         writer.writerows(participants_summary)
                     print(f"\nParticipants summary updated: {summary_file}")
+
+                    if args.participant_scope == "range":
+                        participants_loglik_summary.append({
+                            "participant_id": participant_summary.get("participant_id"),
+                            "train_loglik": participant_summary.get("train_loglik"),
+                            "test_loglik": participant_summary.get("test_loglik"),
+                        })
+                        if details_loglik_file is not None:
+                            with open(details_loglik_file, "w", newline="") as f:
+                                writer = csv.DictWriter(
+                                    f, fieldnames=["participant_id", "train_loglik", "test_loglik"]
+                                )
+                                writer.writeheader()
+                                writer.writerows(participants_loglik_summary)
+                        if summary_loglik_file is not None:
+                            train_ll_vals = [
+                                d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None
+                            ]
+                            test_ll_vals = [
+                                d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None
+                            ]
+                            with open(summary_loglik_file, "w", newline="") as f:
+                                writer = csv.DictWriter(
+                                    f,
+                                    fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
+                                )
+                                writer.writeheader()
+                                writer.writerow({
+                                    "num_of_participants": len(participants_loglik_summary),
+                                    "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                                    "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
+                                })
         finally:
             if wandb is not None:
                 wandb.finish()
