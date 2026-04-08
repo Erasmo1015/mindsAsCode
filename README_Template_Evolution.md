@@ -7,9 +7,45 @@ This guide documents participant-selection arguments for `Template_evo_non_stric
 ```bash
 python Template_evo_non_strict.py \
   --dataset <choice13k|cpc18|mixed_gambles|gridworld|gridworld_ensemble> \
+  --split_mode <within_participant|across_participants> \
   --participant_scope <single|range|all> \
   [scope-specific args] \
   --n_iterations 5 --n_candidates 10 --mode local
+```
+
+## Choice13k split mode (top-level switch)
+
+For Choice13k, decide `--split_mode` first, then set the remaining args.
+
+- `--split_mode within_participant` (default)
+  - Uses per-participant trial split.
+  - Train/test trial ratio is controlled by `--split_ratio` (default `0.9`).
+  - Split randomness is controlled by `--split_seed` (default `0`).
+  - Works with existing `--participant_scope` behavior.
+
+- `--split_mode across_participants`
+  - Uses `--participant_scope` to select participants first.
+  - Selected participants are shuffled with `--split_seed`, then split by `--split_ratio` into train-participants and test-participants.
+  - Training uses **all trials** from train participants; testing uses **all trials** from test participants.
+  - Output is simplified to: `seed_program.py`, `iterations/`, `iterations.csv`, `summary.csv`.
+
+Notes:
+- `--split_ratio` is always interpreted as **train ratio**.
+- `across_participants` is supported for `--dataset choice13k` only.
+
+## LLM prompt size (`--max_prompt_train_trials`)
+
+Generation prompts include serialized **train** trials. If that list is huge (e.g. `across_participants`), the model may hit a **context limit**.
+
+- **`--max_prompt_train_trials N`** (default `1000000`): if `len(train_trials) > N`, the code **randomly subsamples** `N` train trials **only for each LLM generation call**. **Fitness evaluation still uses all train/test trials.**
+- Sampling uses the same RNG seed as **`--split_seed`** (reproducible).
+- **`--max_prompt_train_trials 0`**: no cap — every prompt includes **all** train trials (can exceed context on large runs).
+
+Typical use for large train sets:
+
+```bash
+python Template_evo_non_strict.py --dataset choice13k --split_mode across_participants \
+  --max_prompt_train_trials 200 --split_seed 0 ...
 ```
 
 ## Participant Scope (choice13k / cpc18 / mixed_gambles)
@@ -50,6 +86,15 @@ Use:
 ```bash
 # Single raw participant id (default scope=single)
 python Template_evo_non_strict.py --dataset choice13k --single_participant_id 42 --n_iterations 5 --n_candidates 10
+
+# Choice13k within-participant split (90/10, deterministic)
+python Template_evo_non_strict.py --dataset choice13k --split_mode within_participant --split_ratio 0.9 --split_seed 0 --single_participant_id 42
+
+# Choice13k across-participants split on ordinal range
+python Template_evo_non_strict.py --dataset choice13k --split_mode across_participants --participant_scope range --range_start_ordinal 0 --range_end_ordinal 99 --split_ratio 0.9 --split_seed 0
+
+# Same, but cap train trials in the LLM prompt (evaluation still uses full train set)
+python Template_evo_non_strict.py --dataset choice13k --split_mode across_participants --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 --split_ratio 0.9 --split_seed 0 --max_prompt_train_trials 200
 
 # Ordinal range (inclusive) from precomputed valid list
 python Template_evo_non_strict.py --dataset cpc18 --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 --n_iterations 5 --n_candidates 10

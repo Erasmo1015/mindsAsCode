@@ -27,6 +27,12 @@ Template Evolution
 
 - Iterative evolution loop over executable Choice13k, Gridworld, and CPC18 Track II programs, combining ROTE's program-based modeling with evo's evolutionary control flow.
 - Files: `Template_evo.py` (strict mode - parameter-only evolution), `Template_evo_non_strict.py` (non-strict mode - full program evolution), and `Template_evo_exp_para.py` (except-parameters mode - full program evolution with parameter preservation).
+- Recent non-strict Choice13k updates:
+  - `--fitness_metric {accuracy,loglik}` enables train log-likelihood as an optional fitness (higher is better), while accuracy is still computed and logged for debugging/plots.
+  - Choice model output is now strict probability semantics for Choice13k: `choose(problem, history)` must return a Python `float` in `[0,1]` (invalid outputs fail explicitly).
+  - New split controls: `--split_mode {within_participant,across_participants}`, `--split_ratio` (train ratio), `--split_seed`.
+  - `across_participants` mode (Choice13k only) splits selected participants into train/test groups and uses all trials per group; artifacts are simplified to `seed_program.py`, `iterations/`, `iterations.csv`, and `summary.csv`.
+  - `--max_prompt_train_trials` (default very large): if there are more train trials than this cap, `Template_evo_non_strict.py` **randomly subsamples** that many trials **only for the LLM generation prompt** (seed aligned with `--split_seed`). **Evaluation still uses the full train/test trial lists.** Use `--max_prompt_train_trials 0` to disable capping (full train set in every prompt; large `across_participants` runs can exceed model context). Subsampling changes which trials appear and their order in the prompt; each trial’s own `history` field is unchanged.
 
 Choice13k:
 - Run: `python Template_evo.py --dataset choice13k --participant_id 0 --n_iterations 5 --n_candidates 10 --mode local --model_name Qwen/Qwen2.5-7B-Instruct`

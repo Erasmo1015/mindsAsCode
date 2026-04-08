@@ -267,7 +267,13 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
     return "\n".join(lines)
 
 
-def load_mixed_gambles_data(csv_path: str, participant_id: int, filter_gain_loss_only: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+def load_mixed_gambles_data(
+    csv_path: str,
+    participant_id: int,
+    filter_gain_loss_only: bool = False,
+    split_ratio: float = 0.8,
+    split_seed: int = 42,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
     """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
 
     Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
@@ -310,17 +316,17 @@ def load_mixed_gambles_data(csv_path: str, participant_id: int, filter_gain_loss
     # Random train/test split (reproducible).
     # The dataset is ordered by stimulus structure,
     # so row-order split creates artificial distribution shift.
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(split_seed)
     indices = np.arange(len(all_trials))
     rng.shuffle(indices)
-    split_point = int(len(all_trials) * 0.8)
+    split_point = int(len(all_trials) * split_ratio)
     train_trials = [all_trials[i] for i in indices[:split_point]]
     test_trials = [all_trials[i] for i in indices[split_point:]]
     return train_trials, test_trials, option_keys
 
 
-def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
-    """Split trials into train/test 80/20 (fixed split, matching ROTE); return (train, test, options)."""
+def experiment_to_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], list]:
+    """Convert one Choice13k experiment into trial records without splitting."""
     options = exp.blocks[0].option_keys
     all_trials = []
     history_accum = []
@@ -347,13 +353,23 @@ def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, 
                 }
             )
             history_accum.append(history_entry)
+    return all_trials, options
+
+
+def split_trials(
+    exp: Experiment,
+    split_ratio: float = 0.8,
+    split_seed: int = 42,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
+    """Split Choice13k trials into train/test by ratio; return (train, test, options)."""
+    all_trials, options = experiment_to_trials(exp)
     # Random train/test split (reproducible).
     # The dataset is ordered by stimulus structure,
     # so row-order split creates artificial distribution shift.
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(split_seed)
     indices = np.arange(len(all_trials))
     rng.shuffle(indices)
-    split_point = int(len(all_trials) * 0.8)
+    split_point = int(len(all_trials) * split_ratio)
     train_trials = [all_trials[i] for i in indices[:split_point]]
     test_trials = [all_trials[i] for i in indices[split_point:]]
     return train_trials, test_trials, options
@@ -1873,6 +1889,8 @@ def generate_program_variants(
     parent_train_accuracies: Optional[List[float]] = None,
     parent_train_mses: Optional[List[float]] = None,
     dataset: str = "choice13k",
+    max_prompt_train_trials: int = 1_000_000,
+    prompt_train_trials_seed: int = 0,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -1939,17 +1957,27 @@ def choose(problem, history):
 ```
 """
     
-    # Format training trials for context
+    # Format training trials for context (evaluation elsewhere still uses full train_trials).
+    trials_for_prompt = list(train_trials)
+    if max_prompt_train_trials > 0 and len(trials_for_prompt) > max_prompt_train_trials:
+        rng = np.random.default_rng(prompt_train_trials_seed)
+        perm = rng.permutation(len(trials_for_prompt))
+        sel = perm[:max_prompt_train_trials]
+        trials_for_prompt = [trials_for_prompt[i] for i in sel]
+        print(
+            f"[LLM prompt] Using {len(trials_for_prompt)} of {len(train_trials)} train trials "
+            f"(max_prompt_train_trials={max_prompt_train_trials}, seed={prompt_train_trials_seed})."
+        )
     # Note: dataset parameter not available here, but this function is only called for Choice13k/CPC18
     # We'll detect format from trial structure
-    if train_trials and "problem" in train_trials[0]:
-        if "gamble_A" in train_trials[0]["problem"]:
+    if trials_for_prompt and "problem" in trials_for_prompt[0]:
+        if "gamble_A" in trials_for_prompt[0]["problem"]:
             dataset_type = "choice13k"
         else:
             dataset_type = "cpc18"
     else:
         dataset_type = "choice13k"
-    state_text = format_trials_to_text(train_trials, dataset=dataset_type)
+    state_text = format_trials_to_text(trials_for_prompt, dataset=dataset_type)
     
     # Include parent programs as reference
     num_parents = len(parent_programs)
@@ -2032,6 +2060,12 @@ def run_evolution(
     all_data_mode: bool = False,
     choice13k_experiment: Optional[Experiment] = None,
     fitness_metric: str = "accuracy",
+    split_ratio: float = 0.8,
+    split_seed: int = 42,
+    choice13k_train_trials_override: Optional[List[Dict[str, Any]]] = None,
+    choice13k_test_trials_override: Optional[List[Dict[str, Any]]] = None,
+    choice13k_simple_logging: bool = False,
+    max_prompt_train_trials: int = 1_000_000,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -2054,6 +2088,8 @@ def run_evolution(
         raise ValueError(f"Invalid fitness_metric: {fitness_metric!r} (expected 'accuracy' or 'loglik')")
     if fitness_metric == "loglik" and dataset != "choice13k":
         raise ValueError("fitness_metric='loglik' is only supported when dataset='choice13k'")
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
 
     # Initialize client
     if client_kwargs is None:
@@ -2094,21 +2130,33 @@ def run_evolution(
     elif dataset == "mixed_gambles":
         csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
         print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
-        train_trials, test_trials, options = load_mixed_gambles_data(csv_path, participant_id, filter_gain_loss_only=filter_mixed_gambles)
-        print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
+        train_trials, test_trials, options = load_mixed_gambles_data(
+            csv_path,
+            participant_id,
+            filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+        print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed={split_seed}, ratio={split_ratio:.3f})")
         test_observed_blocks = None
     else:
         # Load Choice13k data
-        print(f"Loading Choice13k data for participant {participant_id}...")
-        if choice13k_experiment is not None:
-            exp = choice13k_experiment
+        if choice13k_train_trials_override is not None and choice13k_test_trials_override is not None:
+            train_trials = choice13k_train_trials_override
+            test_trials = choice13k_test_trials_override
+            options = train_trials[0]["options"] if train_trials else ([0, 1] if test_trials else [])
+            print("Loading Choice13k data from across-participants split (precomputed).")
+            print(f"[Split] Train trials: {len(train_trials)}, Test trials: {len(test_trials)}")
         else:
-            experiments = get_choice13k_experiments(n_participants=participant_id + 1)
-            exp = experiments[participant_id]
-        
-        # Split trials
-        train_trials, test_trials, options = split_trials(exp)
-        print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed=42)")
+            print(f"Loading Choice13k data for participant {participant_id}...")
+            if choice13k_experiment is not None:
+                exp = choice13k_experiment
+            else:
+                experiments = get_choice13k_experiments(n_participants=participant_id + 1)
+                exp = experiments[participant_id]
+            # Split trials
+            train_trials, test_trials, options = split_trials(exp, split_ratio=split_ratio, split_seed=split_seed)
+            print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed={split_seed}, ratio={split_ratio:.3f})")
         test_observed_blocks = None
     
     # Setup output directory
@@ -2129,7 +2177,7 @@ def run_evolution(
     
     # Set up local log file for wandb metrics (if wandb is enabled)
     log_file_path = None
-    if wandb is not None and save_artifacts:
+    if wandb is not None and save_artifacts and not (choice13k_simple_logging and dataset == "choice13k"):
         log_file_path = output_path / "wandb_metrics.jsonl"
     
     # ===== BASELINE EVALUATION =====
@@ -2384,6 +2432,11 @@ def run_evolution(
             )]
     
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
+    simple_iterations_rows: List[Dict[str, Any]] = []
+    simple_iterations_dir = None
+    if choice13k_simple_logging and dataset == "choice13k" and save_artifacts:
+        simple_iterations_dir = output_path / "iterations"
+        simple_iterations_dir.mkdir(parents=True, exist_ok=True)
     for iteration in range(n_iterations):
         iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
         print(f"\n{'='*80}")
@@ -2392,7 +2445,7 @@ def run_evolution(
         
         iter_dir = None
         candidates_dir = None
-        if save_artifacts:
+        if save_artifacts and not (choice13k_simple_logging and dataset == "choice13k"):
             iter_dir = output_path / f"iteration_{iteration_step}"
             iter_dir.mkdir(exist_ok=True)
             candidates_dir = iter_dir / "candidates"
@@ -2451,6 +2504,8 @@ def run_evolution(
                 dataset=dataset,
                 parent_train_accuracies=parent_train_accs if dataset != "cpc18" else None,  # Don't pass accuracy for CPC18
                 parent_train_mses=parent_train_mses if dataset == "cpc18" else None,
+                max_prompt_train_trials=max_prompt_train_trials,
+                prompt_train_trials_seed=split_seed,
             )
         
         # Evaluate candidates
@@ -2743,6 +2798,21 @@ def run_evolution(
             # Select best program for tracking (but use elite_parents pool for actual parent selection)
             best_result = valid_results[0]
             best_fitness = best_result["fitness"]
+            if choice13k_simple_logging and dataset == "choice13k" and save_artifacts and simple_iterations_dir is not None:
+                (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(best_result["code"] or "")
+                simple_iterations_rows.append({
+                    "iteration": iteration_step,
+                    "train_fitness": best_result["fitness"],
+                    "test_fitness": (
+                        best_result["test_loglik"]
+                        if fitness_metric == "loglik"
+                        else best_result["test_acc"]
+                    ),
+                    "train_acc": best_result["train_acc"],
+                    "test_acc": best_result["test_acc"],
+                    "train_loglik": best_result["train_loglik"],
+                    "test_loglik": best_result["test_loglik"],
+                })
             
             print(f"\nBest program selected: Candidate {best_result['idx']}")
             if dataset == "cpc18":
@@ -3123,8 +3193,46 @@ def run_evolution(
             "overall_best_train_accuracy": overall_best_train,
             "overall_best_test_accuracy": overall_best_test,
         }
-    if save_artifacts:
+    if save_artifacts and not choice13k_simple_logging:
         (output_path / "results.json").write_text(json.dumps(results, indent=2))
+    if save_artifacts and choice13k_simple_logging and dataset == "choice13k":
+        if simple_iterations_rows:
+            with open(output_path / "iterations.csv", "w", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "iteration",
+                        "train_fitness",
+                        "test_fitness",
+                        "train_acc",
+                        "test_acc",
+                        "train_loglik",
+                        "test_loglik",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(simple_iterations_rows)
+        summary_row = {
+            "train_fitness": (
+                overall_best_train.get("train_loglik")
+                if fitness_metric == "loglik"
+                else overall_best_train.get("train_accuracy")
+            ),
+            "test_fitness": (
+                overall_best_test.get("test_loglik")
+                if fitness_metric == "loglik"
+                else overall_best_test.get("test_accuracy")
+            ),
+            "train_acc": overall_best_train.get("train_accuracy"),
+            "test_acc": overall_best_test.get("test_accuracy"),
+            "train_loglik": overall_best_train.get("train_loglik"),
+            "test_loglik": overall_best_test.get("test_loglik"),
+            "fitness_metric": fitness_metric,
+        }
+        with open(output_path / "summary.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(summary_row.keys()))
+            writer.writeheader()
+            writer.writerow(summary_row)
     
     if n_iterations > 0:
         if dataset == "cpc18":
@@ -3538,7 +3646,7 @@ def main():
     parser.add_argument(
         "--sample_size",
         type=int,
-        default=3,
+        default=10,
         help="Number of parent programs to use when generating each child (default: 3)",
     )
     parser.add_argument(
@@ -3605,10 +3713,48 @@ def main():
         choices=["accuracy", "loglik"],
         help="Choice13k only: fitness for selection (default: accuracy). loglik = mean Bernoulli log-likelihood on train.",
     )
+    parser.add_argument(
+        "--split_mode",
+        type=str,
+        default="within_participant",
+        choices=["within_participant", "across_participants"],
+        help="Choice13k split mode: within_participant (default) or across_participants.",
+    )
+    parser.add_argument(
+        "--split_ratio",
+        type=float,
+        default=0.9,
+        help="Global train ratio for splitting (default: 0.9).",
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=0,
+        help="Seed for deterministic splitting (default: 0).",
+    )
+    parser.add_argument(
+        "--max_prompt_train_trials",
+        type=int,
+        default=1_000_000,
+        help=(
+            "Cap on train trials serialized into each LLM generation prompt (random subsample without replacement). "
+            "If len(train_trials) <= this value, all train trials are used. Default 1000000. "
+            "Use 0 to disable capping (always use full train set in the prompt; may exceed context limits)."
+        ),
+    )
 
     args = parser.parse_args()
     if args.fitness_metric == "loglik" and args.dataset != "choice13k":
         print("Error: --fitness_metric loglik is only supported with --dataset choice13k.")
+        return
+    if not (0.0 < args.split_ratio < 1.0):
+        print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
+        return
+    if args.split_mode == "across_participants" and args.dataset != "choice13k":
+        print("Error: --split_mode across_participants is only supported with --dataset choice13k.")
+        return
+    if args.max_prompt_train_trials < 0:
+        print("Error: --max_prompt_train_trials must be >= 0 (0 = no cap).")
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
@@ -3705,6 +3851,11 @@ def main():
             print(
                 f"Participant scope: all -> using {cap_text} from valid_participant_ids.json."
             )
+    if args.dataset == "choice13k":
+        print(
+            f"Choice13k split settings: split_mode={args.split_mode}, "
+            f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}"
+        )
     
     # Create base run directory and save seed program once
     base_run_dir = None
@@ -3761,6 +3912,71 @@ def main():
         if args.participant_scope != "all":
             print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
 
+    if args.dataset == "choice13k" and args.split_mode == "across_participants":
+        selected_participants = list(participants_to_process)
+        if len(selected_participants) < 2:
+            print("Error: across_participants split requires at least 2 selected participants.")
+            if wandb is not None:
+                wandb.finish()
+            return
+        rng = np.random.default_rng(args.split_seed)
+        shuffled = list(selected_participants)
+        rng.shuffle(shuffled)
+        split_idx = int(len(shuffled) * args.split_ratio)
+        split_idx = max(1, min(split_idx, len(shuffled) - 1))
+        train_participants = shuffled[:split_idx]
+        test_participants = shuffled[split_idx:]
+        print(
+            f"split_mode={args.split_mode}, split_ratio={args.split_ratio:.3f}, "
+            f"train_participants={len(train_participants)}, test_participants={len(test_participants)}"
+        )
+
+        max_pid = max(selected_participants)
+        experiments = get_choice13k_experiments(n_participants=max_pid + 1)
+        train_trials: List[Dict[str, Any]] = []
+        test_trials: List[Dict[str, Any]] = []
+        for pid in train_participants:
+            p_trials, _ = experiment_to_trials(experiments[pid])
+            train_trials.extend(p_trials)
+        for pid in test_participants:
+            p_trials, _ = experiment_to_trials(experiments[pid])
+            test_trials.extend(p_trials)
+        print(f"Across-participants trial counts: train={len(train_trials)}, test={len(test_trials)}")
+
+        try:
+            run_evolution(
+                seed_program_path=seed_program_path,
+                dataset="choice13k",
+                participant_id=0,
+                data_path=args.data_path,
+                num_blocks=getattr(args, "num_blocks", None),
+                num_walls=getattr(args, "num_walls", None),
+                agent_id=getattr(args, "agent_id", None),
+                n_iterations=args.n_iterations,
+                n_candidates_per_iteration=args.n_candidates,
+                model_name=args.model_name,
+                client_kwargs=client_kwargs if client_kwargs else None,
+                output_dir=base_run_dir,
+                wandb=wandb,
+                n_eval_seeds=args.n_eval_seeds,
+                sample_size=args.sample_size,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                save_artifacts=True,
+                all_data_mode=False,
+                choice13k_experiment=None,
+                fitness_metric=args.fitness_metric,
+                split_ratio=args.split_ratio,
+                split_seed=args.split_seed,
+                choice13k_train_trials_override=train_trials,
+                choice13k_test_trials_override=test_trials,
+                choice13k_simple_logging=True,
+                max_prompt_train_trials=args.max_prompt_train_trials,
+            )
+        finally:
+            if wandb is not None:
+                wandb.finish()
+        return
+
     # participant_scope=all: process listed participants and save compact CSV outputs only (no per-participant artifacts)
     if args.dataset in _PARTICIPANT_DATASETS and args.participant_scope == "all":
         details_file = Path(base_run_dir) / "participants_details.csv"
@@ -3799,6 +4015,9 @@ def main():
                     all_data_mode=True,
                     choice13k_experiment=None,
                     fitness_metric=args.fitness_metric,
+                    split_ratio=args.split_ratio,
+                    split_seed=args.split_seed,
+                    max_prompt_train_trials=args.max_prompt_train_trials,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -4097,6 +4316,9 @@ def main():
                         sample_size=args.sample_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
+                        split_ratio=args.split_ratio,
+                        split_seed=args.split_seed,
+                        max_prompt_train_trials=args.max_prompt_train_trials,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -4211,6 +4433,9 @@ def main():
                         sample_size=args.sample_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
+                        split_ratio=args.split_ratio,
+                        split_seed=args.split_seed,
+                        max_prompt_train_trials=args.max_prompt_train_trials,
                     )
                 
                 # Update participants summary after each participant completes
