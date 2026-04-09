@@ -1891,6 +1891,7 @@ def generate_program_variants(
     dataset: str = "choice13k",
     max_prompt_train_trials: int = 1_000_000,
     prompt_train_trials_seed: int = 0,
+    fitness_metric: str = "accuracy",
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -1907,8 +1908,16 @@ def generate_program_variants(
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "single_code_template.txt")
     else:
-        prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "infer_single_choice.txt")
-        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "single_code_template.txt")
+        if fitness_metric == "loglik":
+            prompt_path = os.path.join(
+                PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "infer_single_choice.txt"
+            )
+            code_template_path = os.path.join(
+                PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "single_code_template.txt"
+            )
+        else:
+            prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "infer_single_choice.txt")
+            code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "single_code_template.txt")
     
     try:
         base_prompt = open(prompt_path).read()
@@ -2506,6 +2515,7 @@ def run_evolution(
                 parent_train_mses=parent_train_mses if dataset == "cpc18" else None,
                 max_prompt_train_trials=max_prompt_train_trials,
                 prompt_train_trials_seed=split_seed,
+                fitness_metric=fitness_metric,
             )
         
         # Evaluate candidates
