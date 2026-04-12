@@ -25,10 +25,13 @@ use disjoint gamble pairs; per-trial history is within-block only. Across-partic
 participant via experiment_to_trials (full cross-block history).
 """
 
+import math
 import os
 import re
 import json
 import csv
+import shlex
+import socket
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional, Tuple
@@ -3285,7 +3288,7 @@ def run_evolution(
         with open(output_path / "summary.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(summary_row.keys()))
             writer.writeheader()
-            writer.writerow(summary_row)
+            writer.writerow(_round_floats_for_csv_row(summary_row))
     
     if n_iterations > 0:
         if dataset == "cpc18":
@@ -3578,6 +3581,37 @@ def run_evolution_gridworld_ensemble(
         "train_acc": mean_train_acc,
         "test_acc": ensemble_test_acc,
     }
+
+
+def _write_command_line_log(run_dir: Path) -> Path:
+    """Persist interpreter + argv under run_dir/log/command.txt (path also printed for SLURM logs)."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = run_dir / "log"
+    log_dir.mkdir(exist_ok=True)
+    path = log_dir / "command.txt"
+    cmd = shlex.join([sys.executable, *sys.argv])
+    stamp = datetime.now().isoformat(timespec="seconds")
+    body = f"# saved {stamp}\n# cwd: {os.getcwd()}\n# host: {socket.gethostname()}\n{cmd}\n"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _round_floats_for_csv_row(row: Dict[str, Any], ndigits: int = 4) -> Dict[str, Any]:
+    """Round finite floats for CSV output; keep ints, None, bools, and other types unchanged."""
+    out: Dict[str, Any] = {}
+    for k, v in row.items():
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (float, np.floating)):
+            x = float(v)
+            out[k] = round(x, ndigits) if math.isfinite(x) else x
+        else:
+            out[k] = v
+    return out
+
+
+def _round_floats_for_csv_rows(rows: List[Dict[str, Any]], ndigits: int = 4) -> List[Dict[str, Any]]:
+    return [_round_floats_for_csv_row(r, ndigits) for r in rows]
 
 
 def main():
@@ -3941,7 +3975,10 @@ def main():
             # It's already a base directory
             base_run_dir = args.output_dir
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
-    
+
+    cmd_log = _write_command_line_log(Path(base_run_dir))
+    print(f"Wrote full command line to {cmd_log}")
+
     # Determine seed program path
     if args.seed_path is None:
         if args.dataset == "gridworld" or args.dataset == "gridworld_ensemble":
@@ -4099,7 +4136,7 @@ def main():
                     ]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
-                    writer.writerows(participant_details)
+                    writer.writerows(_round_floats_for_csv_rows(participant_details))
 
                 avg_train_fitness = float(np.mean([d["train_fitness"] for d in participant_details]))
                 avg_test_fitness = float(np.mean([d["test_fitness"] for d in participant_details]))
@@ -4109,17 +4146,21 @@ def main():
                         fieldnames=["num_of_participants", "avg_train_fitness", "avg_test_fitness"],
                     )
                     writer.writeheader()
-                    writer.writerow({
-                        "num_of_participants": len(participant_details),
-                        "avg_train_fitness": avg_train_fitness,
-                        "avg_test_fitness": avg_test_fitness,
-                    })
+                    writer.writerow(
+                        _round_floats_for_csv_row(
+                            {
+                                "num_of_participants": len(participant_details),
+                                "avg_train_fitness": avg_train_fitness,
+                                "avg_test_fitness": avg_test_fitness,
+                            }
+                        )
+                    )
 
                 with open(details_loglik_file, "w", newline="") as f:
                     fieldnames = ["participant_id", "train_loglik", "test_loglik"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
-                    writer.writerows(participant_details_loglik)
+                    writer.writerows(_round_floats_for_csv_rows(participant_details_loglik))
 
                 train_loglik_values = [
                     d["train_loglik"] for d in participant_details_loglik if d["train_loglik"] is not None
@@ -4135,11 +4176,15 @@ def main():
                         fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
                     )
                     writer.writeheader()
-                    writer.writerow({
-                        "num_of_participants": len(participant_details_loglik),
-                        "avg_train_loglik": avg_train_loglik,
-                        "avg_test_loglik": avg_test_loglik,
-                    })
+                    writer.writerow(
+                        _round_floats_for_csv_row(
+                            {
+                                "num_of_participants": len(participant_details_loglik),
+                                "avg_train_loglik": avg_train_loglik,
+                                "avg_test_loglik": avg_test_loglik,
+                            }
+                        )
+                    )
         finally:
             if wandb is not None:
                 wandb.finish()
@@ -4274,7 +4319,7 @@ def main():
                         fieldnames = ['agent_id', 'num_blocks', 'num_walls', 'train_acc', 'test_acc']
                         writer = csv.DictWriter(f, fieldnames=fieldnames)
                         writer.writeheader()
-                        writer.writerows(participants_summary)
+                        writer.writerows(_round_floats_for_csv_rows(participants_summary))
                     print(f"\nSummary updated: {summary_file}")
             if wandb is not None:
                 wandb.finish()
@@ -4389,7 +4434,7 @@ def main():
                         fieldnames = ['epoch', 'num_blocks', 'num_walls', 'agent_id', 'train_acc', 'test_acc']
                         writer = csv.DictWriter(f, fieldnames=fieldnames)
                         writer.writeheader()
-                        writer.writerows(participants_summary)
+                        writer.writerows(_round_floats_for_csv_rows(participants_summary))
                     print(f"\nSummary updated: {summary_file}")
     else:
         # Original logic for choice13k or random mode
@@ -4498,7 +4543,7 @@ def main():
                     with open(summary_file, 'w', newline='') as f:
                         writer = csv.DictWriter(f, fieldnames=list(participant_summary.keys()))
                         writer.writeheader()
-                        writer.writerows(participants_summary)
+                        writer.writerows(_round_floats_for_csv_rows(participants_summary))
                     print(f"\nParticipants summary updated: {summary_file}")
 
                     if args.participant_scope == "range":
@@ -4513,7 +4558,7 @@ def main():
                                     f, fieldnames=["participant_id", "train_loglik", "test_loglik"]
                                 )
                                 writer.writeheader()
-                                writer.writerows(participants_loglik_summary)
+                                writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
                         if summary_loglik_file is not None:
                             train_ll_vals = [
                                 d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None
@@ -4527,11 +4572,15 @@ def main():
                                     fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
                                 )
                                 writer.writeheader()
-                                writer.writerow({
-                                    "num_of_participants": len(participants_loglik_summary),
-                                    "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
-                                    "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
-                                })
+                                writer.writerow(
+                                    _round_floats_for_csv_row(
+                                        {
+                                            "num_of_participants": len(participants_loglik_summary),
+                                            "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                                            "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
+                                        }
+                                    )
+                                )
         finally:
             if wandb is not None:
                 wandb.finish()

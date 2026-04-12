@@ -1,10 +1,17 @@
 """
 Choice13k dataset loader replicated from llm_evo_cog (read-only reference).
 """
-import re
 import math
+import os
+import re
 from typing import List, NamedTuple, Optional
+
 from datasets import load_dataset
+
+
+def _hf_token_for_datasets():
+    """Read token from env (batch jobs); same vars as Hugging Face CLI / hub."""
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
 
 class Gamble(NamedTuple):
@@ -118,7 +125,9 @@ def _convert_to_experiment(data) -> Experiment:
 
 
 def get_choice13k_experiments(n_participants: int = 10):
-    dataset = load_dataset('marcelbinz/Psych-101-test')
+    tok = _hf_token_for_datasets()
+    ds_kw = {"token": tok} if tok else {}
+    dataset = load_dataset("marcelbinz/Psych-101-test", **ds_kw)
     test_split = dataset['test']
     choices13k_ds = test_split.filter(lambda ex: ex['experiment'] == 'peterson2021using/exp1.csv')
 
