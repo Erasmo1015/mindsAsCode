@@ -2,15 +2,19 @@
 """
 Prospect Theory MLE baselines for Choice13k, CPC18 (Track II), and Mixed Gambles.
 
-Data loading/splitting conventions are copied to match `Template_evo_non_strict.py`
-for the three datasets exactly:
-  - choice13k: fixed 80/20 split with RNG seed=42 (history accumulated in order)
-  - cpc18: NO artificial split (train_ratio ignored; use all trials; CPC18 official MSE computed)
-  - mixed_gambles: participant filtering + optional gain_loss filtering + 80/20 split with RNG seed=42
+Data loading/splitting conventions align with `Template_evo_non_strict.py` and `baseline_methods/MLE.py`:
+  - choice13k within_participant: **problem (block)-level** split (disjoint gamble pairs); history within-block only
+  - choice13k across_participants: shuffle/split participant ids then one global MLE (--participant_scope, etc.)
+  - cpc18: NO artificial trial split (official MSE computed)
+  - mixed_gambles: participant filtering + optional gain_loss + trial split via --split_ratio / --split_seed
 
 Method differs from Template Evolution:
-  - Fit a simple prospect-theory model by MLE on the training split
+  - Fit prospect theory by MLE on the training split
   - Evaluate on the test split (CPC18: report MSE + train_fitness = -train_mse)
+
+python baseline_methods/prospect_theory.py --dataset choice13k --split_mode across_participants \\
+  --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 \\
+  --split_ratio 0.9 --split_seed 0 --fitness_metric loglik
 """
 
 from __future__ import annotations
@@ -44,6 +48,73 @@ if str(_REPO_ROOT) not in sys.path:
 _DATA_MODULES_DIR = _REPO_ROOT / "data_modules"
 
 
+def load_valid_participant_ids_from_json(
+    dataset: str, repo_root: Path, filter_mixed_gambles: bool
+) -> List[int]:
+    """Load precomputed valid raw participant ids (same as Template_evo_non_strict)."""
+    if dataset == "choice13k":
+        path = repo_root / "datasets" / "choice13k" / "valid_participant_ids.json"
+    elif dataset == "cpc18":
+        path = repo_root / "datasets" / "cpc18" / "valid_participant_ids.json"
+    elif dataset == "mixed_gambles":
+        name = (
+            "valid_participant_ids_gain_loss.json"
+            if filter_mixed_gambles
+            else "valid_participant_ids.json"
+        )
+        path = repo_root / "datasets" / "mixed_gambles" / name
+    else:
+        raise ValueError(f"load_valid_participant_ids_from_json: unsupported dataset {dataset!r}")
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing valid participant list: {path}. "
+            f"Generate it with: python utils/tools/collect_participant_ids.py --dataset {dataset}"
+            + (" --filter_mixed_gambles" if dataset == "mixed_gambles" and filter_mixed_gambles else "")
+        )
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return list(data["valid_participant_ids"])
+
+
+def resolve_participants_for_scope(
+    *,
+    dataset: str,
+    repo_root: Path,
+    participant_scope: str,
+    single_participant_id: int,
+    range_start_ordinal: Optional[int],
+    range_end_ordinal: Optional[int],
+    all_max_participants: Optional[int],
+    filter_mixed_gambles: bool,
+) -> List[int]:
+    """Same ordinal/raw-id resolution as Template_evo_non_strict.resolve_participants_for_scope."""
+    valid = load_valid_participant_ids_from_json(dataset, repo_root, filter_mixed_gambles)
+    if participant_scope == "single":
+        if single_participant_id not in valid:
+            raise ValueError(
+                f"--single_participant_id={single_participant_id} is not in the precomputed valid list "
+                f"({len(valid)} ids)."
+            )
+        return [single_participant_id]
+    if participant_scope == "range":
+        if range_start_ordinal is None or range_end_ordinal is None:
+            raise ValueError(
+                "--participant_scope range requires --range_start_ordinal and --range_end_ordinal (inclusive)."
+            )
+        if range_start_ordinal < 0 or range_end_ordinal >= len(valid) or range_start_ordinal > range_end_ordinal:
+            raise ValueError(
+                f"Invalid ordinal range [{range_start_ordinal}, {range_end_ordinal}] "
+                f"for valid list of length {len(valid)} (0-based inclusive end)."
+            )
+        return valid[range_start_ordinal : range_end_ordinal + 1]
+    if participant_scope == "all":
+        if all_max_participants is not None:
+            n = max(0, int(all_max_participants))
+            return valid[:n]
+        return list(valid)
+    raise ValueError(f"Unknown participant_scope: {participant_scope!r}")
+
+
 def _load_data_module(module_filename: str, module_name: str) -> Any:
     """Load a python file as a module without importing the `data_modules` package.
 
@@ -59,10 +130,10 @@ def _load_data_module(module_filename: str, module_name: str) -> Any:
     return module
 
 
-# ===== Dataset loading / splitting (copied to match Template_evo_non_strict.py) =====
+# ===== Dataset loading / splitting (aligned with Template_evo_non_strict / MLE.py) =====
 
-def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
-    """Split trials into train/test 80/20 (fixed split, matching ROTE); return (train, test, options)."""
+def experiment_to_trials(exp: Any) -> Tuple[List[Dict[str, Any]], list]:
+    """Convert one Choice13k experiment into trial records without splitting."""
     options = exp.blocks[0].option_keys
     all_trials = []
     history_accum = []
@@ -89,22 +160,75 @@ def split_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], List[Dict[str, 
                 }
             )
             history_accum.append(history_entry)
-    # Random train/test split (reproducible).
-    # The dataset is ordered by stimulus structure,
-    # so row-order split creates artificial distribution shift.
-    rng = np.random.default_rng(42)
-    indices = np.arange(len(all_trials))
-    rng.shuffle(indices)
-    split_point = int(len(all_trials) * 0.8)
-    train_trials = [all_trials[i] for i in indices[:split_point]]
-    test_trials = [all_trials[i] for i in indices[split_point:]]
+    return all_trials, options
+
+
+def trials_from_blocks_chronological(
+    exp: Any, block_indices: set[int]
+) -> List[Dict[str, Any]]:
+    """Trials from selected blocks in original order; history only within each block (no cross-problem leakage)."""
+    out: List[Dict[str, Any]] = []
+    for bi, block in enumerate(exp.blocks):
+        if bi not in block_indices:
+            continue
+        options = block.option_keys
+        history_accum: List[Dict[str, Any]] = []
+        for trial in block.trials:
+            out.append(
+                {
+                    "problem": {
+                        "gamble_A": {
+                            "probs": block.gamble_A.probs,
+                            "rewards": block.gamble_A.rewards,
+                        },
+                        "gamble_B": {
+                            "probs": block.gamble_B.probs,
+                            "rewards": block.gamble_B.rewards,
+                        },
+                        "option_keys": options,
+                        "has_feedback": block.has_feedback,
+                    },
+                    "history": list(history_accum),
+                    "options": options,
+                    "action": trial.action,
+                }
+            )
+            history_accum.append({"action": trial.action, "feedback": trial.feedback})
+    return out
+
+
+def split_trials(
+    exp: Experiment,
+    split_ratio: float = 0.9,
+    split_seed: int = 0,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
+    """Train/test split by **problem** (Choice13k block): disjoint gamble pairs; ratio/seed apply to block counts."""
+    n_blocks = len(exp.blocks)
+    if n_blocks < 2:
+        raise ValueError(
+            f"Choice13k within_participant split requires at least 2 problems (blocks); got {n_blocks}."
+        )
+    rng = np.random.default_rng(split_seed)
+    perm = np.arange(n_blocks)
+    rng.shuffle(perm)
+    split_idx = int(n_blocks * split_ratio)
+    split_idx = max(1, min(split_idx, n_blocks - 1))
+    train_blocks = set(perm[:split_idx].tolist())
+    test_blocks = set(perm[split_idx:].tolist())
+    train_trials = trials_from_blocks_chronological(exp, train_blocks)
+    test_trials = trials_from_blocks_chronological(exp, test_blocks)
+    options = exp.blocks[0].option_keys
     return train_trials, test_trials, options
 
 
 def load_mixed_gambles_data(
-    csv_path: str, participant_id: int, filter_gain_loss_only: bool = False
+    csv_path: str,
+    participant_id: int,
+    filter_gain_loss_only: bool = False,
+    split_ratio: float = 0.9,
+    split_seed: int = 0,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
-    """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
+    """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with train/test split.
 
     Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
     Raw CSV `took_gamble`: 1 = chose gamble, 0 = chose certain. TE option index: action = 1 - took_gamble
@@ -148,13 +272,42 @@ def load_mixed_gambles_data(
     # Random train/test split (reproducible).
     # The dataset is ordered by stimulus structure,
     # so row-order split creates artificial distribution shift.
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(split_seed)
     indices = np.arange(len(all_trials))
     rng.shuffle(indices)
-    split_point = int(len(all_trials) * 0.8)
+    split_point = int(len(all_trials) * split_ratio)
     train_trials = [all_trials[i] for i in indices[:split_point]]
     test_trials = [all_trials[i] for i in indices[split_point:]]
     return train_trials, test_trials, option_keys
+
+
+def choice13k_across_participants_train_test(
+    selected_participants: List[int],
+    split_ratio: float,
+    split_seed: int,
+    choice13k_mod: Any,
+) -> Tuple[List[int], List[int], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Shuffle/split participant ids then concatenate all trials per side (matches Template_evo_non_strict)."""
+    if len(selected_participants) < 2:
+        raise ValueError("across_participants requires at least 2 selected participants.")
+    rng = np.random.default_rng(split_seed)
+    shuffled = list(selected_participants)
+    rng.shuffle(shuffled)
+    split_idx = int(len(shuffled) * split_ratio)
+    split_idx = max(1, min(split_idx, len(shuffled) - 1))
+    train_participants = shuffled[:split_idx]
+    test_participants = shuffled[split_idx:]
+    max_pid = max(selected_participants)
+    experiments = choice13k_mod.get_choice13k_experiments(n_participants=max_pid + 1)
+    train_trials: List[Dict[str, Any]] = []
+    test_trials: List[Dict[str, Any]] = []
+    for pid in train_participants:
+        tr, _ = experiment_to_trials(experiments[pid])
+        train_trials.extend(tr)
+    for pid in test_participants:
+        tr, _ = experiment_to_trials(experiments[pid])
+        test_trials.extend(tr)
+    return train_participants, test_participants, train_trials, test_trials
 
 
 # ===== Prospect theory model =====
@@ -335,6 +488,32 @@ def eval_cpc18_mse_from_predict_fn(
     return {"mse": mse_val, "valid": True, "n_problems": len(all_mse)}
 
 
+def eval_mean_loglik_choice13k_prospect(
+    trials: List[Dict[str, Any]],
+    params: Dict[str, float],
+) -> float:
+    """Mean Bernoulli log-likelihood under fitted prospect model (P(choose A)=sigmoid(beta*(VA-VB)))."""
+    if not trials:
+        return float("nan")
+    alpha = float(params["alpha"])
+    lam = float(params["lambda"])
+    gamma = float(params["gamma"])
+    beta = float(params["beta"])
+    total = 0.0
+    for tr in trials:
+        p = tr["problem"]
+        VA = subjective_value_gamble(p["gamble_A"]["rewards"], p["gamble_A"]["probs"], alpha, lam, gamma)
+        VB = subjective_value_gamble(p["gamble_B"]["rewards"], p["gamble_B"]["probs"], alpha, lam, gamma)
+        p_choose_a = float(sigmoid(beta * (VA - VB)))
+        p_choose_a = min(max(p_choose_a, 1e-9), 1.0 - 1e-9)
+        y = int(tr["action"])
+        if y == 0:
+            total += np.log(p_choose_a)
+        else:
+            total += np.log(1.0 - p_choose_a)
+    return float(total / len(trials))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prospect Theory baseline (TE-compatible data handling)")
     parser.add_argument(
@@ -377,6 +556,63 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--split_mode",
+        type=str,
+        default="within_participant",
+        choices=["within_participant", "across_participants"],
+        help="choice13k only: within_participant = problem (block)-level split per participant; "
+        "across_participants = shuffle/split participant ids then one global MLE (TE-aligned).",
+    )
+    parser.add_argument(
+        "--split_ratio",
+        type=float,
+        default=0.9,
+        help=(
+            "choice13k within_participant: fraction of problems (blocks) for train; "
+            "choice13k across_participants: fraction of participants for train; "
+            "mixed_gambles: fraction of trials for train."
+        ),
+    )
+    parser.add_argument("--split_seed", type=int, default=0, help="RNG seed for splits (TE-aligned).")
+    parser.add_argument(
+        "--participant_scope",
+        type=str,
+        default=None,
+        choices=["single", "range", "all"],
+        help="choice13k only: resolve participants from datasets/*/valid_participant_ids.json (same ordinals as TE).",
+    )
+    parser.add_argument(
+        "--single_participant_id",
+        type=int,
+        default=0,
+        help="Raw participant id when --participant_scope single.",
+    )
+    parser.add_argument(
+        "--range_start_ordinal",
+        type=int,
+        default=None,
+        help="Inclusive start index into the sorted valid id list (with --participant_scope range).",
+    )
+    parser.add_argument(
+        "--range_end_ordinal",
+        type=int,
+        default=None,
+        help="Inclusive end index into the sorted valid id list (with --participant_scope range).",
+    )
+    parser.add_argument(
+        "--all_max_participants",
+        type=int,
+        default=None,
+        help="With --participant_scope all: cap how many valid ids to use (None = all).",
+    )
+    parser.add_argument(
+        "--fitness_metric",
+        type=str,
+        default="acc",
+        choices=["acc", "loglik"],
+        help="Primary metric for printed summary (both acc and mean loglik are computed for choice13k).",
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default=None,
@@ -391,7 +627,139 @@ def main() -> None:
     num_agents_arg_explicit = "--num_agents_to_sample" in sys.argv
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
+    if not (0.0 < args.split_ratio < 1.0):
+        raise ValueError("--split_ratio must be strictly between 0 and 1.")
+    if args.participant_scope is not None and args.dataset != "choice13k":
+        raise ValueError("--participant_scope is only supported for --dataset choice13k.")
+    if args.split_mode == "across_participants":
+        if args.dataset != "choice13k":
+            raise ValueError("--split_mode across_participants is only supported for --dataset choice13k.")
+        if args.participant_scope is None:
+            raise ValueError("--split_mode across_participants requires --participant_scope.")
+        if args.all_data:
+            raise ValueError(
+                "--split_mode across_participants is incompatible with --all_data; use --participant_scope all."
+            )
+    if args.participant_scope is not None and args.all_data:
+        raise ValueError("Use either --participant_scope or --all_data, not both.")
+
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+
+    if args.dataset == "choice13k" and args.split_mode == "across_participants":
+        selected_participants = resolve_participants_for_scope(
+            dataset="choice13k",
+            repo_root=_REPO_ROOT,
+            participant_scope=args.participant_scope,
+            single_participant_id=args.single_participant_id,
+            range_start_ordinal=args.range_start_ordinal,
+            range_end_ordinal=args.range_end_ordinal,
+            all_max_participants=args.all_max_participants,
+            filter_mixed_gambles=False,
+        )
+        if args.output_dir is None:
+            base_run_dir_ap = f"generated_outputs/choice13k/prospect_theory/run_{timestamp}"
+        else:
+            base_run_dir_ap = args.output_dir
+        Path(base_run_dir_ap).mkdir(parents=True, exist_ok=True)
+
+        wandb_ap = None
+        if not args.no_log:
+            try:
+                import wandb as _wandb
+
+                wandb_ap = _wandb
+                run_name = f"choice13k_prospect_theory_across_{timestamp}"
+                wandb_ap.init(
+                    project="ROTE_evo",
+                    name=run_name,
+                    config=vars(args),
+                    reinit=False,
+                )
+            except Exception as e:
+                print(f"wandb logging disabled: {e}")
+                wandb_ap = None
+
+        choice13k_mod = _load_data_module("choice13k.py", "choice13k_data_module")
+        train_p, test_p, train_trials, test_trials = choice13k_across_participants_train_test(
+            selected_participants, args.split_ratio, args.split_seed, choice13k_mod
+        )
+        params = fit_prospect_theory_gamble_choice(
+            train_trials,
+            action_is_chooseA=lambda a: a == 0,
+            gambleA_getter=lambda prob: (prob["gamble_A"]["rewards"], prob["gamble_A"]["probs"]),
+            gambleB_getter=lambda prob: (prob["gamble_B"]["rewards"], prob["gamble_B"]["probs"]),
+            dataset=args.dataset,
+            participant_id=None,
+        )
+
+        def predict_action_ap(tr: Dict[str, Any]) -> int:
+            p = tr["problem"]
+            VA = subjective_value_gamble(
+                p["gamble_A"]["rewards"],
+                p["gamble_A"]["probs"],
+                params["alpha"],
+                params["lambda"],
+                params["gamma"],
+            )
+            VB = subjective_value_gamble(
+                p["gamble_B"]["rewards"],
+                p["gamble_B"]["probs"],
+                params["alpha"],
+                params["lambda"],
+                params["gamma"],
+            )
+            pA = float(sigmoid(params["beta"] * (VA - VB)))
+            return 0 if pA >= 0.5 else 1
+
+        train_eval = eval_accuracy_from_predict_fn(train_trials, predict_action_ap)
+        test_eval = eval_accuracy_from_predict_fn(test_trials, predict_action_ap)
+        train_ll = eval_mean_loglik_choice13k_prospect(train_trials, params)
+        test_ll = eval_mean_loglik_choice13k_prospect(test_trials, params)
+        results_ap = {
+            "method": "prospect_theory_MLE",
+            "dataset": "choice13k",
+            "split_mode": "across_participants",
+            "train_participants": train_p,
+            "test_participants": test_p,
+            "n_train_participants": len(train_p),
+            "n_test_participants": len(test_p),
+            "fitted_params": params,
+            "train_accuracy": train_eval["accuracy"],
+            "test_accuracy": test_eval["accuracy"],
+            "train_mean_loglik": train_ll,
+            "test_mean_loglik": test_ll,
+            "n_train": train_eval["total"],
+            "n_test": test_eval["total"],
+            "train_correct": train_eval["correct"],
+            "test_correct": test_eval["correct"],
+        }
+        (Path(base_run_dir_ap) / "results.json").write_text(json.dumps(results_ap, indent=2))
+
+        if wandb_ap is not None:
+            wandb_ap.log(
+                {
+                    "train_accuracy": train_eval["accuracy"],
+                    "test_accuracy": test_eval["accuracy"],
+                    "train_mean_loglik": train_ll,
+                    "test_mean_loglik": test_ll,
+                    "is_baseline": 1,
+                },
+                step=0,
+            )
+            wandb_ap.finish()
+
+        if args.fitness_metric == "loglik":
+            print(
+                f"\n[Prospect Theory baseline] choice13k across_participants train_mean_loglik={train_ll:.6f} "
+                f"test_mean_loglik={test_ll:.6f}"
+            )
+        else:
+            print(
+                f"\n[Prospect Theory baseline] choice13k across_participants train_acc={train_eval['accuracy']:.4f} "
+                f"test_acc={test_eval['accuracy']:.4f}"
+            )
+        print(f"Results saved under: {base_run_dir_ap}")
+        return
 
     wandb = None
     if not args.no_log:
@@ -403,6 +771,8 @@ def main() -> None:
             run_name = f"{dataset_prefix}_prospect_theory_{timestamp}"
             if args.participant_id is not None:
                 run_name = f"{run_name}_participant_{args.participant_id}"
+            elif getattr(args, "participant_scope", None) is not None:
+                run_name = f"{run_name}_scope_{args.participant_scope}"
             elif args.all_data:
                 run_name = f"{run_name}_all_data"
             else:
@@ -420,7 +790,18 @@ def main() -> None:
 
     # Determine which participants to process
     choice13k_exp_cache: Dict[int, Any] = {}
-    if args.all_data:
+    if args.dataset == "choice13k" and args.participant_scope is not None:
+        participants_to_process = resolve_participants_for_scope(
+            dataset="choice13k",
+            repo_root=_REPO_ROOT,
+            participant_scope=args.participant_scope,
+            single_participant_id=args.single_participant_id,
+            range_start_ordinal=args.range_start_ordinal,
+            range_end_ordinal=args.range_end_ordinal,
+            all_max_participants=args.all_max_participants,
+            filter_mixed_gambles=False,
+        )
+    elif args.all_data:
         valid_participants: List[int] = []
         if args.dataset == "cpc18":
             cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
@@ -455,7 +836,11 @@ def main() -> None:
             for participant_id in sorted(unique_subjects):
                 try:
                     train_trials, test_trials, _ = load_mixed_gambles_data(
-                        csv_path, participant_id, filter_gain_loss_only=mixed_gambles_gain_loss_only
+                        csv_path,
+                        participant_id,
+                        filter_gain_loss_only=mixed_gambles_gain_loss_only,
+                        split_ratio=args.split_ratio,
+                        split_seed=args.split_seed,
                     )
                     if len(train_trials) > 0 and len(test_trials) > 0:
                         valid_participants.append(participant_id)
@@ -469,7 +854,9 @@ def main() -> None:
             for participant_id in range(len(choices13k_ds)):
                 try:
                     exp = choice13k_mod._convert_to_experiment(choices13k_ds[participant_id])
-                    train_trials, test_trials, _ = split_trials(exp)
+                    train_trials, test_trials, _ = split_trials(
+                        exp, split_ratio=args.split_ratio, split_seed=args.split_seed
+                    )
                     if len(train_trials) > 0 and len(test_trials) > 0:
                         valid_participants.append(participant_id)
                         choice13k_exp_cache[participant_id] = exp
@@ -520,11 +907,18 @@ def main() -> None:
         details_fieldnames = ["participant_id", "train_fitness", "test_fitness", "total_runtime"]
         participants_details: List[Dict[str, Any]] = []
     else:
-        summary_fieldnames = (
-            ["participant_id", "train_fitness", "train_mse", "test_mse"]
-            if args.dataset == "cpc18"
-            else ["participant_id", "train_acc", "test_acc"]
-        )
+        if args.dataset == "cpc18":
+            summary_fieldnames = ["participant_id", "train_fitness", "train_mse", "test_mse"]
+        elif args.dataset == "choice13k":
+            summary_fieldnames = [
+                "participant_id",
+                "train_acc",
+                "test_acc",
+                "train_mean_loglik",
+                "test_mean_loglik",
+            ]
+        else:
+            summary_fieldnames = ["participant_id", "train_acc", "test_acc"]
 
     for participant_id in tqdm(participants_to_process, desc="Participants"):
         participant_start = datetime.now()
@@ -536,7 +930,9 @@ def main() -> None:
                 choice13k_mod = _load_data_module("choice13k.py", "choice13k_data_module")
                 experiments = choice13k_mod.get_choice13k_experiments(n_participants=participant_id + 1)
                 exp = experiments[participant_id]
-            train_trials, test_trials, _ = split_trials(exp)
+            train_trials, test_trials, _ = split_trials(
+                exp, split_ratio=args.split_ratio, split_seed=args.split_seed
+            )
         elif args.dataset == "cpc18":
             cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
             cpc18_mod = _load_data_module("cpc18.py", "cpc18_data_module")
@@ -549,7 +945,11 @@ def main() -> None:
         elif args.dataset == "mixed_gambles":
             csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
             train_trials, test_trials, _ = load_mixed_gambles_data(
-                csv_path, participant_id, filter_gain_loss_only=mixed_gambles_gain_loss_only
+                csv_path,
+                participant_id,
+                filter_gain_loss_only=mixed_gambles_gain_loss_only,
+                split_ratio=args.split_ratio,
+                split_seed=args.split_seed,
             )
         else:
             raise ValueError(f"Unsupported dataset: {args.dataset}")
@@ -575,6 +975,8 @@ def main() -> None:
 
             train_eval = eval_accuracy_from_predict_fn(train_trials, predict_action)
             test_eval = eval_accuracy_from_predict_fn(test_trials, predict_action)
+            train_ll = eval_mean_loglik_choice13k_prospect(train_trials, params)
+            test_ll = eval_mean_loglik_choice13k_prospect(test_trials, params)
 
             results = {
                 "method": "prospect_theory_MLE",
@@ -583,6 +985,8 @@ def main() -> None:
                 "fitted_params": params,
                 "train_accuracy": train_eval["accuracy"],
                 "test_accuracy": test_eval["accuracy"],
+                "train_mean_loglik": train_ll,
+                "test_mean_loglik": test_ll,
                 "n_train": train_eval["total"],
                 "n_test": test_eval["total"],
                 "train_correct": train_eval["correct"],
@@ -729,6 +1133,9 @@ def main() -> None:
                 "train_acc": train_fitness,
                 "test_acc": test_fitness,
             }
+            if args.dataset == "choice13k":
+                row["train_mean_loglik"] = float(results.get("train_mean_loglik", float("nan")))
+                row["test_mean_loglik"] = float(results.get("test_mean_loglik", float("nan")))
 
         if args.all_data:
             runtime_sec = (datetime.now() - participant_start).total_seconds()
@@ -764,13 +1171,7 @@ def main() -> None:
             if args.dataset == "cpc18":
                 participants_summary.append(row)
             else:
-                participants_summary.append(
-                    {
-                        "participant_id": participant_id,
-                        "train_acc": float(results.get("train_accuracy", float("nan"))),
-                        "test_acc": float(results.get("test_accuracy", float("nan"))),
-                    }
-                )
+                participants_summary.append(row)
             with open(summary_file, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=summary_fieldnames)
                 writer.writeheader()
@@ -792,14 +1193,19 @@ def main() -> None:
                     step=0,
                 )
             else:
-                wandb.log(
-                    {
-                        f"{prefix}_train_accuracy": float(row["train_acc"]),
-                        f"{prefix}_test_accuracy": float(row["test_acc"]),
-                        f"{prefix}_is_baseline": 1,
-                    },
-                    step=0,
-                )
+                log_payload = {
+                    f"{prefix}_train_accuracy": float(row["train_acc"]),
+                    f"{prefix}_test_accuracy": float(row["test_acc"]),
+                    f"{prefix}_is_baseline": 1,
+                }
+                if args.dataset == "choice13k":
+                    log_payload[f"{prefix}_train_mean_loglik"] = float(
+                        results.get("train_mean_loglik", float("nan"))
+                    )
+                    log_payload[f"{prefix}_test_mean_loglik"] = float(
+                        results.get("test_mean_loglik", float("nan"))
+                    )
+                wandb.log(log_payload, step=0)
 
     if wandb is not None:
         wandb.finish()
@@ -818,11 +1224,35 @@ def main() -> None:
         print(f"Mean train fitness (-MSE): {train_mean:.4f}")
         print(f"Mean test MSE (official):  {test_mean:.4f}")
     else:
-        train_mean = float(np.mean([r["train_acc"] for r in participants_summary])) if participants_summary else 0.0
-        test_mean = float(np.mean([r["test_acc"] for r in participants_summary])) if participants_summary else 0.0
         print(f"\n[Prospect Theory baseline] dataset={args.dataset} participants={participants_to_process}")
-        print(f"Mean train accuracy: {train_mean:.4f}")
-        print(f"Mean test accuracy:  {test_mean:.4f}")
+        if args.dataset == "choice13k":
+            train_mean_acc = (
+                float(np.mean([r["train_acc"] for r in participants_summary])) if participants_summary else 0.0
+            )
+            test_mean_acc = (
+                float(np.mean([r["test_acc"] for r in participants_summary])) if participants_summary else 0.0
+            )
+            train_mean_ll = (
+                float(np.mean([r["train_mean_loglik"] for r in participants_summary]))
+                if participants_summary
+                else 0.0
+            )
+            test_mean_ll = (
+                float(np.mean([r["test_mean_loglik"] for r in participants_summary]))
+                if participants_summary
+                else 0.0
+            )
+            if args.fitness_metric == "loglik":
+                print(f"Mean train loglik: {train_mean_ll:.6f}")
+                print(f"Mean test loglik:  {test_mean_ll:.6f}")
+            else:
+                print(f"Mean train accuracy: {train_mean_acc:.4f}")
+                print(f"Mean test accuracy:  {test_mean_acc:.4f}")
+        else:
+            train_mean = float(np.mean([r["train_acc"] for r in participants_summary])) if participants_summary else 0.0
+            test_mean = float(np.mean([r["test_acc"] for r in participants_summary])) if participants_summary else 0.0
+            print(f"Mean train accuracy: {train_mean:.4f}")
+            print(f"Mean test accuracy:  {test_mean:.4f}")
     print(f"Results saved under: {base_run_dir}")
 
 
