@@ -5,6 +5,17 @@ Local vLLM mode
   `python plot_and_eval.py --baseline_model ROTE --mode local --model_name Qwen/Qwen2.5-7B-Instruct --llm_server_url http://localhost:8000/v1 --llm_api_key EMPTY`
 - When `--mode local` is set, no models are loaded in-process; all prompts go to the OpenAI-compatible vLLM server. Default mode preserves the original in-process behavior.
 
+OpenEvolve (Choice13k, TE/Centaur-compatible participants)
+
+- Main runner: `baseline_methods/openevolve.py`.
+- Uses the same participant selection source and semantics as TE/Centaur (`datasets/choice13k/valid_participant_ids.json` with `--participant_scope single|range|all`, ordinals for `range`).
+- Supports the same split controls (`--split_mode within_participant|across_participants`, `--split_ratio`, `--split_seed`).
+- Default output dir: `generated_outputs/choice13k/openevolve/run_YYMMDD_HHMMSS/` with CSVs (`participants_summary.csv`, `participant_details_loglik.csv`, `summary_loglik.csv`) and per-participant OpenEvolve artifacts.
+- Command logging: writes `run_dir/log/command.txt`.
+- Failure policy is explicit: evaluator prints `[FATAL]` + traceback and returns `fatal_failure=1.0`; runner raises by default (unless `--allow_failure`).
+- Example run (matches Centaur/TE participant setting for ordinals 0..9):
+  `python baseline_methods/openevolve.py --dataset choice13k --seed_path persona_code_example/choice13k/prospect_theory.py --n_iterations 100 --n_candidates 10 --model_name Qwen/Qwen2.5-7B-Instruct --mode local --llm_server_url http://localhost:8000/v1 --llm_api_key EMPTY --fitness_metric loglik --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 --split_mode within_participant --split_ratio 0.9 --split_seed 0`
+
 Wandb logging
 
 - Enabled by default; disable with `--no_log True`.

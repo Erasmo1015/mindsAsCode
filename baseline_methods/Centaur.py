@@ -193,6 +193,8 @@ def evaluate_centaur_on_trials(
     *,
     verbose: bool = False,
     n_seeds: int = 1,
+    debug_prob: bool = False,
+    debug_limit: int = 5,
 ) -> Dict[str, Any]:
     """
     Same aggregate metrics as Template_evo_non_strict.evaluate_choice13k_program, but uses
@@ -202,11 +204,15 @@ def evaluate_centaur_on_trials(
     seed_avg_accs: List[float] = []
     seed_avg_logliks: List[float] = []
     first_seed_errors = 0
+    first_seed_neutral = 0
+    first_seed_neutral_reasons: Dict[str, int] = {}
 
-    def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
+    def _one_pass(seed_idx: int) -> Tuple[float, float, int, int, Dict[str, int]]:
         loglik_acc = 0.0
         correct = 0
         errors = 0
+        neutral = 0
+        neutral_reasons: Dict[str, int] = {}
         for i in range(total):
             y = int(trials[i]["action"])
             try:
@@ -220,12 +226,27 @@ def evaluate_centaur_on_trials(
                 loglik_acc += y * np.log(p_clamped) + (1 - y) * np.log(1.0 - p_clamped)
                 pred = 1 if p >= 0.5 else 0
                 correct += int(pred == y)
+                if debug_prob and seed_idx == 0 and errors <= debug_limit:
+                    print(f"[DEBUG] trial={i} exception fallback to p=0.5 -> {e!r}")
                 continue
 
             if not isinstance(p_raw, float):
                 raise TypeError(f"expected float, got {type(p_raw)}")
             if not (0.0 <= p_raw <= 1.0):
                 raise ValueError(f"expected p in [0,1], got {p_raw}")
+
+            dbg = getattr(chooser, "last_prob_debug", {})
+            if dbg.get("fallback_source") == "invalid_denom":
+                neutral += 1
+                reason = str(dbg.get("fallback_reason", "invalid_denom"))
+                neutral_reasons[reason] = neutral_reasons.get(reason, 0) + 1
+                if debug_prob and seed_idx == 0 and neutral <= debug_limit:
+                    print(
+                        f"[DEBUG] trial={i} invalid-denom fallback p=0.5 "
+                        f"(lp0={dbg.get('lp0')}, lp1={dbg.get('lp1')}, "
+                        f"s0_reason={dbg.get('suffix0_reason')}, s1_reason={dbg.get('suffix1_reason')})"
+                    )
+
             p = min(max(p_raw, 1e-9), 1.0 - 1e-9)
             loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
             pred = 1 if p_raw >= 0.5 else 0
@@ -233,14 +254,22 @@ def evaluate_centaur_on_trials(
 
         avg_ll = loglik_acc / total if total > 0 else 0.0
         acc = correct / total if total > 0 else 0.0
-        return avg_ll, acc, errors
+        return avg_ll, acc, errors, neutral, neutral_reasons
 
     for seed in range(n_seeds):
-        avg_ll, acc, errs = _one_pass(seed)
+        avg_ll, acc, errs, neutral, neutral_reasons = _one_pass(seed)
         seed_avg_logliks.append(avg_ll)
         seed_avg_accs.append(acc)
         if seed == 0:
             first_seed_errors = errs
+            first_seed_neutral = neutral
+            first_seed_neutral_reasons = neutral_reasons
+
+    if debug_prob and n_seeds == 1:
+        print(
+            f"[DEBUG] eval summary: total={total}, exception_fallbacks={first_seed_errors}, "
+            f"invalid_denom_fallbacks={first_seed_neutral}, reasons={first_seed_neutral_reasons}"
+        )
 
     avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
     avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
@@ -251,6 +280,8 @@ def evaluate_centaur_on_trials(
         "total": total,
         "correct": correct,
         "errors": first_seed_errors if n_seeds == 1 else 0,
+        "neutral_fallbacks": first_seed_neutral if n_seeds == 1 else 0,
+        "neutral_reasons": first_seed_neutral_reasons if n_seeds == 1 else {},
     }
 
 
@@ -345,6 +376,7 @@ class CentaurChooser:
         self.load_in_4bit = load_in_4bit
         self._model = None
         self._tokenizer = None
+        self.last_prob_debug: Dict[str, Any] = {}
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -366,6 +398,10 @@ class CentaurChooser:
         self._tokenizer = tokenizer
 
     def _suffix_logprob(self, prefix: str, suffix: str) -> float:
+        score, _ = self._suffix_logprob_detailed(prefix, suffix)
+        return score
+
+    def _suffix_logprob_detailed(self, prefix: str, suffix: str) -> Tuple[float, Optional[str]]:
         import torch
 
         self._ensure_loaded()
@@ -379,7 +415,7 @@ class CentaurChooser:
         pref = tokenizer(prefix, return_tensors="pt", add_special_tokens=False)
         plen = int(pref["input_ids"].shape[1])
         if plen >= input_ids.shape[1]:
-            return float("-inf")
+            return float("-inf"), "empty_suffix_after_tokenization"
 
         labels = input_ids.clone()
         labels[:, :plen] = -100
@@ -388,16 +424,19 @@ class CentaurChooser:
             out = model(input_ids=input_ids, labels=labels)
             loss = out.loss
             if loss is None:
-                return float("-inf")
+                return float("-inf"), "loss_none"
+            if not torch.isfinite(loss):
+                return float("nan"), f"loss_non_finite:{float(loss.item())}"
             n = int((labels != -100).sum().item())
             if n <= 0:
-                return float("-inf")
-            return float(-loss.item() * n)
+                return float("-inf"), "no_suffix_tokens_after_masking"
+            score = float(-loss.item() * n)
+            if not math.isfinite(score):
+                return score, f"logprob_non_finite:{score}"
+            return score, None
 
     def prob_choose_second_option(self, trials: List[Dict[str, Any]], trial_index: int) -> float:
         """P(action==1) for trials[trial_index] with correct cross-block key labels in history."""
-        import math
-
         problem = trials[trial_index]["problem"]
         keys = problem["option_keys"]
         if len(keys) != 2:
@@ -406,15 +445,30 @@ class CentaurChooser:
         prefix = build_centaur_prompt_prefix_indexed(trials, trial_index)
         s0 = f"<<{keys[0]}>>."
         s1 = f"<<{keys[1]}>>."
-        lp0 = self._suffix_logprob(prefix, s0)
-        lp1 = self._suffix_logprob(prefix, s1)
+        lp0, r0 = self._suffix_logprob_detailed(prefix, s0)
+        lp1, r1 = self._suffix_logprob_detailed(prefix, s1)
         m = max(lp0, lp1)
         t0 = math.exp(lp0 - m)
         t1 = math.exp(lp1 - m)
         denom = t0 + t1
         if denom <= 0 or not math.isfinite(denom):
+            self.last_prob_debug = {
+                "fallback_source": "invalid_denom",
+                "fallback_reason": "denom_non_finite_or_non_positive",
+                "lp0": lp0,
+                "lp1": lp1,
+                "suffix0_reason": r0,
+                "suffix1_reason": r1,
+            }
             return 0.5
         p1 = t1 / denom
+        self.last_prob_debug = {
+            "fallback_source": None,
+            "lp0": lp0,
+            "lp1": lp1,
+            "suffix0_reason": r0,
+            "suffix1_reason": r1,
+        }
         return float(min(max(p1, 1e-9), 1.0 - 1e-9))
 
 def _participant_summary_row(
@@ -574,6 +628,18 @@ def main() -> None:
     parser.add_argument("--split_seed", type=int, default=0)
     parser.add_argument("--n_eval_seeds", type=int, default=1)
     parser.add_argument(
+        "--debug_prob",
+        action="store_true",
+        default=False,
+        help="Print why p=0.5 fallbacks happen (exception vs invalid denominator).",
+    )
+    parser.add_argument(
+        "--debug_prob_limit",
+        type=int,
+        default=5,
+        help="Max number of per-trial debug lines for each fallback type (default: 5).",
+    )
+    parser.add_argument(
         "--centaur_model",
         type=str,
         default="marcelbinz/Llama-3.1-Centaur-70B-adapter",
@@ -642,8 +708,20 @@ def main() -> None:
             test_trials.extend(tr)
         print(f"Across-participants: train trials={len(train_trials)}, test trials={len(test_trials)}")
         t0 = datetime.now()
-        train_eval = evaluate_centaur_on_trials(chooser, train_trials, n_seeds=args.n_eval_seeds)
-        test_eval = evaluate_centaur_on_trials(chooser, test_trials, n_seeds=args.n_eval_seeds)
+        train_eval = evaluate_centaur_on_trials(
+            chooser,
+            train_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
+        test_eval = evaluate_centaur_on_trials(
+            chooser,
+            test_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
         runtime = (datetime.now() - t0).total_seconds()
         base_run_dir.mkdir(parents=True, exist_ok=True)
         row = {
@@ -668,8 +746,20 @@ def main() -> None:
             experiments = get_choice13k_experiments(n_participants=pid + 1)
             exp = experiments[pid]
             train_trials, test_trials, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
-            train_eval = evaluate_centaur_on_trials(chooser, train_trials, n_seeds=args.n_eval_seeds)
-            test_eval = evaluate_centaur_on_trials(chooser, test_trials, n_seeds=args.n_eval_seeds)
+            train_eval = evaluate_centaur_on_trials(
+                chooser,
+                train_trials,
+                n_seeds=args.n_eval_seeds,
+                debug_prob=args.debug_prob,
+                debug_limit=args.debug_prob_limit,
+            )
+            test_eval = evaluate_centaur_on_trials(
+                chooser,
+                test_trials,
+                n_seeds=args.n_eval_seeds,
+                debug_prob=args.debug_prob,
+                debug_limit=args.debug_prob_limit,
+            )
             runtime = (datetime.now() - t0).total_seconds()
             summ = _participant_summary_row(pid, train_eval, test_eval)
             participant_details.append(
@@ -701,8 +791,20 @@ def main() -> None:
         experiments = get_choice13k_experiments(n_participants=pid + 1)
         exp = experiments[pid]
         train_trials, test_trials, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
-        train_eval = evaluate_centaur_on_trials(chooser, train_trials, n_seeds=args.n_eval_seeds)
-        test_eval = evaluate_centaur_on_trials(chooser, test_trials, n_seeds=args.n_eval_seeds)
+        train_eval = evaluate_centaur_on_trials(
+            chooser,
+            train_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
+        test_eval = evaluate_centaur_on_trials(
+            chooser,
+            test_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
         summ = _participant_summary_row(pid, train_eval, test_eval)
         participants_summary.append(summ)
         participants_loglik_summary.append(
