@@ -288,6 +288,92 @@ def _write_all_mode_csvs(
         )
 
 
+def _format_choice13k_train_trials_for_prompt(
+    trials: List[Dict[str, Any]],
+    *,
+    max_trials: int,
+    rng_seed: int,
+    max_history_items_per_trial: int,
+) -> str:
+    """
+    Build human-readable train-split text for OpenEvolve mutation prompts (mirrors TE-style summaries).
+
+    Includes per-trial prior `history` (actions/feedback before the decision) in compact form.
+    """
+    if not trials:
+        return "(no train trials)\n"
+
+    n = len(trials)
+    if max_trials > 0 and n > max_trials:
+        rng = np.random.default_rng(int(rng_seed))
+        perm = rng.permutation(n)
+        order = perm[:max_trials].tolist()
+    else:
+        order = list(range(n))
+
+    lines = [
+        "Choice13k TRAIN split — reference for improving choose(problem, history).",
+        "Fitness uses mean Bernoulli log-likelihood of P(chosen option) on these trials only.",
+        "action 0 = option A, action 1 = option B.",
+        "",
+    ]
+    for j, i in enumerate(order):
+        t = trials[i]
+        prob = t["problem"]
+        prob_a = prob["gamble_A"]["probs"]
+        rew_a = prob["gamble_A"]["rewards"]
+        prob_b = prob["gamble_B"]["probs"]
+        rew_b = prob["gamble_B"]["rewards"]
+        has_fb = prob.get("has_feedback", False)
+        action = t["action"]
+        hist = t.get("history") or []
+        lines.append(f"--- Train trial {j + 1} (index {i} in train split) ---")
+        if hist:
+            if max_history_items_per_trial > 0 and len(hist) > max_history_items_per_trial:
+                hist_for_prompt = hist[-max_history_items_per_trial:]
+                omitted = len(hist) - len(hist_for_prompt)
+                lines.append(
+                    f"Prior history (showing last {len(hist_for_prompt)} of {len(hist)}; omitted {omitted} older items):"
+                )
+            else:
+                hist_for_prompt = hist
+                lines.append(f"Prior history ({len(hist_for_prompt)} items):")
+            compact_hist = [
+                {
+                    "a": int(h.get("action", 0)),
+                    "f": h.get("feedback", None),
+                }
+                for h in hist_for_prompt
+            ]
+            lines.append(f"{compact_hist!r}")
+        else:
+            lines.append("Prior history: (empty)")
+        lines.append(
+            f"Problem: Option A probs {prob_a} rewards {rew_a}; "
+            f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}"
+        )
+        lines.append(f"Observed human action: {action}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_train_trials_prompt_file(
+    *,
+    path: Path,
+    train_trials: List[Dict[str, Any]],
+    max_prompt_train_trials: int,
+    prompt_train_trials_seed: int,
+    max_history_items_per_trial: int,
+) -> None:
+    body = _format_choice13k_train_trials_for_prompt(
+        train_trials,
+        max_trials=max_prompt_train_trials,
+        rng_seed=prompt_train_trials_seed,
+        max_history_items_per_trial=max_history_items_per_trial,
+    )
+    path.write_text(body, encoding="utf-8")
+
+
 def _write_command_line_log(run_dir: Path) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     log_dir = run_dir / "log"
@@ -300,19 +386,82 @@ def _write_command_line_log(run_dir: Path) -> Path:
     return path
 
 
-def _build_participant_evaluator_code(dataset_json_path: Path) -> str:
+def _write_hyperparameters_log(run_dir: Path, args: argparse.Namespace) -> Path:
+    """Record CLI and effective OpenEvolve config under run_dir/log/ (repro / comparison)."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = run_dir / "log"
+    log_dir.mkdir(exist_ok=True)
+    path = log_dir / "hyperparameters.yaml"
+    payload: Dict[str, Any] = {
+        "meta": {
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "cwd": os.getcwd(),
+            "host": socket.gethostname(),
+            "python": sys.executable,
+            "script": str(Path(__file__).resolve()),
+        },
+        "cli": _to_builtin(vars(args)),
+        "openevolve_config": _to_builtin(_build_openevolve_config_dict(args)),
+    }
+    path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prompt_path: Path) -> str:
     return textwrap.dedent(
         f"""
         import importlib.util
         import json
         import math
+        import re
         import traceback
         from pathlib import Path
 
+        from openevolve.evaluation_result import EvaluationResult
+
         DATA_PATH = Path(r\"{str(dataset_json_path)}\")
+        TRAIN_PROMPT_PATH = Path(r\"{str(train_trials_prompt_path)}\")
+
+
+        def _extract_python_candidate(text: str) -> str:
+            norm = (
+                text.replace("’", "'")
+                .replace("“", '"')
+                .replace("”", '"')
+            )
+            m = re.search(r"```(?:python)?\\s*(.*?)```", norm, flags=re.IGNORECASE | re.DOTALL)
+            if m:
+                candidate = m.group(1).strip()
+            else:
+                candidate = norm.strip()
+
+            idx = candidate.find("def choose(")
+            if idx >= 0:
+                candidate = candidate[idx:]
+            else:
+                idx2 = norm.find("def choose(")
+                if idx2 >= 0:
+                    candidate = norm[idx2:].strip()
+            return candidate
+
+
+        def _guard_candidate_file(program_path: str) -> str:
+            p = Path(program_path)
+            raw = p.read_text(encoding="utf-8")
+            candidate = _extract_python_candidate(raw)
+            if not candidate:
+                return program_path
+            try:
+                compile(candidate, str(p), "exec")
+            except SyntaxError:
+                return program_path
+            if candidate != raw:
+                p.write_text(candidate, encoding="utf-8")
+            return program_path
 
 
         def _load_program(program_path: str):
+            program_path = _guard_candidate_file(program_path)
             spec = importlib.util.spec_from_file_location("candidate_module", program_path)
             if spec is None or spec.loader is None:
                 raise ImportError(f"Failed to create module spec from {{program_path}}")
@@ -341,7 +490,15 @@ def _build_participant_evaluator_code(dataset_json_path: Path) -> str:
             return (ll_sum / total), (correct / total), total
 
 
+        def _train_artifact():
+            try:
+                return TRAIN_PROMPT_PATH.read_text(encoding="utf-8")
+            except OSError:
+                return ""
+
+
         def evaluate(program_path: str):
+            art = {{"choice13k_train_trials": _train_artifact()}}
             try:
                 payload = json.loads(DATA_PATH.read_text(encoding="utf-8"))
                 train_trials = payload["train_trials"]
@@ -354,7 +511,7 @@ def _build_participant_evaluator_code(dataset_json_path: Path) -> str:
 
                 train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
                 test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
-                return {{
+                metrics = {{
                     "combined_score": float(train_ll),
                     "train_loglik": float(train_ll),
                     "test_loglik": float(test_ll),
@@ -364,11 +521,11 @@ def _build_participant_evaluator_code(dataset_json_path: Path) -> str:
                     "test_n": float(test_n),
                     "fatal_failure": 0.0,
                 }}
+                return EvaluationResult(metrics=metrics, artifacts=art)
             except Exception as e:
                 print("[FATAL] evaluator failure:", repr(e), flush=True)
                 traceback.print_exc()
-                # Make failure unmissable in logs and OpenEvolve metrics.
-                return {{
+                metrics = {{
                     "combined_score": -1.0e9,
                     "train_loglik": -1.0e9,
                     "test_loglik": -1.0e9,
@@ -376,6 +533,7 @@ def _build_participant_evaluator_code(dataset_json_path: Path) -> str:
                     "test_acc": 0.0,
                     "fatal_failure": 1.0,
                 }}
+                return EvaluationResult(metrics=metrics, artifacts=art)
         """
     ).strip() + "\n"
 
@@ -401,7 +559,7 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
             "api_key": api_key,
             "temperature": 0.7,
             "top_p": 0.95,
-            "max_tokens": 4096,
+            "max_tokens": int(args.llm_max_tokens),
             "timeout": int(args.llm_timeout_sec),
             "retries": 2,
             "retry_delay": 3,
@@ -409,12 +567,16 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
         "prompt": {
             "system_message": (
                 "You are improving a Choice13k choose(problem, history) policy. "
-                "Return valid Python code preserving the choose signature."
+                "The user message includes training-trial observations (and prior history per trial) "
+                "under artifacts — use them to increase train fitness (combined_score / mean log-likelihood). "
+                "Output ONLY runnable Python code (no explanations, no markdown fences, no preamble), "
+                "preserving the choose(problem, history) signature."
             ),
             "evaluator_system_message": "You are a strict code evaluator.",
-            "num_top_programs": 3,
-            "num_diverse_programs": 2,
+            "num_top_programs": int(args.prompt_num_top_programs),
+            "num_diverse_programs": int(args.prompt_num_diverse_programs),
             "include_artifacts": True,
+            "max_artifact_bytes": int(args.max_artifact_bytes),
         },
         "database": {
             "in_memory": True,
@@ -424,10 +586,10 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
             "num_islands": 1,
             "migration_interval": 1000,
             "migration_rate": 0.1,
-            "elite_selection_ratio": 0.2,
-            "exploration_ratio": 0.2,
-            "exploitation_ratio": 0.6,
-            "feature_dimensions": ["complexity", "diversity"],
+            "elite_selection_ratio": 0.5,
+            "exploration_ratio": 0.05,
+            "exploitation_ratio": 0.9,
+            "feature_dimensions": ["complexity"],
             "feature_bins": 10,
         },
         "evaluator": {
@@ -461,6 +623,7 @@ def _run_one_openevolve(
     initial_program_path = part_dir / "initial_program.py"
     evaluator_path = part_dir / "evaluator.py"
     data_path = part_dir / "dataset.json"
+    train_trials_prompt_path = part_dir / "train_trials_prompt.txt"
     config_path = part_dir / "config.yaml"
 
     initial_program_path.write_text(seed_code, encoding="utf-8")
@@ -469,7 +632,21 @@ def _run_one_openevolve(
         "test_trials": _to_builtin(test_trials),
     }
     data_path.write_text(json.dumps(data_payload), encoding="utf-8")
-    evaluator_path.write_text(_build_participant_evaluator_code(data_path), encoding="utf-8")
+    _write_train_trials_prompt_file(
+        path=train_trials_prompt_path,
+        train_trials=train_trials,
+        max_prompt_train_trials=int(args.max_prompt_train_trials),
+        prompt_train_trials_seed=int(args.split_seed),
+        max_history_items_per_trial=int(args.max_history_items_per_trial),
+    )
+    print(
+        f"[INFO] participant {participant_tag}: wrote train trial prompt for OpenEvolve artifacts: "
+        f"{train_trials_prompt_path} ({train_trials_prompt_path.stat().st_size} bytes)"
+    )
+    evaluator_path.write_text(
+        _build_participant_evaluator_code(data_path, train_trials_prompt_path),
+        encoding="utf-8",
+    )
     config_path.write_text(yaml.safe_dump(_build_openevolve_config_dict(args), sort_keys=False), encoding="utf-8")
 
     config = load_config(str(config_path))
@@ -557,7 +734,62 @@ def main() -> None:
     parser.add_argument("--allow_failure", action="store_true", help="Continue run after a participant-level fatal failure.")
     parser.add_argument("--eval_timeout_sec", type=int, default=300)
     parser.add_argument("--llm_timeout_sec", type=int, default=120)
+    parser.add_argument(
+        "--llm_max_tokens",
+        type=int,
+        default=1024,
+        help="Max output tokens per mutation request (smaller value reduces context-overflow failures).",
+    )
+    parser.add_argument(
+        "--prompt_num_top_programs",
+        type=int,
+        default=3,
+        help="Top-performing programs included in OpenEvolve prompt context.",
+    )
+    parser.add_argument(
+        "--prompt_num_diverse_programs",
+        type=int,
+        default=0,
+        help="Diverse programs included in OpenEvolve prompt context.",
+    )
+    parser.add_argument(
+        "--max_prompt_train_trials",
+        type=int,
+        default=120,
+        help="Max train trials to include in the mutation-prompt artifact (0 = all). Subsample is random with --split_seed.",
+    )
+    parser.add_argument(
+        "--max_history_items_per_trial",
+        type=int,
+        default=12,
+        help="For each serialized train trial, include at most this many most-recent history items (0 = all).",
+    )
+    parser.add_argument(
+        "--max_artifact_bytes",
+        type=int,
+        default=131072,
+        help="OpenEvolve truncates each prompt artifact to this many bytes (default 128 KiB).",
+    )
     args = parser.parse_args()
+
+    if args.max_prompt_train_trials < 0:
+        print("Error: --max_prompt_train_trials must be >= 0.")
+        sys.exit(1)
+    if args.max_history_items_per_trial < 0:
+        print("Error: --max_history_items_per_trial must be >= 0.")
+        sys.exit(1)
+    if args.max_artifact_bytes < 1024:
+        print("Error: --max_artifact_bytes must be at least 1024.")
+        sys.exit(1)
+    if args.llm_max_tokens < 64:
+        print("Error: --llm_max_tokens must be >= 64.")
+        sys.exit(1)
+    if args.prompt_num_top_programs < 1:
+        print("Error: --prompt_num_top_programs must be >= 1.")
+        sys.exit(1)
+    if args.prompt_num_diverse_programs < 0:
+        print("Error: --prompt_num_diverse_programs must be >= 0.")
+        sys.exit(1)
 
     if not (0.0 < args.split_ratio < 1.0):
         print("Error: --split_ratio must be in (0,1).")
@@ -574,7 +806,9 @@ def main() -> None:
     )
     base_run_dir.mkdir(parents=True, exist_ok=True)
     cmd_log = _write_command_line_log(base_run_dir)
+    hyp_log = _write_hyperparameters_log(base_run_dir, args)
     print(f"Wrote full command line to {cmd_log}")
+    print(f"Wrote hyperparameters to {hyp_log}")
 
     seed_path = Path(args.seed_path)
     if not seed_path.is_file():

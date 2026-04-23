@@ -135,16 +135,70 @@ def load_seed_program(seed_path: str) -> str:
     Handles markdown code blocks by extracting Python code."""
     with open(seed_path, 'r') as f:
         content = f.read()
-    
-    # Extract code from markdown code blocks if present
-    code_pattern = r'```(?:python)?(.*?)```'
-    matches = re.findall(code_pattern, content, re.DOTALL)
-    if matches:
-        # Return the first code block found
-        return matches[0].strip()
-    
-    # Return as-is if no code blocks found
-    return content
+
+    sanitized = _sanitize_llm_python_candidate(content)
+    return sanitized if sanitized else content
+
+
+def _extract_fenced_blocks(text: str) -> List[str]:
+    blocks: List[str] = []
+    blocks.extend(re.findall(r"```python(.*?)```", text, re.DOTALL | re.IGNORECASE))
+    blocks.extend(re.findall(r"```(.*?)```", text, re.DOTALL))
+    return [b.strip() for b in blocks if b and b.strip()]
+
+
+def _passes_python_syntax(candidate: str) -> bool:
+    try:
+        compile(candidate, "<candidate>", "exec")
+        return True
+    except SyntaxError:
+        return False
+
+
+def _sanitize_llm_python_candidate(
+    text: str,
+    required_markers: Optional[Tuple[str, ...]] = None,
+) -> str:
+    """Extract executable Python from LLM output, removing prose/markdown wrappers.
+
+    Strategy:
+    1) Try python fenced blocks, then generic fenced blocks, then raw text.
+    2) Keep candidates that satisfy required markers (if provided).
+    3) If marker appears later in the text, also try trimming prefix prose.
+    4) Return first syntax-valid candidate.
+    """
+    if not text:
+        return ""
+
+    candidates: List[str] = []
+    candidates.extend(_extract_fenced_blocks(text))
+    candidates.append(text.strip())
+
+    expanded: List[str] = []
+    for c in candidates:
+        c = c.strip()
+        if not c:
+            continue
+        expanded.append(c)
+        if required_markers:
+            for marker in required_markers:
+                i = c.find(marker)
+                if i > 0:
+                    expanded.append(c[i:].strip())
+
+    seen = set()
+    ordered: List[str] = []
+    for c in expanded:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+
+    for c in ordered:
+        if required_markers and not any(m in c for m in required_markers):
+            continue
+        if _passes_python_syntax(c):
+            return c
+    return ""
 
 
 def find_template_program_for_gridworld(num_blocks: int, num_walls: int, agent_id: int) -> Optional[str]:
@@ -1474,7 +1528,7 @@ Observed trajectory (first 20 steps) for this episode:
 
 {code_template}
 
-Output: one complete Python program in a ```python ... ``` block. Generate the variant now:"""
+Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Generate the variant now:"""
     candidates = []
     for _ in range(n_candidates):
         try:
@@ -1485,14 +1539,11 @@ Output: one complete Python program in a ```python ... ``` block. Generate the v
                 max_tokens=max_tokens,
             )
             content = response.choices[0].message.content
-            code_pattern = r'```(?:python)?(.*?)```'
-            matches = re.findall(code_pattern, content, re.DOTALL)
-            if matches:
-                code = matches[0].strip()
-                if 'class FSMAgent' in code or 'def act' in code:
-                    candidates.append(code)
-                else:
-                    candidates.append(template_code)
+            code = _sanitize_llm_python_candidate(
+                content, required_markers=("class FSMAgent", "def act(")
+            )
+            if code and ('class FSMAgent' in code or 'def act' in code):
+                candidates.append(code)
             else:
                 candidates.append(template_code)
         except Exception:
@@ -1536,7 +1587,7 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
     mismatch_section = f"Mismatches (pred vs gt):\n{mismatch_str}\n\n"
     full_prompt = f"""Improve the following agent program. Use only prefix (first 20 steps) performance; do not use any future-step metrics.
 
-{obs_section}{parent_section}{mismatch_section}Generate an improved program variant. Output a complete Python program in a ```python ... ``` block. Actions: 0=stay, 1=right, 2=left, 3=down, 4=up, 5=interact. Generate now:"""
+{obs_section}{parent_section}{mismatch_section}Generate an improved program variant. Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Actions: 0=stay, 1=right, 2=left, 3=down, 4=up, 5=interact. Generate now:"""
     variants = []
     for _ in range(n_variants):
         try:
@@ -1547,14 +1598,11 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
                 max_tokens=max_tokens,
             )
             content = response.choices[0].message.content
-            code_pattern = r'```(?:python)?(.*?)```'
-            matches = re.findall(code_pattern, content, re.DOTALL)
-            if matches:
-                code = matches[0].strip()
-                if 'class FSMAgent' in code or 'def act' in code:
-                    variants.append(code)
-                else:
-                    variants.append(parent_codes[0])
+            code = _sanitize_llm_python_candidate(
+                content, required_markers=("class FSMAgent", "def act(")
+            )
+            if code and ('class FSMAgent' in code or 'def act' in code):
+                variants.append(code)
             else:
                 variants.append(parent_codes[0])
         except Exception:
@@ -1884,8 +1932,8 @@ Your task: Generate an improved program variant. The variant should:
 
 {code_template}
 
-Output format: Provide the variant as a code block marked with ```python and ```.
-The variant should be a complete, runnable program.
+Output format: Provide ONLY runnable Python code (no explanations, no markdown fences, no preamble).
+The variant must be a complete, runnable program.
 
 Generate the variant now:"""
 
@@ -1903,19 +1951,12 @@ Generate the variant now:"""
             )
             content = response.choices[0].message.content
             
-            # Extract code block
-            code_pattern = r'```(?:python)?(.*?)```'
-            matches = re.findall(code_pattern, content, re.DOTALL)
-            
-            if matches:
-                code = matches[0].strip()
-                if 'class FSMAgent' in code or 'def act' in code:
-                    variants.append(code)
-                else:
-                    # If no valid code found, use parent
-                    variants.append(best_parent)
+            code = _sanitize_llm_python_candidate(
+                content, required_markers=("class FSMAgent", "def act(")
+            )
+            if code and ('class FSMAgent' in code or 'def act' in code):
+                variants.append(code)
             else:
-                # No code block found, use parent
                 variants.append(best_parent)
         except Exception as e:
             print(f"Warning: Failed to generate program variant: {e}")
@@ -1998,7 +2039,7 @@ Constraints:
 
 Provide only the code for choose(...) as a complete function body.
 """
-        code_template = """```python
+        code_template = """
 def choose(problem, history):
     \"\"\"
     problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
@@ -2009,7 +2050,6 @@ def choose(problem, history):
     # You can use probabilities, rewards, and history.
     # Must return 0 or 1.
     return 0
-```
 """
     
     # Format training trials for context (evaluation elsewhere still uses full train_trials).
@@ -2085,8 +2125,7 @@ def choose(problem, history):
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content
-            match = re.search(r"```python(.*?)```", content, re.DOTALL | re.IGNORECASE)
-            code = match.group(1).strip() if match else content.strip()
+            code = _sanitize_llm_python_candidate(content, required_markers=("def choose(",))
             programs.append(code)
         except Exception as e:
             print(f"Warning: Failed to generate program variant: {e}")
@@ -2568,6 +2607,13 @@ def run_evolution(
         print(f"\nEvaluating candidates...")
         candidate_results = []
         for idx, code in enumerate(tqdm(candidate_codes, desc="Evaluating")):
+            if dataset == "gridworld":
+                code = _sanitize_llm_python_candidate(
+                    code, required_markers=("class FSMAgent", "def act(")
+                )
+            else:
+                code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
+
             # Save candidate code
             if save_artifacts and candidates_dir is not None:
                 (candidates_dir / f"candidate_{idx}.py").write_text(code or "")

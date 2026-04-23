@@ -18,11 +18,12 @@ Examples (run from repo root):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -53,6 +54,9 @@ def collect_choice13k(
     hf_dataset: str,
     experiment_filter: str,
     split_trials_fn,
+    split_ratio: float,
+    split_seed: int,
+    allowed_raw_participant_ids: Optional[Set[int]] = None,
 ) -> List[int]:
     choice13k_mod = _load_data_module("choice13k.py", "choice13k_data_module")
     dataset = choice13k_mod.load_dataset(hf_dataset)
@@ -61,8 +65,17 @@ def collect_choice13k(
     valid: List[int] = []
     for participant_id in range(len(choices13k_ds)):
         try:
-            exp = choice13k_mod._convert_to_experiment(choices13k_ds[participant_id])
-            train_trials, test_trials, _ = split_trials_fn(exp)
+            row = choices13k_ds[participant_id]
+            raw_participant_id = int(row["participant"])
+            if (
+                allowed_raw_participant_ids is not None
+                and raw_participant_id not in allowed_raw_participant_ids
+            ):
+                continue
+            exp = choice13k_mod._convert_to_experiment(row)
+            train_trials, test_trials, _ = split_trials_fn(
+                exp, split_ratio=split_ratio, split_seed=split_seed
+            )
             if len(train_trials) > 0 and len(test_trials) > 0:
                 valid.append(participant_id)
         except Exception:
@@ -165,6 +178,27 @@ def main() -> None:
         default=None,
         help="Override output JSON path (default: next to that dataset in the repo).",
     )
+    parser.add_argument(
+        "--split_ratio",
+        type=float,
+        default=0.9,
+        help="Train split ratio for validity checks (choice13k only).",
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=0,
+        help="Split seed for validity checks (choice13k only).",
+    )
+    parser.add_argument(
+        "--choice13k_source_ids_json",
+        default=None,
+        help=(
+            "Optional JSON file containing source raw participant IDs under key "
+            "'participant_ids'. If set, choice13k valid ids are filtered to rows "
+            "whose raw participant id is in that list."
+        ),
+    )
     args = parser.parse_args()
 
     valid_ids: List[int]
@@ -174,8 +208,33 @@ def main() -> None:
     if args.dataset == "choice13k":
         from baseline_methods.prospect_theory import split_trials
 
+        allowed_raw_participant_ids: Optional[Set[int]] = None
+        source_ids_path: Optional[Path] = None
+        source_ids_hash: Optional[str] = None
+        if args.choice13k_source_ids_json:
+            source_ids_path = (
+                Path(args.choice13k_source_ids_json)
+                if Path(args.choice13k_source_ids_json).is_absolute()
+                else (_REPO_ROOT / args.choice13k_source_ids_json)
+            ).resolve()
+            source_payload = json.loads(source_ids_path.read_text(encoding="utf-8"))
+            source_ids = source_payload.get("participant_ids")
+            if not isinstance(source_ids, list):
+                raise ValueError(
+                    "choice13k_source_ids_json must contain key 'participant_ids' as a list."
+                )
+            allowed_raw_participant_ids = {int(x) for x in source_ids}
+            source_ids_hash = hashlib.sha256(source_ids_path.read_bytes()).hexdigest()
+
         try:
-            valid_ids = collect_choice13k(args.hf_dataset, args.experiment_filter, split_trials)
+            valid_ids = collect_choice13k(
+                args.hf_dataset,
+                args.experiment_filter,
+                split_trials,
+                split_ratio=float(args.split_ratio),
+                split_seed=int(args.split_seed),
+                allowed_raw_participant_ids=allowed_raw_participant_ids,
+            )
         except Exception as e:
             raise RuntimeError(
                 "choice13k requires a working HuggingFace `datasets` stack (and often `torch`). "
@@ -191,10 +250,18 @@ def main() -> None:
                 "hf_dataset": args.hf_dataset,
                 "hf_split": "test",
                 "experiment_filter": args.experiment_filter,
+                "split_ratio": float(args.split_ratio),
+                "split_seed": int(args.split_seed),
             },
             "id_semantics": "0-based row index into the filtered HuggingFace test split (experiment == experiment_filter).",
             "valid_participant_ids": valid_ids,
         }
+        if source_ids_path is not None:
+            payload["data_source"]["source_raw_participant_ids_json"] = _relative_to_repo(source_ids_path)
+            payload["data_source"]["source_raw_participant_ids_json_sha256"] = source_ids_hash
+            payload["data_source"]["source_raw_participant_ids_count"] = (
+                len(allowed_raw_participant_ids) if allowed_raw_participant_ids is not None else 0
+            )
     elif args.dataset == "cpc18":
         cpc18_mod = _load_data_module("cpc18.py", "cpc18_data_module")
         data_path = (_REPO_ROOT / args.data_path).resolve() if not Path(args.data_path).is_absolute() else Path(args.data_path).resolve()
