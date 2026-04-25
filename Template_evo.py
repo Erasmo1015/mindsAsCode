@@ -1390,7 +1390,7 @@ def run_evolution(
         # Returns: train_trials (ALL trials for parameter evolution), test_trials (ALL trials for predictions), test_observed_blocks (for MSE)
         # Note: train_ratio parameter is ignored - all trials are used for both train and test
         train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
-            participant_data, train_ratio=0.8  # Parameter ignored for CPC18
+            participant_data, train_ratio=0.8, cpc18_official_mse=True
         )
         print(f"CPC18 Track II: Using ALL {len(train_trials)} trials for training (no split)")
         print(f"CPC18 Track II: Using ALL {len(test_trials)} trials for predictions (same trials, aggregated to block-level for MSE)")

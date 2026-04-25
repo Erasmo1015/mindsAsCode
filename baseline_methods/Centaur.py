@@ -1,5 +1,5 @@
 """
-Centaur (Llama 3.1 + Psych-101-style prompts) baseline for Choice13k.
+Centaur (Llama 3.1 + Psych-101-style prompts) baseline for Choice13k/CPC18/Mixed Gambles.
 
 Run from repository root (same as Template_evo_non_strict.py):
   python baseline_methods/Centaur.py --dataset choice13k --fitness_metric loglik \\
@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data_modules.choice13k import Experiment, get_choice13k_experiments  # noqa: E402
+from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials  # noqa: E402
 
 
 def experiment_to_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], list]:
@@ -123,6 +124,64 @@ def split_trials(
     test_trials = trials_from_blocks_chronological(exp, test_blocks)
     options = exp.blocks[0].option_keys
     return train_trials, test_trials, options
+
+
+def load_mixed_gambles_trials(
+    csv_path: str,
+    participant_id: int,
+    *,
+    filter_gain_loss_only: bool,
+    split_ratio: float,
+    split_seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    option_keys = [0, 1]  # 0 = gamble option, 1 = certain option
+    all_trials: List[Dict[str, Any]] = []
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if int(row["subject"]) != participant_id:
+                continue
+            if filter_gain_loss_only and row.get("gamble_type") != "gain_loss":
+                continue
+            gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
+            took_gamble = int(row["took_gamble"])
+            action = 1 - took_gamble
+            all_trials.append(
+                {
+                    "problem": {
+                        "gamble_A": {"rewards": [gain, loss], "probs": [0.5, 0.5]},
+                        "gamble_B": {"rewards": [cert], "probs": [1.0]},
+                        "option_keys": option_keys,
+                        "has_feedback": False,
+                    },
+                    "history": [],
+                    "options": option_keys,
+                    "action": action,
+                    "problem_signature": (gain, loss, cert),
+                }
+            )
+    if len(all_trials) == 0:
+        raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+
+    signatures = sorted({t["problem_signature"] for t in all_trials})
+    if len(signatures) < 2:
+        raise ValueError(
+            f"mixed_gambles participant {participant_id} has <2 unique problems; cannot build disjoint train/test."
+        )
+    rng = np.random.default_rng(int(split_seed))
+    shuffled = list(signatures)
+    rng.shuffle(shuffled)
+    split_point = int(len(shuffled) * float(split_ratio))
+    split_point = max(1, min(split_point, len(shuffled) - 1))
+    train_sigs = set(shuffled[:split_point])
+    test_sigs = set(shuffled[split_point:])
+    train_trials = [t for t in all_trials if t["problem_signature"] in train_sigs]
+    test_trials = [t for t in all_trials if t["problem_signature"] in test_sigs]
+    for t in train_trials:
+        t.pop("problem_signature", None)
+    for t in test_trials:
+        t.pop("problem_signature", None)
+    return train_trials, test_trials, option_keys
 
 
 def load_valid_participant_ids_from_json(
@@ -471,23 +530,193 @@ class CentaurChooser:
         }
         return float(min(max(p1, 1e-9), 1.0 - 1e-9))
 
+
+def _convert_cpc18_problem_to_choice_style(problem: Dict[str, Any]) -> Dict[str, Any]:
+    p_ha = float(problem["pHa"])
+    p_hb = float(problem["pHb"])
+    return {
+        "gamble_A": {
+            "probs": [p_ha, max(0.0, 1.0 - p_ha)],
+            "rewards": [float(problem["Ha"]), float(problem["La"])],
+        },
+        "gamble_B": {
+            "probs": [p_hb, max(0.0, 1.0 - p_hb)],
+            "rewards": [float(problem["Hb"]), float(problem["Lb"])],
+        },
+        "option_keys": ["A", "B"],
+        "has_feedback": True,
+    }
+
+
+def _prepare_trials_for_centaur(dataset: str, trials: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if dataset == "choice13k":
+        return trials
+
+    out: List[Dict[str, Any]] = []
+    for t in trials:
+        nt = dict(t)
+        if dataset == "cpc18":
+            nt["problem"] = _convert_cpc18_problem_to_choice_style(t["problem"])
+        else:
+            p = dict(t["problem"])
+            p["option_keys"] = ["A", "B"]
+            nt["problem"] = p
+        out.append(nt)
+    return out
+
+
+def _eval_accuracy_from_probs(chooser: "CentaurChooser", trials: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(trials)
+    correct = 0
+    errors = 0
+    for i, t in enumerate(trials):
+        y = int(t["action"])
+        try:
+            p_raw = chooser.prob_choose_second_option(trials, i)
+            pred = 1 if p_raw >= 0.5 else 0
+        except Exception:
+            errors += 1
+            pred = 0
+        correct += int(pred == y)
+    acc = correct / total if total > 0 else 0.0
+    return {"accuracy": float(acc), "total": int(total), "correct": int(correct), "errors": int(errors)}
+
+
+def _eval_cpc18_mse_from_probs(
+    chooser: "CentaurChooser",
+    trials: List[Dict[str, Any]],
+    observed_blocks: Dict[int, Any],
+) -> Dict[str, Any]:
+    pred_by_index: Dict[int, int] = {}
+    for i in range(len(trials)):
+        try:
+            p_raw = chooser.prob_choose_second_option(trials, i)
+            pred_by_index[i] = int(p_raw >= 0.5)
+        except Exception:
+            continue
+
+    problems_dict: Dict[int, List[int]] = {}
+    for i, tr in enumerate(trials):
+        pid = int(tr["problem_id"])
+        problems_dict.setdefault(pid, []).append(i)
+
+    all_mse: List[float] = []
+    valid = True
+    for problem_id, problem_trial_indices in problems_dict.items():
+        obs_rates = observed_blocks.get(problem_id)
+        if obs_rates is None:
+            obs_rates = observed_blocks.get(str(problem_id))
+        if obs_rates is None:
+            continue
+
+        blocks: Dict[int, List[int]] = {}
+        for i in problem_trial_indices:
+            tr = trials[i]
+            bid = int(tr["block_id"])
+            blocks.setdefault(bid, []).append(i)
+
+        pred_rates = np.zeros(5, dtype=np.float64)
+        for block_id in range(1, 6):
+            block_indices = blocks.get(block_id, [])
+            if not block_indices:
+                continue
+            preds: List[int] = []
+            for i in block_indices:
+                if i not in pred_by_index:
+                    continue
+                preds.append(pred_by_index[i])
+            if not preds:
+                valid = False
+                break
+            pred_rates[block_id - 1] = float(np.mean(preds))
+        if not valid:
+            break
+
+        obs_arr = np.asarray(obs_rates, dtype=np.float64)
+        mse = 100.0 * float(np.mean((pred_rates - obs_arr) ** 2))
+        all_mse.append(mse)
+
+    if not valid or not all_mse:
+        return {"mse": float("inf"), "valid": False, "n_problems": 0}
+    return {"mse": float(np.mean(all_mse)), "valid": True, "n_problems": len(all_mse)}
+
 def _participant_summary_row(
     participant_id: int,
+    dataset: str,
+    fitness_metric: str,
     train_eval: Dict[str, Any],
     test_eval: Dict[str, Any],
+    train_mse_eval: Optional[Dict[str, Any]] = None,
+    test_mse_eval: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    tr_ll = train_eval["avg_loglik"]
-    te_ll = test_eval["avg_loglik"]
+    if dataset in {"choice13k", "mixed_gambles"}:
+        tr_ll = train_eval["avg_loglik"]
+        te_ll = test_eval["avg_loglik"]
+        train_fit = tr_ll if fitness_metric == "loglik" else train_eval["accuracy"]
+        test_fit = te_ll if fitness_metric == "loglik" else test_eval["accuracy"]
+        return {
+            "participant_id": participant_id,
+            "train_acc": train_eval["accuracy"],
+            "test_acc": test_eval["accuracy"],
+            "train_loglik": tr_ll,
+            "test_loglik": te_ll,
+            "train_mse": None,
+            "test_mse": None,
+            "train_fitness": train_fit,
+            "test_fitness": test_fit,
+            "seed_program_train_fitness": train_fit,
+            "seed_program_test_fitness": test_fit,
+        }
+
+    if dataset == "cpc18" and train_mse_eval is not None and test_mse_eval is not None:
+        tr_mse = float(train_mse_eval["mse"])
+        te_mse = float(test_mse_eval["mse"])
+        tr_fit = -tr_mse if math.isfinite(tr_mse) else float("-inf")
+        te_fit = -te_mse if math.isfinite(te_mse) else float("-inf")
+        return {
+            "participant_id": participant_id,
+            "train_acc": train_eval["accuracy"],
+            "test_acc": test_eval["accuracy"],
+            "train_loglik": None,
+            "test_loglik": None,
+            "train_mse": tr_mse,
+            "test_mse": te_mse,
+            "train_fitness": tr_fit,
+            "test_fitness": te_fit,
+            "seed_program_train_fitness": tr_fit,
+            "seed_program_test_fitness": te_fit,
+        }
+    if dataset == "cpc18":
+        tr_ll = train_eval["avg_loglik"]
+        te_ll = test_eval["avg_loglik"]
+        train_fit = tr_ll if fitness_metric == "loglik" else train_eval["accuracy"]
+        test_fit = te_ll if fitness_metric == "loglik" else test_eval["accuracy"]
+        return {
+            "participant_id": participant_id,
+            "train_acc": train_eval["accuracy"],
+            "test_acc": test_eval["accuracy"],
+            "train_loglik": tr_ll,
+            "test_loglik": te_ll,
+            "train_mse": None,
+            "test_mse": None,
+            "train_fitness": train_fit,
+            "test_fitness": test_fit,
+            "seed_program_train_fitness": train_fit,
+            "seed_program_test_fitness": test_fit,
+        }
+
     return {
         "participant_id": participant_id,
         "train_acc": train_eval["accuracy"],
         "test_acc": test_eval["accuracy"],
-        "train_loglik": tr_ll,
-        "test_loglik": te_ll,
-        "train_fitness": tr_ll,
-        "test_fitness": te_ll,
-        "seed_program_train_fitness": tr_ll,
-        "seed_program_test_fitness": te_ll,
+        "train_loglik": None,
+        "test_loglik": None,
+        "train_mse": None,
+        "test_mse": None,
+        "train_fitness": train_eval["accuracy"],
+        "test_fitness": test_eval["accuracy"],
+        "seed_program_train_fitness": train_eval["accuracy"],
+        "seed_program_test_fitness": test_eval["accuracy"],
     }
 
 
@@ -586,14 +815,148 @@ def _write_command_line_log(run_dir: Path) -> Path:
     return path
 
 
+def _load_trials_for_participant(
+    *,
+    args: argparse.Namespace,
+    participant_id: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[int, Any]]]:
+    if args.dataset == "choice13k":
+        experiments = get_choice13k_experiments(n_participants=participant_id + 1)
+        exp = experiments[participant_id]
+        train_trials, test_trials, _ = split_trials(
+            exp, split_ratio=args.split_ratio, split_seed=args.split_seed
+        )
+        return train_trials, test_trials, None
+
+    if args.dataset == "cpc18":
+        cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
+        participant_data = load_cpc18_track2_data(
+            data_path=cpc18_data_path, participant_id=participant_id
+        )
+        train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
+            participant_data,
+            train_ratio=0.8,
+            cpc18_official_mse=bool(getattr(args, "cpc18_official_mse", False)),
+            split_ratio=float(getattr(args, "split_ratio", 0.9)),
+            split_seed=int(getattr(args, "split_seed", 0)),
+        )
+        return train_trials, test_trials, test_observed_blocks
+
+    if args.dataset == "mixed_gambles":
+        train_trials, test_trials, _ = load_mixed_gambles_trials(
+            args.mixed_gambles_csv,
+            participant_id,
+            filter_gain_loss_only=bool(args.filter_mixed_gambles),
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+        )
+        return train_trials, test_trials, None
+
+    raise ValueError(f"Unsupported dataset: {args.dataset!r}")
+
+
+def _evaluate_participant(
+    *,
+    chooser: "CentaurChooser",
+    args: argparse.Namespace,
+    participant_id: int,
+) -> Dict[str, Any]:
+    train_trials_raw, test_trials_raw, test_observed_blocks = _load_trials_for_participant(
+        args=args, participant_id=participant_id
+    )
+    train_trials = _prepare_trials_for_centaur(args.dataset, train_trials_raw)
+    test_trials = _prepare_trials_for_centaur(args.dataset, test_trials_raw)
+
+    if args.dataset == "choice13k":
+        train_eval = evaluate_centaur_on_trials(
+            chooser,
+            train_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
+        test_eval = evaluate_centaur_on_trials(
+            chooser,
+            test_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
+        return _participant_summary_row(
+            participant_id=participant_id,
+            dataset=args.dataset,
+            fitness_metric=args.fitness_metric,
+            train_eval=train_eval,
+            test_eval=test_eval,
+        )
+
+    if args.dataset == "cpc18" and bool(getattr(args, "cpc18_official_mse", False)):
+        train_eval = _eval_accuracy_from_probs(chooser, train_trials)
+        test_eval = _eval_accuracy_from_probs(chooser, test_trials)
+        train_mse_eval = _eval_cpc18_mse_from_probs(
+            chooser, train_trials, test_observed_blocks or {}
+        )
+        test_mse_eval = _eval_cpc18_mse_from_probs(
+            chooser, test_trials, test_observed_blocks or {}
+        )
+        return _participant_summary_row(
+            participant_id=participant_id,
+            dataset=args.dataset,
+            fitness_metric=args.fitness_metric,
+            train_eval=train_eval,
+            test_eval=test_eval,
+            train_mse_eval=train_mse_eval,
+            test_mse_eval=test_mse_eval,
+        )
+    if args.dataset == "cpc18":
+        train_eval = evaluate_centaur_on_trials(
+            chooser,
+            train_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
+        test_eval = evaluate_centaur_on_trials(
+            chooser,
+            test_trials,
+            n_seeds=args.n_eval_seeds,
+            debug_prob=args.debug_prob,
+            debug_limit=args.debug_prob_limit,
+        )
+        return _participant_summary_row(
+            participant_id=participant_id,
+            dataset=args.dataset,
+            fitness_metric=args.fitness_metric,
+            train_eval=train_eval,
+            test_eval=test_eval,
+            train_mse_eval=None,
+            test_mse_eval=None,
+        )
+
+    train_eval = _eval_accuracy_from_probs(chooser, train_trials)
+    test_eval = _eval_accuracy_from_probs(chooser, test_trials)
+    return _participant_summary_row(
+        participant_id=participant_id,
+        dataset=args.dataset,
+        fitness_metric=args.fitness_metric,
+        train_eval=train_eval,
+        test_eval=test_eval,
+    )
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Centaur baseline on Choice13k (TE-compatible data args).")
-    parser.add_argument("--dataset", type=str, default="choice13k", choices=["choice13k"])
+    parser = argparse.ArgumentParser(description="Centaur baseline (TE-compatible data args).")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="choice13k",
+        choices=["choice13k", "cpc18", "mixed_gambles"],
+    )
     parser.add_argument(
         "--data_path",
         type=str,
         default="data",
-        help="Ignored (TE compatibility). Choice13k loads via data_modules + Hugging Face.",
+        help="For cpc18: directory containing Track II files (default datasets/cpc18 when value is 'data').",
     )
     parser.add_argument(
         "--seed_path",
@@ -622,10 +985,21 @@ def main() -> None:
     parser.add_argument("--range_end_ordinal", type=int, default=None)
     parser.add_argument("--all_max_participants", type=int, default=None)
     parser.add_argument("--filter_mixed_gambles", action="store_true", default=False)
-    parser.add_argument("--fitness_metric", type=str, default="loglik", choices=["loglik"])
+    parser.add_argument("--fitness_metric", type=str, default="accuracy", choices=["loglik", "accuracy"])
     parser.add_argument("--split_mode", type=str, default="within_participant", choices=["within_participant", "across_participants"])
     parser.add_argument("--split_ratio", type=float, default=0.9)
     parser.add_argument("--split_seed", type=int, default=0)
+    parser.add_argument(
+        "--mixed_gambles_csv",
+        type=str,
+        default="datasets/mixed_gambles/data_all_2021-01-08.csv",
+        help="CSV path for mixed_gambles dataset.",
+    )
+    parser.add_argument(
+        "--cpc18_official_mse",
+        action="store_true",
+        help="CPC18: use official all-trials block MSE. Default: per-participant held-out split (use --fitness_metric loglik).",
+    )
     parser.add_argument("--n_eval_seeds", type=int, default=1)
     parser.add_argument(
         "--debug_prob",
@@ -652,6 +1026,14 @@ def main() -> None:
     if not (0.0 < args.split_ratio < 1.0):
         print("Error: --split_ratio must be in (0,1).")
         sys.exit(1)
+    if args.fitness_metric == "loglik" and args.dataset not in {"choice13k", "mixed_gambles"} and not (
+        args.dataset == "cpc18" and not args.cpc18_official_mse
+    ):
+        print("Error: --fitness_metric loglik needs choice13k/mixed_gambles, or cpc18 without --cpc18_official_mse.")
+        sys.exit(1)
+    if args.split_mode == "across_participants" and args.dataset != "choice13k":
+        print("Error: --split_mode across_participants is only supported with --dataset choice13k.")
+        sys.exit(1)
     if args.split_mode == "across_participants" and args.participant_scope == "single":
         print("Error: across_participants needs at least two participants; use range or all.")
         sys.exit(1)
@@ -660,7 +1042,7 @@ def main() -> None:
     base_run_dir = Path(
         args.output_dir
         if args.output_dir
-        else str(REPO_ROOT / "generated_outputs" / "choice13k" / "centaur" / f"run_{timestamp}")
+        else str(REPO_ROOT / "generated_outputs" / args.dataset / "centaur" / f"run_{timestamp}")
     )
 
     mixed = bool(args.filter_mixed_gambles)
@@ -724,15 +1106,26 @@ def main() -> None:
         )
         runtime = (datetime.now() - t0).total_seconds()
         base_run_dir.mkdir(parents=True, exist_ok=True)
+        summ = _participant_summary_row(
+            participant_id=0,
+            dataset="choice13k",
+            fitness_metric=args.fitness_metric,
+            train_eval=train_eval,
+            test_eval=test_eval,
+        )
         row = {
             "participant_id": 0,
-            "train_fitness": train_eval["avg_loglik"],
-            "test_fitness": test_eval["avg_loglik"],
+            "train_fitness": summ["train_fitness"],
+            "test_fitness": summ["test_fitness"],
             "total_runtime": runtime,
-            "seed_program_train_fitness": train_eval["avg_loglik"],
-            "seed_program_test_fitness": test_eval["avg_loglik"],
+            "seed_program_train_fitness": summ["seed_program_train_fitness"],
+            "seed_program_test_fitness": summ["seed_program_test_fitness"],
         }
-        row_ll = {"participant_id": 0, "train_loglik": train_eval["avg_loglik"], "test_loglik": test_eval["avg_loglik"]}
+        row_ll = {
+            "participant_id": 0,
+            "train_loglik": summ["train_loglik"],
+            "test_loglik": summ["test_loglik"],
+        }
         _write_all_mode_csvs(base_run_dir, [row], [row_ll])
         print(f"Wrote CSVs under {base_run_dir}")
         return
@@ -743,25 +1136,8 @@ def main() -> None:
         participant_loglik: List[Dict[str, Any]] = []
         for pid in tqdm(participants, desc="Participants"):
             t0 = datetime.now()
-            experiments = get_choice13k_experiments(n_participants=pid + 1)
-            exp = experiments[pid]
-            train_trials, test_trials, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
-            train_eval = evaluate_centaur_on_trials(
-                chooser,
-                train_trials,
-                n_seeds=args.n_eval_seeds,
-                debug_prob=args.debug_prob,
-                debug_limit=args.debug_prob_limit,
-            )
-            test_eval = evaluate_centaur_on_trials(
-                chooser,
-                test_trials,
-                n_seeds=args.n_eval_seeds,
-                debug_prob=args.debug_prob,
-                debug_limit=args.debug_prob_limit,
-            )
+            summ = _evaluate_participant(chooser=chooser, args=args, participant_id=pid)
             runtime = (datetime.now() - t0).total_seconds()
-            summ = _participant_summary_row(pid, train_eval, test_eval)
             participant_details.append(
                 {
                     "participant_id": pid,
@@ -788,24 +1164,7 @@ def main() -> None:
     details_loglik_file = base_run_dir / "participant_details_loglik.csv"
 
     for pid in tqdm(participants, desc="Participants"):
-        experiments = get_choice13k_experiments(n_participants=pid + 1)
-        exp = experiments[pid]
-        train_trials, test_trials, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
-        train_eval = evaluate_centaur_on_trials(
-            chooser,
-            train_trials,
-            n_seeds=args.n_eval_seeds,
-            debug_prob=args.debug_prob,
-            debug_limit=args.debug_prob_limit,
-        )
-        test_eval = evaluate_centaur_on_trials(
-            chooser,
-            test_trials,
-            n_seeds=args.n_eval_seeds,
-            debug_prob=args.debug_prob,
-            debug_limit=args.debug_prob_limit,
-        )
-        summ = _participant_summary_row(pid, train_eval, test_eval)
+        summ = _evaluate_participant(chooser=chooser, args=args, participant_id=pid)
         participants_summary.append(summ)
         participants_loglik_summary.append(
             {"participant_id": pid, "train_loglik": summ["train_loglik"], "test_loglik": summ["test_loglik"]}
@@ -821,8 +1180,8 @@ def main() -> None:
             w.writeheader()
             w.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
 
-        tr_vals = [d["train_loglik"] for d in participants_loglik_summary]
-        te_vals = [d["test_loglik"] for d in participants_loglik_summary]
+        tr_vals = [d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None]
+        te_vals = [d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None]
         with open(summary_loglik_file, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(
                 f, fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"]

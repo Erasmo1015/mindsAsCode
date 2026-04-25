@@ -1,5 +1,14 @@
 Local vLLM mode
 
+- Recent updates (Apr 2026):
+  - Fixed OpenEvolve local Gemma-2 compatibility: avoid sending `system` role in local vLLM mode to prevent `System role not supported` errors.
+  - Added explicit TE generation cap `--llm_max_tokens` (default 800) and propagated it through non-strict participant flows.
+  - Standardized H100 TE/OpenEvolve scripts to use tighter prompt budgets (`--max_prompt_train_trials 60`) and parent count 3.
+  - Mixed-gambles split is now problem-disjoint (by `(gain, loss, cert)` signature) in TE non-strict, OpenEvolve, and Centaur paths.
+  - Added prompt-side per-problem cap: `--max_prompt_trials_per_problem` (0 disables, scripts use 10) for TE non-strict and OpenEvolve.
+  - OpenEvolve prompt artifacts now omit serialized per-trial history by default (`--max_history_items_per_trial 0` in H100 scripts) to reduce token pressure.
+  - CPC18 valid participants were checked: all have 5 problems (no single-problem participants in current valid-id list).
+
 - Start your local server (example): `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000`.
 - Run with the new mode switch to route LLM calls externally:  
   `python plot_and_eval.py --baseline_model ROTE --mode local --model_name Qwen/Qwen2.5-7B-Instruct --llm_server_url http://localhost:8000/v1 --llm_api_key EMPTY`

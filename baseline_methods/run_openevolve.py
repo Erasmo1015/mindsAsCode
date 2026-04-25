@@ -1,5 +1,5 @@
 """
-OpenEvolve baseline runner for Choice13k with TE/Centaur-compatible participant selection.
+OpenEvolve baseline runner for Choice13k/CPC18/Mixed Gambles with TE-compatible participant selection.
 
 This script is intentionally strict:
 - No silent fallbacks for evaluation failures
@@ -15,6 +15,7 @@ import csv
 import json
 import math
 import os
+import re
 import shlex
 import socket
 import sys
@@ -32,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data_modules.choice13k import Experiment, get_choice13k_experiments  # noqa: E402
+from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials  # noqa: E402
 
 
 def _ensure_openevolve_importable() -> None:
@@ -46,6 +48,110 @@ def _ensure_openevolve_importable() -> None:
             import openevolve  # noqa: F401
             return
         raise
+
+
+def _patch_openevolve_for_gemma_system_role() -> None:
+    """
+    Runtime patch in wrapper layer only:
+    for Gemma models, merge system prompt into first user message and avoid
+    sending a separate system-role message. Non-Gemma models are unchanged.
+    """
+    import openevolve.llm.openai as oe_openai  # type: ignore
+
+    if getattr(oe_openai.OpenAILLM, "_mindsascode_gemma_patch", False):
+        return
+
+    original_call_api = oe_openai.OpenAILLM._call_api
+
+    def _extract_context_limits(exc: Exception) -> Optional[Tuple[int, int]]:
+        """
+        Parse context-overflow details from vLLM/OpenAI-style errors.
+        Returns (max_context, input_tokens) when available.
+        """
+        text = str(exc)
+        m = re.search(
+            r"maximum context length is (\d+) tokens.*prompt contains at least (\d+) input tokens",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2))
+
+    def _normalize_gemma_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        system_chunks: List[str] = []
+        for msg in messages:
+            role = str(msg.get("role", "user")).lower()
+            content = str(msg.get("content", ""))
+            if role == "system":
+                if content.strip():
+                    system_chunks.append(content)
+                continue
+            if role == "assistant":
+                normalized.append({"role": "model", "content": content})
+                continue
+            normalized.append({"role": str(msg.get("role", "user")), "content": content})
+
+        merged_system = "\n\n".join(system_chunks).strip()
+        if merged_system:
+            first_user_idx = next(
+                (i for i, m in enumerate(normalized) if str(m.get("role", "")).lower() == "user"),
+                None,
+            )
+            if first_user_idx is None:
+                normalized.insert(0, {"role": "user", "content": merged_system})
+            else:
+                first_content = str(normalized[first_user_idx].get("content", ""))
+                normalized[first_user_idx]["content"] = (
+                    f"{merged_system}\n\n{first_content}" if first_content else merged_system
+                )
+        return normalized
+
+    async def _patched_call_api(self, params):
+        model_name = str(getattr(self, "model", "")).lower()
+        if "gemma" not in model_name:
+            return await original_call_api(self, params)
+
+        patched_params = dict(params)
+        orig_messages = patched_params.get("messages", [])
+        if isinstance(orig_messages, list):
+            final_messages = _normalize_gemma_messages(orig_messages)
+            final_roles = [str(m.get("role", "")).lower() for m in final_messages]
+            print(f"[GemmaCompat] final message roles: {final_roles}", flush=True)
+            assert all(r not in {"system", "assistant"} for r in final_roles), (
+                f"Gemma payload contains invalid roles: {final_roles}"
+            )
+            patched_params["messages"] = final_messages
+        request_params = dict(patched_params)
+        for _ in range(4):
+            try:
+                return await original_call_api(self, request_params)
+            except Exception as exc:
+                parsed = _extract_context_limits(exc)
+                if parsed is None:
+                    raise
+                max_context, input_tokens = parsed
+                # Larger buffer to survive tokenization drift between attempts.
+                # Allow very small outputs in emergency mode to avoid hard failure loops.
+                safe_max_tokens = max(32, max_context - input_tokens - 256)
+                current_max_tokens = int(
+                    request_params.get("max_tokens", getattr(self, "max_tokens", 512))
+                )
+                if safe_max_tokens >= current_max_tokens:
+                    raise
+                request_params = dict(request_params)
+                request_params["max_tokens"] = safe_max_tokens
+                print(
+                    f"[GemmaCompat] context overflow detected; retrying with max_tokens="
+                    f"{safe_max_tokens} (was {current_max_tokens}, input_tokens={input_tokens}, "
+                    f"max_context={max_context})",
+                    flush=True,
+                )
+        return await original_call_api(self, request_params)
+
+    oe_openai.OpenAILLM._call_api = _patched_call_api
+    oe_openai.OpenAILLM._mindsascode_gemma_patch = True
 
 
 def _to_builtin(x: Any) -> Any:
@@ -145,6 +251,65 @@ def split_trials(
     test_trials = trials_from_blocks_chronological(exp, test_blocks)
     options = exp.blocks[0].option_keys
     return train_trials, test_trials, options
+
+
+def load_mixed_gambles_trials(
+    csv_path: str,
+    participant_id: int,
+    *,
+    filter_gain_loss_only: bool,
+    split_ratio: float,
+    split_seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    option_keys = [0, 1]  # 0 = gamble, 1 = certain
+    all_trials: List[Dict[str, Any]] = []
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if int(row["subject"]) != participant_id:
+                continue
+            if filter_gain_loss_only and row.get("gamble_type") != "gain_loss":
+                continue
+            gain, loss, cert = float(row["gain"]), float(row["loss"]), float(row["cert"])
+            took_gamble = int(row["took_gamble"])
+            action = 1 - took_gamble
+            all_trials.append(
+                {
+                    "problem": {
+                        "gamble_A": {"rewards": [gain, loss], "probs": [0.5, 0.5]},
+                        "gamble_B": {"rewards": [cert], "probs": [1.0]},
+                        "option_keys": option_keys,
+                        "has_feedback": False,
+                    },
+                    "history": [],
+                    "options": option_keys,
+                    "action": action,
+                    "problem_signature": (gain, loss, cert),
+                }
+            )
+
+    if len(all_trials) == 0:
+        raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
+
+    signatures = sorted({t["problem_signature"] for t in all_trials})
+    if len(signatures) < 2:
+        raise ValueError(
+            f"mixed_gambles participant {participant_id} has <2 unique problems; cannot build disjoint train/test."
+        )
+    rng = np.random.default_rng(int(split_seed))
+    shuffled = list(signatures)
+    rng.shuffle(shuffled)
+    split_point = int(len(shuffled) * float(split_ratio))
+    split_point = max(1, min(split_point, len(shuffled) - 1))
+    train_sigs = set(shuffled[:split_point])
+    test_sigs = set(shuffled[split_point:])
+    train_trials = [t for t in all_trials if t["problem_signature"] in train_sigs]
+    test_trials = [t for t in all_trials if t["problem_signature"] in test_sigs]
+    for t in train_trials:
+        t.pop("problem_signature", None)
+    for t in test_trials:
+        t.pop("problem_signature", None)
+    return train_trials, test_trials, option_keys
 
 
 def load_valid_participant_ids_from_json(
@@ -298,7 +463,7 @@ def _format_choice13k_train_trials_for_prompt(
     """
     Build human-readable train-split text for OpenEvolve mutation prompts (mirrors TE-style summaries).
 
-    Includes per-trial prior `history` (actions/feedback before the decision) in compact form.
+    Prompt summary for mutation. Keep compact to stay within context limits.
     """
     if not trials:
         return "(no train trials)\n"
@@ -326,28 +491,7 @@ def _format_choice13k_train_trials_for_prompt(
         rew_b = prob["gamble_B"]["rewards"]
         has_fb = prob.get("has_feedback", False)
         action = t["action"]
-        hist = t.get("history") or []
         lines.append(f"--- Train trial {j + 1} (index {i} in train split) ---")
-        if hist:
-            if max_history_items_per_trial > 0 and len(hist) > max_history_items_per_trial:
-                hist_for_prompt = hist[-max_history_items_per_trial:]
-                omitted = len(hist) - len(hist_for_prompt)
-                lines.append(
-                    f"Prior history (showing last {len(hist_for_prompt)} of {len(hist)}; omitted {omitted} older items):"
-                )
-            else:
-                hist_for_prompt = hist
-                lines.append(f"Prior history ({len(hist_for_prompt)} items):")
-            compact_hist = [
-                {
-                    "a": int(h.get("action", 0)),
-                    "f": h.get("feedback", None),
-                }
-                for h in hist_for_prompt
-            ]
-            lines.append(f"{compact_hist!r}")
-        else:
-            lines.append("Prior history: (empty)")
         lines.append(
             f"Problem: Option A probs {prob_a} rewards {rew_a}; "
             f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}"
@@ -357,20 +501,142 @@ def _format_choice13k_train_trials_for_prompt(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _format_cpc18_train_trials_for_prompt(
+    trials: List[Dict[str, Any]],
+    *,
+    max_trials: int,
+    rng_seed: int,
+    max_history_items_per_trial: int,
+) -> str:
+    if not trials:
+        return "(no train trials)\n"
+
+    n = len(trials)
+    if max_trials > 0 and n > max_trials:
+        rng = np.random.default_rng(int(rng_seed))
+        order = rng.permutation(n)[:max_trials].tolist()
+    else:
+        order = list(range(n))
+
+    lines = [
+        "CPC18 TRAIN trials — improve choose(problem, history).",
+        "Primary fitness is block-level MSE (lower is better); OpenEvolve maximizes combined_score = -train_mse.",
+        "action 0 = option A (L), action 1 = option B (R).",
+        "",
+    ]
+    for j, i in enumerate(order):
+        t = trials[i]
+        p = t["problem"]
+        lines.append(f"--- Train trial {j + 1} (index {i}) ---")
+        lines.append(
+            "Problem: "
+            f"Ha={p['Ha']} pHa={p['pHa']} La={p['La']} | "
+            f"Hb={p['Hb']} pHb={p['pHb']} Lb={p['Lb']} | "
+            f"Amb={p['Amb']} Corr={p['Corr']}"
+        )
+        lines.append(f"Observed human action: {int(t['action'])}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_mixed_gambles_train_trials_for_prompt(
+    trials: List[Dict[str, Any]],
+    *,
+    max_trials: int,
+    rng_seed: int,
+    max_history_items_per_trial: int,  # kept for shared signature
+) -> str:
+    del max_history_items_per_trial
+    if not trials:
+        return "(no train trials)\n"
+
+    n = len(trials)
+    if max_trials > 0 and n > max_trials:
+        rng = np.random.default_rng(int(rng_seed))
+        order = rng.permutation(n)[:max_trials].tolist()
+    else:
+        order = list(range(n))
+
+    lines = [
+        "Mixed Gambles TRAIN trials — improve choose(problem, history).",
+        "Optimize train accuracy (action 0/1).",
+        "action 0 = gamble option, action 1 = certain option.",
+        "",
+    ]
+    for j, i in enumerate(order):
+        t = trials[i]
+        p = t["problem"]
+        lines.append(f"--- Train trial {j + 1} (index {i}) ---")
+        lines.append(
+            f"Problem: gamble rewards={p['gamble_A']['rewards']} probs={p['gamble_A']['probs']}; "
+            f"certain rewards={p['gamble_B']['rewards']} probs={p['gamble_B']['probs']}"
+        )
+        lines.append(f"Observed human action: {int(t['action'])}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _write_train_trials_prompt_file(
     *,
+    dataset: str,
     path: Path,
     train_trials: List[Dict[str, Any]],
     max_prompt_train_trials: int,
     prompt_train_trials_seed: int,
     max_history_items_per_trial: int,
+    max_prompt_trials_per_problem: int,
 ) -> None:
-    body = _format_choice13k_train_trials_for_prompt(
-        train_trials,
-        max_trials=max_prompt_train_trials,
-        rng_seed=prompt_train_trials_seed,
-        max_history_items_per_trial=max_history_items_per_trial,
-    )
+    if max_prompt_trials_per_problem > 0:
+        by_problem: Dict[Any, List[Dict[str, Any]]] = {}
+        for t in train_trials:
+            if "problem_id" in t:
+                k = ("problem_id", t["problem_id"])
+            else:
+                p = t.get("problem", {})
+                ga = p.get("gamble_A", {})
+                gb = p.get("gamble_B", {})
+                ga_probs = ga.get("probs", [])
+                gb_probs = gb.get("probs", [])
+                if ga_probs is None:
+                    ga_probs = []
+                if gb_probs is None:
+                    gb_probs = []
+                k = (
+                    "problem_sig",
+                    tuple(ga.get("rewards", [])),
+                    tuple(ga_probs),
+                    tuple(gb.get("rewards", [])),
+                    tuple(gb_probs),
+                )
+            by_problem.setdefault(k, []).append(t)
+        capped: List[Dict[str, Any]] = []
+        for _, rows in by_problem.items():
+            capped.extend(rows[:max_prompt_trials_per_problem])
+        train_trials = capped
+
+    if dataset == "choice13k":
+        body = _format_choice13k_train_trials_for_prompt(
+            train_trials,
+            max_trials=max_prompt_train_trials,
+            rng_seed=prompt_train_trials_seed,
+            max_history_items_per_trial=max_history_items_per_trial,
+        )
+    elif dataset == "cpc18":
+        body = _format_cpc18_train_trials_for_prompt(
+            train_trials,
+            max_trials=max_prompt_train_trials,
+            rng_seed=prompt_train_trials_seed,
+            max_history_items_per_trial=max_history_items_per_trial,
+        )
+    elif dataset == "mixed_gambles":
+        body = _format_mixed_gambles_train_trials_for_prompt(
+            train_trials,
+            max_trials=max_prompt_train_trials,
+            rng_seed=prompt_train_trials_seed,
+            max_history_items_per_trial=max_history_items_per_trial,
+        )
+    else:
+        raise ValueError(f"Unsupported dataset for prompt formatting: {dataset!r}")
     path.write_text(body, encoding="utf-8")
 
 
@@ -407,7 +673,12 @@ def _write_hyperparameters_log(run_dir: Path, args: argparse.Namespace) -> Path:
     return path
 
 
-def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prompt_path: Path) -> str:
+def _build_participant_evaluator_code(
+    dataset_json_path: Path,
+    train_trials_prompt_path: Path,
+    dataset: str,
+    fitness_metric: str,
+) -> str:
     return textwrap.dedent(
         f"""
         import importlib.util
@@ -421,6 +692,8 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
 
         DATA_PATH = Path(r\"{str(dataset_json_path)}\")
         TRAIN_PROMPT_PATH = Path(r\"{str(train_trials_prompt_path)}\")
+        DATASET = {dataset!r}
+        FITNESS_METRIC = {fitness_metric!r}
 
 
         def _extract_python_candidate(text: str) -> str:
@@ -435,6 +708,10 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
             else:
                 candidate = norm.strip()
 
+            # Handle truncated/unterminated fenced outputs.
+            candidate = re.sub(r"^```(?:python)?\\s*", "", candidate, flags=re.IGNORECASE)
+            candidate = re.sub(r"\\s*```\\s*$", "", candidate, flags=re.IGNORECASE)
+
             idx = candidate.find("def choose(")
             if idx >= 0:
                 candidate = candidate[idx:]
@@ -446,6 +723,22 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
 
 
         def _guard_candidate_file(program_path: str) -> str:
+            def _salvage_by_trimming_tail(src: str) -> str | None:
+                lines = src.splitlines()
+                # Trim broken trailing fragments until compile succeeds.
+                for keep in range(len(lines), 0, -1):
+                    trial = "\\n".join(lines[:keep]).strip()
+                    if not trial:
+                        continue
+                    if "def choose(" not in trial:
+                        continue
+                    try:
+                        compile(trial, "<candidate-trim>", "exec")
+                        return trial
+                    except SyntaxError:
+                        continue
+                return None
+
             p = Path(program_path)
             raw = p.read_text(encoding="utf-8")
             candidate = _extract_python_candidate(raw)
@@ -454,7 +747,20 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
             try:
                 compile(candidate, str(p), "exec")
             except SyntaxError:
-                return program_path
+                # Final fallback: drop any standalone fence lines and retry.
+                fallback = "\\n".join(
+                    line for line in candidate.splitlines() if not line.strip().startswith("```")
+                ).strip()
+                if not fallback:
+                    return program_path
+                try:
+                    compile(fallback, str(p), "exec")
+                    candidate = fallback
+                except SyntaxError:
+                    salvaged = _salvage_by_trimming_tail(fallback)
+                    if salvaged is None:
+                        return program_path
+                    candidate = salvaged
             if candidate != raw:
                 p.write_text(candidate, encoding="utf-8")
             return program_path
@@ -479,6 +785,8 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
             for i, t in enumerate(trials):
                 y = int(t["action"])
                 p_raw = choose_fn(t["problem"], t["history"])
+                if isinstance(p_raw, (bool, int)) and int(p_raw) in (0, 1):
+                    p_raw = 1.0 if int(p_raw) == 1 else 0.0
                 if not isinstance(p_raw, float):
                     raise TypeError(f"trial={{i}} expected float prob, got {{type(p_raw)}}")
                 if not (0.0 <= p_raw <= 1.0):
@@ -488,6 +796,64 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
                 pred = 1 if p_raw >= 0.5 else 0
                 correct += int(pred == y)
             return (ll_sum / total), (correct / total), total
+
+
+        def _eval_action_trials(choose_fn, trials):
+            total = len(trials)
+            if total == 0:
+                raise ValueError("No trials provided to evaluator.")
+            correct = 0
+            for t in trials:
+                try:
+                    pred = choose_fn(t["problem"], t["history"])
+                except Exception:
+                    pred = None
+                if pred is not None and int(pred) == int(t["action"]):
+                    correct += 1
+            return (correct / total), total
+
+
+        def _eval_cpc18_mse(choose_fn, trials, observed_blocks):
+            problems = {{}}
+            for tr in trials:
+                pid = int(tr["problem_id"])
+                problems.setdefault(pid, []).append(tr)
+
+            all_mse = []
+            for problem_id, problem_trials in problems.items():
+                if str(problem_id) in observed_blocks:
+                    obs_rates = observed_blocks[str(problem_id)]
+                elif problem_id in observed_blocks:
+                    obs_rates = observed_blocks[problem_id]
+                else:
+                    continue
+
+                blocks = {{}}
+                for tr in problem_trials:
+                    bid = int(tr["block_id"])
+                    blocks.setdefault(bid, []).append(tr)
+
+                pred_rates = [0.0] * 5
+                for block_id in range(1, 6):
+                    block_trials = blocks.get(block_id, [])
+                    if not block_trials:
+                        continue
+                    preds = []
+                    for tr in block_trials:
+                        try:
+                            pred = choose_fn(tr["problem"], tr["history"])
+                            preds.append(int(pred == 1))
+                        except Exception:
+                            continue
+                    if not preds:
+                        return float("inf"), False
+                    pred_rates[block_id - 1] = sum(preds) / len(preds)
+                mse = 100.0 * sum((float(pred_rates[i]) - float(obs_rates[i])) ** 2 for i in range(5)) / 5.0
+                all_mse.append(float(mse))
+
+            if not all_mse:
+                return float("inf"), False
+            return float(sum(all_mse) / len(all_mse)), True
 
 
         def _train_artifact():
@@ -503,37 +869,82 @@ def _build_participant_evaluator_code(dataset_json_path: Path, train_trials_prom
                 payload = json.loads(DATA_PATH.read_text(encoding="utf-8"))
                 train_trials = payload["train_trials"]
                 test_trials = payload["test_trials"]
+                observed_blocks = payload.get("test_observed_blocks", {{}})
+                cpc18_official = bool(payload.get("cpc18_official_mse", True))
 
                 mod = _load_program(program_path)
                 choose_fn = getattr(mod, "choose", None)
                 if choose_fn is None:
                     raise AttributeError("Candidate program must define choose(problem, history).")
 
-                train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
-                test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
-                metrics = {{
-                    "combined_score": float(train_ll),
-                    "train_loglik": float(train_ll),
-                    "test_loglik": float(test_ll),
-                    "train_acc": float(train_acc),
-                    "test_acc": float(test_acc),
-                    "train_n": float(train_n),
-                    "test_n": float(test_n),
-                    "fatal_failure": 0.0,
-                }}
+                if DATASET == "choice13k":
+                    train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
+                    test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
+                    combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
+                    metrics = {{
+                        "combined_score": combined,
+                        "train_loglik": float(train_ll),
+                        "test_loglik": float(test_ll),
+                        "train_acc": float(train_acc),
+                        "test_acc": float(test_acc),
+                        "train_n": float(train_n),
+                        "test_n": float(test_n),
+                        "fatal_failure": 0.0,
+                    }}
+                elif DATASET == "cpc18" and cpc18_official:
+                    train_acc, train_n = _eval_action_trials(choose_fn, train_trials)
+                    test_acc, test_n = _eval_action_trials(choose_fn, test_trials)
+                    train_mse, train_mse_valid = _eval_cpc18_mse(choose_fn, train_trials, observed_blocks)
+                    test_mse, test_mse_valid = _eval_cpc18_mse(choose_fn, test_trials, observed_blocks)
+                    if (not train_mse_valid) or (not test_mse_valid):
+                        raise RuntimeError("Invalid CPC18 MSE evaluation (missing/invalid block predictions).")
+                    combined = -float(train_mse)
+                    metrics = {{
+                        "combined_score": float(combined),
+                        "train_loglik": None,
+                        "test_loglik": None,
+                        "train_acc": float(train_acc),
+                        "test_acc": float(test_acc),
+                        "train_mse": float(train_mse),
+                        "test_mse": float(test_mse),
+                        "train_n": float(train_n),
+                        "test_n": float(test_n),
+                        "fatal_failure": 0.0,
+                    }}
+                elif DATASET == "cpc18" and (not cpc18_official):
+                    train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
+                    test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
+                    combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
+                    metrics = {{
+                        "combined_score": float(combined),
+                        "train_loglik": float(train_ll),
+                        "test_loglik": float(test_ll),
+                        "train_acc": float(train_acc),
+                        "test_acc": float(test_acc),
+                        "train_mse": 0.0,
+                        "test_mse": 0.0,
+                        "train_n": float(train_n),
+                        "test_n": float(test_n),
+                        "fatal_failure": 0.0,
+                    }}
+                else:
+                    train_acc, train_n = _eval_action_trials(choose_fn, train_trials)
+                    test_acc, test_n = _eval_action_trials(choose_fn, test_trials)
+                    metrics = {{
+                        "combined_score": float(train_acc),
+                        "train_loglik": None,
+                        "test_loglik": None,
+                        "train_acc": float(train_acc),
+                        "test_acc": float(test_acc),
+                        "train_n": float(train_n),
+                        "test_n": float(test_n),
+                        "fatal_failure": 0.0,
+                    }}
                 return EvaluationResult(metrics=metrics, artifacts=art)
             except Exception as e:
                 print("[FATAL] evaluator failure:", repr(e), flush=True)
                 traceback.print_exc()
-                metrics = {{
-                    "combined_score": -1.0e9,
-                    "train_loglik": -1.0e9,
-                    "test_loglik": -1.0e9,
-                    "train_acc": 0.0,
-                    "test_acc": 0.0,
-                    "fatal_failure": 1.0,
-                }}
-                return EvaluationResult(metrics=metrics, artifacts=art)
+                raise RuntimeError(f"Evaluator hard failure for candidate: {e}") from e
         """
     ).strip() + "\n"
 
@@ -545,6 +956,37 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
     else:
         api_base = args.api_base if args.api_base else "https://api.openai.com/v1"
         api_key = args.api_key if args.api_key else "${OPENAI_API_KEY}"
+
+    if args.dataset in {"choice13k", "mixed_gambles"}:
+        if args.fitness_metric == "loglik":
+            objective = "increase train fitness (combined_score / mean log-likelihood)."
+        else:
+            objective = "increase train accuracy fitness (combined_score)."
+    elif args.dataset == "cpc18":
+        if getattr(args, "cpc18_official_mse", False):
+            objective = "increase train fitness where combined_score = -train_mse (lower MSE is better)."
+        elif args.fitness_metric == "loglik":
+            objective = "increase train fitness (combined_score = mean log-likelihood on train trials)."
+        else:
+            objective = "increase train accuracy fitness (combined_score)."
+    else:
+        objective = "increase train accuracy fitness (combined_score)."
+
+    prompt_cfg: Dict[str, Any] = {
+        "num_top_programs": int(args.prompt_num_top_programs),
+        "num_diverse_programs": int(args.prompt_num_diverse_programs),
+        "include_artifacts": True,
+        "max_artifact_bytes": int(args.max_artifact_bytes),
+    }
+
+    prompt_cfg["system_message"] = (
+        f"You are improving a {args.dataset} choose(problem, history) policy. "
+        "The user message includes training-trial observations "
+        f"under artifacts — use them to {objective} "
+        "Output ONLY runnable Python code (no explanations, no markdown fences, no preamble), "
+        "preserving the choose(problem, history) signature."
+    )
+    prompt_cfg["evaluator_system_message"] = "You are a strict code evaluator."
 
     return {
         "max_iterations": int(args.n_iterations),
@@ -564,20 +1006,7 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
             "retries": 2,
             "retry_delay": 3,
         },
-        "prompt": {
-            "system_message": (
-                "You are improving a Choice13k choose(problem, history) policy. "
-                "The user message includes training-trial observations (and prior history per trial) "
-                "under artifacts — use them to increase train fitness (combined_score / mean log-likelihood). "
-                "Output ONLY runnable Python code (no explanations, no markdown fences, no preamble), "
-                "preserving the choose(problem, history) signature."
-            ),
-            "evaluator_system_message": "You are a strict code evaluator.",
-            "num_top_programs": int(args.prompt_num_top_programs),
-            "num_diverse_programs": int(args.prompt_num_diverse_programs),
-            "include_artifacts": True,
-            "max_artifact_bytes": int(args.max_artifact_bytes),
-        },
+        "prompt": prompt_cfg,
         "database": {
             "in_memory": True,
             "log_prompts": True,
@@ -604,16 +1033,59 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def _load_trials_for_participant(
+    *,
+    args: argparse.Namespace,
+    participant_id: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    if args.dataset == "choice13k":
+        experiments = get_choice13k_experiments(n_participants=participant_id + 1)
+        exp = experiments[participant_id]
+        train_trials, test_trials, _ = split_trials(
+            exp, split_ratio=args.split_ratio, split_seed=args.split_seed
+        )
+        return train_trials, test_trials, None
+
+    if args.dataset == "cpc18":
+        cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
+        participant_data = load_cpc18_track2_data(
+            data_path=cpc18_data_path, participant_id=participant_id
+        )
+        train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
+            participant_data,
+            train_ratio=0.8,
+            cpc18_official_mse=bool(getattr(args, "cpc18_official_mse", False)),
+            split_ratio=float(getattr(args, "split_ratio", 0.9)),
+            split_seed=int(getattr(args, "split_seed", 0)),
+        )
+        observed = {str(k): [float(x) for x in v] for k, v in (test_observed_blocks or {}).items()}
+        return train_trials, test_trials, observed
+
+    if args.dataset == "mixed_gambles":
+        train_trials, test_trials, _ = load_mixed_gambles_trials(
+            args.mixed_gambles_csv,
+            participant_id,
+            filter_gain_loss_only=bool(args.filter_mixed_gambles),
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+        )
+        return train_trials, test_trials, None
+
+    raise ValueError(f"Unsupported dataset: {args.dataset!r}")
+
+
 def _run_one_openevolve(
     *,
     seed_code: str,
     train_trials: List[Dict[str, Any]],
     test_trials: List[Dict[str, Any]],
+    test_observed_blocks: Optional[Dict[str, Any]],
     participant_tag: str,
     run_root: Path,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
     _ensure_openevolve_importable()
+    _patch_openevolve_for_gemma_system_role()
     from openevolve import OpenEvolve
     from openevolve.config import load_config
 
@@ -630,21 +1102,30 @@ def _run_one_openevolve(
     data_payload = {
         "train_trials": _to_builtin(train_trials),
         "test_trials": _to_builtin(test_trials),
+        "test_observed_blocks": _to_builtin(test_observed_blocks) if test_observed_blocks is not None else {},
+        "cpc18_official_mse": bool(getattr(args, "cpc18_official_mse", False)),
     }
     data_path.write_text(json.dumps(data_payload), encoding="utf-8")
     _write_train_trials_prompt_file(
+        dataset=args.dataset,
         path=train_trials_prompt_path,
         train_trials=train_trials,
         max_prompt_train_trials=int(args.max_prompt_train_trials),
         prompt_train_trials_seed=int(args.split_seed),
         max_history_items_per_trial=int(args.max_history_items_per_trial),
+        max_prompt_trials_per_problem=int(args.max_prompt_trials_per_problem),
     )
     print(
         f"[INFO] participant {participant_tag}: wrote train trial prompt for OpenEvolve artifacts: "
         f"{train_trials_prompt_path} ({train_trials_prompt_path.stat().st_size} bytes)"
     )
     evaluator_path.write_text(
-        _build_participant_evaluator_code(data_path, train_trials_prompt_path),
+        _build_participant_evaluator_code(
+            data_path,
+            train_trials_prompt_path,
+            dataset=args.dataset,
+            fitness_metric=args.fitness_metric,
+        ),
         encoding="utf-8",
     )
     config_path.write_text(yaml.safe_dump(_build_openevolve_config_dict(args), sort_keys=False), encoding="utf-8")
@@ -669,13 +1150,27 @@ def _run_one_openevolve(
     best_code_path.write_text(best_program.code, encoding="utf-8")
 
     metrics = dict(best_program.metrics or {})
-    train_ll = float(metrics.get("train_loglik", -1e9))
-    test_ll = float(metrics.get("test_loglik", -1e9))
+    raw_train_ll = metrics.get("train_loglik", None)
+    raw_test_ll = metrics.get("test_loglik", None)
+    train_ll = float(raw_train_ll) if raw_train_ll is not None else None
+    test_ll = float(raw_test_ll) if raw_test_ll is not None else None
     train_acc = float(metrics.get("train_acc", 0.0))
     test_acc = float(metrics.get("test_acc", 0.0))
+    train_mse = float(metrics.get("train_mse", float("inf"))) if metrics.get("train_mse", None) is not None else None
+    test_mse = float(metrics.get("test_mse", float("inf"))) if metrics.get("test_mse", None) is not None else None
+    combined_score = float(metrics.get("combined_score", -1e9))
     fatal_flag = float(metrics.get("fatal_failure", 0.0))
 
-    hard_fail = fatal_flag >= 0.5 or train_ll <= -1e8 or test_ll <= -1e8
+    if args.dataset == "choice13k" or (args.dataset == "cpc18" and not args.cpc18_official_mse):
+        hard_fail = (
+            fatal_flag >= 0.5
+            or train_ll is None
+            or test_ll is None
+            or train_ll <= -1e8
+            or test_ll <= -1e8
+        )
+    else:
+        hard_fail = fatal_flag >= 0.5 or combined_score <= -1e8
     if hard_fail:
         msg = (
             f"[FATAL] participant {participant_tag} evolution failed. "
@@ -685,11 +1180,46 @@ def _run_one_openevolve(
         if not args.allow_failure:
             raise RuntimeError(msg)
 
-    print(
-        f"[INFO] participant {participant_tag}: train_loglik={train_ll:.6f}, "
-        f"test_loglik={test_ll:.6f}, train_acc={train_acc:.4f}, test_acc={test_acc:.4f}, "
-        f"fatal_failure={fatal_flag:.1f}"
-    )
+    if args.dataset == "choice13k":
+        print(
+            f"[INFO] participant {participant_tag}: train_loglik={float(train_ll):.6f}, "
+            f"test_loglik={float(test_ll):.6f}, train_acc={train_acc:.4f}, test_acc={test_acc:.4f}, "
+            f"fatal_failure={fatal_flag:.1f}"
+        )
+        if args.fitness_metric == "loglik":
+            train_fitness = float(train_ll)
+            test_fitness = float(test_ll)
+        else:
+            train_fitness = float(train_acc)
+            test_fitness = float(test_acc)
+    elif args.dataset == "cpc18":
+        if args.cpc18_official_mse:
+            print(
+                f"[INFO] participant {participant_tag}: train_mse={train_mse}, "
+                f"test_mse={test_mse}, train_acc={train_acc:.4f}, test_acc={test_acc:.4f}, "
+                f"combined_score={combined_score:.6f}, fatal_failure={fatal_flag:.1f}"
+            )
+            train_fitness = combined_score
+            test_fitness = -float(test_mse) if test_mse is not None and math.isfinite(test_mse) else -1e9
+        else:
+            print(
+                f"[INFO] participant {participant_tag}: train_loglik={float(train_ll):.6f}, "
+                f"test_loglik={float(test_ll):.6f}, train_acc={train_acc:.4f}, test_acc={test_acc:.4f}, "
+                f"combined_score={combined_score:.6f}, fatal_failure={fatal_flag:.1f}"
+            )
+            if args.fitness_metric == "loglik":
+                train_fitness = float(train_ll) if train_ll is not None else -1e9
+                test_fitness = float(test_ll) if test_ll is not None else -1e9
+            else:
+                train_fitness = combined_score
+                test_fitness = float(test_acc) if test_acc is not None else 0.0
+    else:
+        print(
+            f"[INFO] participant {participant_tag}: train_acc={train_acc:.4f}, "
+            f"test_acc={test_acc:.4f}, combined_score={combined_score:.6f}, fatal_failure={fatal_flag:.1f}"
+        )
+        train_fitness = combined_score
+        test_fitness = float(test_acc)
 
     return {
         "participant_id": participant_tag,
@@ -697,10 +1227,13 @@ def _run_one_openevolve(
         "test_loglik": test_ll,
         "train_acc": train_acc,
         "test_acc": test_acc,
-        "train_fitness": train_ll,
-        "test_fitness": test_ll,
-        "seed_program_train_fitness": train_ll,
-        "seed_program_test_fitness": test_ll,
+        "train_mse": train_mse,
+        "test_mse": test_mse,
+        "combined_score": combined_score,
+        "train_fitness": train_fitness,
+        "test_fitness": test_fitness,
+        "seed_program_train_fitness": train_fitness,
+        "seed_program_test_fitness": test_fitness,
         "total_runtime": runtime,
         "fatal_failure": fatal_flag,
         "metrics_raw": metrics,
@@ -708,8 +1241,13 @@ def _run_one_openevolve(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OpenEvolve baseline on Choice13k (TE-compatible participant scope).")
-    parser.add_argument("--dataset", type=str, default="choice13k", choices=["choice13k"])
+    parser = argparse.ArgumentParser(description="OpenEvolve baseline (TE-compatible participant scope).")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="choice13k",
+        choices=["choice13k", "cpc18", "mixed_gambles"],
+    )
     parser.add_argument("--seed_path", type=str, required=True, help="Path to seed Python program containing choose().")
     parser.add_argument("--n_iterations", type=int, default=20)
     parser.add_argument("--n_candidates", type=int, default=10, help="Mapped to OpenEvolve population sizing.")
@@ -725,10 +1263,27 @@ def main() -> None:
     parser.add_argument("--range_end_ordinal", type=int, default=None)
     parser.add_argument("--all_max_participants", type=int, default=None)
     parser.add_argument("--filter_mixed_gambles", action="store_true", default=False)
-    parser.add_argument("--fitness_metric", type=str, default="loglik", choices=["loglik"])
+    parser.add_argument("--fitness_metric", type=str, default="accuracy", choices=["loglik", "accuracy"])
     parser.add_argument("--split_mode", type=str, default="within_participant", choices=["within_participant", "across_participants"])
     parser.add_argument("--split_ratio", type=float, default=0.9)
     parser.add_argument("--split_seed", type=int, default=0)
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="data",
+        help="For cpc18: directory containing Track II files (default datasets/cpc18 when value is 'data').",
+    )
+    parser.add_argument(
+        "--cpc18_official_mse",
+        action="store_true",
+        help="CPC18: official all-trials block MSE protocol. Default: held-out train/test split (set --fitness_metric loglik for log-likelihood).",
+    )
+    parser.add_argument(
+        "--mixed_gambles_csv",
+        type=str,
+        default="datasets/mixed_gambles/data_all_2021-01-08.csv",
+        help="CSV path for mixed_gambles dataset.",
+    )
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--no_log", action="store_true")
     parser.add_argument("--allow_failure", action="store_true", help="Continue run after a participant-level fatal failure.")
@@ -765,6 +1320,12 @@ def main() -> None:
         help="For each serialized train trial, include at most this many most-recent history items (0 = all).",
     )
     parser.add_argument(
+        "--max_prompt_trials_per_problem",
+        type=int,
+        default=0,
+        help="Cap serialized train trials per problem in prompt artifacts (0 = no per-problem cap).",
+    )
+    parser.add_argument(
         "--max_artifact_bytes",
         type=int,
         default=131072,
@@ -777,6 +1338,9 @@ def main() -> None:
         sys.exit(1)
     if args.max_history_items_per_trial < 0:
         print("Error: --max_history_items_per_trial must be >= 0.")
+        sys.exit(1)
+    if args.max_prompt_trials_per_problem < 0:
+        print("Error: --max_prompt_trials_per_problem must be >= 0.")
         sys.exit(1)
     if args.max_artifact_bytes < 1024:
         print("Error: --max_artifact_bytes must be at least 1024.")
@@ -794,6 +1358,17 @@ def main() -> None:
     if not (0.0 < args.split_ratio < 1.0):
         print("Error: --split_ratio must be in (0,1).")
         sys.exit(1)
+    if args.fitness_metric == "loglik" and args.dataset not in {"choice13k", "mixed_gambles"} and not (
+        args.dataset == "cpc18" and not args.cpc18_official_mse
+    ):
+        print(
+            "Error: --fitness_metric loglik is only supported for --dataset choice13k/mixed_gambles, "
+            "or cpc18 without --cpc18_official_mse."
+        )
+        sys.exit(1)
+    if args.split_mode == "across_participants" and args.dataset != "choice13k":
+        print("Error: --split_mode across_participants is only supported with --dataset choice13k.")
+        sys.exit(1)
     if args.split_mode == "across_participants" and args.participant_scope == "single":
         print("Error: across_participants needs at least two participants; use range or all.")
         sys.exit(1)
@@ -802,7 +1377,7 @@ def main() -> None:
     base_run_dir = Path(
         args.output_dir
         if args.output_dir
-        else str(REPO_ROOT / "generated_outputs" / "choice13k" / "openevolve" / f"run_{timestamp}")
+        else str(REPO_ROOT / "generated_outputs" / args.dataset / "openevolve" / f"run_{timestamp}")
     )
     base_run_dir.mkdir(parents=True, exist_ok=True)
     cmd_log = _write_command_line_log(base_run_dir)
@@ -840,7 +1415,7 @@ def main() -> None:
         try:
             import wandb as _wandb
             wandb = _wandb
-            run_name = f"choice13k_openevolve_{timestamp}_{args.participant_scope}"
+            run_name = f"{args.dataset}_openevolve_{timestamp}_{args.participant_scope}"
             wandb.init(project="ROTE_evo", name=run_name, config=vars(args), reinit=False)
         except Exception as e:
             print(f"[WARN] wandb logging disabled: {e}")
@@ -875,17 +1450,18 @@ def main() -> None:
                 seed_code=seed_code,
                 train_trials=train_trials,
                 test_trials=test_trials,
+                test_observed_blocks=None,
                 participant_tag="0",
                 run_root=base_run_dir,
                 args=args,
             )
             row = {
                 "participant_id": 0,
-                "train_fitness": result["train_loglik"],
-                "test_fitness": result["test_loglik"],
+                "train_fitness": result["train_fitness"],
+                "test_fitness": result["test_fitness"],
                 "total_runtime": result["total_runtime"],
-                "seed_program_train_fitness": result["train_loglik"],
-                "seed_program_test_fitness": result["test_loglik"],
+                "seed_program_train_fitness": result["seed_program_train_fitness"],
+                "seed_program_test_fitness": result["seed_program_test_fitness"],
             }
             row_ll = {"participant_id": 0, "train_loglik": result["train_loglik"], "test_loglik": result["test_loglik"]}
             _write_all_mode_csvs(base_run_dir, [row], [row_ll])
@@ -897,13 +1473,14 @@ def main() -> None:
             participant_details: List[Dict[str, Any]] = []
             participant_loglik: List[Dict[str, Any]] = []
             for pid in tqdm(participants, desc="Participants"):
-                experiments = get_choice13k_experiments(n_participants=pid + 1)
-                exp = experiments[pid]
-                train_trials, test_trials, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
+                train_trials, test_trials, test_observed_blocks = _load_trials_for_participant(
+                    args=args, participant_id=pid
+                )
                 result = _run_one_openevolve(
                     seed_code=seed_code,
                     train_trials=train_trials,
                     test_trials=test_trials,
+                    test_observed_blocks=test_observed_blocks,
                     participant_tag=str(pid),
                     run_root=base_run_dir,
                     args=args,
@@ -926,10 +1503,14 @@ def main() -> None:
                     wandb.log(
                         {
                             "participant_id": pid,
+                            "train_fitness": result["train_fitness"],
+                            "test_fitness": result["test_fitness"],
                             "train_loglik": result["train_loglik"],
                             "test_loglik": result["test_loglik"],
                             "train_acc": result["train_acc"],
                             "test_acc": result["test_acc"],
+                            "train_mse": result["train_mse"],
+                            "test_mse": result["test_mse"],
                             "fatal_failure": result["fatal_failure"],
                         }
                     )
@@ -944,13 +1525,14 @@ def main() -> None:
         details_loglik_file = base_run_dir / "participant_details_loglik.csv"
 
         for pid in tqdm(participants, desc="Participants"):
-            experiments = get_choice13k_experiments(n_participants=pid + 1)
-            exp = experiments[pid]
-            train_trials, test_trials, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
+            train_trials, test_trials, test_observed_blocks = _load_trials_for_participant(
+                args=args, participant_id=pid
+            )
             result = _run_one_openevolve(
                 seed_code=seed_code,
                 train_trials=train_trials,
                 test_trials=test_trials,
+                test_observed_blocks=test_observed_blocks,
                 participant_tag=str(pid),
                 run_root=base_run_dir,
                 args=args,
@@ -961,6 +1543,9 @@ def main() -> None:
                 "test_acc": result["test_acc"],
                 "train_loglik": result["train_loglik"],
                 "test_loglik": result["test_loglik"],
+                "train_mse": result["train_mse"],
+                "test_mse": result["test_mse"],
+                "combined_score": result["combined_score"],
                 "train_fitness": result["train_fitness"],
                 "test_fitness": result["test_fitness"],
                 "seed_program_train_fitness": result["seed_program_train_fitness"],
@@ -1002,10 +1587,14 @@ def main() -> None:
                 wandb.log(
                     {
                         "participant_id": pid,
+                        "train_fitness": result["train_fitness"],
+                        "test_fitness": result["test_fitness"],
                         "train_loglik": result["train_loglik"],
                         "test_loglik": result["test_loglik"],
                         "train_acc": result["train_acc"],
                         "test_acc": result["test_acc"],
+                        "train_mse": result["train_mse"],
+                        "test_mse": result["test_mse"],
                         "fatal_failure": result["fatal_failure"],
                     }
                 )

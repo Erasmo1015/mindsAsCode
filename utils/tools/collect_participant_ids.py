@@ -102,7 +102,7 @@ def collect_cpc18(data_path: Path, cpc18_mod: Any) -> List[int]:
                 data_path=str(data_path), participant_id=participant_id
             )
             train_trials, test_trials, _ = cpc18_mod.split_cpc18_trials(
-                participant_data, train_ratio=0.8
+                participant_data, train_ratio=0.8, cpc18_official_mse=True
             )
             if len(train_trials) > 0 and len(test_trials) > 0:
                 valid.append(participant_id)

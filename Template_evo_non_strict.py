@@ -328,6 +328,44 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
     return "\n".join(lines)
 
 
+def _cap_prompt_trials_per_problem(
+    trials: List[Dict[str, Any]], max_trials_per_problem: int
+) -> List[Dict[str, Any]]:
+    """Cap prompt trials per problem (prompt-only; evaluation still uses full train split)."""
+    if max_trials_per_problem <= 0:
+        return list(trials)
+    grouped: Dict[Any, List[Dict[str, Any]]] = {}
+    order: List[Any] = []
+    for t in trials:
+        if "problem_id" in t:
+            key = ("problem_id", t["problem_id"])
+        else:
+            p = t.get("problem", {})
+            ga = p.get("gamble_A", {})
+            gb = p.get("gamble_B", {})
+            ga_probs = ga.get("probs", [])
+            gb_probs = gb.get("probs", [])
+            if ga_probs is None:
+                ga_probs = []
+            if gb_probs is None:
+                gb_probs = []
+            key = (
+                "problem_sig",
+                tuple(ga.get("rewards", [])),
+                tuple(ga_probs),
+                tuple(gb.get("rewards", [])),
+                tuple(gb_probs),
+            )
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(t)
+    capped: List[Dict[str, Any]] = []
+    for key in order:
+        capped.extend(grouped[key][:max_trials_per_problem])
+    return capped
+
+
 def load_mixed_gambles_data(
     csv_path: str,
     participant_id: int,
@@ -335,7 +373,7 @@ def load_mixed_gambles_data(
     split_ratio: float = 0.8,
     split_seed: int = 42,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
-    """Load mixed_gambles CSV, filter by subject == participant_id, convert to choice13k-style trials with 80/20 split.
+    """Load mixed_gambles CSV, filter by subject == participant_id, and split by disjoint problem signatures.
 
     Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
     Raw CSV `took_gamble`: 1 = chose gamble, 0 = chose certain. TE option index: action = 1 - took_gamble
@@ -368,21 +406,32 @@ def load_mixed_gambles_data(
                 "history": [],
                 "options": option_keys,
                 "action": action,
+                "problem_signature": (gain, loss, cert),
             })
     if len(all_trials) == 0:
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
     if filter_gain_loss_only and not getattr(load_mixed_gambles_data, "_printed_gain_loss", False):
         print("[Mixed Gambles] Using gain_loss trials only.")
         load_mixed_gambles_data._printed_gain_loss = True
-    # Random train/test split (reproducible).
-    # The dataset is ordered by stimulus structure,
-    # so row-order split creates artificial distribution shift.
+    # Split by unique (gain, loss, cert) signatures so train/test never share the same problem.
+    signatures = sorted({t["problem_signature"] for t in all_trials})
+    if len(signatures) < 2:
+        raise ValueError(
+            f"mixed_gambles participant {participant_id} has <2 unique problems; cannot build disjoint train/test."
+        )
     rng = np.random.default_rng(split_seed)
-    indices = np.arange(len(all_trials))
-    rng.shuffle(indices)
-    split_point = int(len(all_trials) * split_ratio)
-    train_trials = [all_trials[i] for i in indices[:split_point]]
-    test_trials = [all_trials[i] for i in indices[split_point:]]
+    shuffled = list(signatures)
+    rng.shuffle(shuffled)
+    split_point = int(len(shuffled) * split_ratio)
+    split_point = max(1, min(split_point, len(shuffled) - 1))
+    train_sigs = set(shuffled[:split_point])
+    test_sigs = set(shuffled[split_point:])
+    train_trials = [t for t in all_trials if t["problem_signature"] in train_sigs]
+    test_trials = [t for t in all_trials if t["problem_signature"] in test_sigs]
+    for t in train_trials:
+        t.pop("problem_signature", None)
+    for t in test_trials:
+        t.pop("problem_signature", None)
     return train_trials, test_trials, option_keys
 
 
@@ -524,15 +573,11 @@ def evaluate_choice13k_program(
     n_seeds: int = 1,
 ) -> Dict[str, Any]:
     """
-    Evaluate Choice13k programs where choose(problem, history) returns p = P(action = 1).
+    Evaluate Choice13k-style programs where choose(problem, history) returns P(action=1).
 
-    Per-trial: validates p is a Python float in [0, 1] (no int/bool/np float); clamps for log-density;
-    accumulates average Bernoulli log-likelihood and threshold accuracy (pred = 1 if p >= 0.5 else 0).
-    Averages metrics across n_seeds full passes (same pattern as evaluate_program).
-
-    Raises:
-        TypeError: if model output is not an instance of float.
-        ValueError: if model output is not in [0.0, 1.0].
+    Accepts either:
+      - float in [0, 1], or
+      - int/bool 0/1 (coerced to degenerate Bernoulli probabilities).
     """
     total = len(trials)
     seed_avg_accs: List[float] = []
@@ -558,11 +603,20 @@ def evaluate_choice13k_program(
                 correct += int(pred == y)
                 continue
 
-            assert isinstance(p_raw, float)
-            assert 0.0 <= p_raw <= 1.0
-            p = min(max(p_raw, 1e-9), 1.0 - 1e-9)
+            if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
+                p_use = 1.0 if int(p_raw) == 1 else 0.0
+            elif isinstance(p_raw, float):
+                p_use = p_raw
+            else:
+                raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
+            if not (0.0 <= p_use <= 1.0):
+                raise ValueError(f"invalid probability: {p_use!r}")
+            p = min(max(p_use, 1e-9), 1.0 - 1e-9)
             loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
-            pred = 1 if p_raw >= 0.5 else 0
+            if isinstance(p_raw, float):
+                pred = 1 if p_raw >= 0.5 else 0
+            else:
+                pred = 1 if int(p_raw) == 1 else 0
             correct += int(pred == y)
 
         avg_ll = loglik_acc / total if total > 0 else 0.0
@@ -605,6 +659,75 @@ def evaluate_cpc18_program(choose_fn: Callable, trials: List[Dict[str, Any]], ve
         Dictionary with averaged accuracy metrics across n_seeds runs
     """
     return evaluate_program(choose_fn, trials, verbose, n_seeds)
+
+
+def evaluate_cpc18_split_program(
+    choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1
+) -> Dict[str, Any]:
+    """
+    CPC18 non-official (held-out) evaluation: P(B) as float in [0,1] (choice13k-style) or
+    int 0/1 coerced to degenerate Bernoulli probabilities. Mean Bernoulli log-lik and threshold acc.
+    """
+    total = len(trials)
+    seed_avg_accs: List[float] = []
+    seed_avg_logliks: List[float] = []
+    first_seed_errors = 0
+
+    def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
+        loglik_acc = 0.0
+        correct = 0
+        errors = 0
+        for t in trials:
+            y = int(t["action"])
+            try:
+                p_raw = choose_fn(t["problem"], t["history"])
+            except Exception as e:
+                errors += 1
+                if verbose and errors <= 3 and seed_idx == 0:
+                    print(f"  Evaluation error: {e}")
+                p = 0.5
+                p_clamped = min(max(p, 1e-9), 1.0 - 1e-9)
+                loglik_acc += y * np.log(p_clamped) + (1 - y) * np.log(1.0 - p_clamped)
+                pred = 1 if p >= 0.5 else 0
+                correct += int(pred == y)
+                continue
+            if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
+                p_use = 1.0 if int(p_raw) == 1 else 0.0
+            elif isinstance(p_raw, float):
+                p_use = p_raw
+            else:
+                raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
+            if not (0.0 <= p_use <= 1.0):
+                raise ValueError(f"invalid probability: {p_use!r}")
+            p = min(max(p_use, 1e-9), 1.0 - 1e-9)
+            loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
+            if isinstance(p_raw, float):
+                pred = 1 if p_raw >= 0.5 else 0
+            else:
+                pred = 1 if int(p_raw) == 1 else 0
+            correct += int(pred == y)
+
+        avg_ll = loglik_acc / total if total > 0 else 0.0
+        acc = correct / total if total > 0 else 0.0
+        return avg_ll, acc, errors
+
+    for seed in range(n_seeds):
+        avg_ll, acc, errs = _one_pass(seed)
+        seed_avg_logliks.append(avg_ll)
+        seed_avg_accs.append(acc)
+        if seed == 0:
+            first_seed_errors = errs
+
+    avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
+    avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
+    correct = int(round(avg_acc * total))
+    return {
+        "accuracy": avg_acc,
+        "avg_loglik": avg_loglik,
+        "total": total,
+        "correct": correct,
+        "errors": first_seed_errors if n_seeds == 1 else 0,
+    }
 
 
 def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]], 
@@ -1977,8 +2100,10 @@ def generate_program_variants(
     parent_train_mses: Optional[List[float]] = None,
     dataset: str = "choice13k",
     max_prompt_train_trials: int = 1_000_000,
+    max_prompt_trials_per_problem: int = 0,
     prompt_train_trials_seed: int = 0,
     fitness_metric: str = "accuracy",
+    cpc18_official_mse: bool = True,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -1988,7 +2113,18 @@ def generate_program_variants(
     """
     # Load prompts from file
     PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
-    if dataset == "cpc18":
+    if (
+        dataset == "cpc18"
+        and not cpc18_official_mse
+        and fitness_metric == "loglik"
+    ):
+        prompt_path = os.path.join(
+            PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "infer_single_choice.txt"
+        )
+        code_template_path = os.path.join(
+            PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "single_code_template.txt"
+        )
+    elif dataset == "cpc18":
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "single_code_template.txt")
     elif dataset == "mixed_gambles":
@@ -2054,6 +2190,9 @@ def choose(problem, history):
     
     # Format training trials for context (evaluation elsewhere still uses full train_trials).
     trials_for_prompt = list(train_trials)
+    trials_for_prompt = _cap_prompt_trials_per_problem(
+        trials_for_prompt, max_prompt_trials_per_problem
+    )
     if max_prompt_train_trials > 0 and len(trials_for_prompt) > max_prompt_train_trials:
         rng = np.random.default_rng(prompt_train_trials_seed)
         perm = rng.permutation(len(trials_for_prompt))
@@ -2082,8 +2221,7 @@ def choose(problem, history):
     else:
         parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
         for i, parent_program in enumerate(parent_programs):
-            if dataset == "cpc18":
-                # For CPC18: only show MSE, not accuracy
+            if dataset == "cpc18" and cpc18_official_mse:
                 mse = parent_train_mses[i] if (parent_train_mses and i < len(parent_train_mses)) else None
                 mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
                 parent_context += f"\nParent {i+1}{mse_str}:\n```python\n{parent_program}\n```\n"
@@ -2093,8 +2231,7 @@ def choose(problem, history):
                 acc_str = f" (train_acc: {acc:.4f})" if acc is not None else ""
                 parent_context += f"\nParent {i+1}{acc_str}:\n```python\n{parent_program}\n```\n"
         
-        # Add performance guidance for CPC18 (MSE only)
-        if dataset == "cpc18" and parent_train_mses:
+        if dataset == "cpc18" and cpc18_official_mse and parent_train_mses:
             avg_mse = sum(parent_train_mses) / len(parent_train_mses)
             min_mse = min(parent_train_mses)
             parent_context += f"\nParent performance on training data:\n"
@@ -2160,6 +2297,9 @@ def run_evolution(
     choice13k_test_trials_override: Optional[List[Dict[str, Any]]] = None,
     choice13k_simple_logging: bool = False,
     max_prompt_train_trials: int = 1_000_000,
+    max_prompt_trials_per_problem: int = 0,
+    llm_max_tokens: int = 800,
+    cpc18_official_mse: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -2180,8 +2320,13 @@ def run_evolution(
     """
     if fitness_metric not in ("accuracy", "loglik"):
         raise ValueError(f"Invalid fitness_metric: {fitness_metric!r} (expected 'accuracy' or 'loglik')")
-    if fitness_metric == "loglik" and dataset != "choice13k":
-        raise ValueError("fitness_metric='loglik' is only supported when dataset='choice13k'")
+    if fitness_metric == "loglik" and not (
+        dataset in {"choice13k", "mixed_gambles"} or (dataset == "cpc18" and not cpc18_official_mse)
+    ):
+        raise ValueError(
+            "fitness_metric='loglik' is only supported for choice13k/mixed_gambles, or for cpc18 when "
+            "not using the official MSE protocol (cpc18_official_mse=False)."
+        )
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
 
@@ -2195,6 +2340,8 @@ def run_evolution(
     seed_code = load_seed_program(seed_program_path)
     
     # Branch based on dataset
+    is_cpc18_mse = False
+    is_cpc18_split = False
     if dataset == "gridworld":
         if num_blocks is None or num_walls is None or agent_id is None:
             raise ValueError("For gridworld, num_blocks, num_walls, and agent_id must be provided")
@@ -2209,18 +2356,26 @@ def run_evolution(
         cpc18_data_path = data_path if data_path != "data" else "datasets/cpc18"
         print(f"Loading CPC18 Track II data for participant {participant_id} from {cpc18_data_path}...")
         participant_data = load_cpc18_track2_data(data_path=cpc18_data_path, participant_id=participant_id)
-        
-        # CPC18 Track II: NO train/test split - use ALL trials
-        # Returns: train_trials (ALL trials for parameter evolution), test_trials (ALL trials for predictions), test_observed_blocks (for MSE)
-        # Note: train_ratio parameter is ignored - all trials are used for both train and test
+        is_cpc18_mse = bool(cpc18_official_mse)
+        is_cpc18_split = not is_cpc18_mse
+        # Official: all trials, block MSE. Otherwise: per-participant holdout (problem or trial split).
         train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
-            participant_data, train_ratio=0.8  # Parameter ignored for CPC18
+            participant_data,
+            train_ratio=0.8,
+            cpc18_official_mse=is_cpc18_mse,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
         )
-        print(f"CPC18 Track II: Using ALL {len(train_trials)} trials for training (no split)")
-        print(f"CPC18 Track II: Using ALL {len(test_trials)} trials for predictions (same trials, aggregated to block-level for MSE)")
-        print(f"Problems: {len(participant_data.problems)} total")
-        print(f"Test targets (block-level B-rates from Data-to-predict-Track-2.csv): {len(test_observed_blocks)} problems")
-        options = None  # Not used for CPC18
+        if is_cpc18_mse:
+            print(f"CPC18 official: ALL {len(train_trials)} trials; block MSE vs Data-to-predict-Track-2")
+            print(f"Problems: {len(participant_data.problems)} total; block targets: {len(test_observed_blocks)}")
+        else:
+            print(
+                f"CPC18 held-out split: train={len(train_trials)} test={len(test_trials)} "
+                f"(split_ratio={split_ratio:.3f} seed={split_seed})"
+            )
+            print(f"Problems: {len(participant_data.problems)} total (partition by problem when possible).")
+        options = None
     elif dataset == "mixed_gambles":
         csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
         print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
@@ -2297,30 +2452,35 @@ def run_evolution(
         if baseline_fn is None:
             print("ERROR: Failed to compile baseline program!")
             return None
-        # Trial-level accuracy (auxiliary metric, not official)
-        # Note: train_trials and test_trials are the same (all trials) for CPC18
-        baseline_train_eval = evaluate_cpc18_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
-        baseline_test_eval = evaluate_cpc18_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
-        
-        # Block-level MSE (official CPC18 metric)
-        # Training MSE: computed on train_trials (all trials) for LLM guidance
-        # Note: train_observed_blocks is the same as test_observed_blocks (both from Data-to-predict-Track-2.csv)
-        train_observed_blocks = test_observed_blocks  # Same observed blocks for all trials
-        baseline_train_mse_eval = evaluate_cpc18_mse(
-            baseline_fn, train_trials, train_observed_blocks, verbose=True, n_seeds=n_eval_seeds
-        )
-        
-        # Test MSE: uses all trials (test_trials) to generate predictions, aggregated to block-level
-        # Compared against observed block-level B-rates from Data-to-predict-Track-2.csv
-        baseline_test_mse_eval = evaluate_cpc18_mse(
-            baseline_fn, test_trials, test_observed_blocks, verbose=True, n_seeds=n_eval_seeds
-        )
+        if is_cpc18_mse:
+            baseline_train_eval = evaluate_cpc18_program(
+                baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds
+            )
+            baseline_test_eval = evaluate_cpc18_program(
+                baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
+            )
+            train_observed_blocks = test_observed_blocks
+            baseline_train_mse_eval = evaluate_cpc18_mse(
+                baseline_fn, train_trials, train_observed_blocks, verbose=True, n_seeds=n_eval_seeds
+            )
+            baseline_test_mse_eval = evaluate_cpc18_mse(
+                baseline_fn, test_trials, test_observed_blocks, verbose=True, n_seeds=n_eval_seeds
+            )
+        else:
+            baseline_train_mse_eval = None
+            baseline_test_mse_eval = None
+            baseline_train_eval = evaluate_cpc18_split_program(
+                baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds
+            )
+            baseline_test_eval = evaluate_cpc18_split_program(
+                baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
+            )
     else:
         baseline_fn = compile_program(seed_code)
         if baseline_fn is None:
             print("ERROR: Failed to compile baseline program!")
             return None
-        if dataset == "choice13k":
+        if dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
             baseline_train_eval = evaluate_choice13k_program(
                 baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds
             )
@@ -2334,12 +2494,12 @@ def run_evolution(
     print(f"\nBaseline Performance:")
     print(f"  Train accuracy: {baseline_train_eval['accuracy']:.4f} ({baseline_train_eval['correct']}/{baseline_train_eval['total']})")
     print(f"  Test accuracy: {baseline_test_eval['accuracy']:.4f} ({baseline_test_eval['correct']}/{baseline_test_eval['total']})")
-    if dataset == "choice13k":
+    if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
         print(
             f"  Train avg log-likelihood: {baseline_train_eval['avg_loglik']:.6f}, "
             f"test: {baseline_test_eval['avg_loglik']:.6f}"
         )
-    if dataset == "cpc18":
+    if is_cpc18_mse:
         print(f"  Train MSE: {baseline_train_mse_eval['mse']:.4f}")
         print(f"  Test MSE (official): {baseline_test_mse_eval['mse']:.4f}")
     
@@ -2352,10 +2512,10 @@ def run_evolution(
         "test_correct": baseline_test_eval['correct'],
         "test_total": baseline_test_eval['total'],
     }
-    if dataset == "cpc18":
+    if is_cpc18_mse and baseline_train_mse_eval is not None and baseline_test_mse_eval is not None:
         baseline_results["train_mse"] = baseline_train_mse_eval['mse']
         baseline_results["test_mse"] = baseline_test_mse_eval['mse']
-    if dataset == "choice13k":
+    if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
         baseline_results["train_loglik"] = baseline_train_eval["avg_loglik"]
         baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
     
@@ -2379,25 +2539,44 @@ def run_evolution(
                     f"gw_test_accuracy": baseline_test_eval["accuracy"],
                     f"gw_is_baseline": 1,
                 }
-        elif dataset == "cpc18":
+        elif is_cpc18_mse:
             if all_data_mode:
                 baseline_log_dict = {
-                    f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],  # -MSE (higher is better)
-                    f"p{participant_id}_test_fitness": -baseline_test_mse_eval["mse"],   # -MSE (higher is better)
+                    f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],
+                    f"p{participant_id}_test_fitness": -baseline_test_mse_eval["mse"],
                 }
             else:
                 baseline_log_dict = {
-                    f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],  # -MSE (primary metric)
+                    f"p{participant_id}_train_fitness": -baseline_train_mse_eval["mse"],
                     f"p{participant_id}_train_mse": baseline_train_mse_eval["mse"],
                     f"p{participant_id}_test_mse": baseline_test_mse_eval["mse"],
                     f"p{participant_id}_is_baseline": 1,
-                    # Keep accuracy for debugging (not used for selection)
                     f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
                     f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
                 }
+        elif is_cpc18_split:
+            baseline_log_dict = {
+                f"p{participant_id}_train_fitness": (
+                    baseline_train_eval["avg_loglik"]
+                    if fitness_metric == "loglik"
+                    else baseline_train_eval["accuracy"]
+                ),
+                f"p{participant_id}_test_fitness": (
+                    baseline_test_eval["avg_loglik"]
+                    if fitness_metric == "loglik"
+                    else baseline_test_eval["accuracy"]
+                ),
+                f"p{participant_id}_train_mse": None,
+                f"p{participant_id}_test_mse": None,
+                f"p{participant_id}_is_baseline": 1,
+                f"p{participant_id}_train_loglik": baseline_train_eval["avg_loglik"],
+                f"p{participant_id}_test_loglik": baseline_test_eval["avg_loglik"],
+                f"p{participant_id}_train_acc": baseline_train_eval["accuracy"],
+                f"p{participant_id}_test_acc": baseline_test_eval["accuracy"],
+            }
         else:
             if all_data_mode:
-                if dataset == "choice13k" and fitness_metric == "loglik":
+                if dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                     baseline_log_dict = {
                         f"p{participant_id}_train_fitness": baseline_train_eval["avg_loglik"],
                         f"p{participant_id}_test_fitness": baseline_test_eval["avg_loglik"],
@@ -2411,7 +2590,7 @@ def run_evolution(
                         f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
                         f"p{participant_id}_test_fitness": baseline_test_eval["accuracy"],
                     }
-                    if dataset == "choice13k":
+                    if dataset in {"choice13k", "mixed_gambles"}:
                         baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
                         baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
                         baseline_log_dict[f"p{participant_id}_train_loglik"] = baseline_train_eval["avg_loglik"]
@@ -2422,7 +2601,7 @@ def run_evolution(
                     f"p{participant_id}_test_accuracy": baseline_test_eval["accuracy"],
                     f"p{participant_id}_is_baseline": 1,
                 }
-                if dataset == "choice13k":
+                if dataset in {"choice13k", "mixed_gambles"}:
                     baseline_log_dict[f"p{participant_id}_train_loglik"] = baseline_train_eval["avg_loglik"]
                     baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
                     baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
@@ -2440,24 +2619,25 @@ def run_evolution(
                 f.write(json.dumps(baseline_entry) + "\n")
     
     # Initialize best program tracking with baseline
-    # For CPC18: use -MSE as fitness (higher is better, so negate MSE)
-    # For other datasets: use accuracy
-    if dataset == "cpc18":
+    if is_cpc18_mse and baseline_train_mse_eval is not None:
         best_fitness = -baseline_train_mse_eval['mse']
-    elif dataset == "choice13k" and fitness_metric == "loglik":
+    elif is_cpc18_split and fitness_metric == "loglik":
+        best_fitness = baseline_train_eval["avg_loglik"]
+    elif is_cpc18_split:
+        best_fitness = baseline_train_eval["accuracy"]
+    elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
         best_fitness = baseline_train_eval["avg_loglik"]
     else:
         best_fitness = baseline_train_eval["accuracy"]
     
     # Track overall best across all iterations
-    # For CPC18: track -MSE as fitness; for others: track accuracy
-    if dataset == "cpc18":
+    if is_cpc18_mse and baseline_train_mse_eval is not None:
         overall_best_train = {
-            "train_fitness": -baseline_train_mse_eval['mse'],  # -MSE (higher is better)
+            "train_fitness": -baseline_train_mse_eval['mse'],
             "train_mse": baseline_train_mse_eval['mse'],
             "test_mse": baseline_test_mse_eval['mse'],
-            "train_accuracy": baseline_train_eval['accuracy'],  # Keep for debugging
-            "test_accuracy": baseline_test_eval['accuracy'],  # Keep for debugging
+            "train_accuracy": baseline_train_eval['accuracy'],
+            "test_accuracy": baseline_test_eval['accuracy'],
             "program_id": "baseline"
         }
         overall_best_test = {
@@ -2468,6 +2648,21 @@ def run_evolution(
             "test_accuracy": baseline_test_eval['accuracy'],
             "program_id": "baseline"
         }
+    elif is_cpc18_split:
+        overall_best_train = {
+            "train_accuracy": baseline_train_eval['accuracy'],
+            "test_accuracy": baseline_test_eval['accuracy'],
+            "train_loglik": baseline_train_eval['avg_loglik'],
+            "test_loglik": baseline_test_eval['avg_loglik'],
+            "program_id": "baseline"
+        }
+        overall_best_test = {
+            "train_accuracy": baseline_train_eval['accuracy'],
+            "test_accuracy": baseline_test_eval['accuracy'],
+            "train_loglik": baseline_train_eval['avg_loglik'],
+            "test_loglik": baseline_test_eval['avg_loglik'],
+            "program_id": "baseline"
+        }
     else:
         overall_best_train = {
             "train_accuracy": baseline_train_eval['accuracy'],
@@ -2479,7 +2674,7 @@ def run_evolution(
             "test_accuracy": baseline_test_eval['accuracy'],
             "program_id": "baseline"
         }
-        if dataset == "choice13k":
+        if dataset in {"choice13k", "mixed_gambles"}:
             overall_best_train["train_loglik"] = baseline_train_eval["avg_loglik"]
             overall_best_train["test_loglik"] = baseline_test_eval["avg_loglik"]
             overall_best_test["train_loglik"] = baseline_train_eval["avg_loglik"]
@@ -2489,17 +2684,32 @@ def run_evolution(
     # Format: list of (code, fitness, test_metric, program_id, train_mse, test_mse) tuples
     # For CPC18: fitness = -train_mse (higher is better), sorted by fitness descending
     # For other datasets: fitness = train_acc, sorted by fitness descending
-    if dataset == "cpc18":
+    if is_cpc18_mse and baseline_train_mse_eval is not None and baseline_test_mse_eval is not None:
         elite_parents = [(
             seed_code,
-            -baseline_train_mse_eval['mse'],  # fitness = -MSE
-            baseline_test_mse_eval['mse'],  # test_metric = test_mse
+            -baseline_train_mse_eval['mse'],
+            baseline_test_mse_eval['mse'],
             "baseline",
             baseline_train_mse_eval['mse'],
             baseline_test_mse_eval['mse'],
         )]
+    elif is_cpc18_split:
+        _bfit = (
+            baseline_train_eval["avg_loglik"]
+            if fitness_metric == "loglik"
+            else baseline_train_eval["accuracy"]
+        )
+        elite_parents = [(
+            seed_code,
+            _bfit,
+            baseline_test_eval["accuracy"],
+            "baseline",
+            None,
+            None,
+            baseline_train_eval["accuracy"],
+        )]
     else:
-        if dataset == "choice13k":
+        if dataset in {"choice13k", "mixed_gambles"}:
             _baseline_fit = (
                 baseline_train_eval["avg_loglik"]
                 if fitness_metric == "loglik"
@@ -2554,28 +2764,23 @@ def run_evolution(
         parent_codes = [p[0] for p in selected_parents]
         
         print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
-        if dataset == "cpc18":
+        if is_cpc18_mse:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_mse, prog_id, train_mse, test_mse = parent_tuple
-                # fitness = -train_mse, so display train_mse and test_mse
                 print(f"  Parent {i+1}: {prog_id} (train_mse={train_mse:.2f}, test_mse={test_mse:.2f}, fitness={fitness:.2f})")
         else:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
-                # train_acc_prompt is always train accuracy for LLM context; fitness is the selection metric for choice13k when using loglik
                 print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
         
-        # Extract metrics for LLM guidance
-        # For CPC18: pass only MSE (not accuracy)
-        # For others: pass accuracy
         parent_train_accs = None
         parent_train_mses = None
         parent_test_mses = None
-        if dataset == "cpc18":
+        if is_cpc18_mse:
             parent_train_mses = [p[4] for p in selected_parents if p[4] is not None]
             parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
         else:
-            parent_train_accs = [p[6] for p in selected_parents]  # train accuracy for prompts (index 6)
+            parent_train_accs = [p[6] for p in selected_parents]
         
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
@@ -2595,12 +2800,15 @@ def run_evolution(
                 parent_programs=parent_codes,
                 train_trials=train_trials,
                 n_variants=n_candidates_per_iteration,
+                max_tokens=llm_max_tokens,
                 dataset=dataset,
-                parent_train_accuracies=parent_train_accs if dataset != "cpc18" else None,  # Don't pass accuracy for CPC18
-                parent_train_mses=parent_train_mses if dataset == "cpc18" else None,
+                parent_train_accuracies=parent_train_accs if (dataset != "cpc18" or is_cpc18_split) else None,
+                parent_train_mses=parent_train_mses if is_cpc18_mse else None,
                 max_prompt_train_trials=max_prompt_train_trials,
+                max_prompt_trials_per_problem=max_prompt_trials_per_problem,
                 prompt_train_trials_seed=split_seed,
                 fitness_metric=fitness_metric,
+                cpc18_official_mse=is_cpc18_mse,
             )
         
         # Evaluate candidates
@@ -2626,7 +2834,7 @@ def run_evolution(
                     "test_acc": 0.0,
                     "valid": False,
                 }
-                if dataset == "choice13k":
+                if dataset == "choice13k" or is_cpc18_split:
                     empty_row["train_loglik"] = float("-inf")
                     empty_row["test_loglik"] = float("-inf")
                     empty_row["fitness"] = float("-inf") if fitness_metric == "loglik" else 0.0
@@ -2663,8 +2871,7 @@ def run_evolution(
                     "test_total": test_eval["total"],
                     "valid": train_eval["errors"] == 0,
                 })
-            elif dataset == "cpc18":
-                # CPC18 Track II: reject history-only programs (must reference problem)
+            elif is_cpc18_mse:
                 if "problem[" not in code:
                     candidate_results.append({
                         "idx": idx,
@@ -2677,7 +2884,6 @@ def run_evolution(
                         "valid": False,
                     })
                     continue
-                # CPC18 Track II: compile and evaluate with both accuracy and MSE
                 choose_fn = compile_program(code)
                 if choose_fn is None:
                     candidate_results.append({
@@ -2687,31 +2893,19 @@ def run_evolution(
                         "test_acc": 0.0,
                         "train_mse": float('inf'),
                         "test_mse": float('inf'),
-                        "fitness": float('-inf'),  # Worst fitness for invalid program
+                        "fitness": float('-inf'),
                         "valid": False,
                     })
                     continue
-                
-                # Trial-level accuracy (auxiliary metric, not official)
-                # Note: train_trials and test_trials are the same (all trials) for CPC18
                 train_eval = evaluate_cpc18_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                 test_eval = evaluate_cpc18_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
-                
-                # Block-level MSE (official CPC18 metric)
-                # Training MSE: computed on train_trials (all trials) for LLM guidance
-                # Note: train_observed_blocks is the same as test_observed_blocks (both from Data-to-predict-Track-2.csv)
-                train_observed_blocks = test_observed_blocks  # Same observed blocks for all trials
+                train_observed_blocks = test_observed_blocks
                 train_mse_eval = evaluate_cpc18_mse(
                     choose_fn, train_trials, train_observed_blocks, n_seeds=n_eval_seeds
                 )
-                
-                # Test MSE: uses all trials (test_trials) to generate predictions, aggregated to block-level
-                # Compared against observed block-level B-rates from Data-to-predict-Track-2.csv
                 test_mse_eval = evaluate_cpc18_mse(
                     choose_fn, test_trials, test_observed_blocks, n_seeds=n_eval_seeds
                 )
-                
-                # If program crashed or produced invalid predictions, mark candidate invalid (Infinity MSE)
                 mse_valid = train_mse_eval.get("valid", True) and test_mse_eval.get("valid", True)
                 if not mse_valid:
                     candidate_results.append({
@@ -2729,23 +2923,80 @@ def run_evolution(
                         "valid": False,
                     })
                     continue
-                
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"]
                 train_mse = train_mse_eval["mse"]
                 test_mse = test_mse_eval["mse"]
-                
-                # For CPC18: fitness = -MSE (higher is better); parent selection uses fitness only
                 fitness = -train_mse
-                
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
-                    "train_acc": train_acc,  # Debug/plotting only, not used for selection
+                    "train_acc": train_acc,
                     "test_acc": test_acc,
                     "train_mse": train_mse,
                     "test_mse": test_mse,
-                    "fitness": fitness,  # Primary metric for CPC18: -MSE
+                    "fitness": fitness,
+                    "train_correct": train_eval["correct"],
+                    "test_correct": test_eval["correct"],
+                    "train_total": train_eval["total"],
+                    "test_total": test_eval["total"],
+                    "valid": True,
+                })
+            elif is_cpc18_split:
+                if "problem[" not in code:
+                    candidate_results.append({
+                        "idx": idx,
+                        "code": code,
+                        "train_acc": 0.0,
+                        "test_acc": 0.0,
+                        "train_loglik": float("-inf"),
+                        "test_loglik": float("-inf"),
+                        "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
+                        "valid": False,
+                    })
+                    continue
+                choose_fn = compile_program(code)
+                _worst = float("-inf") if fitness_metric == "loglik" else 0.0
+                if choose_fn is None:
+                    candidate_results.append({
+                        "idx": idx,
+                        "code": code,
+                        "train_acc": 0.0,
+                        "test_acc": 0.0,
+                        "train_loglik": float("-inf"),
+                        "test_loglik": float("-inf"),
+                        "fitness": _worst,
+                        "valid": False,
+                    })
+                    continue
+                try:
+                    train_eval = evaluate_cpc18_split_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+                    test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                except (TypeError, ValueError, AssertionError):
+                    candidate_results.append({
+                        "idx": idx,
+                        "code": code,
+                        "train_acc": 0.0,
+                        "test_acc": 0.0,
+                        "train_loglik": float("-inf"),
+                        "test_loglik": float("-inf"),
+                        "fitness": _worst,
+                        "valid": False,
+                    })
+                    continue
+                train_acc = train_eval["accuracy"]
+                test_acc = test_eval["accuracy"]
+                train_loglik = train_eval["avg_loglik"]
+                test_loglik = test_eval["avg_loglik"]
+                fitness = train_loglik if fitness_metric == "loglik" else train_acc
+                candidate_results.append({
+                    "idx": idx,
+                    "code": code,
+                    "train_acc": train_acc,
+                    "test_acc": test_acc,
+                    "train_loglik": train_loglik,
+                    "test_loglik": test_loglik,
+                    "fitness": fitness,
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"],
                     "train_total": train_eval["total"],
@@ -2802,24 +3053,33 @@ def run_evolution(
                     "valid": True,
                 })
             else:
-                # mixed_gambles: integer action match (evaluate_program)
+                # mixed_gambles: support accuracy and optional log-likelihood fitness
                 choose_fn = compile_program(code)
                 if choose_fn is None:
-                    candidate_results.append({
+                    row = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
                         "test_acc": 0.0,
                         "fitness": 0.0,
                         "valid": False,
-                    })
+                    }
+                    if fitness_metric == "loglik":
+                        row["train_loglik"] = float("-inf")
+                        row["test_loglik"] = float("-inf")
+                        row["fitness"] = float("-inf")
+                    candidate_results.append(row)
                     continue
-                train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                if fitness_metric == "loglik":
+                    train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                else:
+                    train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+                    test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"]
-                fitness = train_acc
-                candidate_results.append({
+                fitness = train_eval["avg_loglik"] if fitness_metric == "loglik" else train_acc
+                row = {
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
@@ -2830,17 +3090,30 @@ def run_evolution(
                     "train_total": train_eval["total"],
                     "test_total": test_eval["total"],
                     "valid": True,
-                })
+                }
+                if fitness_metric == "loglik":
+                    row["train_loglik"] = train_eval["avg_loglik"]
+                    row["test_loglik"] = test_eval["avg_loglik"]
+                candidate_results.append(row)
             
             # Track for overall best (only valid candidates)
             if candidate_results[-1]["valid"]:
-                if dataset == "cpc18":
+                if is_cpc18_mse:
                     all_candidate_results.append({
                         "iteration": iteration_step,
                         "candidate_idx": idx,
-                        "fitness": candidate_results[-1]["fitness"],  # -MSE
+                        "fitness": candidate_results[-1]["fitness"],
                         "train_mse": candidate_results[-1]["train_mse"],
                         "test_mse": candidate_results[-1]["test_mse"],
+                    })
+                elif is_cpc18_split:
+                    all_candidate_results.append({
+                        "iteration": iteration_step,
+                        "candidate_idx": idx,
+                        "train_acc": candidate_results[-1]["train_acc"],
+                        "test_acc": candidate_results[-1]["test_acc"],
+                        "train_loglik": candidate_results[-1]["train_loglik"],
+                        "test_loglik": candidate_results[-1]["test_loglik"],
                     })
                 elif dataset == "choice13k":
                     all_candidate_results.append({
@@ -2869,7 +3142,7 @@ def run_evolution(
             # Sort by fitness (for CPC18: -MSE, for others: accuracy)
             valid_results.sort(key=lambda x: x["fitness"], reverse=True)
             
-            if dataset == "cpc18":
+            if is_cpc18_mse:
                 print(f"\nTop performers (by fitness = -train_MSE, higher is better):")
                 for i, result in enumerate(valid_results[:5]):
                     print(
@@ -2878,7 +3151,17 @@ def run_evolution(
                         f"test_mse={result['test_mse']:.2f}, "
                         f"fitness={result['fitness']:.2f}"
                     )
-            elif dataset == "choice13k" and fitness_metric == "loglik":
+            elif is_cpc18_split and fitness_metric == "loglik":
+                print(f"\nTop performers (by train avg log-likelihood, higher is better):")
+                for i, result in enumerate(valid_results[:5]):
+                    print(
+                        f"  {i+1}. Candidate {result['idx']}: "
+                        f"train_loglik={result['train_loglik']:.6f}, "
+                        f"test_loglik={result['test_loglik']:.6f}, "
+                        f"train_acc={result['train_acc']:.4f}, "
+                        f"test_acc={result['test_acc']:.4f}"
+                    )
+            elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 print(f"\nTop performers (by train avg log-likelihood, higher is better):")
                 for i, result in enumerate(valid_results[:5]):
                     print(
@@ -2917,11 +3200,18 @@ def run_evolution(
                 })
             
             print(f"\nBest program selected: Candidate {best_result['idx']}")
-            if dataset == "cpc18":
+            if is_cpc18_mse:
                 print(f"  Train MSE: {best_result['train_mse']:.2f}")
                 print(f"  Test MSE: {best_result['test_mse']:.2f}")
                 print(f"  Fitness (-MSE): {best_result['fitness']:.2f}")
-            elif dataset == "choice13k":
+            elif is_cpc18_split:
+                print(f"  Train accuracy: {best_result['train_acc']:.4f}")
+                print(f"  Test accuracy: {best_result['test_acc']:.4f}")
+                print(
+                    f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
+                    f"test: {best_result['test_loglik']:.6f}"
+                )
+            elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
                 print(f"  Test accuracy: {best_result['test_acc']:.4f}")
                 print(
@@ -2935,14 +3225,24 @@ def run_evolution(
             # Add all valid candidates to elite set
             for result in valid_results:
                 program_id = f"iteration_{iteration_step}_candidate_{result['idx']}"
-                if dataset == "cpc18":
+                if is_cpc18_mse:
                     elite_parents.append((
                         result["code"],
-                        result["fitness"],  # fitness = -train_mse
-                        result.get("test_mse", float('inf')),  # test_metric = test_mse
+                        result["fitness"],
+                        result.get("test_mse", float('inf')),
                         program_id,
                         result.get("train_mse", None),
                         result.get("test_mse", None),
+                    ))
+                elif is_cpc18_split:
+                    elite_parents.append((
+                        result["code"],
+                        result["fitness"],
+                        result["test_acc"],
+                        program_id,
+                        None,
+                        None,
+                        result["train_acc"],
                     ))
                 else:
                     elite_parents.append((
@@ -2967,17 +3267,17 @@ def run_evolution(
             
             # Update overall best tracking
             # For CPC18: compare by fitness (-MSE), for others: compare by accuracy
-            if dataset == "cpc18":
+            if is_cpc18_mse:
                 if best_result['fitness'] > overall_best_train["train_fitness"]:
                     overall_best_train = {
                         "train_fitness": best_result['fitness'],
                         "train_mse": best_result['train_mse'],
                         "test_mse": best_result['test_mse'],
-                        "train_accuracy": best_result['train_acc'],  # Keep for debugging
-                        "test_accuracy": best_result['test_acc'],  # Keep for debugging
+                        "train_accuracy": best_result['train_acc'],
+                        "test_accuracy": best_result['test_acc'],
                         "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
-                if best_result['test_mse'] < overall_best_test["test_mse"]:  # Lower test_mse is better
+                if best_result['test_mse'] < overall_best_test["test_mse"]:
                     overall_best_test = {
                         "train_fitness": best_result['fitness'],
                         "train_mse": best_result['train_mse'],
@@ -2986,7 +3286,28 @@ def run_evolution(
                         "test_accuracy": best_result['test_acc'],
                         "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
-            elif dataset == "choice13k":
+            elif is_cpc18_split:
+                if fitness_metric == "loglik":
+                    _train_better2 = best_result["train_loglik"] > overall_best_train["train_loglik"]
+                else:
+                    _train_better2 = best_result["train_acc"] > overall_best_train["train_accuracy"]
+                if _train_better2:
+                    overall_best_train = {
+                        "train_accuracy": best_result["train_acc"],
+                        "test_accuracy": best_result["test_acc"],
+                        "train_loglik": best_result["train_loglik"],
+                        "test_loglik": best_result["test_loglik"],
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                    }
+                if best_result["test_acc"] > overall_best_test["test_accuracy"]:
+                    overall_best_test = {
+                        "train_accuracy": best_result["train_acc"],
+                        "test_accuracy": best_result["test_acc"],
+                        "train_loglik": best_result["train_loglik"],
+                        "test_loglik": best_result["test_loglik"],
+                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                    }
+            elif dataset in {"choice13k", "mixed_gambles"}:
                 if fitness_metric == "loglik":
                     _train_better = best_result["train_loglik"] > overall_best_train["train_loglik"]
                 else:
@@ -3029,7 +3350,7 @@ def run_evolution(
         if valid_results:
             best_program_id = f"iteration_{iteration_step}_candidate_{valid_results[0]['idx']}"
         
-        if dataset == "cpc18":
+        if is_cpc18_mse:
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
@@ -3045,9 +3366,33 @@ def run_evolution(
                     }
                     for r in candidate_results
                 ],
-                "best_train_fitness": best_fitness if valid_results else None,  # -MSE
+                "best_train_fitness": best_fitness if valid_results else None,
                 "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
                 "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
+            }
+        elif is_cpc18_split:
+            metrics = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(valid_results),
+                "best_program_id": best_program_id,
+                "candidate_results": [
+                    {
+                        "idx": r["idx"],
+                        "train_acc": r["train_acc"],
+                        "test_acc": r["test_acc"],
+                        "train_loglik": r.get("train_loglik"),
+                        "test_loglik": r.get("test_loglik"),
+                        "fitness": r.get("fitness"),
+                        "valid": r["valid"],
+                    }
+                    for r in candidate_results
+                ],
+                "best_train_fitness": best_fitness if valid_results else None,
+                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
+                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
+                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
             }
         elif dataset == "choice13k":
             metrics = {
@@ -3095,12 +3440,22 @@ def run_evolution(
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         
         # Save summary
-        if dataset == "cpc18":
+        if is_cpc18_mse:
             summary = {
                 "iteration": iteration_step,
-                "best_train_fitness": best_fitness if valid_results else None,  # -MSE
+                "best_train_fitness": best_fitness if valid_results else None,
                 "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
                 "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
+                "n_valid": len(valid_results),
+            }
+        elif is_cpc18_split:
+            summary = {
+                "iteration": iteration_step,
+                "best_train_fitness": best_fitness if valid_results else None,
+                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
+                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
+                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
                 "n_valid": len(valid_results),
             }
         elif dataset == "choice13k":
@@ -3144,27 +3499,62 @@ def run_evolution(
                         log_dict[f"gw_test_accuracy"] = valid_results[0]["test_acc"]
                         log_dict[f"gw_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         log_dict[f"gw_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-            elif dataset == "cpc18":
+            elif is_cpc18_mse:
                 if all_data_mode:
                     log_dict = {}
                     if valid_results:
-                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness  # -train_mse (higher is better)
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness
                         log_dict[f"p{participant_id}_test_fitness"] = -valid_results[0].get("test_mse", float("inf"))
                 else:
-                    log_dict = {
-                        f"p{participant_id}_n_valid": len(valid_results),
-                    }
+                    log_dict = {f"p{participant_id}_n_valid": len(valid_results)}
                     if valid_results:
-                        # CPC18: log fitness (-MSE) as primary metric, and MSE values
-                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness  # -train_mse (higher is better)
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness
                         log_dict[f"p{participant_id}_train_mse"] = valid_results[0].get("train_mse", None)
                         log_dict[f"p{participant_id}_test_mse"] = valid_results[0].get("test_mse", None)
                         log_dict[f"p{participant_id}_avg_train_fitness"] = np.mean([r["fitness"] for r in valid_results])
-                        log_dict[f"p{participant_id}_avg_train_mse"] = np.mean([r.get("train_mse", float('inf')) for r in valid_results])
-                        log_dict[f"p{participant_id}_avg_test_mse"] = np.mean([r.get("test_mse", float('inf')) for r in valid_results])
-                        # Keep accuracy for debugging (not used for selection)
+                        log_dict[f"p{participant_id}_avg_train_mse"] = np.mean(
+                            [r.get("train_mse", float("inf")) for r in valid_results]
+                        )
+                        log_dict[f"p{participant_id}_avg_test_mse"] = np.mean(
+                            [r.get("test_mse", float("inf")) for r in valid_results]
+                        )
                         log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0].get("train_acc", None)
                         log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0].get("test_acc", None)
+            elif is_cpc18_split:
+                if all_data_mode:
+                    log_dict = {}
+                    if valid_results:
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness
+                        log_dict[f"p{participant_id}_test_fitness"] = (
+                            valid_results[0]["test_loglik"]
+                            if fitness_metric == "loglik"
+                            else valid_results[0]["test_acc"]
+                        )
+                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
+                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
+                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                else:
+                    log_dict = {f"p{participant_id}_n_valid": len(valid_results)}
+                    if valid_results:
+                        log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0]["train_acc"]
+                        log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
+                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
+                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
+                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                        log_dict[f"p{participant_id}_train_fitness"] = best_fitness
+                        log_dict[f"p{participant_id}_test_fitness"] = (
+                            valid_results[0]["test_loglik"]
+                            if fitness_metric == "loglik"
+                            else valid_results[0]["test_acc"]
+                        )
+                        log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean(
+                            [r["train_acc"] for r in valid_results]
+                        )
+                        log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean(
+                            [r["test_acc"] for r in valid_results]
+                        )
             elif dataset == "choice13k":
                 if all_data_mode:
                     log_dict = {}
@@ -3232,7 +3622,7 @@ def run_evolution(
     
     # Check all candidates to find true overall best (in case best wasn't selected as parent)
     for candidate in all_candidate_results:
-        if dataset == "cpc18":
+        if is_cpc18_mse:
             if candidate['fitness'] > overall_best_train["train_fitness"]:
                 overall_best_train = {
                     "train_fitness": candidate['fitness'],
@@ -3240,12 +3630,33 @@ def run_evolution(
                     "test_mse": candidate['test_mse'],
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
                 }
-            if candidate['test_mse'] < overall_best_test["test_mse"]:  # Lower test_mse is better
+            if candidate['test_mse'] < overall_best_test["test_mse"]:
                 overall_best_test = {
                     "train_fitness": candidate['fitness'],
                     "train_mse": candidate['train_mse'],
                     "test_mse": candidate['test_mse'],
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
+                }
+        elif is_cpc18_split:
+            if fitness_metric == "loglik":
+                _better3 = candidate["train_loglik"] > overall_best_train["train_loglik"]
+            else:
+                _better3 = candidate["train_acc"] > overall_best_train["train_accuracy"]
+            if _better3:
+                overall_best_train = {
+                    "train_accuracy": candidate["train_acc"],
+                    "test_accuracy": candidate["test_acc"],
+                    "train_loglik": candidate["train_loglik"],
+                    "test_loglik": candidate["test_loglik"],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
+                }
+            if candidate["test_acc"] > overall_best_test["test_accuracy"]:
+                overall_best_test = {
+                    "train_accuracy": candidate["train_acc"],
+                    "test_accuracy": candidate["test_acc"],
+                    "train_loglik": candidate["train_loglik"],
+                    "test_loglik": candidate["test_loglik"],
+                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
                 }
         elif dataset == "choice13k":
             if fitness_metric == "loglik":
@@ -3282,12 +3693,11 @@ def run_evolution(
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
                 }
     
-    # Create comprehensive results.json
-    if dataset == "cpc18":
+    if is_cpc18_mse or is_cpc18_split:
         results = {
             "baseline": baseline_results,
-            "overall_best_train": overall_best_train,  # Contains train_fitness, train_mse, etc.
-            "overall_best_test": overall_best_test,  # Contains test_mse, etc.
+            "overall_best_train": overall_best_train,
+            "overall_best_test": overall_best_test,
         }
     else:
         results = {
@@ -3337,13 +3747,43 @@ def run_evolution(
             writer.writerow(_round_floats_for_csv_row(summary_row))
     
     if n_iterations > 0:
-        if dataset == "cpc18":
+        if is_cpc18_mse:
             print(f"Final best train MSE: {overall_best_train['train_mse']:.2f} (fitness={overall_best_train['train_fitness']:.2f}) (from {overall_best_train['program_id']})")
             print(f"Final best test MSE: {overall_best_test['test_mse']:.2f} (from {overall_best_test['program_id']})")
             print(f"Baseline train MSE: {baseline_results['train_mse']:.4f}")
             print(f"Baseline test MSE (official): {baseline_results['test_mse']:.4f}")
             print(f"Train MSE improvement: {baseline_results['train_mse'] - overall_best_train['train_mse']:.4f}")
             print(f"Test MSE improvement: {baseline_results['test_mse'] - overall_best_test['test_mse']:.4f}")
+        elif is_cpc18_split:
+            print(
+                f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} "
+                f"(from {overall_best_train['program_id']})"
+            )
+            print(
+                f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} "
+                f"(from {overall_best_test['program_id']})"
+            )
+            print(
+                f"Final best train avg log-likelihood: {overall_best_train['train_loglik']:.6f}, "
+                f"test: {overall_best_test['test_loglik']:.6f}"
+            )
+            print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
+            print(
+                f"Train accuracy improvement: "
+                f"{overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}"
+            )
+            print(
+                f"Test accuracy improvement: "
+                f"{overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}"
+            )
+            print(
+                f"Train avg log-likelihood improvement: "
+                f"{overall_best_train['train_loglik'] - baseline_train_eval['avg_loglik']:.6f}"
+            )
+            print(
+                f"Test avg log-likelihood improvement: "
+                f"{overall_best_test['test_loglik'] - baseline_test_eval['avg_loglik']:.6f}"
+            )
         elif dataset == "choice13k":
             print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
             print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
@@ -3371,16 +3811,43 @@ def run_evolution(
     if save_artifacts:
         print(f"\nResults saved to: {output_path / 'results.json'}")
     
-    # Return summary for participants summary file (just the essentials)
-    if dataset == "cpc18":
+    if is_cpc18_mse:
         result = {
             "participant_id": participant_id,
             "train_mse": overall_best_train['train_mse'],
             "test_mse": overall_best_test['test_mse'],
-            "train_fitness": overall_best_train['train_fitness'],  # -MSE
+            "train_fitness": overall_best_train['train_fitness'],
             "test_fitness": -overall_best_test['test_mse'],
             "seed_program_train_fitness": -baseline_results['train_mse'],
             "seed_program_test_fitness": -baseline_results['test_mse'],
+        }
+    elif is_cpc18_split:
+        result = {
+            "participant_id": participant_id,
+            "train_acc": overall_best_train["train_accuracy"],
+            "test_acc": overall_best_test["test_accuracy"],
+            "train_loglik": overall_best_train["train_loglik"],
+            "test_loglik": overall_best_test["test_loglik"],
+            "train_fitness": (
+                overall_best_train["train_loglik"]
+                if fitness_metric == "loglik"
+                else overall_best_train["train_accuracy"]
+            ),
+            "test_fitness": (
+                overall_best_test["test_loglik"]
+                if fitness_metric == "loglik"
+                else overall_best_test["test_accuracy"]
+            ),
+            "seed_program_train_fitness": (
+                baseline_train_eval["avg_loglik"]
+                if fitness_metric == "loglik"
+                else baseline_train_eval["accuracy"]
+            ),
+            "seed_program_test_fitness": (
+                baseline_test_eval["avg_loglik"]
+                if fitness_metric == "loglik"
+                else baseline_test_eval["accuracy"]
+            ),
         }
     elif dataset == "choice13k":
         result = {
@@ -3844,7 +4311,19 @@ def main():
         type=str,
         default="accuracy",
         choices=["accuracy", "loglik"],
-        help="Choice13k only: fitness for selection (default: accuracy). loglik = mean Bernoulli log-likelihood on train.",
+        help=(
+            "Fitness for selection (default: accuracy). For choice13k, or cpc18 without --cpc18_official_mse, "
+            "loglik = mean Bernoulli log-likelihood on held-out-consistent train; use with --fitness_metric loglik for CPC18 split."
+        ),
+    )
+    parser.add_argument(
+        "--cpc18_official_mse",
+        action="store_true",
+        help=(
+            "CPC18 only: official competition protocol (all trial data, block-level MSE vs Data-to-predict-Track-2). "
+            "Omit (default) for a per-participant held-out problem/trial split with split_ratio/split_seed, "
+            "comparable to mixed_gambles/choice13k; use with --fitness_metric loglik for the Bernoulli log-likelihood line."
+        ),
     )
     parser.add_argument(
         "--split_mode",
@@ -3875,10 +4354,27 @@ def main():
             "Use 0 to disable capping (always use full train set in the prompt; may exceed context limits)."
         ),
     )
+    parser.add_argument(
+        "--max_prompt_trials_per_problem",
+        type=int,
+        default=0,
+        help="Cap serialized train trials per problem in LLM prompts (0 = no per-problem cap).",
+    )
+    parser.add_argument(
+        "--llm_max_tokens",
+        type=int,
+        default=800,
+        help="Max output tokens per candidate generation request (reduces context-overflow failures).",
+    )
 
     args = parser.parse_args()
-    if args.fitness_metric == "loglik" and args.dataset != "choice13k":
-        print("Error: --fitness_metric loglik is only supported with --dataset choice13k.")
+    if args.fitness_metric == "loglik" and args.dataset not in {"choice13k", "mixed_gambles"} and not (
+        args.dataset == "cpc18" and not args.cpc18_official_mse
+    ):
+        print(
+            "Error: --fitness_metric loglik is only supported for --dataset choice13k/mixed_gambles, "
+            "or for cpc18 without --cpc18_official_mse (held-out split mode)."
+        )
         return
     if not (0.0 < args.split_ratio < 1.0):
         print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
@@ -3888,6 +4384,12 @@ def main():
         return
     if args.max_prompt_train_trials < 0:
         print("Error: --max_prompt_train_trials must be >= 0 (0 = no cap).")
+        return
+    if args.max_prompt_trials_per_problem < 0:
+        print("Error: --max_prompt_trials_per_problem must be >= 0.")
+        return
+    if args.llm_max_tokens < 64:
+        print("Error: --llm_max_tokens must be >= 64.")
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
@@ -3988,6 +4490,12 @@ def main():
         print(
             f"Choice13k split settings: split_mode={args.split_mode}, "
             f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}"
+        )
+    if args.dataset == "cpc18":
+        print(
+            f"CPC18: official_mse={args.cpc18_official_mse}, "
+            f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}, "
+            f"fitness_metric={args.fitness_metric}"
         )
     
     # Create base run directory and save seed program once
@@ -4107,6 +4615,8 @@ def main():
                 choice13k_test_trials_override=test_trials,
                 choice13k_simple_logging=True,
                 max_prompt_train_trials=args.max_prompt_train_trials,
+                max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                llm_max_tokens=args.llm_max_tokens,
             )
         finally:
             if wandb is not None:
@@ -4154,6 +4664,9 @@ def main():
                     split_ratio=args.split_ratio,
                     split_seed=args.split_seed,
                     max_prompt_train_trials=args.max_prompt_train_trials,
+                    max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                    llm_max_tokens=args.llm_max_tokens,
+                    cpc18_official_mse=args.cpc18_official_mse,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -4463,6 +4976,8 @@ def main():
                         split_ratio=args.split_ratio,
                         split_seed=args.split_seed,
                         max_prompt_train_trials=args.max_prompt_train_trials,
+                        max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                        llm_max_tokens=args.llm_max_tokens,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -4580,6 +5095,9 @@ def main():
                         split_ratio=args.split_ratio,
                         split_seed=args.split_seed,
                         max_prompt_train_trials=args.max_prompt_train_trials,
+                        max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                        llm_max_tokens=args.llm_max_tokens,
+                        cpc18_official_mse=args.cpc18_official_mse,
                     )
                 
                 # Update participants summary after each participant completes

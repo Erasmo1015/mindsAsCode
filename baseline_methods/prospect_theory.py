@@ -820,7 +820,7 @@ def main() -> None:
                         data_path=cpc18_data_path, participant_id=participant_id
                     )
                     train_trials, test_trials, _ = cpc18_mod.split_cpc18_trials(
-                        participant_data, train_ratio=0.8
+                        participant_data, train_ratio=0.8, cpc18_official_mse=True
                     )
                     if len(train_trials) > 0 and len(test_trials) > 0:
                         valid_participants.append(participant_id)
@@ -940,7 +940,7 @@ def main() -> None:
                 data_path=cpc18_data_path, participant_id=participant_id
             )
             train_trials, test_trials, test_observed_blocks = cpc18_mod.split_cpc18_trials(
-                participant_data, train_ratio=0.8
+                participant_data, train_ratio=0.8, cpc18_official_mse=True
             )
         elif args.dataset == "mixed_gambles":
             csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
