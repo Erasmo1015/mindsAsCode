@@ -867,7 +867,7 @@ def _evaluate_participant(
     train_trials = _prepare_trials_for_centaur(args.dataset, train_trials_raw)
     test_trials = _prepare_trials_for_centaur(args.dataset, test_trials_raw)
 
-    if args.dataset == "choice13k":
+    if args.dataset in {"choice13k", "mixed_gambles"}:
         train_eval = evaluate_centaur_on_trials(
             chooser,
             train_trials,

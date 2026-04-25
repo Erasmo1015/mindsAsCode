@@ -154,6 +154,108 @@ def _patch_openevolve_for_gemma_system_role() -> None:
     oe_openai.OpenAILLM._mindsascode_gemma_patch = True
 
 
+def _patch_openevolve_for_minimal_prompt() -> None:
+    """
+    Wrapper-layer runtime patch:
+    build a compact mutation prompt that keeps only essential context:
+    - objective/system instruction
+    - current program
+    - top parent programs (num_top_programs)
+    This avoids OpenEvolve template overhead (history blocks, repeated metrics prose,
+    artifact rendering) that frequently causes context overflow.
+    """
+    import openevolve.prompt.sampler as oe_sampler  # type: ignore
+
+    if getattr(oe_sampler.PromptSampler, "_mindsascode_min_prompt_patch", False):
+        return
+
+    def _resolve_system_message(self) -> str:
+        if getattr(self, "system_template_override", None):
+            key = str(self.system_template_override)
+            try:
+                return str(self.template_manager.get_template(key))
+            except Exception:
+                return key
+        msg = str(getattr(self.config, "system_message", "") or "")
+        if msg in getattr(self.template_manager, "templates", {}):
+            try:
+                return str(self.template_manager.get_template(msg))
+            except Exception:
+                return msg
+        return msg
+
+    def _patched_build_prompt(
+        self,
+        current_program: str = "",
+        parent_program: str = "",
+        program_metrics: Dict[str, float] = {},
+        previous_programs: List[Dict[str, Any]] = [],
+        top_programs: List[Dict[str, Any]] = [],
+        inspirations: List[Dict[str, Any]] = [],
+        language: str = "python",
+        evolution_round: int = 0,
+        diff_based_evolution: bool = True,
+        template_key: Optional[str] = None,
+        program_artifacts: Optional[Dict[str, Any]] = None,
+        feature_dimensions: Optional[List[str]] = None,
+        current_changes_description: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Dict[str, str]:
+        del parent_program, previous_programs, inspirations, evolution_round
+        del diff_based_evolution, template_key, program_artifacts
+        del feature_dimensions, current_changes_description, kwargs
+
+        system_message = _resolve_system_message(self).strip()
+        if not system_message:
+            system_message = (
+                "You are improving choose(problem, history). "
+                "Return only runnable Python code."
+            )
+
+        n_top = int(getattr(self.config, "num_top_programs", 3))
+        selected_top = list(top_programs[: max(0, n_top)])
+
+        lines: List[str] = []
+        lines.append("# Task")
+        lines.append(
+            "Improve the policy while preserving the exact signature `choose(problem, history)`."
+        )
+        if isinstance(program_metrics, dict):
+            score = program_metrics.get("combined_score", None)
+            if isinstance(score, (int, float)):
+                lines.append(f"Current combined_score: {float(score):.6f}")
+        lines.append("")
+
+        if selected_top:
+            lines.append("# Parent Programs")
+            for i, prog in enumerate(selected_top, start=1):
+                code = str(prog.get("code", "") or "").strip()
+                if not code:
+                    continue
+                lines.append(f"## Parent {i}")
+                lines.append(f"```{language}")
+                lines.append(code)
+                lines.append("```")
+                lines.append("")
+
+        lines.append("# Current Program")
+        lines.append(f"```{language}")
+        lines.append(str(current_program or ""))
+        lines.append("```")
+        lines.append("")
+
+        lines.append("# Output Rules")
+        lines.append("- Output only complete runnable Python code.")
+        lines.append("- Do not include markdown fences or explanations.")
+        lines.append("- Keep `def choose(problem, history):`.")
+
+        user_message = "\n".join(lines).strip() + "\n"
+        return {"system": system_message, "user": user_message}
+
+    oe_sampler.PromptSampler.build_prompt = _patched_build_prompt
+    oe_sampler.PromptSampler._mindsascode_min_prompt_patch = True
+
+
 def _to_builtin(x: Any) -> Any:
     """Convert numpy scalars/containers into JSON-serializable builtin types."""
     if isinstance(x, dict):
@@ -681,6 +783,7 @@ def _build_participant_evaluator_code(
 ) -> str:
     return textwrap.dedent(
         f"""
+        import ast
         import importlib.util
         import json
         import math
@@ -723,6 +826,44 @@ def _build_participant_evaluator_code(
 
 
         def _guard_candidate_file(program_path: str) -> str:
+            def _choose_has_explicit_final_return(src: str) -> bool:
+                try:
+                    tree = ast.parse(src)
+                except SyntaxError:
+                    return False
+                choose_node = None
+                for node in tree.body:
+                    if isinstance(node, ast.FunctionDef) and node.name == "choose":
+                        choose_node = node
+                        break
+                if choose_node is None or not choose_node.body:
+                    return False
+                # Conservative check: require an explicit trailing return in choose().
+                return isinstance(choose_node.body[-1], ast.Return)
+
+            def _append_choose_fallback_return(src: str) -> str:
+                lines = src.splitlines()
+                def_line_idx = None
+                def_indent = ""
+                for i, line in enumerate(lines):
+                    stripped = line.lstrip()
+                    if stripped.startswith("def choose("):
+                        def_line_idx = i
+                        def_indent = line[: len(line) - len(stripped)]
+                        break
+                if def_line_idx is None:
+                    return src
+
+                body_indent = def_indent + "    "
+                fallback_line = body_indent + "return 0.5"
+                # Avoid duplicate fallback if already present at end.
+                if lines and lines[-1].strip() == "return 0.5":
+                    return src
+                if lines and lines[-1].strip() != "":
+                    lines.append("")
+                lines.append(fallback_line)
+                return "\\n".join(lines).rstrip() + "\\n"
+
             def _salvage_by_trimming_tail(src: str) -> str | None:
                 lines = src.splitlines()
                 # Trim broken trailing fragments until compile succeeds.
@@ -763,6 +904,16 @@ def _build_participant_evaluator_code(
                     candidate = salvaged
             if candidate != raw:
                 p.write_text(candidate, encoding="utf-8")
+            # Ensure choose() cannot silently fall through and return None.
+            if not _choose_has_explicit_final_return(candidate):
+                candidate2 = _append_choose_fallback_return(candidate)
+                try:
+                    compile(candidate2, str(p), "exec")
+                    candidate = candidate2
+                    p.write_text(candidate, encoding="utf-8")
+                except SyntaxError:
+                    # Keep original candidate if fallback insertion somehow breaks syntax.
+                    pass
             return program_path
 
 
@@ -877,7 +1028,7 @@ def _build_participant_evaluator_code(
                 if choose_fn is None:
                     raise AttributeError("Candidate program must define choose(problem, history).")
 
-                if DATASET == "choice13k":
+                if DATASET in {"choice13k", "mixed_gambles"}:
                     train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
                     test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
                     combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
@@ -944,7 +1095,24 @@ def _build_participant_evaluator_code(
             except Exception as e:
                 print("[FATAL] evaluator failure:", repr(e), flush=True)
                 traceback.print_exc()
-                raise RuntimeError(f"Evaluator hard failure for candidate: {e}") from e
+                _pl = None
+                try:
+                    _pl = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+                except OSError:
+                    _pl = {{}}
+                cpc18_off = bool(_pl.get("cpc18_official_mse", True))
+                _tl = -1.0e9 if (DATASET in {"choice13k", "mixed_gambles"} or (DATASET == "cpc18" and (not cpc18_off))) else None
+                metrics = {{
+                    "combined_score": -1.0e9,
+                    "train_loglik": _tl,
+                    "test_loglik": _tl,
+                    "train_acc": 0.0,
+                    "test_acc": 0.0,
+                    "train_mse": float("inf") if DATASET == "cpc18" and cpc18_off else (0.0 if DATASET == "cpc18" else None),
+                    "test_mse": float("inf") if DATASET == "cpc18" and cpc18_off else (0.0 if DATASET == "cpc18" else None),
+                    "fatal_failure": 1.0,
+                }}
+                return EvaluationResult(metrics=metrics, artifacts=art)
         """
     ).strip() + "\n"
 
@@ -975,14 +1143,13 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
     prompt_cfg: Dict[str, Any] = {
         "num_top_programs": int(args.prompt_num_top_programs),
         "num_diverse_programs": int(args.prompt_num_diverse_programs),
-        "include_artifacts": True,
+        "include_artifacts": False,
         "max_artifact_bytes": int(args.max_artifact_bytes),
     }
 
     prompt_cfg["system_message"] = (
         f"You are improving a {args.dataset} choose(problem, history) policy. "
-        "The user message includes training-trial observations "
-        f"under artifacts — use them to {objective} "
+        f"Use provided code context to {objective} "
         "Output ONLY runnable Python code (no explanations, no markdown fences, no preamble), "
         "preserving the choose(problem, history) signature."
     )
@@ -1086,6 +1253,7 @@ def _run_one_openevolve(
 ) -> Dict[str, Any]:
     _ensure_openevolve_importable()
     _patch_openevolve_for_gemma_system_role()
+    _patch_openevolve_for_minimal_prompt()
     from openevolve import OpenEvolve
     from openevolve.config import load_config
 
@@ -1161,7 +1329,7 @@ def _run_one_openevolve(
     combined_score = float(metrics.get("combined_score", -1e9))
     fatal_flag = float(metrics.get("fatal_failure", 0.0))
 
-    if args.dataset == "choice13k" or (args.dataset == "cpc18" and not args.cpc18_official_mse):
+    if args.dataset in {"choice13k", "mixed_gambles"} or (args.dataset == "cpc18" and not args.cpc18_official_mse):
         hard_fail = (
             fatal_flag >= 0.5
             or train_ll is None
@@ -1180,7 +1348,7 @@ def _run_one_openevolve(
         if not args.allow_failure:
             raise RuntimeError(msg)
 
-    if args.dataset == "choice13k":
+    if args.dataset in {"choice13k", "mixed_gambles"}:
         print(
             f"[INFO] participant {participant_tag}: train_loglik={float(train_ll):.6f}, "
             f"test_loglik={float(test_ll):.6f}, train_acc={train_acc:.4f}, test_acc={test_acc:.4f}, "

@@ -3021,7 +3021,7 @@ def run_evolution(
                 try:
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
-                except AssertionError:
+                except (AssertionError, TypeError, ValueError):
                     candidate_results.append({
                         "idx": idx,
                         "code": code,
@@ -3299,7 +3299,11 @@ def run_evolution(
                         "test_loglik": best_result["test_loglik"],
                         "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
                     }
-                if best_result["test_acc"] > overall_best_test["test_accuracy"]:
+                if fitness_metric == "loglik":
+                    _test_better2 = best_result["test_loglik"] > overall_best_test["test_loglik"]
+                else:
+                    _test_better2 = best_result["test_acc"] > overall_best_test["test_accuracy"]
+                if _test_better2:
                     overall_best_test = {
                         "train_accuracy": best_result["train_acc"],
                         "test_accuracy": best_result["test_acc"],
@@ -3320,7 +3324,11 @@ def run_evolution(
                         "test_loglik": best_result["test_loglik"],
                         "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
                     }
-                if best_result["test_acc"] > overall_best_test["test_accuracy"]:
+                if fitness_metric == "loglik":
+                    _test_better = best_result["test_loglik"] > overall_best_test["test_loglik"]
+                else:
+                    _test_better = best_result["test_acc"] > overall_best_test["test_accuracy"]
+                if _test_better:
                     overall_best_test = {
                         "train_accuracy": best_result["train_acc"],
                         "test_accuracy": best_result["test_acc"],
@@ -3658,7 +3666,7 @@ def run_evolution(
                     "test_loglik": candidate["test_loglik"],
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
                 }
-        elif dataset == "choice13k":
+        elif dataset in {"choice13k", "mixed_gambles"}:
             if fitness_metric == "loglik":
                 _better = candidate["train_loglik"] > overall_best_train["train_loglik"]
             else:
@@ -3876,6 +3884,18 @@ def run_evolution(
                 if fitness_metric == "loglik"
                 else baseline_results["test_accuracy"]
             ),
+        }
+    elif dataset == "mixed_gambles" and fitness_metric == "loglik":
+        result = {
+            "participant_id": participant_id,
+            "train_acc": overall_best_train["train_accuracy"],
+            "test_acc": overall_best_test["test_accuracy"],
+            "train_loglik": overall_best_train["train_loglik"],
+            "test_loglik": overall_best_test["test_loglik"],
+            "train_fitness": overall_best_train["train_loglik"],
+            "test_fitness": overall_best_test["test_loglik"],
+            "seed_program_train_fitness": baseline_results["train_loglik"],
+            "seed_program_test_fitness": baseline_results["test_loglik"],
         }
     else:
         result = {
