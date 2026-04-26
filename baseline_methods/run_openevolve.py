@@ -580,7 +580,7 @@ def _format_choice13k_train_trials_for_prompt(
 
     lines = [
         "Choice13k TRAIN split — reference for improving choose(problem, history).",
-        "Fitness uses mean Bernoulli log-likelihood of P(chosen option) on these trials only.",
+        "Fitness uses mean Bernoulli log-likelihood of P(action=1) on these trials only.",
         "action 0 = option A, action 1 = option B.",
         "",
     ]
@@ -1206,17 +1206,47 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
         "max_artifact_bytes": int(args.max_artifact_bytes),
     }
 
-    prompt_cfg["system_message"] = (
+    system_message = (
         f"You are improving a {args.dataset} choose(problem, history) policy. "
         f"Use provided code context to {objective} "
         "Output ONLY runnable Python code (no explanations, no markdown fences, no preamble), "
         "preserving the choose(problem, history) signature."
     )
+    if args.fitness_metric == "loglik":
+        prompt_dataset = None
+        if args.dataset == "choice13k":
+            prompt_dataset = "choice13k"
+        elif args.dataset == "mixed_gambles":
+            prompt_dataset = "mixed_gambles"
+        elif args.dataset == "cpc18" and not getattr(args, "cpc18_official_mse", False):
+            prompt_dataset = "cpc18"
+        if prompt_dataset is not None:
+            prompt_root = REPO_ROOT / "prompts" / "Template_evo" / prompt_dataset / "non_strict" / "loglik"
+            infer_path = prompt_root / "infer_single_choice.txt"
+            template_path = prompt_root / "single_code_template.txt"
+            try:
+                infer_text = infer_path.read_text(encoding="utf-8").strip()
+                template_text = template_path.read_text(encoding="utf-8").strip()
+                system_message = (
+                    f"{system_message}\n\n"
+                    "# Dataset-specific loglik prompt guidance\n"
+                    f"{infer_text}\n\n"
+                    "# Dataset-specific loglik code template\n"
+                    f"{template_text}"
+                )
+            except OSError as e:
+                print(
+                    f"[WARN] Could not load dataset-specific loglik prompts from {prompt_root}: {e}",
+                    flush=True,
+                )
+    prompt_cfg["system_message"] = system_message
     prompt_cfg["evaluator_system_message"] = "You are a strict code evaluator."
 
     return {
         "max_iterations": int(args.n_iterations),
-        "checkpoint_interval": max(1, min(20, int(args.n_iterations))),
+        # Keep per-iteration checkpoints so we can emit W&B time series points
+        # for each participant without relying on OpenEvolve internal callbacks.
+        "checkpoint_interval": 1,
         "log_level": "INFO",
         "diff_based_evolution": False,
         "max_code_length": 20000,
@@ -1309,6 +1339,7 @@ def _run_one_openevolve(
     participant_tag: str,
     run_root: Path,
     args: argparse.Namespace,
+    wandb: Optional[Any] = None,
 ) -> Dict[str, Any]:
     _ensure_openevolve_importable()
     _patch_openevolve_for_gemma_system_role()
@@ -1377,6 +1408,69 @@ def _run_one_openevolve(
 
     best_code_path = part_dir / "best_program.py"
     best_code_path.write_text(best_program.code, encoding="utf-8")
+
+    # Emit per-iteration W&B series from checkpoint snapshots.
+    # OpenEvolve writes best_program_info.json for each checkpoint_k.
+    if wandb is not None:
+        pid_key = f"p{participant_tag}"
+        iter_key = f"{pid_key}_iter"
+        wandb.define_metric(iter_key)
+        wandb.define_metric(f"{pid_key}_*", step_metric=iter_key)
+        ckpt_dir = output_dir / "checkpoints"
+        checkpoint_rows: List[Tuple[int, Dict[str, Any]]] = []
+        if ckpt_dir.exists():
+            for cp in ckpt_dir.iterdir():
+                if (not cp.is_dir()) or (not cp.name.startswith("checkpoint_")):
+                    continue
+                info_path = cp / "best_program_info.json"
+                if not info_path.exists():
+                    continue
+                try:
+                    info = json.loads(info_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                iter_idx = info.get("current_iteration", None)
+                if iter_idx is None:
+                    continue
+                try:
+                    iter_idx_int = int(iter_idx)
+                except (TypeError, ValueError):
+                    continue
+                metrics_i = info.get("metrics", {}) or {}
+                checkpoint_rows.append((iter_idx_int, metrics_i))
+        checkpoint_rows.sort(key=lambda x: x[0])
+        for iter_idx, m in checkpoint_rows:
+            train_fitness_i = m.get("combined_score", None)
+            test_fitness_i = m.get("test_loglik", None)
+            if args.dataset in {"choice13k", "mixed_gambles"}:
+                if args.fitness_metric == "loglik":
+                    train_fitness_i = m.get("train_loglik", train_fitness_i)
+                    test_fitness_i = m.get("test_loglik", test_fitness_i)
+                else:
+                    train_fitness_i = m.get("train_acc", train_fitness_i)
+                    test_fitness_i = m.get("test_acc", test_fitness_i)
+            elif args.dataset == "cpc18":
+                if args.cpc18_official_mse:
+                    tm = m.get("test_mse", None)
+                    test_fitness_i = (-float(tm)) if tm is not None else None
+                    train_fitness_i = m.get("combined_score", train_fitness_i)
+                elif args.fitness_metric == "loglik":
+                    train_fitness_i = m.get("train_loglik", train_fitness_i)
+                    test_fitness_i = m.get("test_loglik", test_fitness_i)
+                else:
+                    train_fitness_i = m.get("combined_score", train_fitness_i)
+                    test_fitness_i = m.get("test_acc", test_fitness_i)
+            payload = {
+                iter_key: iter_idx,
+                f"{pid_key}_train_fitness": train_fitness_i,
+                f"{pid_key}_test_fitness": test_fitness_i,
+                f"{pid_key}_train_loglik": m.get("train_loglik", None),
+                f"{pid_key}_test_loglik": m.get("test_loglik", None),
+                f"{pid_key}_train_accuracy": m.get("train_acc", None),
+                f"{pid_key}_test_accuracy": m.get("test_acc", None),
+                f"{pid_key}_n_valid": m.get("train_n", None),
+            }
+            wandb.log(payload)
 
     metrics = dict(best_program.metrics or {})
     raw_train_ll = metrics.get("train_loglik", None)
@@ -1692,6 +1786,7 @@ def main() -> None:
                 participant_tag="0",
                 run_root=base_run_dir,
                 args=args,
+                wandb=wandb,
             )
             row = {
                 "participant_id": 0,
@@ -1722,6 +1817,7 @@ def main() -> None:
                     participant_tag=str(pid),
                     run_root=base_run_dir,
                     args=args,
+                    wandb=wandb,
                 )
                 participant_details.append(
                     {
@@ -1740,16 +1836,16 @@ def main() -> None:
                 if wandb is not None:
                     wandb.log(
                         {
-                            "participant_id": pid,
-                            "train_fitness": result["train_fitness"],
-                            "test_fitness": result["test_fitness"],
-                            "train_loglik": result["train_loglik"],
-                            "test_loglik": result["test_loglik"],
-                            "train_acc": result["train_acc"],
-                            "test_acc": result["test_acc"],
-                            "train_mse": result["train_mse"],
-                            "test_mse": result["test_mse"],
-                            "fatal_failure": result["fatal_failure"],
+                            "final/participant_id": pid,
+                            "final/train_fitness": result["train_fitness"],
+                            "final/test_fitness": result["test_fitness"],
+                            "final/train_loglik": result["train_loglik"],
+                            "final/test_loglik": result["test_loglik"],
+                            "final/train_acc": result["train_acc"],
+                            "final/test_acc": result["test_acc"],
+                            "final/train_mse": result["train_mse"],
+                            "final/test_mse": result["test_mse"],
+                            "final/fatal_failure": result["fatal_failure"],
                         }
                     )
             print(f"Wrote CSVs under {base_run_dir}")
@@ -1774,6 +1870,7 @@ def main() -> None:
                 participant_tag=str(pid),
                 run_root=base_run_dir,
                 args=args,
+                wandb=wandb,
             )
             summ = {
                 "participant_id": pid,
@@ -1824,16 +1921,16 @@ def main() -> None:
             if wandb is not None:
                 wandb.log(
                     {
-                        "participant_id": pid,
-                        "train_fitness": result["train_fitness"],
-                        "test_fitness": result["test_fitness"],
-                        "train_loglik": result["train_loglik"],
-                        "test_loglik": result["test_loglik"],
-                        "train_acc": result["train_acc"],
-                        "test_acc": result["test_acc"],
-                        "train_mse": result["train_mse"],
-                        "test_mse": result["test_mse"],
-                        "fatal_failure": result["fatal_failure"],
+                        "final/participant_id": pid,
+                        "final/train_fitness": result["train_fitness"],
+                        "final/test_fitness": result["test_fitness"],
+                        "final/train_loglik": result["train_loglik"],
+                        "final/test_loglik": result["test_loglik"],
+                        "final/train_acc": result["train_acc"],
+                        "final/test_acc": result["test_acc"],
+                        "final/train_mse": result["train_mse"],
+                        "final/test_mse": result["test_mse"],
+                        "final/fatal_failure": result["fatal_failure"],
                     }
                 )
 

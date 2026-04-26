@@ -8,6 +8,13 @@ Local vLLM mode
   - Added prompt-side per-problem cap: `--max_prompt_trials_per_problem` (0 disables, scripts use 10) for TE non-strict and OpenEvolve.
   - OpenEvolve prompt artifacts now omit serialized per-trial history by default (`--max_history_items_per_trial 0` in H100 scripts) to reduce token pressure.
   - CPC18 valid participants were checked: all have 5 problems (no single-problem participants in current valid-id list).
+  - Loglik fixes (TE + OpenEvolve):
+    - Unified loglik return semantics to `P(action=1)` and aligned wording/prompts accordingly (choice13k/cpc18 held-out/mixed_gambles).
+    - TE non-strict now uses dataset-specific loglik prompt folders for `cpc18` and `mixed_gambles` (instead of reusing choice13k loglik prompts).
+    - OpenEvolve now injects dataset-specific loglik prompt guidance from `prompts/Template_evo/<dataset>/non_strict/loglik/` into generation-time system guidance.
+    - Updated TE and OpenEvolve cluster scripts to use renewed loglik seeds:
+      - `persona_code_example/cpc18/prospect_theory.py`
+      - `persona_code_example/mixed_gambles/prospect_theory.py`
 
 - Start your local server (example): `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000`.
 - Run with the new mode switch to route LLM calls externally:  
