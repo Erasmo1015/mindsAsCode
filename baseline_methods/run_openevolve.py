@@ -644,6 +644,7 @@ def _format_cpc18_train_trials_for_prompt(
 def _format_mixed_gambles_train_trials_for_prompt(
     trials: List[Dict[str, Any]],
     *,
+    fitness_metric: str,
     max_trials: int,
     rng_seed: int,
     max_history_items_per_trial: int,  # kept for shared signature
@@ -659,9 +660,16 @@ def _format_mixed_gambles_train_trials_for_prompt(
     else:
         order = list(range(n))
 
+    if fitness_metric == "loglik":
+        objective_line = (
+            "Fitness uses mean Bernoulli log-likelihood of P(action=1) on train trials "
+            "(higher is better)."
+        )
+    else:
+        objective_line = "Optimize train accuracy (action 0/1)."
     lines = [
         "Mixed Gambles TRAIN trials — improve choose(problem, history).",
-        "Optimize train accuracy (action 0/1).",
+        objective_line,
         "action 0 = gamble option, action 1 = certain option.",
         "",
     ]
@@ -681,6 +689,7 @@ def _format_mixed_gambles_train_trials_for_prompt(
 def _write_train_trials_prompt_file(
     *,
     dataset: str,
+    fitness_metric: str,
     path: Path,
     train_trials: List[Dict[str, Any]],
     max_prompt_train_trials: int,
@@ -733,6 +742,7 @@ def _write_train_trials_prompt_file(
     elif dataset == "mixed_gambles":
         body = _format_mixed_gambles_train_trials_for_prompt(
             train_trials,
+            fitness_metric=fitness_metric,
             max_trials=max_prompt_train_trials,
             rng_seed=prompt_train_trials_seed,
             max_history_items_per_trial=max_history_items_per_trial,
@@ -1276,6 +1286,7 @@ def _run_one_openevolve(
     data_path.write_text(json.dumps(data_payload), encoding="utf-8")
     _write_train_trials_prompt_file(
         dataset=args.dataset,
+        fitness_metric=args.fitness_metric,
         path=train_trials_prompt_path,
         train_trials=train_trials,
         max_prompt_train_trials=int(args.max_prompt_train_trials),

@@ -2128,8 +2128,22 @@ def generate_program_variants(
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "infer_single_choice.txt")
         code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "non_strict", "single_code_template.txt")
     elif dataset == "mixed_gambles":
-        prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "infer_single_choice.txt")
-        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "single_code_template.txt")
+        if fitness_metric == "loglik":
+            # Log-likelihood fitness requires probabilistic outputs (P(action=1)).
+            # Reuse the loglik prompt/template that enforces float outputs in [0,1].
+            prompt_path = os.path.join(
+                PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "infer_single_choice.txt"
+            )
+            code_template_path = os.path.join(
+                PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "single_code_template.txt"
+            )
+        else:
+            prompt_path = os.path.join(
+                PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "infer_single_choice.txt"
+            )
+            code_template_path = os.path.join(
+                PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "non_strict", "single_code_template.txt"
+            )
     else:
         if fitness_metric == "loglik":
             prompt_path = os.path.join(
@@ -2149,7 +2163,52 @@ def generate_program_variants(
         print(f"Warning: Could not load prompt files: {e}")
         print("Falling back to hardcoded prompts.")
         # Fallback to hardcoded prompts
-        base_prompt = """You are given observations of human choices in risky-gamble problems.
+        if fitness_metric == "loglik":
+            base_prompt = """You are given observations of human choices in risky-gamble problems.
+Each problem presents two gambles: Option A and Option B. A gamble has outcomes and their probabilities (percent).
+You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
+
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
+
+def choose(problem, history):
+    \"\"\"
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys: e.g., ["A","B"]
+        - has_feedback: bool
+    history: list of dicts with keys
+        - action: int (0 for A, 1 for B)
+        - feedback: float or None
+    return: float, probability of choosing option 1 (Option B)
+    \"\"\"
+
+Constraints:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Return a single float in [0, 1].
+- The returned value must be the probability of choosing option 1 (Option B).
+- Higher returned values should mean the participant is more likely to choose Option B.
+- Do not sample or use randomness.
+
+Provide only the code for choose(...) as a complete function body.
+"""
+            code_template = """
+def choose(problem, history):
+    \"\"\"
+    problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
+    history: list of dicts with keys action (int) and feedback (float or None)
+    return: float, probability of choosing option 1 (Option B)
+    \"\"\"
+    # Write your decision logic here.
+    # You can use probabilities, rewards, and history.
+    # Must return a single float in [0, 1].
+    # The returned value is the probability of choosing Option B (action 1).
+    return 0.5
+"""
+        else:
+            base_prompt = """You are given observations of human choices in risky-gamble problems.
 Each problem presents two gambles: Option A and Option B. A gamble has outcomes and their probabilities (percent).
 You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
 
@@ -2175,7 +2234,7 @@ Constraints:
 
 Provide only the code for choose(...) as a complete function body.
 """
-        code_template = """
+            code_template = """
 def choose(problem, history):
     \"\"\"
     problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
@@ -2226,10 +2285,21 @@ def choose(problem, history):
                 mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
                 parent_context += f"\nParent {i+1}{mse_str}:\n```python\n{parent_program}\n```\n"
             else:
-                # For Choice13k: show accuracy
-                acc = parent_train_accuracies[i] if parent_train_accuracies and i < len(parent_train_accuracies) else None
-                acc_str = f" (train_acc: {acc:.4f})" if acc is not None else ""
-                parent_context += f"\nParent {i+1}{acc_str}:\n```python\n{parent_program}\n```\n"
+                parent_metric = (
+                    parent_train_accuracies[i]
+                    if parent_train_accuracies and i < len(parent_train_accuracies)
+                    else None
+                )
+                if parent_metric is not None:
+                    metric_label = (
+                        "train_loglik"
+                        if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}
+                        else "train_acc"
+                    )
+                    metric_str = f" ({metric_label}: {parent_metric:.4f})"
+                else:
+                    metric_str = ""
+                parent_context += f"\nParent {i+1}{metric_str}:\n```python\n{parent_program}\n```\n"
         
         if dataset == "cpc18" and cpc18_official_mse and parent_train_mses:
             avg_mse = sum(parent_train_mses) / len(parent_train_mses)
@@ -2771,7 +2841,10 @@ def run_evolution(
         else:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
-                print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
+                if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}:
+                    print(f"  Parent {i+1}: {prog_id} (train_loglik={fitness:.4f}, test_acc={test_acc:.4f})")
+                else:
+                    print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
         
         parent_train_accs = None
         parent_train_mses = None
@@ -2780,7 +2853,11 @@ def run_evolution(
             parent_train_mses = [p[4] for p in selected_parents if p[4] is not None]
             parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
         else:
-            parent_train_accs = [p[6] for p in selected_parents]
+            # In loglik mode, feed train fitness (log-likelihood) into prompt context.
+            if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}:
+                parent_train_accs = [p[1] for p in selected_parents]
+            else:
+                parent_train_accs = [p[6] for p in selected_parents]
         
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
@@ -2834,7 +2911,7 @@ def run_evolution(
                     "test_acc": 0.0,
                     "valid": False,
                 }
-                if dataset == "choice13k" or is_cpc18_split:
+                if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
                     empty_row["train_loglik"] = float("-inf")
                     empty_row["test_loglik"] = float("-inf")
                     empty_row["fitness"] = float("-inf") if fitness_metric == "loglik" else 0.0
@@ -3668,23 +3745,24 @@ def run_evolution(
                 }
         elif dataset in {"choice13k", "mixed_gambles"}:
             if fitness_metric == "loglik":
-                _better = candidate["train_loglik"] > overall_best_train["train_loglik"]
+                candidate_train_loglik = candidate.get("train_loglik", float("-inf"))
+                _better = candidate_train_loglik > overall_best_train["train_loglik"]
             else:
                 _better = candidate["train_acc"] > overall_best_train["train_accuracy"]
             if _better:
                 overall_best_train = {
                     "train_accuracy": candidate["train_acc"],
                     "test_accuracy": candidate["test_acc"],
-                    "train_loglik": candidate["train_loglik"],
-                    "test_loglik": candidate["test_loglik"],
+                    "train_loglik": candidate.get("train_loglik", float("-inf")),
+                    "test_loglik": candidate.get("test_loglik", float("-inf")),
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
                 }
             if candidate["test_acc"] > overall_best_test["test_accuracy"]:
                 overall_best_test = {
                     "train_accuracy": candidate["train_acc"],
                     "test_accuracy": candidate["test_acc"],
-                    "train_loglik": candidate["train_loglik"],
-                    "test_loglik": candidate["test_loglik"],
+                    "train_loglik": candidate.get("train_loglik", float("-inf")),
+                    "test_loglik": candidate.get("test_loglik", float("-inf")),
                     "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
                 }
         else:
