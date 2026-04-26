@@ -790,6 +790,7 @@ def _build_participant_evaluator_code(
     train_trials_prompt_path: Path,
     dataset: str,
     fitness_metric: str,
+    n_eval_seeds: int,
 ) -> str:
     return textwrap.dedent(
         f"""
@@ -807,6 +808,7 @@ def _build_participant_evaluator_code(
         TRAIN_PROMPT_PATH = Path(r\"{str(train_trials_prompt_path)}\")
         DATASET = {dataset!r}
         FITNESS_METRIC = {fitness_metric!r}
+        N_EVAL_SEEDS = {int(n_eval_seeds)}
 
 
         def _extract_python_candidate(text: str) -> str:
@@ -1039,8 +1041,21 @@ def _build_participant_evaluator_code(
                     raise AttributeError("Candidate program must define choose(problem, history).")
 
                 if DATASET in {"choice13k", "mixed_gambles"}:
-                    train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
-                    test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
+                    train_lls, train_accs = [], []
+                    test_lls, test_accs = [], []
+                    train_n = float(len(train_trials))
+                    test_n = float(len(test_trials))
+                    for seed in range(max(1, int(N_EVAL_SEEDS))):
+                        train_ll, train_acc, _ = _eval_trials(choose_fn, train_trials)
+                        test_ll, test_acc, _ = _eval_trials(choose_fn, test_trials)
+                        train_lls.append(float(train_ll))
+                        train_accs.append(float(train_acc))
+                        test_lls.append(float(test_ll))
+                        test_accs.append(float(test_acc))
+                    train_ll = float(sum(train_lls) / len(train_lls))
+                    test_ll = float(sum(test_lls) / len(test_lls))
+                    train_acc = float(sum(train_accs) / len(train_accs))
+                    test_acc = float(sum(test_accs) / len(test_accs))
                     combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
                     metrics = {{
                         "combined_score": combined,
@@ -1053,12 +1068,25 @@ def _build_participant_evaluator_code(
                         "fatal_failure": 0.0,
                     }}
                 elif DATASET == "cpc18" and cpc18_official:
-                    train_acc, train_n = _eval_action_trials(choose_fn, train_trials)
-                    test_acc, test_n = _eval_action_trials(choose_fn, test_trials)
-                    train_mse, train_mse_valid = _eval_cpc18_mse(choose_fn, train_trials, observed_blocks)
-                    test_mse, test_mse_valid = _eval_cpc18_mse(choose_fn, test_trials, observed_blocks)
-                    if (not train_mse_valid) or (not test_mse_valid):
-                        raise RuntimeError("Invalid CPC18 MSE evaluation (missing/invalid block predictions).")
+                    train_accs, test_accs = [], []
+                    train_mses, test_mses = [], []
+                    train_n = float(len(train_trials))
+                    test_n = float(len(test_trials))
+                    for seed in range(max(1, int(N_EVAL_SEEDS))):
+                        train_acc, _ = _eval_action_trials(choose_fn, train_trials)
+                        test_acc, _ = _eval_action_trials(choose_fn, test_trials)
+                        train_mse, train_mse_valid = _eval_cpc18_mse(choose_fn, train_trials, observed_blocks)
+                        test_mse, test_mse_valid = _eval_cpc18_mse(choose_fn, test_trials, observed_blocks)
+                        if (not train_mse_valid) or (not test_mse_valid):
+                            raise RuntimeError("Invalid CPC18 MSE evaluation (missing/invalid block predictions).")
+                        train_accs.append(float(train_acc))
+                        test_accs.append(float(test_acc))
+                        train_mses.append(float(train_mse))
+                        test_mses.append(float(test_mse))
+                    train_acc = float(sum(train_accs) / len(train_accs))
+                    test_acc = float(sum(test_accs) / len(test_accs))
+                    train_mse = float(sum(train_mses) / len(train_mses))
+                    test_mse = float(sum(test_mses) / len(test_mses))
                     combined = -float(train_mse)
                     metrics = {{
                         "combined_score": float(combined),
@@ -1073,8 +1101,21 @@ def _build_participant_evaluator_code(
                         "fatal_failure": 0.0,
                     }}
                 elif DATASET == "cpc18" and (not cpc18_official):
-                    train_ll, train_acc, train_n = _eval_trials(choose_fn, train_trials)
-                    test_ll, test_acc, test_n = _eval_trials(choose_fn, test_trials)
+                    train_lls, train_accs = [], []
+                    test_lls, test_accs = [], []
+                    train_n = float(len(train_trials))
+                    test_n = float(len(test_trials))
+                    for seed in range(max(1, int(N_EVAL_SEEDS))):
+                        train_ll, train_acc, _ = _eval_trials(choose_fn, train_trials)
+                        test_ll, test_acc, _ = _eval_trials(choose_fn, test_trials)
+                        train_lls.append(float(train_ll))
+                        train_accs.append(float(train_acc))
+                        test_lls.append(float(test_ll))
+                        test_accs.append(float(test_acc))
+                    train_ll = float(sum(train_lls) / len(train_lls))
+                    test_ll = float(sum(test_lls) / len(test_lls))
+                    train_acc = float(sum(train_accs) / len(train_accs))
+                    test_acc = float(sum(test_accs) / len(test_accs))
                     combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
                     metrics = {{
                         "combined_score": float(combined),
@@ -1089,8 +1130,16 @@ def _build_participant_evaluator_code(
                         "fatal_failure": 0.0,
                     }}
                 else:
-                    train_acc, train_n = _eval_action_trials(choose_fn, train_trials)
-                    test_acc, test_n = _eval_action_trials(choose_fn, test_trials)
+                    train_accs, test_accs = [], []
+                    train_n = float(len(train_trials))
+                    test_n = float(len(test_trials))
+                    for seed in range(max(1, int(N_EVAL_SEEDS))):
+                        train_acc, _ = _eval_action_trials(choose_fn, train_trials)
+                        test_acc, _ = _eval_action_trials(choose_fn, test_trials)
+                        train_accs.append(float(train_acc))
+                        test_accs.append(float(test_acc))
+                    train_acc = float(sum(train_accs) / len(train_accs))
+                    test_acc = float(sum(test_accs) / len(test_accs))
                     metrics = {{
                         "combined_score": float(train_acc),
                         "train_loglik": None,
@@ -1304,6 +1353,7 @@ def _run_one_openevolve(
             train_trials_prompt_path,
             dataset=args.dataset,
             fitness_metric=args.fitness_metric,
+            n_eval_seeds=int(args.n_eval_seeds),
         ),
         encoding="utf-8",
     )
@@ -1475,6 +1525,12 @@ def main() -> None:
         help="Max output tokens per mutation request (smaller value reduces context-overflow failures).",
     )
     parser.add_argument(
+        "--n_eval_seeds",
+        type=int,
+        default=3,
+        help="Number of repeated evaluation passes to average for each candidate.",
+    )
+    parser.add_argument(
         "--prompt_num_top_programs",
         type=int,
         default=3,
@@ -1526,6 +1582,9 @@ def main() -> None:
         sys.exit(1)
     if args.llm_max_tokens < 64:
         print("Error: --llm_max_tokens must be >= 64.")
+        sys.exit(1)
+    if args.n_eval_seeds < 1:
+        print("Error: --n_eval_seeds must be >= 1.")
         sys.exit(1)
     if args.prompt_num_top_programs < 1:
         print("Error: --prompt_num_top_programs must be >= 1.")
