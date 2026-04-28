@@ -491,6 +491,222 @@ def _round_floats_for_csv_rows(rows: List[Dict[str, Any]], ndigits: int = 4) -> 
     return [_round_floats_for_csv_row(r, ndigits) for r in rows]
 
 
+def _compile_choose_from_code(code: str):
+    namespace: Dict[str, Any] = {}
+    exec(compile(code, "<openevolve-best-program>", "exec"), namespace, namespace)
+    choose_fn = namespace.get("choose", None)
+    if choose_fn is None:
+        raise AttributeError("Candidate program must define choose(problem, history).")
+    return choose_fn
+
+
+def _eval_trials_loglik(choose_fn, trials: List[Dict[str, Any]]) -> Tuple[float, float, int]:
+    total = len(trials)
+    if total == 0:
+        raise ValueError("No trials provided to evaluator.")
+    ll_sum = 0.0
+    correct = 0
+    for i, t in enumerate(trials):
+        y = int(t["action"])
+        p_raw = choose_fn(t["problem"], t["history"])
+        if isinstance(p_raw, (bool, int)) and int(p_raw) in (0, 1):
+            p_raw = 1.0 if int(p_raw) == 1 else 0.0
+        if not isinstance(p_raw, float):
+            raise TypeError(f"trial={i} expected float prob, got {type(p_raw)}")
+        if not (0.0 <= p_raw <= 1.0):
+            raise ValueError(f"trial={i} probability out of [0,1]: {p_raw}")
+        p = min(max(float(p_raw), 1e-9), 1.0 - 1e-9)
+        ll_sum += y * math.log(p) + (1 - y) * math.log(1.0 - p)
+        pred = 1 if p_raw >= 0.5 else 0
+        correct += int(pred == y)
+    return (ll_sum / total), (correct / total), total
+
+
+def _eval_action_trials(choose_fn, trials: List[Dict[str, Any]]) -> Tuple[float, int]:
+    total = len(trials)
+    if total == 0:
+        raise ValueError("No trials provided to evaluator.")
+    correct = 0
+    for t in trials:
+        try:
+            pred = choose_fn(t["problem"], t["history"])
+        except Exception:
+            pred = None
+        if pred is not None and int(pred) == int(t["action"]):
+            correct += 1
+    return (correct / total), total
+
+
+def _eval_cpc18_mse(
+    choose_fn,
+    trials: List[Dict[str, Any]],
+    observed_blocks: Dict[str, Any],
+) -> Tuple[float, bool]:
+    problems: Dict[int, List[Dict[str, Any]]] = {}
+    for tr in trials:
+        pid = int(tr["problem_id"])
+        problems.setdefault(pid, []).append(tr)
+
+    all_mse: List[float] = []
+    for problem_id, problem_trials in problems.items():
+        if str(problem_id) in observed_blocks:
+            obs_rates = observed_blocks[str(problem_id)]
+        elif problem_id in observed_blocks:
+            obs_rates = observed_blocks[problem_id]
+        else:
+            continue
+
+        blocks: Dict[int, List[Dict[str, Any]]] = {}
+        for tr in problem_trials:
+            bid = int(tr["block_id"])
+            blocks.setdefault(bid, []).append(tr)
+
+        pred_rates = [0.0] * 5
+        for block_id in range(1, 6):
+            block_trials = blocks.get(block_id, [])
+            if not block_trials:
+                continue
+            preds: List[int] = []
+            for tr in block_trials:
+                try:
+                    pred = choose_fn(tr["problem"], tr["history"])
+                    preds.append(int(pred == 1))
+                except Exception:
+                    continue
+            if not preds:
+                return float("inf"), False
+            pred_rates[block_id - 1] = sum(preds) / len(preds)
+        mse = 100.0 * sum((float(pred_rates[i]) - float(obs_rates[i])) ** 2 for i in range(5)) / 5.0
+        all_mse.append(float(mse))
+
+    if not all_mse:
+        return float("inf"), False
+    return float(sum(all_mse) / len(all_mse)), True
+
+
+def _evaluate_program_code_metrics(
+    *,
+    code: str,
+    dataset: str,
+    fitness_metric: str,
+    cpc18_official_mse: bool,
+    train_trials: List[Dict[str, Any]],
+    test_trials: List[Dict[str, Any]],
+    observed_blocks: Optional[Dict[str, Any]],
+    n_eval_seeds: int,
+) -> Dict[str, Any]:
+    choose_fn = _compile_choose_from_code(code)
+    n_rep = max(1, int(n_eval_seeds))
+    metrics: Dict[str, Any] = {"fatal_failure": 0.0}
+    if dataset in {"choice13k", "mixed_gambles"}:
+        train_lls: List[float] = []
+        test_lls: List[float] = []
+        train_accs: List[float] = []
+        test_accs: List[float] = []
+        for _ in range(n_rep):
+            train_ll, train_acc, train_n = _eval_trials_loglik(choose_fn, train_trials)
+            test_ll, test_acc, test_n = _eval_trials_loglik(choose_fn, test_trials)
+            train_lls.append(float(train_ll))
+            test_lls.append(float(test_ll))
+            train_accs.append(float(train_acc))
+            test_accs.append(float(test_acc))
+        metrics.update(
+            {
+                "train_loglik": float(sum(train_lls) / len(train_lls)),
+                "test_loglik": float(sum(test_lls) / len(test_lls)),
+                "train_acc": float(sum(train_accs) / len(train_accs)),
+                "test_acc": float(sum(test_accs) / len(test_accs)),
+                "train_n": float(train_n),
+                "test_n": float(test_n),
+            }
+        )
+        metrics["combined_score"] = (
+            float(metrics["train_loglik"]) if fitness_metric == "loglik" else float(metrics["train_acc"])
+        )
+        return metrics
+
+    if dataset == "cpc18" and cpc18_official_mse:
+        train_accs = []
+        test_accs = []
+        train_mses = []
+        test_mses = []
+        obs = observed_blocks or {}
+        for _ in range(n_rep):
+            train_acc, train_n = _eval_action_trials(choose_fn, train_trials)
+            test_acc, test_n = _eval_action_trials(choose_fn, test_trials)
+            train_mse, train_ok = _eval_cpc18_mse(choose_fn, train_trials, obs)
+            test_mse, test_ok = _eval_cpc18_mse(choose_fn, test_trials, obs)
+            if (not train_ok) or (not test_ok):
+                raise RuntimeError("Invalid CPC18 MSE evaluation (missing/invalid block predictions).")
+            train_accs.append(float(train_acc))
+            test_accs.append(float(test_acc))
+            train_mses.append(float(train_mse))
+            test_mses.append(float(test_mse))
+        metrics.update(
+            {
+                "train_loglik": None,
+                "test_loglik": None,
+                "train_acc": float(sum(train_accs) / len(train_accs)),
+                "test_acc": float(sum(test_accs) / len(test_accs)),
+                "train_mse": float(sum(train_mses) / len(train_mses)),
+                "test_mse": float(sum(test_mses) / len(test_mses)),
+                "train_n": float(train_n),
+                "test_n": float(test_n),
+            }
+        )
+        metrics["combined_score"] = -float(metrics["train_mse"])
+        return metrics
+
+    if dataset == "cpc18" and (not cpc18_official_mse):
+        train_lls = []
+        test_lls = []
+        train_accs = []
+        test_accs = []
+        for _ in range(n_rep):
+            train_ll, train_acc, train_n = _eval_trials_loglik(choose_fn, train_trials)
+            test_ll, test_acc, test_n = _eval_trials_loglik(choose_fn, test_trials)
+            train_lls.append(float(train_ll))
+            test_lls.append(float(test_ll))
+            train_accs.append(float(train_acc))
+            test_accs.append(float(test_acc))
+        metrics.update(
+            {
+                "train_loglik": float(sum(train_lls) / len(train_lls)),
+                "test_loglik": float(sum(test_lls) / len(test_lls)),
+                "train_acc": float(sum(train_accs) / len(train_accs)),
+                "test_acc": float(sum(test_accs) / len(test_accs)),
+                "train_mse": 0.0,
+                "test_mse": 0.0,
+                "train_n": float(train_n),
+                "test_n": float(test_n),
+            }
+        )
+        metrics["combined_score"] = (
+            float(metrics["train_loglik"]) if fitness_metric == "loglik" else float(metrics["train_acc"])
+        )
+        return metrics
+
+    train_accs = []
+    test_accs = []
+    for _ in range(n_rep):
+        train_acc, train_n = _eval_action_trials(choose_fn, train_trials)
+        test_acc, test_n = _eval_action_trials(choose_fn, test_trials)
+        train_accs.append(float(train_acc))
+        test_accs.append(float(test_acc))
+    metrics.update(
+        {
+            "train_loglik": None,
+            "test_loglik": None,
+            "train_acc": float(sum(train_accs) / len(train_accs)),
+            "test_acc": float(sum(test_accs) / len(test_accs)),
+            "train_n": float(train_n),
+            "test_n": float(test_n),
+            "combined_score": float(sum(train_accs) / len(train_accs)),
+        }
+    )
+    return metrics
+
+
 def _write_all_mode_csvs(
     base: Path,
     participant_details: List[Dict[str, Any]],
@@ -1042,27 +1258,32 @@ def _build_participant_evaluator_code(
 
                 if DATASET in {"choice13k", "mixed_gambles"}:
                     train_lls, train_accs = [], []
-                    test_lls, test_accs = [], []
                     train_n = float(len(train_trials))
                     test_n = float(len(test_trials))
                     for seed in range(max(1, int(N_EVAL_SEEDS))):
                         train_ll, train_acc, _ = _eval_trials(choose_fn, train_trials)
-                        test_ll, test_acc, _ = _eval_trials(choose_fn, test_trials)
                         train_lls.append(float(train_ll))
                         train_accs.append(float(train_acc))
-                        test_lls.append(float(test_ll))
-                        test_accs.append(float(test_acc))
                     train_ll = float(sum(train_lls) / len(train_lls))
-                    test_ll = float(sum(test_lls) / len(test_lls))
                     train_acc = float(sum(train_accs) / len(train_accs))
-                    test_acc = float(sum(test_accs) / len(test_accs))
                     combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
+                    if FITNESS_METRIC == "loglik":
+                        test_ll = None
+                        test_acc = None
+                    else:
+                        test_lls, test_accs = [], []
+                        for seed in range(max(1, int(N_EVAL_SEEDS))):
+                            test_ll, test_acc, _ = _eval_trials(choose_fn, test_trials)
+                            test_lls.append(float(test_ll))
+                            test_accs.append(float(test_acc))
+                        test_ll = float(sum(test_lls) / len(test_lls))
+                        test_acc = float(sum(test_accs) / len(test_accs))
                     metrics = {{
                         "combined_score": combined,
                         "train_loglik": float(train_ll),
-                        "test_loglik": float(test_ll),
+                        "test_loglik": float(test_ll) if test_ll is not None else None,
                         "train_acc": float(train_acc),
-                        "test_acc": float(test_acc),
+                        "test_acc": float(test_acc) if test_acc is not None else None,
                         "train_n": float(train_n),
                         "test_n": float(test_n),
                         "fatal_failure": 0.0,
@@ -1102,27 +1323,32 @@ def _build_participant_evaluator_code(
                     }}
                 elif DATASET == "cpc18" and (not cpc18_official):
                     train_lls, train_accs = [], []
-                    test_lls, test_accs = [], []
                     train_n = float(len(train_trials))
                     test_n = float(len(test_trials))
                     for seed in range(max(1, int(N_EVAL_SEEDS))):
                         train_ll, train_acc, _ = _eval_trials(choose_fn, train_trials)
-                        test_ll, test_acc, _ = _eval_trials(choose_fn, test_trials)
                         train_lls.append(float(train_ll))
                         train_accs.append(float(train_acc))
-                        test_lls.append(float(test_ll))
-                        test_accs.append(float(test_acc))
                     train_ll = float(sum(train_lls) / len(train_lls))
-                    test_ll = float(sum(test_lls) / len(test_lls))
                     train_acc = float(sum(train_accs) / len(train_accs))
-                    test_acc = float(sum(test_accs) / len(test_accs))
+                    if FITNESS_METRIC == "loglik":
+                        test_ll = None
+                        test_acc = None
+                    else:
+                        test_lls, test_accs = [], []
+                        for seed in range(max(1, int(N_EVAL_SEEDS))):
+                            test_ll, test_acc, _ = _eval_trials(choose_fn, test_trials)
+                            test_lls.append(float(test_ll))
+                            test_accs.append(float(test_acc))
+                        test_ll = float(sum(test_lls) / len(test_lls))
+                        test_acc = float(sum(test_accs) / len(test_accs))
                     combined = float(train_ll) if FITNESS_METRIC == "loglik" else float(train_acc)
                     metrics = {{
                         "combined_score": float(combined),
                         "train_loglik": float(train_ll),
-                        "test_loglik": float(test_ll),
+                        "test_loglik": float(test_ll) if test_ll is not None else None,
                         "train_acc": float(train_acc),
-                        "test_acc": float(test_acc),
+                        "test_acc": float(test_acc) if test_acc is not None else None,
                         "train_mse": 0.0,
                         "test_mse": 0.0,
                         "train_n": float(train_n),
@@ -1406,73 +1632,161 @@ def _run_one_openevolve(
     if best_program is None:
         raise RuntimeError(f"[FATAL] OpenEvolve returned no best program for participant {participant_tag}.")
 
-    best_code_path = part_dir / "best_program.py"
-    best_code_path.write_text(best_program.code, encoding="utf-8")
+    # Gather checkpoint-level pool-best programs and metrics.
+    ckpt_dir = output_dir / "checkpoints"
+    checkpoint_rows: List[Dict[str, Any]] = []
+    if ckpt_dir.exists():
+        for cp in ckpt_dir.iterdir():
+            if (not cp.is_dir()) or (not cp.name.startswith("checkpoint_")):
+                continue
+            info_path = cp / "best_program_info.json"
+            if not info_path.exists():
+                continue
+            try:
+                info = json.loads(info_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            iter_idx = info.get("current_iteration", None)
+            if iter_idx is None:
+                continue
+            try:
+                iter_idx_int = int(iter_idx)
+            except (TypeError, ValueError):
+                continue
+            prog_id = info.get("id", None)
+            prog_code = None
+            if prog_id is not None:
+                prog_json = cp / "programs" / f"{prog_id}.json"
+                if prog_json.exists():
+                    try:
+                        prog_payload = json.loads(prog_json.read_text(encoding="utf-8"))
+                        prog_code = prog_payload.get("code", None)
+                    except Exception:
+                        prog_code = None
+            checkpoint_rows.append(
+                {
+                    "iter_idx": iter_idx_int,
+                    "program_id": prog_id,
+                    "metrics": info.get("metrics", {}) or {},
+                    "program_code": prog_code,
+                }
+            )
+    checkpoint_rows.sort(key=lambda x: int(x["iter_idx"]))
 
-    # Emit per-iteration W&B series from checkpoint snapshots.
-    # OpenEvolve writes best_program_info.json for each checkpoint_k.
+    # Evaluate only pool-best programs per iteration in loglik mode.
+    is_loglik_mode = (
+        args.fitness_metric == "loglik"
+        and (args.dataset in {"choice13k", "mixed_gambles"} or (args.dataset == "cpc18" and not args.cpc18_official_mse))
+    )
+    eval_cache: Dict[str, Dict[str, Any]] = {}
+    for row in checkpoint_rows:
+        row["paired_metrics"] = None
+        if (not is_loglik_mode) or (not row.get("program_code")):
+            continue
+        pid = str(row.get("program_id", ""))
+        if pid in eval_cache:
+            row["paired_metrics"] = eval_cache[pid]
+            continue
+        try:
+            pm = _evaluate_program_code_metrics(
+                code=str(row["program_code"]),
+                dataset=args.dataset,
+                fitness_metric=args.fitness_metric,
+                cpc18_official_mse=bool(args.cpc18_official_mse),
+                train_trials=train_trials,
+                test_trials=test_trials,
+                observed_blocks=test_observed_blocks,
+                n_eval_seeds=int(args.n_eval_seeds),
+            )
+        except Exception:
+            pm = None
+        if pm is not None:
+            eval_cache[pid] = pm
+            row["paired_metrics"] = pm
+
+    # Final best must be from the last updated pool (last checkpoint), then evaluated as a pair.
+    final_row = checkpoint_rows[-1] if checkpoint_rows else None
+    if final_row is not None and final_row.get("program_code"):
+        final_best_code = str(final_row["program_code"])
+        final_prog_id = str(final_row.get("program_id", "unknown"))
+        final_iter = int(final_row.get("iter_idx", -1))
+        final_metrics = dict(final_row.get("paired_metrics") or {})
+        if not final_metrics:
+            final_metrics = _evaluate_program_code_metrics(
+                code=final_best_code,
+                dataset=args.dataset,
+                fitness_metric=args.fitness_metric,
+                cpc18_official_mse=bool(args.cpc18_official_mse),
+                train_trials=train_trials,
+                test_trials=test_trials,
+                observed_blocks=test_observed_blocks,
+                n_eval_seeds=int(args.n_eval_seeds),
+            )
+    else:
+        final_best_code = str(best_program.code)
+        final_prog_id = str(getattr(best_program, "id", "unknown"))
+        final_iter = int(args.n_iterations)
+        final_metrics = dict(best_program.metrics or {})
+        if is_loglik_mode:
+            final_metrics = _evaluate_program_code_metrics(
+                code=final_best_code,
+                dataset=args.dataset,
+                fitness_metric=args.fitness_metric,
+                cpc18_official_mse=bool(args.cpc18_official_mse),
+                train_trials=train_trials,
+                test_trials=test_trials,
+                observed_blocks=test_observed_blocks,
+                n_eval_seeds=int(args.n_eval_seeds),
+            )
+
+    best_code_path = part_dir / "best_program.py"
+    best_code_path.write_text(final_best_code, encoding="utf-8")
+    best_from_iter_path = part_dir / f"best_program_fr_iter{final_iter}_cand{final_prog_id[:8]}.py"
+    best_from_iter_path.write_text(final_best_code, encoding="utf-8")
+
     if wandb is not None:
         pid_key = f"p{participant_tag}"
         iter_key = f"{pid_key}_iter"
         wandb.define_metric(iter_key)
         wandb.define_metric(f"{pid_key}_*", step_metric=iter_key)
-        ckpt_dir = output_dir / "checkpoints"
-        checkpoint_rows: List[Tuple[int, Dict[str, Any]]] = []
-        if ckpt_dir.exists():
-            for cp in ckpt_dir.iterdir():
-                if (not cp.is_dir()) or (not cp.name.startswith("checkpoint_")):
-                    continue
-                info_path = cp / "best_program_info.json"
-                if not info_path.exists():
-                    continue
-                try:
-                    info = json.loads(info_path.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                iter_idx = info.get("current_iteration", None)
-                if iter_idx is None:
-                    continue
-                try:
-                    iter_idx_int = int(iter_idx)
-                except (TypeError, ValueError):
-                    continue
-                metrics_i = info.get("metrics", {}) or {}
-                checkpoint_rows.append((iter_idx_int, metrics_i))
-        checkpoint_rows.sort(key=lambda x: x[0])
-        for iter_idx, m in checkpoint_rows:
-            train_fitness_i = m.get("combined_score", None)
-            test_fitness_i = m.get("test_loglik", None)
+        for row in checkpoint_rows:
+            iter_idx = int(row["iter_idx"])
+            m = dict(row.get("metrics", {}) or {})
+            paired = row.get("paired_metrics") if is_loglik_mode else None
+            src = dict(paired) if paired else m
+            train_fitness_i = src.get("combined_score", None)
+            test_fitness_i = src.get("test_loglik", None)
             if args.dataset in {"choice13k", "mixed_gambles"}:
                 if args.fitness_metric == "loglik":
-                    train_fitness_i = m.get("train_loglik", train_fitness_i)
-                    test_fitness_i = m.get("test_loglik", test_fitness_i)
+                    train_fitness_i = src.get("train_loglik", train_fitness_i)
+                    test_fitness_i = src.get("test_loglik", test_fitness_i)
                 else:
-                    train_fitness_i = m.get("train_acc", train_fitness_i)
-                    test_fitness_i = m.get("test_acc", test_fitness_i)
+                    train_fitness_i = src.get("train_acc", train_fitness_i)
+                    test_fitness_i = src.get("test_acc", test_fitness_i)
             elif args.dataset == "cpc18":
                 if args.cpc18_official_mse:
-                    tm = m.get("test_mse", None)
+                    tm = src.get("test_mse", None)
                     test_fitness_i = (-float(tm)) if tm is not None else None
-                    train_fitness_i = m.get("combined_score", train_fitness_i)
+                    train_fitness_i = src.get("combined_score", train_fitness_i)
                 elif args.fitness_metric == "loglik":
-                    train_fitness_i = m.get("train_loglik", train_fitness_i)
-                    test_fitness_i = m.get("test_loglik", test_fitness_i)
+                    train_fitness_i = src.get("train_loglik", train_fitness_i)
+                    test_fitness_i = src.get("test_loglik", test_fitness_i)
                 else:
-                    train_fitness_i = m.get("combined_score", train_fitness_i)
-                    test_fitness_i = m.get("test_acc", test_fitness_i)
+                    train_fitness_i = src.get("combined_score", train_fitness_i)
+                    test_fitness_i = src.get("test_acc", test_fitness_i)
             payload = {
                 iter_key: iter_idx,
                 f"{pid_key}_train_fitness": train_fitness_i,
                 f"{pid_key}_test_fitness": test_fitness_i,
-                f"{pid_key}_train_loglik": m.get("train_loglik", None),
-                f"{pid_key}_test_loglik": m.get("test_loglik", None),
-                f"{pid_key}_train_accuracy": m.get("train_acc", None),
-                f"{pid_key}_test_accuracy": m.get("test_acc", None),
-                f"{pid_key}_n_valid": m.get("train_n", None),
+                f"{pid_key}_train_loglik": src.get("train_loglik", None),
+                f"{pid_key}_test_loglik": src.get("test_loglik", None),
+                f"{pid_key}_train_accuracy": src.get("train_acc", None),
+                f"{pid_key}_test_accuracy": src.get("test_acc", None),
+                f"{pid_key}_n_valid": src.get("train_n", None),
             }
             wandb.log(payload)
 
-    metrics = dict(best_program.metrics or {})
+    metrics = dict(final_metrics or {})
     raw_train_ll = metrics.get("train_loglik", None)
     raw_test_ll = metrics.get("test_loglik", None)
     train_ll = float(raw_train_ll) if raw_train_ll is not None else None
@@ -1544,6 +1858,40 @@ def _run_one_openevolve(
         train_fitness = combined_score
         test_fitness = float(test_acc)
 
+    results_payload = {
+        "overall_best_train": {
+            "program_id": final_prog_id,
+            "origin_iteration": final_iter,
+            "program_file": best_from_iter_path.name,
+            "train_loglik": train_ll,
+            "test_loglik": test_ll,
+            "train_accuracy": train_acc,
+            "test_accuracy": test_acc,
+            "train_mse": train_mse,
+            "test_mse": test_mse,
+            "train_fitness": train_fitness,
+            "test_fitness": test_fitness,
+        },
+        # Keep paired values from the same best-train program.
+        "overall_best_test": {
+            "program_id": final_prog_id,
+            "origin_iteration": final_iter,
+            "program_file": best_from_iter_path.name,
+            "train_loglik": train_ll,
+            "test_loglik": test_ll,
+            "train_accuracy": train_acc,
+            "test_accuracy": test_acc,
+            "train_mse": train_mse,
+            "test_mse": test_mse,
+            "train_fitness": train_fitness,
+            "test_fitness": test_fitness,
+        },
+    }
+    (part_dir / "results.json").write_text(
+        json.dumps(_to_builtin(results_payload), indent=2),
+        encoding="utf-8",
+    )
+
     return {
         "participant_id": participant_tag,
         "train_loglik": train_ll,
@@ -1560,6 +1908,8 @@ def _run_one_openevolve(
         "total_runtime": runtime,
         "fatal_failure": fatal_flag,
         "metrics_raw": metrics,
+        "overall_best_train": results_payload["overall_best_train"],
+        "overall_best_test": results_payload["overall_best_test"],
     }
 
 

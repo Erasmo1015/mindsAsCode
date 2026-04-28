@@ -2587,9 +2587,6 @@ def run_evolution(
         baseline_results["train_loglik"] = baseline_train_eval["avg_loglik"]
         baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
     
-    # Track all candidate results across iterations for finding overall best
-    all_candidate_results = []  # List of dicts with iteration, candidate_idx, train_acc, test_acc
-    
     # Log baseline to wandb at step=0
     if wandb is not None:
         baseline_log_dict = {}
@@ -3046,7 +3043,10 @@ def run_evolution(
                     continue
                 try:
                     train_eval = evaluate_cpc18_split_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    if fitness_metric == "loglik":
+                        test_eval = None
+                    else:
+                        test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 except (TypeError, ValueError, AssertionError):
                     candidate_results.append({
                         "idx": idx,
@@ -3060,9 +3060,9 @@ def run_evolution(
                     })
                     continue
                 train_acc = train_eval["accuracy"]
-                test_acc = test_eval["accuracy"]
+                test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
-                test_loglik = test_eval["avg_loglik"]
+                test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 candidate_results.append({
                     "idx": idx,
@@ -3073,9 +3073,9 @@ def run_evolution(
                     "test_loglik": test_loglik,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
-                    "test_correct": test_eval["correct"],
+                    "test_correct": test_eval["correct"] if test_eval is not None else None,
                     "train_total": train_eval["total"],
-                    "test_total": test_eval["total"],
+                    "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
                 })
             elif dataset == "choice13k":
@@ -3095,7 +3095,10 @@ def run_evolution(
                     continue
                 try:
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    if fitness_metric == "loglik":
+                        test_eval = None
+                    else:
+                        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 except (AssertionError, TypeError, ValueError):
                     candidate_results.append({
                         "idx": idx,
@@ -3109,9 +3112,9 @@ def run_evolution(
                     })
                     continue
                 train_acc = train_eval["accuracy"]
-                test_acc = test_eval["accuracy"]
+                test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
-                test_loglik = test_eval["avg_loglik"]
+                test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 candidate_results.append({
                     "idx": idx,
@@ -3122,9 +3125,9 @@ def run_evolution(
                     "test_loglik": test_loglik,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
-                    "test_correct": test_eval["correct"],
+                    "test_correct": test_eval["correct"] if test_eval is not None else None,
                     "train_total": train_eval["total"],
-                    "test_total": test_eval["total"],
+                    "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
                 })
             else:
@@ -3147,12 +3150,12 @@ def run_evolution(
                     continue
                 if fitness_metric == "loglik":
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    test_eval = None
                 else:
                     train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 train_acc = train_eval["accuracy"]
-                test_acc = test_eval["accuracy"]
+                test_acc = test_eval["accuracy"] if test_eval is not None else None
                 fitness = train_eval["avg_loglik"] if fitness_metric == "loglik" else train_acc
                 row = {
                     "idx": idx,
@@ -3161,52 +3164,16 @@ def run_evolution(
                     "test_acc": test_acc,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
-                    "test_correct": test_eval["correct"],
+                    "test_correct": test_eval["correct"] if test_eval is not None else None,
                     "train_total": train_eval["total"],
-                    "test_total": test_eval["total"],
+                    "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
                 }
                 if fitness_metric == "loglik":
                     row["train_loglik"] = train_eval["avg_loglik"]
-                    row["test_loglik"] = test_eval["avg_loglik"]
+                    row["test_loglik"] = None
                 candidate_results.append(row)
             
-            # Track for overall best (only valid candidates)
-            if candidate_results[-1]["valid"]:
-                if is_cpc18_mse:
-                    all_candidate_results.append({
-                        "iteration": iteration_step,
-                        "candidate_idx": idx,
-                        "fitness": candidate_results[-1]["fitness"],
-                        "train_mse": candidate_results[-1]["train_mse"],
-                        "test_mse": candidate_results[-1]["test_mse"],
-                    })
-                elif is_cpc18_split:
-                    all_candidate_results.append({
-                        "iteration": iteration_step,
-                        "candidate_idx": idx,
-                        "train_acc": candidate_results[-1]["train_acc"],
-                        "test_acc": candidate_results[-1]["test_acc"],
-                        "train_loglik": candidate_results[-1]["train_loglik"],
-                        "test_loglik": candidate_results[-1]["test_loglik"],
-                    })
-                elif dataset == "choice13k":
-                    all_candidate_results.append({
-                        "iteration": iteration_step,
-                        "candidate_idx": idx,
-                        "train_acc": candidate_results[-1]["train_acc"],
-                        "test_acc": candidate_results[-1]["test_acc"],
-                        "train_loglik": candidate_results[-1]["train_loglik"],
-                        "test_loglik": candidate_results[-1]["test_loglik"],
-                    })
-                else:
-                    all_candidate_results.append({
-                        "iteration": iteration_step,
-                        "candidate_idx": idx,
-                        "train_acc": candidate_results[-1]["train_acc"],
-                        "test_acc": candidate_results[-1]["test_acc"],
-                    })
-        
         # Report results
         print(f"\n{'='*80}")
         print(f"Iteration {iteration + 1} Results:")
@@ -3229,22 +3196,42 @@ def run_evolution(
             elif is_cpc18_split and fitness_metric == "loglik":
                 print(f"\nTop performers (by train avg log-likelihood, higher is better):")
                 for i, result in enumerate(valid_results[:5]):
+                    _test_ll = (
+                        f"{result['test_loglik']:.6f}"
+                        if result.get("test_loglik") is not None
+                        else "N/A (eval on pool-best only)"
+                    )
+                    _test_acc = (
+                        f"{result['test_acc']:.4f}"
+                        if result.get("test_acc") is not None
+                        else "N/A"
+                    )
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
-                        f"test_loglik={result['test_loglik']:.6f}, "
+                        f"test_loglik={_test_ll}, "
                         f"train_acc={result['train_acc']:.4f}, "
-                        f"test_acc={result['test_acc']:.4f}"
+                        f"test_acc={_test_acc}"
                     )
             elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 print(f"\nTop performers (by train avg log-likelihood, higher is better):")
                 for i, result in enumerate(valid_results[:5]):
+                    _test_ll = (
+                        f"{result['test_loglik']:.6f}"
+                        if result.get("test_loglik") is not None
+                        else "N/A (eval on pool-best only)"
+                    )
+                    _test_acc = (
+                        f"{result['test_acc']:.4f}"
+                        if result.get("test_acc") is not None
+                        else "N/A"
+                    )
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
-                        f"test_loglik={result['test_loglik']:.6f}, "
+                        f"test_loglik={_test_ll}, "
                         f"train_acc={result['train_acc']:.4f}, "
-                        f"test_acc={result['test_acc']:.4f}"
+                        f"test_acc={_test_acc}"
                     )
             else:
                 print(f"\nTop performers (by train accuracy):")
@@ -3255,44 +3242,43 @@ def run_evolution(
                         f"test_acc={result['test_acc']:.4f}"
                     )
             
-            # Select best program for tracking (but use elite_parents pool for actual parent selection)
+            # Best candidate in current generated batch (before elite pool update).
             best_result = valid_results[0]
             best_fitness = best_result["fitness"]
-            if choice13k_simple_logging and dataset == "choice13k" and save_artifacts and simple_iterations_dir is not None:
-                (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(best_result["code"] or "")
-                simple_iterations_rows.append({
-                    "iteration": iteration_step,
-                    "train_fitness": best_result["fitness"],
-                    "test_fitness": (
-                        best_result["test_loglik"]
-                        if fitness_metric == "loglik"
-                        else best_result["test_acc"]
-                    ),
-                    "train_acc": best_result["train_acc"],
-                    "test_acc": best_result["test_acc"],
-                    "train_loglik": best_result["train_loglik"],
-                    "test_loglik": best_result["test_loglik"],
-                })
             
-            print(f"\nBest program selected: Candidate {best_result['idx']}")
+            print(f"\nBest candidate in this batch: Candidate {best_result['idx']}")
             if is_cpc18_mse:
                 print(f"  Train MSE: {best_result['train_mse']:.2f}")
                 print(f"  Test MSE: {best_result['test_mse']:.2f}")
                 print(f"  Fitness (-MSE): {best_result['fitness']:.2f}")
             elif is_cpc18_split:
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
-                print(f"  Test accuracy: {best_result['test_acc']:.4f}")
-                print(
-                    f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
-                    f"test: {best_result['test_loglik']:.6f}"
-                )
+                if best_result["test_acc"] is None:
+                    print("  Test accuracy: N/A (eval on pool-best only)")
+                    print(
+                        f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
+                        "test: N/A (eval on pool-best only)"
+                    )
+                else:
+                    print(f"  Test accuracy: {best_result['test_acc']:.4f}")
+                    print(
+                        f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
+                        f"test: {best_result['test_loglik']:.6f}"
+                    )
             elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
-                print(f"  Test accuracy: {best_result['test_acc']:.4f}")
-                print(
-                    f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
-                    f"test: {best_result['test_loglik']:.6f}"
-                )
+                if best_result["test_acc"] is None:
+                    print("  Test accuracy: N/A (eval on pool-best only)")
+                    print(
+                        f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
+                        "test: N/A (eval on pool-best only)"
+                    )
+                else:
+                    print(f"  Test accuracy: {best_result['test_acc']:.4f}")
+                    print(
+                        f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
+                        f"test: {best_result['test_loglik']:.6f}"
+                    )
             else:
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
                 print(f"  Test accuracy: {best_result['test_acc']:.4f}")
@@ -3339,6 +3325,56 @@ def run_evolution(
             elite_parents = elite_parents[:max_elite_size]
             
             print(f"\nElite set updated: {len(elite_parents)} programs (top {max_elite_size} kept)")
+
+            # Use the updated elite-pool best for per-iteration reporting.
+            iter_best_code, iter_best_fitness, _, iter_best_program_id = elite_parents[0][:4]
+            iter_best_train_acc = best_result["train_acc"]
+            iter_best_test_acc = best_result["test_acc"]
+            iter_best_train_loglik = best_result.get("train_loglik")
+            iter_best_test_loglik = best_result.get("test_loglik")
+            if fitness_metric == "loglik" and (is_cpc18_split or dataset in {"choice13k", "mixed_gambles"}):
+                iter_best_fn = compile_program(iter_best_code)
+                if iter_best_fn is not None:
+                    if is_cpc18_split:
+                        iter_best_train_eval = evaluate_cpc18_split_program(
+                            iter_best_fn, train_trials, n_seeds=n_eval_seeds
+                        )
+                        iter_best_test_eval = evaluate_cpc18_split_program(
+                            iter_best_fn, test_trials, n_seeds=n_eval_seeds
+                        )
+                    else:
+                        iter_best_train_eval = evaluate_choice13k_program(
+                            iter_best_fn, train_trials, n_seeds=n_eval_seeds
+                        )
+                        iter_best_test_eval = evaluate_choice13k_program(
+                            iter_best_fn, test_trials, n_seeds=n_eval_seeds
+                        )
+                    iter_best_train_acc = iter_best_train_eval["accuracy"]
+                    iter_best_test_acc = iter_best_test_eval["accuracy"]
+                    iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
+                    iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
+                    iter_best_fitness = iter_best_train_loglik
+                else:
+                    # Should be rare; keep loop stable if a pool entry cannot recompile.
+                    iter_best_test_acc = None
+                    iter_best_test_loglik = None
+
+            if choice13k_simple_logging and dataset == "choice13k" and save_artifacts and simple_iterations_dir is not None:
+                (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(iter_best_code or "")
+                simple_iterations_rows.append({
+                    "iteration": iteration_step,
+                    "train_fitness": iter_best_fitness,
+                    "test_fitness": (
+                        iter_best_test_loglik
+                        if fitness_metric == "loglik"
+                        else iter_best_test_acc
+                    ),
+                    "train_acc": iter_best_train_acc,
+                    "test_acc": iter_best_test_acc,
+                    "train_loglik": iter_best_train_loglik,
+                    "test_loglik": iter_best_test_loglik,
+                })
+            best_fitness = iter_best_fitness
             
             # Update overall best tracking
             # For CPC18: compare by fitness (-MSE), for others: compare by accuracy
@@ -3363,53 +3399,65 @@ def run_evolution(
                     }
             elif is_cpc18_split:
                 if fitness_metric == "loglik":
-                    _train_better2 = best_result["train_loglik"] > overall_best_train["train_loglik"]
+                    _train_better2 = (
+                        iter_best_train_loglik is not None
+                        and iter_best_train_loglik > overall_best_train["train_loglik"]
+                    )
                 else:
                     _train_better2 = best_result["train_acc"] > overall_best_train["train_accuracy"]
                 if _train_better2:
                     overall_best_train = {
-                        "train_accuracy": best_result["train_acc"],
-                        "test_accuracy": best_result["test_acc"],
-                        "train_loglik": best_result["train_loglik"],
-                        "test_loglik": best_result["test_loglik"],
-                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                        "train_accuracy": iter_best_train_acc,
+                        "test_accuracy": iter_best_test_acc,
+                        "train_loglik": iter_best_train_loglik,
+                        "test_loglik": iter_best_test_loglik,
+                        "program_id": iter_best_program_id,
                     }
                 if fitness_metric == "loglik":
-                    _test_better2 = best_result["test_loglik"] > overall_best_test["test_loglik"]
+                    _test_better2 = (
+                        iter_best_test_loglik is not None
+                        and iter_best_test_loglik > overall_best_test["test_loglik"]
+                    )
                 else:
                     _test_better2 = best_result["test_acc"] > overall_best_test["test_accuracy"]
                 if _test_better2:
                     overall_best_test = {
-                        "train_accuracy": best_result["train_acc"],
-                        "test_accuracy": best_result["test_acc"],
-                        "train_loglik": best_result["train_loglik"],
-                        "test_loglik": best_result["test_loglik"],
-                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                        "train_accuracy": iter_best_train_acc,
+                        "test_accuracy": iter_best_test_acc,
+                        "train_loglik": iter_best_train_loglik,
+                        "test_loglik": iter_best_test_loglik,
+                        "program_id": iter_best_program_id,
                     }
             elif dataset in {"choice13k", "mixed_gambles"}:
                 if fitness_metric == "loglik":
-                    _train_better = best_result["train_loglik"] > overall_best_train["train_loglik"]
+                    _train_better = (
+                        iter_best_train_loglik is not None
+                        and iter_best_train_loglik > overall_best_train["train_loglik"]
+                    )
                 else:
                     _train_better = best_result["train_acc"] > overall_best_train["train_accuracy"]
                 if _train_better:
                     overall_best_train = {
-                        "train_accuracy": best_result["train_acc"],
-                        "test_accuracy": best_result["test_acc"],
-                        "train_loglik": best_result["train_loglik"],
-                        "test_loglik": best_result["test_loglik"],
-                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                        "train_accuracy": iter_best_train_acc,
+                        "test_accuracy": iter_best_test_acc,
+                        "train_loglik": iter_best_train_loglik,
+                        "test_loglik": iter_best_test_loglik,
+                        "program_id": iter_best_program_id,
                     }
                 if fitness_metric == "loglik":
-                    _test_better = best_result["test_loglik"] > overall_best_test["test_loglik"]
+                    _test_better = (
+                        iter_best_test_loglik is not None
+                        and iter_best_test_loglik > overall_best_test["test_loglik"]
+                    )
                 else:
                     _test_better = best_result["test_acc"] > overall_best_test["test_accuracy"]
                 if _test_better:
                     overall_best_test = {
-                        "train_accuracy": best_result["train_acc"],
-                        "test_accuracy": best_result["test_acc"],
-                        "train_loglik": best_result["train_loglik"],
-                        "test_loglik": best_result["test_loglik"],
-                        "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}",
+                        "train_accuracy": iter_best_train_acc,
+                        "test_accuracy": iter_best_test_acc,
+                        "train_loglik": iter_best_train_loglik,
+                        "test_loglik": iter_best_test_loglik,
+                        "program_id": iter_best_program_id,
                     }
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
@@ -3431,7 +3479,7 @@ def run_evolution(
         # Save iteration results
         best_program_id = None
         if valid_results:
-            best_program_id = f"iteration_{iteration_step}_candidate_{valid_results[0]['idx']}"
+            best_program_id = iter_best_program_id
         
         if is_cpc18_mse:
             metrics = {
@@ -3472,12 +3520,12 @@ def run_evolution(
                     for r in candidate_results
                 ],
                 "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
-                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
-                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
+                "best_train_acc": iter_best_train_acc if valid_results else None,
+                "best_test_acc": iter_best_test_acc if valid_results else None,
+                "best_train_loglik": iter_best_train_loglik if valid_results else None,
+                "best_test_loglik": iter_best_test_loglik if valid_results else None,
             }
-        elif dataset == "choice13k":
+        elif dataset in {"choice13k", "mixed_gambles"}:
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
@@ -3496,10 +3544,10 @@ def run_evolution(
                     for r in candidate_results
                 ],
                 "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
-                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
-                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
+                "best_train_acc": iter_best_train_acc if valid_results else None,
+                "best_test_acc": iter_best_test_acc if valid_results else None,
+                "best_train_loglik": iter_best_train_loglik if valid_results else None,
+                "best_test_loglik": iter_best_test_loglik if valid_results else None,
             }
         else:
             metrics = {
@@ -3535,20 +3583,20 @@ def run_evolution(
             summary = {
                 "iteration": iteration_step,
                 "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
-                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
-                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
+                "best_train_acc": iter_best_train_acc if valid_results else None,
+                "best_test_acc": iter_best_test_acc if valid_results else None,
+                "best_train_loglik": iter_best_train_loglik if valid_results else None,
+                "best_test_loglik": iter_best_test_loglik if valid_results else None,
                 "n_valid": len(valid_results),
             }
-        elif dataset == "choice13k":
+        elif dataset in {"choice13k", "mixed_gambles"}:
             summary = {
                 "iteration": iteration_step,
                 "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": valid_results[0]["train_acc"] if valid_results else None,
-                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-                "best_train_loglik": valid_results[0]["train_loglik"] if valid_results else None,
-                "best_test_loglik": valid_results[0]["test_loglik"] if valid_results else None,
+                "best_train_acc": iter_best_train_acc if valid_results else None,
+                "best_test_acc": iter_best_test_acc if valid_results else None,
+                "best_train_loglik": iter_best_train_loglik if valid_results else None,
+                "best_test_loglik": iter_best_test_loglik if valid_results else None,
                 "n_valid": len(valid_results),
             }
         else:
@@ -3609,68 +3657,70 @@ def run_evolution(
                     if valid_results:
                         log_dict[f"p{participant_id}_train_fitness"] = best_fitness
                         log_dict[f"p{participant_id}_test_fitness"] = (
-                            valid_results[0]["test_loglik"]
+                            iter_best_test_loglik
                             if fitness_metric == "loglik"
-                            else valid_results[0]["test_acc"]
+                            else iter_best_test_acc
                         )
-                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
-                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
-                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                        log_dict[f"p{participant_id}_train_acc"] = iter_best_train_acc
+                        log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
+                        log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
                 else:
                     log_dict = {f"p{participant_id}_n_valid": len(valid_results)}
                     if valid_results:
-                        log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0]["train_acc"]
-                        log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
-                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
-                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                        log_dict[f"p{participant_id}_train_accuracy"] = iter_best_train_acc
+                        log_dict[f"p{participant_id}_test_accuracy"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_acc"] = iter_best_train_acc
+                        log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
+                        log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
                         log_dict[f"p{participant_id}_train_fitness"] = best_fitness
                         log_dict[f"p{participant_id}_test_fitness"] = (
-                            valid_results[0]["test_loglik"]
+                            iter_best_test_loglik
                             if fitness_metric == "loglik"
-                            else valid_results[0]["test_acc"]
+                            else iter_best_test_acc
                         )
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean(
                             [r["train_acc"] for r in valid_results]
                         )
-                        log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean(
-                            [r["test_acc"] for r in valid_results]
-                        )
-            elif dataset == "choice13k":
+                        if fitness_metric != "loglik":
+                            log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean(
+                                [r["test_acc"] for r in valid_results]
+                            )
+            elif dataset in {"choice13k", "mixed_gambles"}:
                 if all_data_mode:
                     log_dict = {}
                     if valid_results:
                         if fitness_metric == "loglik":
                             log_dict[f"p{participant_id}_train_fitness"] = best_fitness
-                            log_dict[f"p{participant_id}_test_fitness"] = valid_results[0]["test_loglik"]
+                            log_dict[f"p{participant_id}_test_fitness"] = iter_best_test_loglik
                         else:
                             log_dict[f"p{participant_id}_train_fitness"] = best_fitness
-                            log_dict[f"p{participant_id}_test_fitness"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
-                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
-                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                            log_dict[f"p{participant_id}_test_fitness"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_acc"] = iter_best_train_acc
+                        log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
+                        log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
                 else:
                     log_dict = {
                         f"p{participant_id}_n_valid": len(valid_results),
                     }
                     if valid_results:
-                        log_dict[f"p{participant_id}_train_accuracy"] = valid_results[0]["train_acc"]
-                        log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_acc"] = valid_results[0]["train_acc"]
-                        log_dict[f"p{participant_id}_test_acc"] = valid_results[0]["test_acc"]
-                        log_dict[f"p{participant_id}_train_loglik"] = valid_results[0]["train_loglik"]
-                        log_dict[f"p{participant_id}_test_loglik"] = valid_results[0]["test_loglik"]
+                        log_dict[f"p{participant_id}_train_accuracy"] = iter_best_train_acc
+                        log_dict[f"p{participant_id}_test_accuracy"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_acc"] = iter_best_train_acc
+                        log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
+                        log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
+                        log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
                         log_dict[f"p{participant_id}_train_fitness"] = best_fitness
                         log_dict[f"p{participant_id}_test_fitness"] = (
-                            valid_results[0]["test_loglik"]
+                            iter_best_test_loglik
                             if fitness_metric == "loglik"
-                            else valid_results[0]["test_acc"]
+                            else iter_best_test_acc
                         )
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
-                        log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
+                        if fitness_metric != "loglik":
+                            log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
             else:
                 if all_data_mode:
                     log_dict = {}
@@ -3702,81 +3752,103 @@ def run_evolution(
     print(f"\n{'='*80}")
     print("Evolution Complete")
     print(f"{'='*80}")
-    
-    # Check all candidates to find true overall best (in case best wasn't selected as parent)
-    for candidate in all_candidate_results:
-        if is_cpc18_mse:
-            if candidate['fitness'] > overall_best_train["train_fitness"]:
-                overall_best_train = {
-                    "train_fitness": candidate['fitness'],
-                    "train_mse": candidate['train_mse'],
-                    "test_mse": candidate['test_mse'],
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
-                }
-            if candidate['test_mse'] < overall_best_test["test_mse"]:
-                overall_best_test = {
-                    "train_fitness": candidate['fitness'],
-                    "train_mse": candidate['train_mse'],
-                    "test_mse": candidate['test_mse'],
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
-                }
-        elif is_cpc18_split:
-            if fitness_metric == "loglik":
-                _better3 = candidate["train_loglik"] > overall_best_train["train_loglik"]
-            else:
-                _better3 = candidate["train_acc"] > overall_best_train["train_accuracy"]
-            if _better3:
-                overall_best_train = {
-                    "train_accuracy": candidate["train_acc"],
-                    "test_accuracy": candidate["test_acc"],
-                    "train_loglik": candidate["train_loglik"],
-                    "test_loglik": candidate["test_loglik"],
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
-                }
-            if candidate["test_acc"] > overall_best_test["test_accuracy"]:
-                overall_best_test = {
-                    "train_accuracy": candidate["train_acc"],
-                    "test_accuracy": candidate["test_acc"],
-                    "train_loglik": candidate["train_loglik"],
-                    "test_loglik": candidate["test_loglik"],
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
-                }
-        elif dataset in {"choice13k", "mixed_gambles"}:
-            if fitness_metric == "loglik":
-                candidate_train_loglik = candidate.get("train_loglik", float("-inf"))
-                _better = candidate_train_loglik > overall_best_train["train_loglik"]
-            else:
-                _better = candidate["train_acc"] > overall_best_train["train_accuracy"]
-            if _better:
-                overall_best_train = {
-                    "train_accuracy": candidate["train_acc"],
-                    "test_accuracy": candidate["test_acc"],
-                    "train_loglik": candidate.get("train_loglik", float("-inf")),
-                    "test_loglik": candidate.get("test_loglik", float("-inf")),
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
-                }
-            if candidate["test_acc"] > overall_best_test["test_accuracy"]:
-                overall_best_test = {
-                    "train_accuracy": candidate["train_acc"],
-                    "test_accuracy": candidate["test_acc"],
-                    "train_loglik": candidate.get("train_loglik", float("-inf")),
-                    "test_loglik": candidate.get("test_loglik", float("-inf")),
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}",
-                }
-        else:
-            if candidate['train_acc'] > overall_best_train["train_accuracy"]:
-                overall_best_train = {
-                    "train_accuracy": candidate['train_acc'],
-                    "test_accuracy": candidate['test_acc'],
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
-                }
-            if candidate['test_acc'] > overall_best_test["test_accuracy"]:
-                overall_best_test = {
-                    "train_accuracy": candidate['train_acc'],
-                    "test_accuracy": candidate['test_acc'],
-                    "program_id": f"iteration_{candidate['iteration']}_candidate_{candidate['candidate_idx']}"
-                }
-    
+
+    # Select final best program directly from the final elite pool (already sorted by train fitness).
+    # This guarantees final reporting is paired from one candidate.
+    final_best_code, _, _, final_best_program_id = (
+        elite_parents[0][0],
+        elite_parents[0][1],
+        elite_parents[0][2],
+        elite_parents[0][3],
+    )
+    match = re.match(r"iteration_(\d+)_candidate_(\d+)$", final_best_program_id)
+    if match is not None:
+        best_iteration = int(match.group(1))
+        best_candidate_idx = int(match.group(2))
+        best_program_filename = f"best_program_fr_iter{best_iteration}_cand{best_candidate_idx}.py"
+    elif final_best_program_id == "baseline":
+        best_iteration = -1
+        best_candidate_idx = -1
+        best_program_filename = "best_program_fr_baseline.py"
+    else:
+        best_iteration = None
+        best_candidate_idx = None
+        safe_program_id = re.sub(r"[^A-Za-z0-9_.-]", "_", final_best_program_id)
+        best_program_filename = f"best_program_fr_{safe_program_id}.py"
+
+    if save_artifacts:
+        (output_path / best_program_filename).write_text(final_best_code or "")
+
+    final_best_fn = compile_program(final_best_code)
+    if final_best_fn is None:
+        raise RuntimeError(
+            f"Final best program failed to compile: {final_best_program_id}"
+        )
+
+    if is_cpc18_mse:
+        final_train_eval = evaluate_cpc18_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
+        final_test_eval = evaluate_cpc18_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        train_observed_blocks = test_observed_blocks
+        final_train_mse_eval = evaluate_cpc18_mse(
+            final_best_fn, train_trials, train_observed_blocks, n_seeds=n_eval_seeds
+        )
+        final_test_mse_eval = evaluate_cpc18_mse(
+            final_best_fn, test_trials, test_observed_blocks, n_seeds=n_eval_seeds
+        )
+        overall_best_train = {
+            "train_fitness": -final_train_mse_eval["mse"],
+            "train_mse": final_train_mse_eval["mse"],
+            "test_mse": final_test_mse_eval["mse"],
+            "train_accuracy": final_train_eval["accuracy"],
+            "test_accuracy": final_test_eval["accuracy"],
+            "program_id": final_best_program_id,
+            "origin_iteration": best_iteration,
+            "origin_candidate_idx": best_candidate_idx,
+            "program_file": best_program_filename,
+        }
+        # Keep paired train/test metrics from the same best-train program.
+        overall_best_test = dict(overall_best_train)
+    elif is_cpc18_split:
+        final_train_eval = evaluate_cpc18_split_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
+        final_test_eval = evaluate_cpc18_split_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        overall_best_train = {
+            "train_accuracy": final_train_eval["accuracy"],
+            "test_accuracy": final_test_eval["accuracy"],
+            "train_loglik": final_train_eval["avg_loglik"],
+            "test_loglik": final_test_eval["avg_loglik"],
+            "program_id": final_best_program_id,
+            "origin_iteration": best_iteration,
+            "origin_candidate_idx": best_candidate_idx,
+            "program_file": best_program_filename,
+        }
+        overall_best_test = dict(overall_best_train)
+    elif dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
+        final_train_eval = evaluate_choice13k_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
+        final_test_eval = evaluate_choice13k_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        overall_best_train = {
+            "train_accuracy": final_train_eval["accuracy"],
+            "test_accuracy": final_test_eval["accuracy"],
+            "train_loglik": final_train_eval["avg_loglik"],
+            "test_loglik": final_test_eval["avg_loglik"],
+            "program_id": final_best_program_id,
+            "origin_iteration": best_iteration,
+            "origin_candidate_idx": best_candidate_idx,
+            "program_file": best_program_filename,
+        }
+        overall_best_test = dict(overall_best_train)
+    else:
+        final_train_eval = evaluate_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
+        final_test_eval = evaluate_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        overall_best_train = {
+            "train_accuracy": final_train_eval["accuracy"],
+            "test_accuracy": final_test_eval["accuracy"],
+            "program_id": final_best_program_id,
+            "origin_iteration": best_iteration,
+            "origin_candidate_idx": best_candidate_idx,
+            "program_file": best_program_filename,
+        }
+        overall_best_test = dict(overall_best_train)
+
     if is_cpc18_mse or is_cpc18_split:
         results = {
             "baseline": baseline_results,
@@ -3786,8 +3858,8 @@ def run_evolution(
     else:
         results = {
             "baseline": baseline_results,
-            "overall_best_train_accuracy": overall_best_train,
-            "overall_best_test_accuracy": overall_best_test,
+            "overall_best_train": overall_best_train,
+            "overall_best_test": overall_best_test,
         }
     if save_artifacts and not choice13k_simple_logging:
         (output_path / "results.json").write_text(json.dumps(results, indent=2))
@@ -4172,8 +4244,8 @@ def run_evolution_gridworld_ensemble(
 
     results = {
         "baseline": baseline_results,
-        "overall_best_train_accuracy": {"train_accuracy": mean_train_acc, "test_accuracy": ensemble_test_acc, "program_id": "ensemble"},
-        "overall_best_test_accuracy": {"train_accuracy": mean_train_acc, "test_accuracy": ensemble_test_acc, "program_id": "ensemble"},
+        "overall_best_train": {"train_accuracy": mean_train_acc, "test_accuracy": ensemble_test_acc, "program_id": "ensemble"},
+        "overall_best_test": {"train_accuracy": mean_train_acc, "test_accuracy": ensemble_test_acc, "program_id": "ensemble"},
         "ensemble_test_accuracy": ensemble_test_acc,
         "ensemble_size": K,
     }

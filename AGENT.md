@@ -15,6 +15,13 @@ Local vLLM mode
     - Updated TE and OpenEvolve cluster scripts to use renewed loglik seeds:
       - `persona_code_example/cpc18/prospect_theory.py`
       - `persona_code_example/mixed_gambles/prospect_theory.py`
+  - Best-program reporting fix (TE + OpenEvolve, Apr 28, 2026):
+    - Final reporting now uses a single pool-best program selected by train fitness after the last iteration/pool update.
+    - `train_loglik` and `test_loglik` in participant/loglik CSVs are paired values from that same best program (no mixed-program pairing).
+    - Per-participant best-program artifact is saved with origin in filename (e.g., `best_program_fr_iterX_candY.py`).
+    - Result naming is metric-agnostic (`overall_best_train` / `overall_best_test`).
+    - In `fitness_metric=loglik` mode, per-iteration test loglik is evaluated only for the updated-pool best program, and W&B curves use those pool-best paired metrics.
+  - `utils/adhoc_fix_report.py` is for legacy runs before 2026-04-28 (use only for pre-fix experiments).
 
 - Start your local server (example): `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000`.
 - Run with the new mode switch to route LLM calls externally:  
