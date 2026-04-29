@@ -67,7 +67,12 @@ def _infer_participant_id(path: Path) -> int:
 
 def _load_row_from_results_json(path: Path) -> ParticipantLoglikRow:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    best_train = payload.get("overall_best_train_accuracy", {})
+    # Support both legacy and newer result schemas:
+    # - overall_best_train_accuracy (older TE naming)
+    # - overall_best_train (newer naming, incl. CPC18 runs)
+    best_train = payload.get("overall_best_train_accuracy", None)
+    if not isinstance(best_train, dict):
+        best_train = payload.get("overall_best_train", {})
 
     participant_id = payload.get("participant_id", None)
     if participant_id is None:

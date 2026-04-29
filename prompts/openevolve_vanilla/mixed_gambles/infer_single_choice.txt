@@ -13,7 +13,7 @@ def choose(problem, history):
         - option_keys
         - has_feedback: bool
 
-    history: unused (may be empty)
+    history: empty list of dict
 
     return: float, probability of choosing action 1
             action 1 = gamble_B / certain option / reject the risky gamble

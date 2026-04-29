@@ -1,73 +1,46 @@
 You are given observations of human choices in mixed-gamble problems.
 
 Each problem presents two options:
-- One risky gamble with possible gains and losses
-- One certain outcome
+- Option A: a risky gamble (may involve gains and/or losses)
+- Option B: an alternative option, often a certain outcome
+- action 0 = choose Option A
+- action 1 = choose Option B
 
-Option convention:
-- Option A = gamble_A / accept the risky gamble
-- Option B = gamble_B / certain option / reject the risky gamble
-- action 0 = choose gamble_A
-- action 1 = choose gamble_B
-
-All information about outcomes and probabilities is fully described in the problem.
-Each decision is independent.
-
-IMPORTANT DATA PROPERTIES:
+Each decision is independent:
 - has_feedback is always False
-- history does NOT contain useful information
-- There is NO outcome realization shown to the participant
-- Choices depend only on the current gamble, not past trials
+- history does not contain useful information
+- choices should depend only on the current problem
 
-IMPORTANT — Evaluation metric:
-Mixed gambles are evaluated using log-likelihood.
-
-Your program must return a probability:
-
-    P(action = 1)
-
-where:
-- action 0 = choose gamble_A / accept the risky gamble
-- action 1 = choose gamble_B / choose the certain option / reject the risky gamble
-
-The goal is to MAXIMIZE log-likelihood.
-Higher log-likelihood is better. Since log-likelihood values are usually negative, values closer to 0 are better.
-
-Key implications:
-- Return a smooth probability in [0, 1], not only hard labels 0 or 1.
-- Higher returned values mean the participant is more likely to choose gamble_B / reject the gamble.
-- Lower returned values mean the participant is more likely to choose gamble_A / accept the gamble.
-- Avoid returning exactly 0.0 or exactly 1.0, as this can cause very poor log-likelihood when wrong.
-- Do not sample or use randomness.
-
-Write Python code that reproduces the observed behavior.
-
-You must generate a complete program implementing:
+Write Python code implementing:
 
 def choose(problem, history):
     """
+    Mixed-gambles probabilistic decision function.
+    The returned probability is evaluated by log-likelihood.
+
     problem: dict with keys
         - gamble_A: {"probs": List[float], "rewards": List[float]}
         - gamble_B: {"probs": List[float], "rewards": List[float]}
         - option_keys
         - has_feedback: bool
 
-    history: unused (may be empty)
+    history: empty list of dict
 
-    return: float, probability of choosing action 1
-            action 1 = gamble_B / certain option / reject the risky gamble
+    return:
+        float, probability of choosing action 1 (Option B)
     """
 
-REQUIREMENTS:
-- Pure Python.
-- Deterministic code only: same inputs should always produce the same probability.
-- Use ONLY information from the current problem.
-- Do NOT rely on history or feedback.
-- Return a single float in [0, 1].
-- The returned value must be the probability of choosing action 1.
-- Prefer simple, consistent probabilistic decision rules.
-- Avoid symmetric rules that treat both options identically.
-- Do not sample or use randomness.
+Requirements:
+- Pure Python, deterministic, no imports.
+- Use only the current problem information.
+- Do not rely on history or feedback.
 - Do not call external APIs.
+- Return one finite float strictly inside (0, 1). If needed, clip to [1e-9, 1 - 1e-9].
+- Higher returned values indicate higher likelihood of choosing Option B.
+- The output should be a calibrated probability, not a hard label.
+- The probability must depend meaningfully on the gamble probabilities and rewards.
+- Avoid constant or near-constant probabilities, such as always returning values close to 0.5.
+- Avoid trivial solutions such as adding small noise to a constant value.
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
 
-Output ONLY the complete choose(...) function.
+Provide only the code for choose(...) as a complete function.

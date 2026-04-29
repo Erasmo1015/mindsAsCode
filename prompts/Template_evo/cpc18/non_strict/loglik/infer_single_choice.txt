@@ -1,95 +1,51 @@
-You are given observations of human choices in the CPC18 Track II task (Individual behavior).
+You are given observations of human choices in the CPC18 Track II task (individual behavior).
 
-Each problem presents two gambles: Option A and Option B.
-Each gamble is defined by:
-- a high outcome and its probability,
-- a low outcome,
-- a lottery shape and number of outcomes.
-
-You will see a history of previous trials for the SAME participant and SAME problem.
-Each problem consists of 25 trials, organized into 5 blocks of 5 trials.
-Feedback is only available after the first block.
-
-IMPORTANT — Evaluation metric:
-CPC18 is evaluated using log-likelihood.
-
-Your program must return a probability:
-
-    P(action = 1)
-
-where:
-- action 0 = choose Option A
-- action 1 = choose Option B
-
-The observed human action is scored by log-likelihood:
-- if the human chose B (action 1), the score uses log(p)
-- if the human chose A (action 0), the score uses log(1 - p)
-
-where p is your returned probability of choosing action 1.
-
-The goal is to MAXIMIZE log-likelihood.
-Higher log-likelihood is better (values closer to 0 are better).
-
-Examples:
-- log-likelihood = -0.2 is better than -1.5
-- returning p = 0.8 means high likelihood of choosing Option B
-- returning p = 0.2 means high likelihood of choosing Option A
-
-Key implications:
-- Your output should be a smooth probability in [0, 1], not only hard labels 0 or 1.
-- Avoid returning exactly 0.0 or exactly 1.0, as this leads to very poor log-likelihood when incorrect.
-- Good solutions estimate human choice probabilities, not just deterministic decisions.
-- Pure always-A or always-B strategies perform poorly.
-- Simply copying past actions may overfit and generalize poorly.
-
-Your goal:
-Write Python code that reproduces human behavior by maximizing log-likelihood.
-This requires estimating the probability that the participant chooses Option B (action 1).
-
-HARD CONSTRAINTS:
-- The program MUST use problem fields:
-  Ha, pHa, La, Hb, pHb, Lb, LotShapeA, LotNumA, LotShapeB, LotNumB, Amb, Corr.
-- Do NOT rely only on copying or smoothing history.action.
-- Do NOT implement pure inertia or majority-vote policies that ignore the problem.
-
-You must generate a program implementing:
+Write Python code implementing:
 
 def choose(problem, history):
     """
+    CPC18 Track II probabilistic decision function.
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    The function must return P(action = 1), where:
+        - action 0 = Option A
+        - action 1 = Option B
+
     problem: dict with keys
-        - Ha: float
-        - pHa: float
-        - La: float
-        - LotShapeA: str
-        - LotNumA: int
+        - Ha: float      # high outcome of Option A
+        - pHa: float     # probability of Ha
+        - La: float      # low outcome of Option A
+        - LotShapeA: str # '-', 'Symm', 'L-skew', 'R-skew'
+        - LotNumA: int   # number of outcomes for Option A
 
-        - Hb: float
-        - pHb: float
-        - Lb: float
-        - LotShapeB: str
-        - LotNumB: int
+        - Hb: float      # high outcome of Option B
+        - pHb: float     # probability of Hb
+        - Lb: float      # low outcome of Option B
+        - LotShapeB: str # '-', 'Symm', 'L-skew', 'R-skew'
+        - LotNumB: int   # number of outcomes for Option B
 
-        - Amb: int
-        - Corr: int
+        - Amb: int       # 1 if ambiguous, 0 otherwise
+        - Corr: int      # correlation: -1, 0, or 1
 
     history: list of dicts with keys
-        - action: int (0 = A, 1 = B)
+        - action: int (0 = Option A, 1 = Option B)
         - feedback: float or None
 
-    return: float, probability of choosing action 1 (Option B)
-            Must be in [0, 1]
+    return:
+        float, probability of choosing action 1 / Option B
     """
 
-Guidelines:
-- Use both problem and history to estimate P(action=1).
-- Prefer smooth probabilistic decision rules (e.g., sigmoid/logistic).
-- Avoid sharp deterministic switching unless strongly justified.
-- Clip probabilities to avoid exact 0 or 1 (e.g., [1e-9, 1 - 1e-9]).
-
-Constraints:
-- Pure Python.
-- Deterministic code only (no randomness or sampling).
+Requirements:
+- Pure Python, deterministic, no imports.
 - Use only the provided problem and history.
-- Do not call external APIs.
+- Return one finite float strictly inside (0, 1). If needed, clip to [1e-9, 1 - 1e-9].
+- Higher returned values mean higher probability of choosing Option B.
+- The probability should assign high likelihood to the observed human action, not just output hard labels.
+- The probability must depend meaningfully on the problem inputs.
+- History may be used when helpful, but do not rely only on copying, smoothing, or majority vote of past actions.
+- Avoid constant or near-constant probabilities, such as always returning values close to 0.5.
+- Avoid trivial solutions such as adding small noise to a constant value.
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
 
-Provide only the code for choose(...) as a complete function body.
+Provide only the code for choose(...) as a complete function.
