@@ -1704,6 +1704,35 @@ def _run_one_openevolve(
             )
     checkpoint_rows.sort(key=lambda x: int(x["iter_idx"]))
 
+    def _is_runtime_valid_metrics(src: Dict[str, Any]) -> bool:
+        if not isinstance(src, dict) or not src:
+            return False
+        fatal = float(src.get("fatal_failure", 0.0) or 0.0)
+        if fatal >= 0.5:
+            return False
+        if args.dataset in {"choice13k", "mixed_gambles"} or (
+            args.dataset == "cpc18" and not args.cpc18_official_mse
+        ):
+            tr_ll = src.get("train_loglik", None)
+            te_ll = src.get("test_loglik", None)
+            if tr_ll is None or te_ll is None:
+                return False
+            if float(tr_ll) <= -1e8 or float(te_ll) <= -1e8:
+                return False
+            return True
+        if args.dataset == "cpc18" and args.cpc18_official_mse:
+            tr_mse = src.get("train_mse", None)
+            te_mse = src.get("test_mse", None)
+            if tr_mse is None or te_mse is None:
+                return False
+            if (not math.isfinite(float(tr_mse))) or (not math.isfinite(float(te_mse))):
+                return False
+            return True
+        cs = src.get("combined_score", None)
+        if cs is None:
+            return False
+        return float(cs) > -1e8
+
     # Evaluate only pool-best programs per iteration in loglik mode.
     is_loglik_mode = (
         args.fitness_metric == "loglik"
@@ -1712,11 +1741,14 @@ def _run_one_openevolve(
     eval_cache: Dict[str, Dict[str, Any]] = {}
     for row in checkpoint_rows:
         row["paired_metrics"] = None
+        row["runtime_valid"] = False
         if (not is_loglik_mode) or (not row.get("program_code")):
+            row["runtime_valid"] = _is_runtime_valid_metrics(dict(row.get("metrics", {}) or {}))
             continue
         pid = str(row.get("program_id", ""))
         if pid in eval_cache:
             row["paired_metrics"] = eval_cache[pid]
+            row["runtime_valid"] = _is_runtime_valid_metrics(eval_cache[pid])
             continue
         try:
             pm = _evaluate_program_code_metrics(
@@ -1734,9 +1766,12 @@ def _run_one_openevolve(
         if pm is not None:
             eval_cache[pid] = pm
             row["paired_metrics"] = pm
+            row["runtime_valid"] = _is_runtime_valid_metrics(pm)
 
-    # Final best must be from the last updated pool (last checkpoint), then evaluated as a pair.
-    final_row = checkpoint_rows[-1] if checkpoint_rows else None
+    # Select only runtime-valid evolved programs; fallback to seed if none exist.
+    runtime_valid_rows = [r for r in checkpoint_rows if bool(r.get("runtime_valid", False))]
+    final_row = runtime_valid_rows[-1] if runtime_valid_rows else None
+    used_seed_fallback = False
     if final_row is not None and final_row.get("program_code"):
         final_best_code = str(final_row["program_code"])
         final_prog_id = str(final_row.get("program_id", "unknown"))
@@ -1753,22 +1788,30 @@ def _run_one_openevolve(
                 observed_blocks=test_observed_blocks,
                 n_eval_seeds=int(args.n_eval_seeds),
             )
+        if not _is_runtime_valid_metrics(final_metrics):
+            final_row = None
+
+    if final_row is None:
+        used_seed_fallback = True
+        print(
+            f"[WARN] participant {participant_tag}: no runtime-valid evolved program found; using seed program.",
+            flush=True,
+        )
+        final_best_code = seed_code
+        final_prog_id = "seed_program"
+        final_iter = 0
+        final_metrics = _evaluate_program_code_metrics(
+            code=final_best_code,
+            dataset=args.dataset,
+            fitness_metric=args.fitness_metric,
+            cpc18_official_mse=bool(args.cpc18_official_mse),
+            train_trials=train_trials,
+            test_trials=test_trials,
+            observed_blocks=test_observed_blocks,
+            n_eval_seeds=int(args.n_eval_seeds),
+        )
     else:
-        final_best_code = str(best_program.code)
-        final_prog_id = str(getattr(best_program, "id", "unknown"))
-        final_iter = int(args.n_iterations)
-        final_metrics = dict(best_program.metrics or {})
-        if is_loglik_mode:
-            final_metrics = _evaluate_program_code_metrics(
-                code=final_best_code,
-                dataset=args.dataset,
-                fitness_metric=args.fitness_metric,
-                cpc18_official_mse=bool(args.cpc18_official_mse),
-                train_trials=train_trials,
-                test_trials=test_trials,
-                observed_blocks=test_observed_blocks,
-                n_eval_seeds=int(args.n_eval_seeds),
-            )
+        pass
 
     best_code_path = part_dir / "best_program.py"
     best_code_path.write_text(final_best_code, encoding="utf-8")
@@ -1809,6 +1852,7 @@ def _run_one_openevolve(
                 iter_key: iter_idx,
                 f"{pid_key}_train_fitness": train_fitness_i,
                 f"{pid_key}_test_fitness": test_fitness_i,
+                f"{pid_key}_runtime_valid": bool(row.get("runtime_valid", False)),
                 f"{pid_key}_train_loglik": src.get("train_loglik", None),
                 f"{pid_key}_test_loglik": src.get("test_loglik", None),
                 f"{pid_key}_train_accuracy": src.get("train_acc", None),
@@ -1839,7 +1883,7 @@ def _run_one_openevolve(
         )
     else:
         hard_fail = fatal_flag >= 0.5 or combined_score <= -1e8
-    if hard_fail:
+    if hard_fail and (not used_seed_fallback):
         msg = (
             f"[FATAL] participant {participant_tag} evolution failed. "
             f"metrics={metrics} output_dir={output_dir}"
@@ -1938,6 +1982,8 @@ def _run_one_openevolve(
         "seed_program_test_fitness": test_fitness,
         "total_runtime": runtime,
         "fatal_failure": fatal_flag,
+        "runtime_valid_evolved_found": bool(runtime_valid_rows),
+        "used_seed_fallback": bool(used_seed_fallback),
         "metrics_raw": metrics,
         "overall_best_train": results_payload["overall_best_train"],
         "overall_best_test": results_payload["overall_best_test"],

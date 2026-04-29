@@ -2800,6 +2800,8 @@ def run_evolution(
                 baseline_train_eval["accuracy"],
             )]
     
+    runtime_valid_evolved_found = False
+
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
     simple_iterations_dir = None
@@ -2910,6 +2912,7 @@ def run_evolution(
                     empty_row["train_loglik"] = float("-inf")
                     empty_row["test_loglik"] = float("-inf")
                     empty_row["fitness"] = float("-inf") if fitness_metric == "loglik" else 0.0
+                    empty_row["runtime_valid"] = False
                 candidate_results.append(empty_row)
                 continue
             
@@ -3025,6 +3028,7 @@ def run_evolution(
                         "test_loglik": float("-inf"),
                         "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
                         "valid": False,
+                        "runtime_valid": False,
                     })
                     continue
                 choose_fn = compile_program(code)
@@ -3039,14 +3043,13 @@ def run_evolution(
                         "test_loglik": float("-inf"),
                         "fitness": _worst,
                         "valid": False,
+                        "runtime_valid": False,
                     })
                     continue
                 try:
                     train_eval = evaluate_cpc18_split_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    if fitness_metric == "loglik":
-                        test_eval = None
-                    else:
-                        test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    # Always run test pass for runtime-valid checks; test metrics may be hidden later.
+                    test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 except (TypeError, ValueError, AssertionError):
                     candidate_results.append({
                         "idx": idx,
@@ -3057,13 +3060,19 @@ def run_evolution(
                         "test_loglik": float("-inf"),
                         "fitness": _worst,
                         "valid": False,
+                        "runtime_valid": False,
                     })
                     continue
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
+                runtime_valid = (train_eval.get("errors", 0) == 0) and (
+                    test_eval is None or test_eval.get("errors", 0) == 0
+                )
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
+                if not runtime_valid:
+                    fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
@@ -3077,6 +3086,7 @@ def run_evolution(
                     "train_total": train_eval["total"],
                     "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
+                    "runtime_valid": runtime_valid,
                 })
             elif dataset == "choice13k":
                 choose_fn = compile_program(code)
@@ -3091,14 +3101,13 @@ def run_evolution(
                         "test_loglik": float("-inf"),
                         "fitness": _worst,
                         "valid": False,
+                        "runtime_valid": False,
                     })
                     continue
                 try:
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    if fitness_metric == "loglik":
-                        test_eval = None
-                    else:
-                        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    # Always run test pass for runtime-valid checks; test metrics may be hidden later.
+                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 except (AssertionError, TypeError, ValueError):
                     candidate_results.append({
                         "idx": idx,
@@ -3109,13 +3118,19 @@ def run_evolution(
                         "test_loglik": float("-inf"),
                         "fitness": _worst,
                         "valid": False,
+                        "runtime_valid": False,
                     })
                     continue
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
+                runtime_valid = (train_eval.get("errors", 0) == 0) and (
+                    test_eval is None or test_eval.get("errors", 0) == 0
+                )
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
+                if not runtime_valid:
+                    fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
@@ -3129,6 +3144,7 @@ def run_evolution(
                     "train_total": train_eval["total"],
                     "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
+                    "runtime_valid": runtime_valid,
                 })
             else:
                 # mixed_gambles: support accuracy and optional log-likelihood fitness
@@ -3141,6 +3157,7 @@ def run_evolution(
                         "test_acc": 0.0,
                         "fitness": 0.0,
                         "valid": False,
+                        "runtime_valid": False,
                     }
                     if fitness_metric == "loglik":
                         row["train_loglik"] = float("-inf")
@@ -3150,13 +3167,21 @@ def run_evolution(
                     continue
                 if fitness_metric == "loglik":
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    test_eval = None
+                    # Always run test pass for runtime-valid checks; test metrics are still excluded downstream.
+                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 else:
                     train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 fitness = train_eval["avg_loglik"] if fitness_metric == "loglik" else train_acc
+                runtime_valid = True
+                if fitness_metric == "loglik":
+                    runtime_valid = (train_eval.get("errors", 0) == 0) and (
+                        test_eval is None or test_eval.get("errors", 0) == 0
+                    )
+                    if not runtime_valid:
+                        fitness = -1e9
                 row = {
                     "idx": idx,
                     "code": code,
@@ -3168,6 +3193,7 @@ def run_evolution(
                     "train_total": train_eval["total"],
                     "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
+                    "runtime_valid": runtime_valid,
                 }
                 if fitness_metric == "loglik":
                     row["train_loglik"] = train_eval["avg_loglik"]
@@ -3179,14 +3205,22 @@ def run_evolution(
         print(f"Iteration {iteration + 1} Results:")
         print(f"{'='*80}")
         
-        valid_results = [r for r in candidate_results if r["valid"]]
-        if valid_results:
+        compile_valid_results = [r for r in candidate_results if r.get("valid", False)]
+        # For probability-evaluation datasets, selection must use runtime-valid programs only.
+        if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
+            selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
+        else:
+            selected_results = list(compile_valid_results)
+        if selected_results:
+            runtime_valid_evolved_found = True
             # Sort by fitness (for CPC18: -MSE, for others: accuracy)
-            valid_results.sort(key=lambda x: x["fitness"], reverse=True)
+            selected_results.sort(key=lambda x: x["fitness"], reverse=True)
+            # Keep legacy name for downstream logging blocks.
+            valid_results = selected_results
             
             if is_cpc18_mse:
                 print(f"\nTop performers (by fitness = -train_MSE, higher is better):")
-                for i, result in enumerate(valid_results[:5]):
+                for i, result in enumerate(selected_results[:5]):
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_mse={result['train_mse']:.2f}, "
@@ -3195,7 +3229,7 @@ def run_evolution(
                     )
             elif is_cpc18_split and fitness_metric == "loglik":
                 print(f"\nTop performers (by train avg log-likelihood, higher is better):")
-                for i, result in enumerate(valid_results[:5]):
+                for i, result in enumerate(selected_results[:5]):
                     _test_ll = (
                         f"{result['test_loglik']:.6f}"
                         if result.get("test_loglik") is not None
@@ -3215,7 +3249,7 @@ def run_evolution(
                     )
             elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 print(f"\nTop performers (by train avg log-likelihood, higher is better):")
-                for i, result in enumerate(valid_results[:5]):
+                for i, result in enumerate(selected_results[:5]):
                     _test_ll = (
                         f"{result['test_loglik']:.6f}"
                         if result.get("test_loglik") is not None
@@ -3235,7 +3269,7 @@ def run_evolution(
                     )
             else:
                 print(f"\nTop performers (by train accuracy):")
-                for i, result in enumerate(valid_results[:5]):
+                for i, result in enumerate(selected_results[:5]):
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_acc={result['train_acc']:.4f}, "
@@ -3243,7 +3277,7 @@ def run_evolution(
                     )
             
             # Best candidate in current generated batch (before elite pool update).
-            best_result = valid_results[0]
+            best_result = selected_results[0]
             best_fitness = best_result["fitness"]
             
             print(f"\nBest candidate in this batch: Candidate {best_result['idx']}")
@@ -3283,8 +3317,8 @@ def run_evolution(
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
                 print(f"  Test accuracy: {best_result['test_acc']:.4f}")
             
-            # Add all valid candidates to elite set
-            for result in valid_results:
+            # Add only selection-eligible (runtime-valid) candidates to elite set.
+            for result in selected_results:
                 program_id = f"iteration_{iteration_step}_candidate_{result['idx']}"
                 if is_cpc18_mse:
                     elite_parents.append((
@@ -3473,19 +3507,24 @@ def run_evolution(
                         "program_id": f"iteration_{iteration_step}_candidate_{best_result['idx']}"
                     }
         else:
-            print("\nWarning: No valid programs generated in this iteration!")
+            valid_results = []
+            if (dataset in {"choice13k", "mixed_gambles"}) or is_cpc18_split:
+                print("\nWarning: No runtime-valid programs generated in this iteration!")
+            else:
+                print("\nWarning: No valid programs generated in this iteration!")
             print("Continuing with elite parents pool from previous iterations...")
         
         # Save iteration results
         best_program_id = None
-        if valid_results:
+        if selected_results:
             best_program_id = iter_best_program_id
         
         if is_cpc18_mse:
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(valid_results),
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
                 "candidate_results": [
                     {
@@ -3494,18 +3533,20 @@ def run_evolution(
                         "test_mse": r.get("test_mse", None),
                         "fitness": r.get("fitness", None),
                         "valid": r["valid"],
+                        "runtime_valid": r.get("runtime_valid", r["valid"]),
                     }
                     for r in candidate_results
                 ],
-                "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
-                "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
+                "best_train_fitness": best_fitness if selected_results else None,
+                "best_train_mse": selected_results[0]["train_mse"] if selected_results else None,
+                "best_test_mse": selected_results[0]["test_mse"] if selected_results else None,
             }
         elif is_cpc18_split:
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(valid_results),
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
                 "candidate_results": [
                     {
@@ -3516,20 +3557,22 @@ def run_evolution(
                         "test_loglik": r.get("test_loglik"),
                         "fitness": r.get("fitness"),
                         "valid": r["valid"],
+                        "runtime_valid": r.get("runtime_valid", r["valid"]),
                     }
                     for r in candidate_results
                 ],
-                "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": iter_best_train_acc if valid_results else None,
-                "best_test_acc": iter_best_test_acc if valid_results else None,
-                "best_train_loglik": iter_best_train_loglik if valid_results else None,
-                "best_test_loglik": iter_best_test_loglik if valid_results else None,
+                "best_train_fitness": best_fitness if selected_results else None,
+                "best_train_acc": iter_best_train_acc if selected_results else None,
+                "best_test_acc": iter_best_test_acc if selected_results else None,
+                "best_train_loglik": iter_best_train_loglik if selected_results else None,
+                "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
         elif dataset in {"choice13k", "mixed_gambles"}:
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(valid_results),
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
                 "candidate_results": [
                     {
@@ -3540,20 +3583,22 @@ def run_evolution(
                         "test_loglik": r.get("test_loglik"),
                         "fitness": r.get("fitness"),
                         "valid": r["valid"],
+                        "runtime_valid": r.get("runtime_valid", r["valid"]),
                     }
                     for r in candidate_results
                 ],
-                "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": iter_best_train_acc if valid_results else None,
-                "best_test_acc": iter_best_test_acc if valid_results else None,
-                "best_train_loglik": iter_best_train_loglik if valid_results else None,
-                "best_test_loglik": iter_best_test_loglik if valid_results else None,
+                "best_train_fitness": best_fitness if selected_results else None,
+                "best_train_acc": iter_best_train_acc if selected_results else None,
+                "best_test_acc": iter_best_test_acc if selected_results else None,
+                "best_train_loglik": iter_best_train_loglik if selected_results else None,
+                "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
         else:
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(valid_results),
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
                 "candidate_results": [
                     {
@@ -3561,11 +3606,12 @@ def run_evolution(
                         "train_acc": r["train_acc"],
                         "test_acc": r["test_acc"],
                         "valid": r["valid"],
+                        "runtime_valid": r.get("runtime_valid", r["valid"]),
                     }
                     for r in candidate_results
                 ],
-                "best_train_acc": best_fitness if valid_results else None,
-                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
+                "best_train_acc": best_fitness if selected_results else None,
+                "best_test_acc": selected_results[0]["test_acc"] if selected_results else None,
             }
         if save_artifacts and iter_dir is not None:
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -3574,37 +3620,41 @@ def run_evolution(
         if is_cpc18_mse:
             summary = {
                 "iteration": iteration_step,
-                "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_mse": valid_results[0]["train_mse"] if valid_results else None,
-                "best_test_mse": valid_results[0]["test_mse"] if valid_results else None,
-                "n_valid": len(valid_results),
+                "best_train_fitness": best_fitness if selected_results else None,
+                "best_train_mse": selected_results[0]["train_mse"] if selected_results else None,
+                "best_test_mse": selected_results[0]["test_mse"] if selected_results else None,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
             }
         elif is_cpc18_split:
             summary = {
                 "iteration": iteration_step,
-                "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": iter_best_train_acc if valid_results else None,
-                "best_test_acc": iter_best_test_acc if valid_results else None,
-                "best_train_loglik": iter_best_train_loglik if valid_results else None,
-                "best_test_loglik": iter_best_test_loglik if valid_results else None,
-                "n_valid": len(valid_results),
+                "best_train_fitness": best_fitness if selected_results else None,
+                "best_train_acc": iter_best_train_acc if selected_results else None,
+                "best_test_acc": iter_best_test_acc if selected_results else None,
+                "best_train_loglik": iter_best_train_loglik if selected_results else None,
+                "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
             }
         elif dataset in {"choice13k", "mixed_gambles"}:
             summary = {
                 "iteration": iteration_step,
-                "best_train_fitness": best_fitness if valid_results else None,
-                "best_train_acc": iter_best_train_acc if valid_results else None,
-                "best_test_acc": iter_best_test_acc if valid_results else None,
-                "best_train_loglik": iter_best_train_loglik if valid_results else None,
-                "best_test_loglik": iter_best_test_loglik if valid_results else None,
-                "n_valid": len(valid_results),
+                "best_train_fitness": best_fitness if selected_results else None,
+                "best_train_acc": iter_best_train_acc if selected_results else None,
+                "best_test_acc": iter_best_test_acc if selected_results else None,
+                "best_train_loglik": iter_best_train_loglik if selected_results else None,
+                "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
             }
         else:
             summary = {
                 "iteration": iteration_step,
-                "best_train_acc": best_fitness if valid_results else None,
-                "best_test_acc": valid_results[0]["test_acc"] if valid_results else None,
-                "n_valid": len(valid_results),
+                "best_train_acc": best_fitness if selected_results else None,
+                "best_test_acc": selected_results[0]["test_acc"] if selected_results else None,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
             }
         print(f"\nSummary: {json.dumps(summary, indent=2)}")
         
@@ -3755,12 +3805,20 @@ def run_evolution(
 
     # Select final best program directly from the final elite pool (already sorted by train fitness).
     # This guarantees final reporting is paired from one candidate.
-    final_best_code, _, _, final_best_program_id = (
-        elite_parents[0][0],
-        elite_parents[0][1],
-        elite_parents[0][2],
-        elite_parents[0][3],
-    )
+    if ((dataset in {"choice13k", "mixed_gambles"}) or is_cpc18_split) and (not runtime_valid_evolved_found):
+        print(
+            "[WARN] No runtime-valid evolved program found; using baseline program for final reporting.",
+            flush=True,
+        )
+        final_best_code = seed_code
+        final_best_program_id = "baseline"
+    else:
+        final_best_code, _, _, final_best_program_id = (
+            elite_parents[0][0],
+            elite_parents[0][1],
+            elite_parents[0][2],
+            elite_parents[0][3],
+        )
     match = re.match(r"iteration_(\d+)_candidate_(\d+)$", final_best_program_id)
     if match is not None:
         best_iteration = int(match.group(1))
