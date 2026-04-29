@@ -31,16 +31,24 @@ def choose(problem, history):
     """
 
 Requirements:
-- Pure Python, deterministic, no imports.
-- Use only the current problem information.
-- Do not rely on history or feedback.
+- Pure Python, no imports, deterministic.
+- Use only the provided problem.
+- Do not use history or feedback (they are not informative).
 - Do not call external APIs.
-- Return one finite float strictly inside (0, 1). If needed, clip to [1e-9, 1 - 1e-9].
-- Higher returned values indicate higher likelihood of choosing Option B.
-- The output should be a calibrated probability, not a hard label.
-- The probability must depend meaningfully on the gamble probabilities and rewards.
-- Avoid constant or near-constant probabilities, such as always returning values close to 0.5.
-- Avoid trivial solutions such as adding small noise to a constant value.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing Option B.
+- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].
+- Higher returned values mean the participant is more likely to choose Option B.
 - Avoid numerical errors such as division by zero, overflow, or invalid operations.
+
+Behavioral requirements:
+- Do not return constant or near-constant probabilities (e.g., always close to 0.5).
+- Do not add small noise or artificial variation to a constant value.
+- The probability must depend meaningfully on the gamble probabilities and rewards.
+- The program should behave sensibly across different problems.
+
+Generation requirements:
+- Produce a valid program that is meaningfully different from the parent.
+- Avoid making only superficial changes without changing behavior.
 
 Provide only the code for choose(...) as a complete function.

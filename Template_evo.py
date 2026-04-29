@@ -1155,15 +1155,11 @@ REMEMBER: Change ALL {num_params} parameters! Do not leave any parameter unchang
                 output_format=output_format,
             )
             
-            # Adjust LLM temperature based on exploration factor
-            # Higher exploration_factor -> higher temperature for more diversity
-            # Range: 0.8 (conservative) to 1.5 (very aggressive)
-            llm_temperature = 0.8 + (exploration_factor * 0.7)
-            
             resp = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": variant_prompt}],
-                temperature=llm_temperature,
+                temperature=0.7,
+                top_p=0.95,
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content.strip()

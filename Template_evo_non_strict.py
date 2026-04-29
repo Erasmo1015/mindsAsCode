@@ -1659,6 +1659,7 @@ Output ONLY runnable Python code (no explanations, no markdown fences, no preamb
                 model=model_name,
                 messages=[{"role": "user", "content": full_prompt}],
                 temperature=0.7,
+                top_p=0.95,
                 max_tokens=max_tokens,
             )
             content = response.choices[0].message.content
@@ -1718,6 +1719,7 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
                 model=model_name,
                 messages=[{"role": "user", "content": full_prompt}],
                 temperature=0.7,
+                top_p=0.95,
                 max_tokens=max_tokens,
             )
             content = response.choices[0].message.content
@@ -2070,6 +2072,7 @@ Generate the variant now:"""
                 model=model_name,
                 messages=[{"role": "user", "content": base_prompt_template_final}],
                 temperature=0.7,
+                top_p=0.95,
                 max_tokens=max_tokens,  # Per variant - keep original max_tokens
             )
             content = response.choices[0].message.content
@@ -2327,6 +2330,7 @@ def choose(problem, history):
                 model=model_name,
                 messages=[{"role": "user", "content": prompt_text}],
                 temperature=0.7,
+                top_p=0.95,
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content
