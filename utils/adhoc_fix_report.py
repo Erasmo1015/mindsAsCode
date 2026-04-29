@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Ad-hoc report fixer for TE non-strict Choice13k loglik runs.
+Ad-hoc report fixer for TE non-strict loglik runs before Apr 28th, 2026.
+
+Usage:
+python utils/adhoc_fix_report.py --run_dir generated_outputs/choice13k/non_strict/run_260427_112812
 
 Safety-first behavior:
 - Reads only existing run artifacts.
