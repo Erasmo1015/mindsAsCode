@@ -500,6 +500,17 @@ def _compile_choose_from_code(code: str):
     return choose_fn
 
 
+def _call_choose_compat(choose_fn, problem: Dict[str, Any], history: Any):
+    """Call choose(problem, history) with backward-compatible history fallback."""
+    try:
+        return choose_fn(problem, history)
+    except (KeyError, TypeError):
+        if isinstance(history, list) and history and all(isinstance(h, dict) for h in history):
+            legacy_history = [(h.get("action"), h.get("feedback")) for h in history]
+            return choose_fn(problem, legacy_history)
+        raise
+
+
 def _eval_trials_loglik(choose_fn, trials: List[Dict[str, Any]]) -> Tuple[float, float, int]:
     total = len(trials)
     if total == 0:
@@ -508,7 +519,7 @@ def _eval_trials_loglik(choose_fn, trials: List[Dict[str, Any]]) -> Tuple[float,
     correct = 0
     for i, t in enumerate(trials):
         y = int(t["action"])
-        p_raw = choose_fn(t["problem"], t["history"])
+        p_raw = _call_choose_compat(choose_fn, t["problem"], t["history"])
         if isinstance(p_raw, (bool, int)) and int(p_raw) in (0, 1):
             p_raw = 1.0 if int(p_raw) == 1 else 0.0
         if not isinstance(p_raw, float):
@@ -529,7 +540,7 @@ def _eval_action_trials(choose_fn, trials: List[Dict[str, Any]]) -> Tuple[float,
     correct = 0
     for t in trials:
         try:
-            pred = choose_fn(t["problem"], t["history"])
+            pred = _call_choose_compat(choose_fn, t["problem"], t["history"])
         except Exception:
             pred = None
         if pred is not None and int(pred) == int(t["action"]):
@@ -569,7 +580,7 @@ def _eval_cpc18_mse(
             preds: List[int] = []
             for tr in block_trials:
                 try:
-                    pred = choose_fn(tr["problem"], tr["history"])
+                    pred = _call_choose_compat(choose_fn, tr["problem"], tr["history"])
                     preds.append(int(pred == 1))
                 except Exception:
                     continue
@@ -798,6 +809,7 @@ def _format_choice13k_train_trials_for_prompt(
         "Choice13k TRAIN split — reference for improving choose(problem, history).",
         "Fitness uses mean Bernoulli log-likelihood of P(action=1) on these trials only.",
         "action 0 = option A, action 1 = option B.",
+        "history is a list of entries like {'action': 0/1, 'feedback': ...}.",
         "",
     ]
     for j, i in enumerate(order):
@@ -840,6 +852,7 @@ def _format_cpc18_train_trials_for_prompt(
         "CPC18 TRAIN trials — improve choose(problem, history).",
         "Primary fitness is block-level MSE (lower is better); OpenEvolve maximizes combined_score = -train_mse.",
         "action 0 = option A (L), action 1 = option B (R).",
+        "history is a list of entries like {'action': 0/1, 'feedback': ...}.",
         "",
     ]
     for j, i in enumerate(order):
@@ -887,6 +900,7 @@ def _format_mixed_gambles_train_trials_for_prompt(
         "Mixed Gambles TRAIN trials — improve choose(problem, history).",
         objective_line,
         "action 0 = gamble option, action 1 = certain option.",
+        "history is a list of entries like {'action': 0/1, 'feedback': ...}.",
         "",
     ]
     for j, i in enumerate(order):
@@ -1155,6 +1169,16 @@ def _build_participant_evaluator_code(
             return mod
 
 
+        def _call_choose_compat(choose_fn, problem, history):
+            try:
+                return choose_fn(problem, history)
+            except (KeyError, TypeError):
+                if isinstance(history, list) and history and all(isinstance(h, dict) for h in history):
+                    legacy_history = [(h.get("action"), h.get("feedback")) for h in history]
+                    return choose_fn(problem, legacy_history)
+                raise
+
+
         def _eval_trials(choose_fn, trials):
             total = len(trials)
             if total == 0:
@@ -1163,7 +1187,7 @@ def _build_participant_evaluator_code(
             correct = 0
             for i, t in enumerate(trials):
                 y = int(t["action"])
-                p_raw = choose_fn(t["problem"], t["history"])
+                p_raw = _call_choose_compat(choose_fn, t["problem"], t["history"])
                 if isinstance(p_raw, (bool, int)) and int(p_raw) in (0, 1):
                     p_raw = 1.0 if int(p_raw) == 1 else 0.0
                 if not isinstance(p_raw, float):
@@ -1184,7 +1208,7 @@ def _build_participant_evaluator_code(
             correct = 0
             for t in trials:
                 try:
-                    pred = choose_fn(t["problem"], t["history"])
+                    pred = _call_choose_compat(choose_fn, t["problem"], t["history"])
                 except Exception:
                     pred = None
                 if pred is not None and int(pred) == int(t["action"]):
@@ -1220,7 +1244,7 @@ def _build_participant_evaluator_code(
                     preds = []
                     for tr in block_trials:
                         try:
-                            pred = choose_fn(tr["problem"], tr["history"])
+                            pred = _call_choose_compat(choose_fn, tr["problem"], tr["history"])
                             preds.append(int(pred == 1))
                         except Exception:
                             continue
@@ -1436,9 +1460,14 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
         f"You are improving a {args.dataset} choose(problem, history) policy. "
         f"Use provided code context to {objective} "
         "Output ONLY runnable Python code (no explanations, no markdown fences, no preamble), "
-        "preserving the choose(problem, history) signature."
+        "preserving the choose(problem, history) signature. "
+        "history is a list of dict entries with keys 'action' and 'feedback'."
     )
-    if args.fitness_metric == "loglik":
+    prompt_root: Optional[Path] = None
+    if args.prompt_mode == "vanilla":
+        dataset_dir = "choices13k" if args.dataset == "choice13k" else args.dataset
+        prompt_root = REPO_ROOT / "prompts" / "openevolve_vanilla" / dataset_dir
+    elif args.fitness_metric == "loglik":
         prompt_dataset = None
         if args.dataset == "choice13k":
             prompt_dataset = "choice13k"
@@ -1448,23 +1477,25 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
             prompt_dataset = "cpc18"
         if prompt_dataset is not None:
             prompt_root = REPO_ROOT / "prompts" / "Template_evo" / prompt_dataset / "non_strict" / "loglik"
-            infer_path = prompt_root / "infer_single_choice.txt"
-            template_path = prompt_root / "single_code_template.txt"
-            try:
-                infer_text = infer_path.read_text(encoding="utf-8").strip()
-                template_text = template_path.read_text(encoding="utf-8").strip()
-                system_message = (
-                    f"{system_message}\n\n"
-                    "# Dataset-specific loglik prompt guidance\n"
-                    f"{infer_text}\n\n"
-                    "# Dataset-specific loglik code template\n"
-                    f"{template_text}"
-                )
-            except OSError as e:
-                print(
-                    f"[WARN] Could not load dataset-specific loglik prompts from {prompt_root}: {e}",
-                    flush=True,
-                )
+
+    if prompt_root is not None:
+        infer_path = prompt_root / "infer_single_choice.txt"
+        template_path = prompt_root / "single_code_template.txt"
+        try:
+            infer_text = infer_path.read_text(encoding="utf-8").strip()
+            template_text = template_path.read_text(encoding="utf-8").strip()
+            system_message = (
+                f"{system_message}\n\n"
+                "# Dataset-specific prompt guidance\n"
+                f"{infer_text}\n\n"
+                "# Dataset-specific code template\n"
+                f"{template_text}"
+            )
+        except OSError as e:
+            print(
+                f"[WARN] Could not load prompt files from {prompt_root}: {e}",
+                flush=True,
+            )
     prompt_cfg["system_message"] = system_message
     prompt_cfg["evaluator_system_message"] = "You are a strict code evaluator."
 
@@ -2009,6 +2040,16 @@ def main() -> None:
         type=int,
         default=131072,
         help="OpenEvolve truncates each prompt artifact to this many bytes (default 128 KiB).",
+    )
+    parser.add_argument(
+        "--prompt_mode",
+        type=str,
+        default="default",
+        choices=["default", "vanilla"],
+        help=(
+            "Prompt-source mode for infer_single_choice.txt and single_code_template.txt. "
+            "'default' keeps current behavior; 'vanilla' uses prompts/openevolve_vanilla/<dataset>/."
+        ),
     )
     args = parser.parse_args()
 

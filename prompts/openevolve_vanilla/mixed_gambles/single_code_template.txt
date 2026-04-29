@@ -1,0 +1,23 @@
+```python
+def choose(problem, history):
+    """
+    Mixed-gambles probabilistic decision function.
+    Evaluated by log-likelihood.
+
+    problem: dict with keys:
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys
+        - has_feedback: bool
+
+    history: unused; mixed-gamble choices are independent.
+
+    Option A = gamble_A / accept the risky gamble
+    Option B = gamble_B / certain option / reject the risky gamble
+
+    return:
+        float, probability of choosing action 1 / gamble_B
+        action 0 = gamble_A
+        action 1 = gamble_B
+    """
+```

@@ -1,0 +1,26 @@
+You will encounter a series of mixed-gamble problems where you have to select between two options.
+
+One option is a risky gamble with possible gains and losses.
+The other option is a certain outcome.
+
+Write Python:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys
+        - has_feedback: bool
+
+    history: unused (may be empty)
+
+    return: float, probability of choosing action 1
+            action 1 = gamble_B / certain option / reject the risky gamble
+    """
+
+Constraints:
+- Pure Python, no imports, deterministic.
+- Return a single float in [0,1].
+
+Only output the function.

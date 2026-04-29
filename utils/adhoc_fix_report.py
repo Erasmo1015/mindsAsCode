@@ -8,10 +8,10 @@ Safety-first behavior:
 - Writes all outputs into a fresh subfolder inside the run directory.
 
 Fix logic:
-- For each participant, read `participant_*/results.json`.
-- Use `overall_best_train_accuracy.train_loglik` and
-  `overall_best_train_accuracy.test_loglik` as the paired values.
-- Build fixed participant and summary CSVs from those values.
+- For each participant, prefer `participant_*/results.json`.
+- Fallback for legacy OpenEvolve folders:
+  `participant_*/openevolve_output/best/best_program_info.json`.
+- Build fixed participant and summary CSVs from train/test loglik values.
 """
 
 from __future__ import annotations
@@ -49,23 +49,44 @@ def _fmt2(v: Optional[float]) -> str:
     return f"{v:.2f}"
 
 
+def _infer_participant_id(path: Path) -> int:
+    parent_name = path.parent.name
+    if parent_name.startswith("participant_"):
+        return int(parent_name.split("_", 1)[1])
+    # Legacy best_program_info.json lives deeper:
+    # participant_123/openevolve_output/best/best_program_info.json
+    for ancestor in path.parents:
+        name = ancestor.name
+        if name.startswith("participant_"):
+            return int(name.split("_", 1)[1])
+    raise ValueError(f"Cannot infer participant_id from {path}")
+
+
 def _load_row_from_results_json(path: Path) -> ParticipantLoglikRow:
     payload = json.loads(path.read_text(encoding="utf-8"))
     best_train = payload.get("overall_best_train_accuracy", {})
 
     participant_id = payload.get("participant_id", None)
     if participant_id is None:
-        parent_name = path.parent.name
-        if parent_name.startswith("participant_"):
-            participant_id = int(parent_name.split("_", 1)[1])
-        else:
-            raise ValueError(f"Cannot infer participant_id from {path}")
+        participant_id = _infer_participant_id(path)
 
     return ParticipantLoglikRow(
         participant_id=int(participant_id),
         train_loglik=_safe_float(best_train.get("train_loglik")),
         test_loglik=_safe_float(best_train.get("test_loglik")),
         source_program_id=str(best_train.get("program_id", "")),
+        source_results_json=str(path),
+    )
+
+
+def _load_row_from_legacy_best_program_info(path: Path) -> ParticipantLoglikRow:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    participant_id = _infer_participant_id(path)
+    return ParticipantLoglikRow(
+        participant_id=int(participant_id),
+        train_loglik=_safe_float(payload.get("train_loglik")),
+        test_loglik=_safe_float(payload.get("test_loglik")),
+        source_program_id=str(payload.get("program_id", "")),
         source_results_json=str(path),
     )
 
@@ -161,18 +182,23 @@ def main() -> None:
     out_dir = run_dir / f"{args.output_prefix}_{ts}"
     out_dir.mkdir(parents=False, exist_ok=False)
 
-    # Build fixed rows from participant_*/results.json.
+    # Build fixed rows from participant_*/results.json with a legacy fallback.
     rows: List[ParticipantLoglikRow] = []
     for pdir in sorted(run_dir.glob("participant_*")):
         if not pdir.is_dir():
             continue
         results_path = pdir / "results.json"
-        if not results_path.exists():
-            continue
-        rows.append(_load_row_from_results_json(results_path))
+        legacy_best_path = pdir / "openevolve_output" / "best" / "best_program_info.json"
+        if results_path.exists():
+            rows.append(_load_row_from_results_json(results_path))
+        elif legacy_best_path.exists():
+            rows.append(_load_row_from_legacy_best_program_info(legacy_best_path))
 
     if not rows:
-        raise RuntimeError(f"No participant results.json files found under {run_dir}")
+        raise RuntimeError(
+            "No participant metrics files found under "
+            f"{run_dir} (expected results.json or legacy best_program_info.json)"
+        )
 
     rows.sort(key=lambda r: r.participant_id)
 
@@ -186,8 +212,8 @@ def main() -> None:
             "Ad-hoc fixed report (read-only source, new outputs only)\n"
             "\n"
             "Method:\n"
-            "- For each participant, read participant_*/results.json\n"
-            "- Use overall_best_train_accuracy.{train_loglik,test_loglik}\n"
+            "- For each participant, prefer participant_*/results.json\n"
+            "- Legacy fallback: participant_*/openevolve_output/best/best_program_info.json\n"
             "- Emit fixed participant and summary CSVs from those paired values\n"
             "\n"
             f"Run directory: {run_dir}\n"

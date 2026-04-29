@@ -1,0 +1,28 @@
+You will encounter a series of gambling problems where you have to select between
+two options.
+You can select an option by pressing the corresponding key.
+For some problems, you are told the points you received and missed out on after each
+selection, while for others this information is suppressed.
+In cases where the probabilities are unknown, they sum up to one and remain constant
+within a problem.
+
+Write Python:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys: e.g., ["A","B"]
+        - has_feedback: bool
+    history: list of dicts with keys
+        - action: int (0 for A, 1 for B)
+        - feedback: float or None
+    return: float, probability of choosing option 1 (Option B)
+    """
+
+Constraints:
+- Pure Python, no imports, deterministic.
+- Return a single float in [0,1].
+
+Only output the function.

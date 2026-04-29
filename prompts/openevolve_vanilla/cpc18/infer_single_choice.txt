@@ -1,0 +1,43 @@
+You will encounter a series of gambling problems where you have to select between
+two options.
+You can select an option by pressing the corresponding key.
+You will encounter each problem 25 times.
+In the first five encounters, you will not receive feedback.
+In the remaining 20 encounters, you will receive feedback about the outcomes of both
+options.
+In cases where the probabilities are stated to be unknown, they sum up to one and
+remain constant within a problem.
+
+Write Python:
+
+def choose(problem, history):
+    """
+    problem: dict with keys
+        - Ha: float
+        - pHa: float
+        - La: float
+        - LotShapeA: str
+        - LotNumA: int
+
+        - Hb: float
+        - pHb: float
+        - Lb: float
+        - LotShapeB: str
+        - LotNumB: int
+
+        - Amb: int
+        - Corr: int
+
+    history: list of dicts with keys
+        - action: int (0 = A, 1 = B)
+        - feedback: float or None
+
+    return: float, probability of choosing action 1 (Option B)
+            Must be in [0, 1]
+    """
+
+Constraints:
+- Pure Python, no imports, deterministic.
+- Return a single float in [0,1].
+
+Only output the function.
