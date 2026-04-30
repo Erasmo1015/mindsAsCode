@@ -2531,6 +2531,7 @@ def run_aggregate_evolution_phase(
     n_eval_seeds: int,
     llm_max_tokens: int,
     wandb=None,
+    wandb_log_fn=None,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     seed_fn = compile_program(seed_code)
@@ -2676,14 +2677,18 @@ def run_aggregate_evolution_phase(
                         best_test_ll = float(best_test_eval["avg_loglik"])
                     else:
                         best_test_ll = -1e9
-            wandb.log(
-                {
-                    "aggregate_iter": it,
-                    "aggregate_best_train_loglik": best_fit,
-                    "aggregate_best_test_loglik": best_test_ll,
-                },
-                step=it,
-            )
+            agg_log_dict = {
+                "aggregate_iter": it,
+                "aggregate_best_train_loglik": best_fit,
+                "aggregate_best_test_loglik": best_test_ll,
+                "aggregate_step": it,
+                "aggregate/train_loglik": best_fit,
+                "aggregate/test_loglik": best_test_ll,
+            }
+            if wandb_log_fn is not None:
+                wandb_log_fn(agg_log_dict)
+            else:
+                wandb.log(agg_log_dict, step=it)
         (iter_dir / "metrics.json").write_text(
             _json_dumps_safe(
                 {
@@ -2768,6 +2773,7 @@ def run_evolution(
     num_diagnostic_trials: Optional[int] = None,
     lambda_complexity: float = 0.0,
     lambda_change: float = 0.0,
+    wandb_log_fn=None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -3071,7 +3077,19 @@ def run_evolution(
                     baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
                     baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
                     baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
-        wandb.log(baseline_log_dict, step=0)
+        if participant_id is not None:
+            baseline_log_dict[f"p{participant_id}_step"] = 0
+            if (
+                (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split)
+                and baseline_train_eval is not None
+                and baseline_test_eval is not None
+            ):
+                baseline_log_dict[f"p{participant_id}/train_loglik"] = baseline_train_eval.get("avg_loglik", None)
+                baseline_log_dict[f"p{participant_id}/test_loglik"] = baseline_test_eval.get("avg_loglik", None)
+        if wandb_log_fn is not None:
+            wandb_log_fn(baseline_log_dict)
+        else:
+            wandb.log(baseline_log_dict, step=0)
         
         # Also save baseline to local JSONL file
         if log_file_path is not None:
@@ -4307,7 +4325,15 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-            wandb.log(log_dict, step=iteration + 1)  # Step starts at 1 (baseline is step=0)
+            if participant_id is not None:
+                log_dict[f"p{participant_id}_step"] = iteration + 1
+                if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
+                    log_dict[f"p{participant_id}/train_loglik"] = iter_best_train_loglik
+                    log_dict[f"p{participant_id}/test_loglik"] = iter_best_test_loglik
+            if wandb_log_fn is not None:
+                wandb_log_fn(log_dict)
+            else:
+                wandb.log(log_dict, step=iteration + 1)  # Step starts at 1 (baseline is step=0)
             
             # Also save to local JSONL file
             if save_artifacts and log_file_path is not None:
@@ -5281,6 +5307,22 @@ def main():
             f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}, "
             f"fitness_metric={args.fitness_metric}"
         )
+
+    wandb_global_step = 0
+
+    def _wandb_log_with_global_step(metrics: Dict[str, Any]) -> None:
+        nonlocal wandb_global_step
+        if wandb is None:
+            return
+        wandb.log(metrics, step=wandb_global_step)
+        wandb_global_step += 1
+
+    if wandb is not None and args.dataset in _PARTICIPANT_DATASETS:
+        wandb.define_metric("aggregate_step")
+        wandb.define_metric("aggregate/*", step_metric="aggregate_step")
+        for pid in participants_to_process:
+            wandb.define_metric(f"p{pid}_step")
+            wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
     
     # Create base run directory and save seed program once
     base_run_dir = None
@@ -5386,6 +5428,7 @@ def main():
                 client_kwargs=client_kwargs if client_kwargs else None,
                 output_dir=base_run_dir,
                 wandb=wandb,
+                wandb_log_fn=_wandb_log_with_global_step,
                 n_eval_seeds=args.n_eval_seeds,
                 sample_size=args.sample_size,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
@@ -5474,6 +5517,7 @@ def main():
             n_eval_seeds=args.n_eval_seeds,
             llm_max_tokens=args.llm_max_tokens,
             wandb=wandb,
+            wandb_log_fn=_wandb_log_with_global_step,
         )
         aggregate_seed_path.write_text(agg["best_code"], encoding="utf-8")
 
@@ -5546,6 +5590,7 @@ def main():
                     num_diagnostic_trials=args.num_diagnostic_trials,
                     lambda_complexity=args.lambda_complexity,
                     lambda_change=args.lambda_change,
+                    wandb_log_fn=_wandb_log_with_global_step,
                 )
                 best_src = Path(participant_output_dir) / "best_program.py"
                 if best_src.exists():
@@ -5619,6 +5664,7 @@ def main():
                     client_kwargs=client_kwargs if client_kwargs else None,
                     output_dir=base_run_dir,
                     wandb=wandb,
+                    wandb_log_fn=_wandb_log_with_global_step,
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
                     filter_mixed_gambles=mixed_gambles_gain_loss_only,
@@ -5915,6 +5961,7 @@ def main():
                         client_kwargs=client_kwargs if client_kwargs else None,
                         output_dir=participant_output_dir,
                         wandb=wandb,
+                        wandb_log_fn=_wandb_log_with_global_step,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         top_k=getattr(args, 'top_k', 0),
@@ -5934,6 +5981,7 @@ def main():
                         client_kwargs=client_kwargs if client_kwargs else None,
                         output_dir=participant_output_dir,
                         wandb=wandb,
+                        wandb_log_fn=_wandb_log_with_global_step,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
