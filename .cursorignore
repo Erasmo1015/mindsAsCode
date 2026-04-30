@@ -1,0 +1,4 @@
+generated_outputs/
+wandb/
+*.tar.gz
+*.tar
