@@ -4,9 +4,10 @@ Choice13k dataset loader replicated from llm_evo_cog (read-only reference).
 import math
 import os
 import re
+from pathlib import Path
 from typing import List, NamedTuple, Optional
 
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 
 
 def _hf_token_for_datasets():
@@ -124,10 +125,16 @@ def _convert_to_experiment(data) -> Experiment:
     )
 
 
-def get_choice13k_experiments(n_participants: int = 10):
-    tok = _hf_token_for_datasets()
-    ds_kw = {"token": tok} if tok else {}
-    dataset = load_dataset("marcelbinz/Psych-101-test", **ds_kw)
+def get_choice13k_experiments(n_participants: int = 10, local_dataset: Optional[str] = None):
+    if local_dataset:
+        dataset_path = Path(local_dataset).expanduser().resolve()
+        if not dataset_path.exists():
+            raise FileNotFoundError(f"Local dataset path does not exist: {dataset_path}")
+        dataset = load_from_disk(str(dataset_path))
+    else:
+        tok = _hf_token_for_datasets()
+        ds_kw = {"token": tok} if tok else {}
+        dataset = load_dataset("marcelbinz/Psych-101-test", **ds_kw)
     test_split = dataset['test']
     choices13k_ds = test_split.filter(lambda ex: ex['experiment'] == 'peterson2021using/exp1.csv')
 

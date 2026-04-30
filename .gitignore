@@ -196,3 +196,5 @@ cpc18_baselines.zip
 cpc18_baselines/
 
 analysis/figures/
+
+datasets/downloaded/

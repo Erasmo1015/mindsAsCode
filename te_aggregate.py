@@ -2774,6 +2774,7 @@ def run_evolution(
     lambda_complexity: float = 0.0,
     lambda_change: float = 0.0,
     wandb_log_fn=None,
+    local_dataset: Optional[str] = None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -2875,7 +2876,10 @@ def run_evolution(
             if choice13k_experiment is not None:
                 exp = choice13k_experiment
             else:
-                experiments = get_choice13k_experiments(n_participants=participant_id + 1)
+                experiments = get_choice13k_experiments(
+                    n_participants=participant_id + 1,
+                    local_dataset=local_dataset,
+                )
                 exp = experiments[participant_id]
             # Split trials
             train_trials, test_trials, options = split_trials(exp, split_ratio=split_ratio, split_seed=split_seed)
@@ -5130,6 +5134,18 @@ def main():
         help="Choice13k split mode: within_participant (default) or across_participants.",
     )
     parser.add_argument(
+        "--local_dataset",
+        nargs="?",
+        const="datasets/downloaded/choices13k/Psych-101-test",
+        type=str,
+        default=None,
+        help=(
+            "Choice13k only: path to a local Hugging Face dataset saved with datasets.save_to_disk "
+            "(default when flag is provided without value: datasets/downloaded/choices13k/Psych-101-test). "
+            "When set, skips remote HF download."
+        ),
+    )
+    parser.add_argument(
         "--split_ratio",
         type=float,
         default=0.9,
@@ -5179,6 +5195,8 @@ def main():
     if args.split_mode == "across_participants" and args.dataset != "choice13k":
         print("Error: --split_mode across_participants is only supported with --dataset choice13k.")
         return
+    if args.local_dataset is not None and args.dataset != "choice13k":
+        print("Warning: --local_dataset is only used for --dataset choice13k; ignoring it.")
     if args.max_prompt_train_trials < 0:
         print("Error: --max_prompt_train_trials must be >= 0 (0 = no cap).")
         return
@@ -5402,7 +5420,10 @@ def main():
         )
 
         max_pid = max(selected_participants)
-        experiments = get_choice13k_experiments(n_participants=max_pid + 1)
+        experiments = get_choice13k_experiments(
+            n_participants=max_pid + 1,
+            local_dataset=args.local_dataset,
+        )
         train_trials: List[Dict[str, Any]] = []
         test_trials: List[Dict[str, Any]] = []
         for pid in train_participants:
@@ -5444,6 +5465,7 @@ def main():
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
+                local_dataset=args.local_dataset,
             )
         finally:
             if wandb is not None:
@@ -5470,7 +5492,10 @@ def main():
         aggregate_test_trials: List[Dict[str, Any]] = []
         max_pid = max(participants_to_process)
         cached_choice13k = (
-            get_choice13k_experiments(n_participants=max_pid + 1)
+            get_choice13k_experiments(
+                n_participants=max_pid + 1,
+                local_dataset=args.local_dataset,
+            )
             if args.dataset == "choice13k"
             else None
         )
@@ -5591,6 +5616,7 @@ def main():
                     lambda_complexity=args.lambda_complexity,
                     lambda_change=args.lambda_change,
                     wandb_log_fn=_wandb_log_with_global_step,
+                    local_dataset=args.local_dataset,
                 )
                 best_src = Path(participant_output_dir) / "best_program.py"
                 if best_src.exists():
@@ -5678,6 +5704,7 @@ def main():
                     max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
+                    local_dataset=args.local_dataset,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -5991,6 +6018,7 @@ def main():
                         max_prompt_train_trials=args.max_prompt_train_trials,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
+                        local_dataset=args.local_dataset,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -6111,6 +6139,7 @@ def main():
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         cpc18_official_mse=args.cpc18_official_mse,
+                        local_dataset=args.local_dataset,
                     )
                 
                 # Update participants summary after each participant completes
