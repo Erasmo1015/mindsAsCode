@@ -659,7 +659,7 @@ def evaluate_choice13k_program(
     total = len(trials)
     seed_avg_accs: List[float] = []
     seed_avg_logliks: List[float] = []
-    first_seed_errors = 0
+    seed_errors: List[int] = []
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
         loglik_acc = 0.0
@@ -669,34 +669,28 @@ def evaluate_choice13k_program(
             y = int(t["action"])
             try:
                 p_raw = choose_fn(t["problem"], t["history"])
+                if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
+                    p_use = 1.0 if int(p_raw) == 1 else 0.0
+                elif isinstance(p_raw, float):
+                    p_use = p_raw
+                else:
+                    raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
+                if not (0.0 <= p_use <= 1.0):
+                    raise ValueError(f"invalid probability: {p_use!r}")
+                p = min(max(p_use, 1e-9), 1.0 - 1e-9)
+                loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
+                if isinstance(p_raw, float):
+                    pred = 1 if p_raw >= 0.5 else 0
+                else:
+                    pred = 1 if int(p_raw) == 1 else 0
+                correct += int(pred == y)
             except Exception as e:
                 errors += 1
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error: {e}")
-                p = 0.5
-                p_clamped = min(max(p, 1e-9), 1.0 - 1e-9)
-                loglik_acc += y * np.log(p_clamped) + (1 - y) * np.log(1.0 - p_clamped)
-                pred = 1 if p >= 0.5 else 0
-                correct += int(pred == y)
                 continue
 
-            if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
-                p_use = 1.0 if int(p_raw) == 1 else 0.0
-            elif isinstance(p_raw, float):
-                p_use = p_raw
-            else:
-                raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
-            if not (0.0 <= p_use <= 1.0):
-                raise ValueError(f"invalid probability: {p_use!r}")
-            p = min(max(p_use, 1e-9), 1.0 - 1e-9)
-            loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
-            if isinstance(p_raw, float):
-                pred = 1 if p_raw >= 0.5 else 0
-            else:
-                pred = 1 if int(p_raw) == 1 else 0
-            correct += int(pred == y)
-
-        avg_ll = loglik_acc / total if total > 0 else 0.0
+        avg_ll = (loglik_acc / total if total > 0 else 0.0) if errors == 0 else float("-inf")
         acc = correct / total if total > 0 else 0.0
         return avg_ll, acc, errors
 
@@ -704,18 +698,18 @@ def evaluate_choice13k_program(
         avg_ll, acc, errs = _one_pass(seed)
         seed_avg_logliks.append(avg_ll)
         seed_avg_accs.append(acc)
-        if seed == 0:
-            first_seed_errors = errs
+        seed_errors.append(errs)
 
     avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
     avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
     correct = int(round(avg_acc * total))
+    total_errors = int(max(seed_errors)) if seed_errors else 0
     return {
         "accuracy": avg_acc,
         "avg_loglik": avg_loglik,
         "total": total,
         "correct": correct,
-        "errors": first_seed_errors if n_seeds == 1 else 0,
+        "errors": total_errors,
     }
 
 
@@ -748,7 +742,7 @@ def evaluate_cpc18_split_program(
     total = len(trials)
     seed_avg_accs: List[float] = []
     seed_avg_logliks: List[float] = []
-    first_seed_errors = 0
+    seed_errors: List[int] = []
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
         loglik_acc = 0.0
@@ -758,33 +752,28 @@ def evaluate_cpc18_split_program(
             y = int(t["action"])
             try:
                 p_raw = choose_fn(t["problem"], t["history"])
+                if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
+                    p_use = 1.0 if int(p_raw) == 1 else 0.0
+                elif isinstance(p_raw, float):
+                    p_use = p_raw
+                else:
+                    raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
+                if not (0.0 <= p_use <= 1.0):
+                    raise ValueError(f"invalid probability: {p_use!r}")
+                p = min(max(p_use, 1e-9), 1.0 - 1e-9)
+                loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
+                if isinstance(p_raw, float):
+                    pred = 1 if p_raw >= 0.5 else 0
+                else:
+                    pred = 1 if int(p_raw) == 1 else 0
+                correct += int(pred == y)
             except Exception as e:
                 errors += 1
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error: {e}")
-                p = 0.5
-                p_clamped = min(max(p, 1e-9), 1.0 - 1e-9)
-                loglik_acc += y * np.log(p_clamped) + (1 - y) * np.log(1.0 - p_clamped)
-                pred = 1 if p >= 0.5 else 0
-                correct += int(pred == y)
                 continue
-            if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
-                p_use = 1.0 if int(p_raw) == 1 else 0.0
-            elif isinstance(p_raw, float):
-                p_use = p_raw
-            else:
-                raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
-            if not (0.0 <= p_use <= 1.0):
-                raise ValueError(f"invalid probability: {p_use!r}")
-            p = min(max(p_use, 1e-9), 1.0 - 1e-9)
-            loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
-            if isinstance(p_raw, float):
-                pred = 1 if p_raw >= 0.5 else 0
-            else:
-                pred = 1 if int(p_raw) == 1 else 0
-            correct += int(pred == y)
 
-        avg_ll = loglik_acc / total if total > 0 else 0.0
+        avg_ll = (loglik_acc / total if total > 0 else 0.0) if errors == 0 else float("-inf")
         acc = correct / total if total > 0 else 0.0
         return avg_ll, acc, errors
 
@@ -792,18 +781,18 @@ def evaluate_cpc18_split_program(
         avg_ll, acc, errs = _one_pass(seed)
         seed_avg_logliks.append(avg_ll)
         seed_avg_accs.append(acc)
-        if seed == 0:
-            first_seed_errors = errs
+        seed_errors.append(errs)
 
     avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
     avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
     correct = int(round(avg_acc * total))
+    total_errors = int(max(seed_errors)) if seed_errors else 0
     return {
         "accuracy": avg_acc,
         "avg_loglik": avg_loglik,
         "total": total,
         "correct": correct,
-        "errors": first_seed_errors if n_seeds == 1 else 0,
+        "errors": total_errors,
     }
 
 
