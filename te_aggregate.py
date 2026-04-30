@@ -2178,6 +2178,7 @@ def generate_program_variants(
     diagnostic_trials_text: str = "",
     extra_prompt_instructions: str = "",
     parent_metric_label_override: Optional[str] = None,
+    parent_runtime_errors: Optional[List[Optional[str]]] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -2357,7 +2358,10 @@ def choose(problem, history):
             if dataset == "cpc18" and cpc18_official_mse:
                 mse = parent_train_mses[i] if (parent_train_mses and i < len(parent_train_mses)) else None
                 mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
-                parent_context += f"\nParent {i+1}{mse_str}:\n```python\n{parent_program}\n```\n"
+                err_str = ""
+                if parent_runtime_errors and i < len(parent_runtime_errors) and parent_runtime_errors[i]:
+                    err_str = f"\nRuntime error previously observed: {parent_runtime_errors[i]}"
+                parent_context += f"\nParent {i+1}{mse_str}{err_str}:\n```python\n{parent_program}\n```\n"
             else:
                 parent_metric = (
                     parent_train_accuracies[i]
@@ -2373,7 +2377,10 @@ def choose(problem, history):
                     metric_str = f" ({metric_label}: {parent_metric:.4f})"
                 else:
                     metric_str = ""
-                parent_context += f"\nParent {i+1}{metric_str}:\n```python\n{parent_program}\n```\n"
+                err_str = ""
+                if parent_runtime_errors and i < len(parent_runtime_errors) and parent_runtime_errors[i]:
+                    err_str = f"\nRuntime error previously observed: {parent_runtime_errors[i]}"
+                parent_context += f"\nParent {i+1}{metric_str}{err_str}:\n```python\n{parent_program}\n```\n"
         
         if dataset == "cpc18" and cpc18_official_mse and parent_train_mses:
             avg_mse = sum(parent_train_mses) / len(parent_train_mses)
@@ -2453,6 +2460,36 @@ def _change_penalty(code: str, base_code: str) -> float:
     return float(1.0 - sm.ratio())
 
 
+def _one_line_runtime_error(exc: Exception) -> str:
+    msg = str(exc).strip()
+    if msg:
+        return msg.splitlines()[-1][:240]
+    return exc.__class__.__name__
+
+
+def _probe_runtime_error_line(
+    choose_fn: Callable,
+    trials: List[Dict[str, Any]],
+    max_trials: int = 256,
+) -> str:
+    for t in trials[:max_trials]:
+        try:
+            p_raw = choose_fn(t["problem"], t["history"])
+            if isinstance(p_raw, bool) or (
+                isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)
+            ):
+                p_use = 1.0 if int(p_raw) == 1 else 0.0
+            elif isinstance(p_raw, float):
+                p_use = p_raw
+            else:
+                raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
+            if not (0.0 <= p_use <= 1.0):
+                raise ValueError(f"invalid probability: {p_use!r}")
+        except Exception as exc:
+            return _one_line_runtime_error(exc)
+    return "runtime error (not captured)"
+
+
 def run_aggregate_evolution_phase(
     *,
     dataset: str,
@@ -2477,6 +2514,7 @@ def run_aggregate_evolution_phase(
     seed_runtime_valid = (seed_eval.get("errors", 0) == 0)
     seed_fit = float(seed_eval["avg_loglik"]) if seed_runtime_valid else -1e9
     elite: List[Tuple[str, float, str]] = [(seed_code, seed_fit, "aggregate_baseline")]
+    runtime_error_bank: List[Dict[str, Any]] = []
     history: List[Dict[str, Any]] = []
 
     for it in range(1, aggregate_iterations + 1):
@@ -2487,6 +2525,30 @@ def run_aggregate_evolution_phase(
         selected = elite[: max(1, min(sample_size, len(elite)))]
         parent_codes = [x[0] for x in selected]
         parent_scores = [x[1] for x in selected]
+        parent_runtime_errors: List[Optional[str]] = [None for _ in selected]
+        needs_fallback = (
+            len(selected) < sample_size
+            or (len(selected) == 1 and selected[0][2] == "aggregate_baseline")
+        )
+        if needs_fallback and runtime_error_bank:
+            selected_ids = {x[2] for x in selected}
+            candidates = [r for r in runtime_error_bank if r["program_id"] not in selected_ids]
+            finite = [r for r in candidates if np.isfinite(float(r["fitness"])) and float(r["fitness"]) > -1e8]
+            if finite:
+                finite.sort(key=lambda r: float(r["fitness"]), reverse=True)
+                extras = finite[:3]
+            else:
+                rng = np.random.default_rng(it)
+                take = min(3, len(candidates))
+                if take > 0:
+                    idxs = rng.choice(len(candidates), size=take, replace=False)
+                    extras = [candidates[int(i)] for i in idxs]
+                else:
+                    extras = []
+            for e in extras:
+                parent_codes.append(e["code"])
+                parent_scores.append(float(e["fitness"]))
+                parent_runtime_errors.append(e.get("runtime_error_line"))
         extra = (
             "Target: learn a generalizable program across participants.\n"
             "Prefer simple, stable rules. Do not overfit to any specific participant. "
@@ -2509,6 +2571,7 @@ def run_aggregate_evolution_phase(
             include_train_trials_in_prompt=False,
             extra_prompt_instructions=extra,
             parent_metric_label_override="aggregate_train_loglik",
+            parent_runtime_errors=parent_runtime_errors,
         )
 
         iter_rows: List[Dict[str, Any]] = []
@@ -2539,6 +2602,16 @@ def run_aggregate_evolution_phase(
                 "fitness": fit,
                 "code": code,
             }
+            if not runtime_valid:
+                row["runtime_error_line"] = _probe_runtime_error_line(choose_fn, aggregate_train_trials)
+                runtime_error_bank.append(
+                    {
+                        "program_id": f"aggregate_iter_{it}_cand_{idx}",
+                        "code": code,
+                        "fitness": fit,
+                        "runtime_error_line": row["runtime_error_line"],
+                    }
+                )
             iter_rows.append(row)
             if runtime_valid:
                 elite.append((code, fit, f"aggregate_iter_{it}_cand_{idx}"))
@@ -3102,6 +3175,7 @@ def run_evolution(
             )]
     
     runtime_valid_evolved_found = False
+    runtime_error_bank: List[Dict[str, Any]] = []
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
@@ -3130,6 +3204,7 @@ def run_evolution(
         num_parents_to_use = min(sample_size, len(elite_parents))
         selected_parents = elite_parents[:num_parents_to_use]
         parent_codes = [p[0] for p in selected_parents]
+        parent_runtime_errors: List[Optional[str]] = [None for _ in selected_parents]
         
         print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
         if is_cpc18_mse:
@@ -3156,6 +3231,34 @@ def run_evolution(
                 parent_train_accs = [p[1] for p in selected_parents]
             else:
                 parent_train_accs = [p[6] for p in selected_parents]
+        needs_fallback = (
+            len(selected_parents) < sample_size
+            or (len(selected_parents) == 1 and selected_parents[0][3] == "baseline")
+        )
+        if needs_fallback and runtime_error_bank:
+            selected_ids = {p[3] for p in selected_parents}
+            candidates = [r for r in runtime_error_bank if r["program_id"] not in selected_ids]
+            finite = [r for r in candidates if np.isfinite(float(r["fitness"])) and float(r["fitness"]) > -1e8]
+            if finite:
+                finite.sort(key=lambda r: float(r["fitness"]), reverse=True)
+                extras = finite[:3]
+            else:
+                rng = np.random.default_rng(split_seed + iteration_step)
+                take = min(3, len(candidates))
+                if take > 0:
+                    idxs = rng.choice(len(candidates), size=take, replace=False)
+                    extras = [candidates[int(i)] for i in idxs]
+                else:
+                    extras = []
+            if extras:
+                print(f"Adding {len(extras)} fallback parent(s) with runtime error context.")
+            for e in extras:
+                parent_codes.append(e["code"])
+                parent_runtime_errors.append(e.get("runtime_error_line"))
+                if parent_train_accs is not None:
+                    parent_train_accs.append(float(e["fitness"]))
+                if parent_train_mses is not None:
+                    parent_train_mses.append(None)
         
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
@@ -3203,6 +3306,7 @@ def run_evolution(
                 base_program_code=aggregate_base_code if adaptation_mode else None,
                 diagnostic_trials_text=diagnostic_text,
                 extra_prompt_instructions=adaptation_instruction,
+                parent_runtime_errors=parent_runtime_errors,
             )
         
         # Evaluate candidates
@@ -3415,6 +3519,17 @@ def run_evolution(
                     "valid": True,
                     "runtime_valid": runtime_valid,
                 })
+                if not runtime_valid:
+                    err_line = _probe_runtime_error_line(choose_fn, train_trials)
+                    candidate_results[-1]["runtime_error_line"] = err_line
+                    runtime_error_bank.append(
+                        {
+                            "program_id": f"iter{iteration_step}_cand{idx}",
+                            "code": code,
+                            "fitness": fitness,
+                            "runtime_error_line": err_line,
+                        }
+                    )
             elif dataset == "choice13k":
                 choose_fn = compile_program(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
@@ -3480,6 +3595,17 @@ def run_evolution(
                     "valid": True,
                     "runtime_valid": runtime_valid,
                 })
+                if not runtime_valid:
+                    err_line = _probe_runtime_error_line(choose_fn, train_trials)
+                    candidate_results[-1]["runtime_error_line"] = err_line
+                    runtime_error_bank.append(
+                        {
+                            "program_id": f"iter{iteration_step}_cand{idx}",
+                            "code": code,
+                            "fitness": fitness,
+                            "runtime_error_line": err_line,
+                        }
+                    )
             else:
                 # mixed_gambles: support accuracy and optional log-likelihood fitness
                 choose_fn = compile_program(code)
@@ -3544,6 +3670,17 @@ def run_evolution(
                     row["train_loglik"] = train_eval["avg_loglik"]
                     row["test_loglik"] = None
                 candidate_results.append(row)
+                if fitness_metric == "loglik" and not runtime_valid:
+                    err_line = _probe_runtime_error_line(choose_fn, train_trials)
+                    candidate_results[-1]["runtime_error_line"] = err_line
+                    runtime_error_bank.append(
+                        {
+                            "program_id": f"iter{iteration_step}_cand{idx}",
+                            "code": code,
+                            "fitness": fitness,
+                            "runtime_error_line": err_line,
+                        }
+                    )
             
         # Report results
         print(f"\n{'='*80}")

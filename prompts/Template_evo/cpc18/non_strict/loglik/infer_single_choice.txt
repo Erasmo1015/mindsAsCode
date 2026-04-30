@@ -45,6 +45,10 @@ Requirements:
 - The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].
 - Higher returned values mean the participant is more likely to choose Option B.
 - Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches (avoid branch-only definitions).
 
 Behavioral requirements:
 - Do not return constant or near-constant probabilities (e.g., always close to 0.5).

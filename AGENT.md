@@ -1,6 +1,17 @@
 Local vLLM mode
 
 - Recent updates (Apr 2026):
+  - `te_aggregate.py` (two-phase TE aggregate+adapt) summary:
+    - Implements Phase 1 aggregate evolution (`--aggregate_iterations`, default 30) over the union of participants' train trials.
+    - Implements Phase 2 participant adaptation (`--n_iterations`, default 10) starting from `aggregate/best_aggregate_program.py`.
+    - Aggregate outputs are written under `run_dir/aggregate/` with per-iteration artifacts (`iteration_k/candidates/*.py`, `iteration_k/metrics.json`), rolling `aggregate_results.json`, and `best_aggregate_program.py`.
+    - Participant adaptation reuses per-participant logging/output structure and writes final run-level summaries (`participant_details_loglik.csv`, `summary.csv`).
+    - Optional diagnostic prompt trials are supported via `--num_diagnostic_trials` (total count, split into bad/good by log-likelihood; recommend 10 = 5 hard + 5 easy).
+    - Optional adaptation regularization is supported via `--lambda_complexity` and `--lambda_change` (both default 0.0).
+    - Runtime-valid filtering is strict for loglik paths: candidates with runtime/evaluation errors are marked `runtime_valid=False` and penalized (invalid candidates can yield `-inf` loglik / low fitness).
+    - Parent fallback robustness (new): when the parent pool is too small (or effectively only baseline/seed), `te_aggregate.py` now injects up to 3 extra "fallback parents" from a runtime-error bank into prompt context; each fallback parent includes a one-line runtime error summary (captured from first failing trial, last line of exception text). If no finite-quality fallback exists, it samples fallback parents randomly from the error bank.
+    - Test-leakage safeguards in evolution: test trials are not used in prompts or candidate selection logic (test eval is reporting-only where applicable).
+    - Output naming/location for this method uses `te_aggregate` (generated outputs and run naming), distinct from `non_strict`.
   - Fixed OpenEvolve local Gemma-2 compatibility: avoid sending `system` role in local vLLM mode to prevent `System role not supported` errors.
   - Added explicit TE generation cap `--llm_max_tokens` (default 800) and propagated it through non-strict participant flows.
   - Standardized H100 TE/OpenEvolve scripts to use tighter prompt budgets (`--max_prompt_train_trials 60`) and parent count 3.
