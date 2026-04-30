@@ -2369,9 +2369,13 @@ def choose(problem, history):
                     else None
                 )
                 if parent_metric is not None:
+                    is_loglik_prompt_metric = (
+                        fitness_metric == "loglik"
+                        and (dataset in {"choice13k", "mixed_gambles"} or (dataset == "cpc18" and not cpc18_official_mse))
+                    )
                     metric_label = parent_metric_label_override or (
                         "train_loglik"
-                        if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}
+                        if is_loglik_prompt_metric
                         else "train_acc"
                     )
                     metric_str = f" ({metric_label}: {parent_metric:.4f})"
@@ -2458,6 +2462,28 @@ def _change_penalty(code: str, base_code: str) -> float:
     b = [ln.rstrip() for ln in code.splitlines()]
     sm = difflib.SequenceMatcher(a=a, b=b)
     return float(1.0 - sm.ratio())
+
+
+def _json_safe_obj(obj: Any, neg_inf_fallback: float = -1e9, pos_inf_fallback: float = 1e9) -> Any:
+    """Recursively convert NaN/Inf values to finite sentinels for JSON output."""
+    if isinstance(obj, dict):
+        return {k: _json_safe_obj(v, neg_inf_fallback, pos_inf_fallback) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe_obj(v, neg_inf_fallback, pos_inf_fallback) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_safe_obj(v, neg_inf_fallback, pos_inf_fallback) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        v = float(obj)
+        if np.isnan(v) or np.isneginf(v):
+            return neg_inf_fallback
+        if np.isposinf(v):
+            return pos_inf_fallback
+        return v
+    return obj
+
+
+def _json_dumps_safe(obj: Any, **kwargs) -> str:
+    return json.dumps(_json_safe_obj(obj), **kwargs)
 
 
 def _one_line_runtime_error(exc: Exception) -> str:
@@ -2649,7 +2675,7 @@ def run_aggregate_evolution_phase(
                     if best_test_eval.get("errors", 0) == 0:
                         best_test_ll = float(best_test_eval["avg_loglik"])
                     else:
-                        best_test_ll = float("-inf")
+                        best_test_ll = -1e9
             wandb.log(
                 {
                     "aggregate_iter": it,
@@ -2659,7 +2685,7 @@ def run_aggregate_evolution_phase(
                 step=it,
             )
         (iter_dir / "metrics.json").write_text(
-            json.dumps(
+            _json_dumps_safe(
                 {
                     "iteration": it,
                     "n_candidates": len(iter_rows),
@@ -2690,7 +2716,7 @@ def run_aggregate_evolution_phase(
             "best_aggregate_train_loglik": best_fit,
             "history": history,
         }
-        (output_dir / "aggregate_results.json").write_text(json.dumps(rolling, indent=2), encoding="utf-8")
+        (output_dir / "aggregate_results.json").write_text(_json_dumps_safe(rolling, indent=2), encoding="utf-8")
         (output_dir / "best_aggregate_program.py").write_text(best_code, encoding="utf-8")
 
     best_code, best_fit, best_id = elite[0]
@@ -2703,7 +2729,7 @@ def run_aggregate_evolution_phase(
         "best_aggregate_train_loglik": best_fit,
         "history": history,
     }
-    (output_dir / "aggregate_results.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (output_dir / "aggregate_results.json").write_text(_json_dumps_safe(result, indent=2), encoding="utf-8")
     return {"best_code": best_code, "best_fit": best_fit, "result": result}
 
 
@@ -3055,7 +3081,7 @@ def run_evolution(
                 **baseline_log_dict
             }
             with open(log_file_path, "a") as f:
-                f.write(json.dumps(baseline_entry) + "\n")
+                f.write(_json_dumps_safe(baseline_entry) + "\n")
     
     # Initialize best program tracking with baseline
     if is_cpc18_mse and baseline_train_mse_eval is not None:
@@ -3207,17 +3233,30 @@ def run_evolution(
         parent_runtime_errors: List[Optional[str]] = [None for _ in selected_parents]
         
         print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
+        def _fmt_opt(v: Optional[float], ndigits: int = 4) -> str:
+            if v is None:
+                return "N/A"
+            return f"{v:.{ndigits}f}"
         if is_cpc18_mse:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_mse, prog_id, train_mse, test_mse = parent_tuple
-                print(f"  Parent {i+1}: {prog_id} (train_mse={train_mse:.2f}, test_mse={test_mse:.2f}, fitness={fitness:.2f})")
+                print(
+                    f"  Parent {i+1}: {prog_id} "
+                    f"(train_mse={_fmt_opt(train_mse, 2)}, test_mse={_fmt_opt(test_mse, 2)}, fitness={_fmt_opt(fitness, 2)})"
+                )
         else:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
-                if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}:
-                    print(f"  Parent {i+1}: {prog_id} (train_loglik={fitness:.4f}, test_acc={test_acc:.4f})")
+                if fitness_metric == "loglik" and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split):
+                    print(
+                        f"  Parent {i+1}: {prog_id} "
+                        f"(train_loglik={_fmt_opt(fitness)})"
+                    )
                 else:
-                    print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
+                    print(
+                        f"  Parent {i+1}: {prog_id} "
+                        f"(train_acc={_fmt_opt(train_acc_prompt)}, test_acc={_fmt_opt(test_acc)})"
+                    )
         
         parent_train_accs = None
         parent_train_mses = None
@@ -3227,7 +3266,7 @@ def run_evolution(
             parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
         else:
             # In loglik mode, feed train fitness (log-likelihood) into prompt context.
-            if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}:
+            if fitness_metric == "loglik" and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split):
                 parent_train_accs = [p[1] for p in selected_parents]
             else:
                 parent_train_accs = [p[6] for p in selected_parents]
@@ -4096,7 +4135,7 @@ def run_evolution(
                 "best_test_acc": selected_results[0]["test_acc"] if selected_results else None,
             }
         if save_artifacts and iter_dir is not None:
-            (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+            (iter_dir / "metrics.json").write_text(_json_dumps_safe(metrics, indent=2))
         
         # Save summary
         if is_cpc18_mse:
@@ -4138,7 +4177,7 @@ def run_evolution(
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
-        print(f"\nSummary: {json.dumps(summary, indent=2)}")
+        print(f"\nSummary: {_json_dumps_safe(summary, indent=2)}")
         
         # Log to wandb (use dataset-specific metric names)
         if wandb is not None:
@@ -4278,7 +4317,7 @@ def run_evolution(
                     **log_dict
                 }
                 with open(log_file_path, "a") as f:
-                    f.write(json.dumps(log_entry) + "\n")
+                    f.write(_json_dumps_safe(log_entry) + "\n")
     
     # Final summary and save comprehensive results.json
     print(f"\n{'='*80}")
@@ -4402,7 +4441,7 @@ def run_evolution(
             "overall_best_test": overall_best_test,
         }
     if save_artifacts and not choice13k_simple_logging:
-        (output_path / "results.json").write_text(json.dumps(results, indent=2))
+        (output_path / "results.json").write_text(_json_dumps_safe(results, indent=2))
     if save_artifacts and choice13k_simple_logging and dataset == "choice13k":
         if simple_iterations_rows:
             with open(output_path / "iterations.csv", "w", newline="") as f:
@@ -4668,7 +4707,7 @@ def run_evolution_gridworld_ensemble(
         }, step=0)
         if log_file_path is not None:
             with open(log_file_path, "a") as f:
-                f.write(json.dumps({"step": 0, "iteration": -1, f"a{agent_id}_train_accuracy": baseline_train_eval["accuracy"], f"a{agent_id}_test_accuracy": baseline_test_eval["accuracy"], f"a{agent_id}_is_baseline": 1}) + "\n")
+                f.write(_json_dumps_safe({"step": 0, "iteration": -1, f"a{agent_id}_train_accuracy": baseline_train_eval["accuracy"], f"a{agent_id}_test_accuracy": baseline_test_eval["accuracy"], f"a{agent_id}_is_baseline": 1}) + "\n")
 
     # K elite pools; each element (code, fitness=train_acc, test_acc, program_id, None, None)
     elite_pools = []
@@ -4765,7 +4804,7 @@ def run_evolution_gridworld_ensemble(
                 wandb.log(log_dict, step=iteration + 1)
                 if log_file_path is not None:
                     with open(log_file_path, "a") as f:
-                        f.write(json.dumps({"step": iteration + 1, "iteration": iteration_step, **log_dict}) + "\n")
+                        f.write(_json_dumps_safe({"step": iteration + 1, "iteration": iteration_step, **log_dict}) + "\n")
 
     # Best program per member; weights from log-likelihood on first 20 steps
     best_codes = [elite_pools[k][0][0] for k in range(K)]
@@ -4789,7 +4828,7 @@ def run_evolution_gridworld_ensemble(
         "ensemble_test_accuracy": ensemble_test_acc,
         "ensemble_size": K,
     }
-    (output_path / "results.json").write_text(json.dumps(results, indent=2))
+    (output_path / "results.json").write_text(_json_dumps_safe(results, indent=2))
 
     print(f"\n{'='*80}\nEvolution Complete (gridworld_ensemble)\n{'='*80}")
     print(f"Mean train accuracy (over K best): {mean_train_acc:.4f}")
