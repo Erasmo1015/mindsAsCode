@@ -2458,6 +2458,7 @@ def run_aggregate_evolution_phase(
     dataset: str,
     seed_code: str,
     aggregate_train_trials: List[Dict[str, Any]],
+    aggregate_test_trials: Optional[List[Dict[str, Any]]],
     model_name: str,
     client: OpenAI,
     output_dir: Path,
@@ -2565,19 +2566,22 @@ def run_aggregate_evolution_phase(
             }
         )
         if wandb is not None:
-            valid_rows = [r for r in iter_rows if r["runtime_valid"] and r["aggregate_train_loglik"] is not None]
-            avg_ll = (
-                float(np.mean([r["aggregate_train_loglik"] for r in valid_rows]))
-                if valid_rows
-                else None
-            )
+            best_test_ll = None
+            if aggregate_test_trials:
+                best_fn = compile_program(best_code)
+                if best_fn is not None:
+                    best_test_eval = _evaluate_loglik_for_dataset(
+                        dataset, best_fn, aggregate_test_trials, n_eval_seeds=n_eval_seeds
+                    )
+                    if best_test_eval.get("errors", 0) == 0:
+                        best_test_ll = float(best_test_eval["avg_loglik"])
+                    else:
+                        best_test_ll = float("-inf")
             wandb.log(
                 {
                     "aggregate_iter": it,
                     "aggregate_best_train_loglik": best_fit,
-                    "aggregate_n_candidates": len(iter_rows),
-                    "aggregate_n_runtime_valid": len(valid_rows),
-                    "aggregate_avg_candidate_loglik": avg_ll,
+                    "aggregate_best_test_loglik": best_test_ll,
                 },
                 step=it,
             )
@@ -5244,6 +5248,7 @@ def main():
 
         participant_trials: Dict[int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
         aggregate_train_trials: List[Dict[str, Any]] = []
+        aggregate_test_trials: List[Dict[str, Any]] = []
         max_pid = max(participants_to_process)
         cached_choice13k = (
             get_choice13k_experiments(n_participants=max_pid + 1)
@@ -5274,6 +5279,7 @@ def main():
                 )
             participant_trials[pid] = (tr, te)
             aggregate_train_trials.extend(tr)
+            aggregate_test_trials.extend(te)
 
         print(
             f"[Phase1] participants={len(participants_to_process)}, aggregate_train_trials={len(aggregate_train_trials)}"
@@ -5282,6 +5288,7 @@ def main():
             dataset=args.dataset,
             seed_code=seed_code,
             aggregate_train_trials=aggregate_train_trials,
+            aggregate_test_trials=aggregate_test_trials,
             model_name=args.model_name,
             client=OpenAI(**client_kwargs) if client_kwargs else OpenAI(),
             output_dir=aggregate_dir,
