@@ -1,0 +1,46 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "psych-101-test",
+  "dataset_size": 90006152,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/marcelbinz/Psych-101-test@88acfc178f3a41e2f323b1e0c0a5cd73bb02414d/prompts_testing_t1.jsonl": {
+      "num_bytes": 91981882,
+      "checksum": null
+    }
+  },
+  "download_size": 91981882,
+  "features": {
+    "text": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "experiment": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "participant": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 181988034,
+  "splits": {
+    "test": {
+      "name": "test",
+      "num_bytes": 90006152,
+      "num_examples": 6561,
+      "dataset_name": "psych-101-test"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
