@@ -198,6 +198,3 @@ cpc18_baselines/
 analysis/figures/
 
 dataset/downloaded/
-
-!datasets/cpc18/
-!datasets/mixed_gambles/
