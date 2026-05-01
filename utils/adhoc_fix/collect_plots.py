@@ -175,11 +175,41 @@ def _participant_id_from_name(name: str) -> Optional[int]:
     return int(m.group(1))
 
 
-def collect_for_run(run_dir: Path, out_subdir: str) -> Tuple[int, int]:
+def _collect_aggregate_rows(run_dir: Path) -> List[dict]:
+    aggregate_dir = run_dir / "aggregate"
+    if not aggregate_dir.exists():
+        return []
+    out: List[dict] = []
+    iter_metrics = sorted(
+        aggregate_dir.glob("iteration_*/metrics.json"),
+        key=lambda p: int(re.search(r"iteration_(\d+)", str(p)).group(1)),
+    )
+    for mpath in iter_metrics:
+        try:
+            payload = json.loads(mpath.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        iteration = int(payload.get("iteration", -999))
+        out.append(
+            {
+                "iteration": iteration,
+                "train_loglik": _safe_float(payload.get("best_aggregate_train_loglik")),
+                "test_loglik": _safe_float(payload.get("best_aggregate_test_loglik")),
+            }
+        )
+    out.sort(key=lambda d: d["iteration"])
+    return out
+
+
+def collect_for_run(run_dir: Path) -> Tuple[int, int]:
     participant_dirs = sorted(
         [p for p in run_dir.glob("participant_*") if p.is_dir()],
         key=lambda p: _participant_id_from_name(p.name) or -1,
     )
+    csv_dir = run_dir / "csvs"
+    plot_dir = run_dir / "plots"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
     n_found = 0
     n_written = 0
     for pdir in participant_dirs:
@@ -194,13 +224,20 @@ def collect_for_run(run_dir: Path, out_subdir: str) -> Tuple[int, int]:
             print(f"[WARN] skip {pdir.name}: no usable loglik trajectory found")
             continue
 
-        target_dir = pdir / out_subdir
-        csv_path = target_dir / "evolution_loglik.csv"
-        png_path = target_dir / "evolution_loglik.png"
+        csv_path = csv_dir / f"{pdir.name}_evolution_loglik.csv"
+        png_path = plot_dir / f"{pdir.name}_evolution_loglik.png"
         _write_csv(rows, csv_path)
         _plot_rows(rows, png_path, title=f"{run_dir.name} / {pdir.name}")
         n_written += 1
         print(f"[OK] {pdir.name}: wrote {csv_path} and {png_path}")
+
+    aggregate_rows = _collect_aggregate_rows(run_dir)
+    if aggregate_rows:
+        agg_csv = csv_dir / "aggregate_evolution_loglik.csv"
+        agg_png = plot_dir / "aggregate_evolution_loglik.png"
+        _write_csv(aggregate_rows, agg_csv)
+        _plot_rows(aggregate_rows, agg_png, title=f"{run_dir.name} / aggregate")
+        print(f"[OK] aggregate: wrote {agg_csv} and {agg_png}")
     return n_found, n_written
 
 
@@ -213,12 +250,6 @@ def main() -> None:
         type=str,
         help="Path to te_aggregate run directory (contains participant_* folders).",
     )
-    parser.add_argument(
-        "--out-subdir",
-        type=str,
-        default="adhoc_plots",
-        help="Subdirectory under each participant folder for outputs.",
-    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -227,7 +258,7 @@ def main() -> None:
     if not run_dir.is_dir():
         raise NotADirectoryError(f"Run dir is not a directory: {run_dir}")
 
-    n_found, n_written = collect_for_run(run_dir, args.out_subdir)
+    n_found, n_written = collect_for_run(run_dir)
     if n_found == 0:
         print(
             "[INFO] no participant_* folders found. "

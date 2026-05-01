@@ -2646,11 +2646,24 @@ def run_aggregate_evolution_phase(
         elite.sort(key=lambda x: x[1], reverse=True)
         elite = elite[: max(sample_size * 2, 20)]
         best_code, best_fit, best_id = elite[0]
+        best_test_ll = None
+        if aggregate_test_trials:
+            best_fn = compile_program(best_code)
+            if best_fn is not None:
+                best_test_eval = _evaluate_loglik_for_dataset(
+                    dataset, best_fn, aggregate_test_trials, n_eval_seeds=n_eval_seeds
+                )
+                if best_test_eval.get("errors", 0) == 0:
+                    best_test_ll = float(best_test_eval["avg_loglik"])
+                else:
+                    best_test_ll = -1e9
+
         history.append(
             {
                 "iteration": it,
                 "best_program_id": best_id,
                 "best_aggregate_train_loglik": best_fit,
+                "best_aggregate_test_loglik": best_test_ll,
                 "n_candidates": len(iter_rows),
                 "n_runtime_valid": sum(1 for r in iter_rows if r["runtime_valid"]),
                 "candidate_results": [
@@ -2666,17 +2679,6 @@ def run_aggregate_evolution_phase(
             }
         )
         if wandb is not None:
-            best_test_ll = None
-            if aggregate_test_trials:
-                best_fn = compile_program(best_code)
-                if best_fn is not None:
-                    best_test_eval = _evaluate_loglik_for_dataset(
-                        dataset, best_fn, aggregate_test_trials, n_eval_seeds=n_eval_seeds
-                    )
-                    if best_test_eval.get("errors", 0) == 0:
-                        best_test_ll = float(best_test_eval["avg_loglik"])
-                    else:
-                        best_test_ll = -1e9
             agg_log_dict = {
                 "aggregate_iter": it,
                 "aggregate_best_train_loglik": best_fit,
@@ -2697,6 +2699,7 @@ def run_aggregate_evolution_phase(
                     "n_runtime_valid": sum(1 for r in iter_rows if r["runtime_valid"]),
                     "best_program_id": best_id,
                     "best_aggregate_train_loglik": best_fit,
+                    "best_aggregate_test_loglik": best_test_ll,
                     "candidate_results": [
                         {
                             "idx": r["idx"],
@@ -2719,6 +2722,7 @@ def run_aggregate_evolution_phase(
             "aggregate_train_trials": len(aggregate_train_trials),
             "best_program_id": best_id,
             "best_aggregate_train_loglik": best_fit,
+            "best_aggregate_test_loglik": best_test_ll,
             "history": history,
         }
         (output_dir / "aggregate_results.json").write_text(_json_dumps_safe(rolling, indent=2), encoding="utf-8")
