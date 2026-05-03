@@ -2756,7 +2756,7 @@ def run_evolution(
     client_kwargs: Optional[Dict[str, Any]] = None,
     output_dir: Optional[str] = None,
     wandb=None,
-    n_eval_seeds: int = 3,
+    n_eval_seeds: int = 1,
     sample_size: int = 10,
     filter_mixed_gambles: bool = False,
     save_artifacts: bool = True,
@@ -2777,6 +2777,10 @@ def run_evolution(
     num_diagnostic_trials: Optional[int] = None,
     lambda_complexity: float = 0.0,
     lambda_change: float = 0.0,
+    hard_participant_train_loglik_threshold: float = -0.6,
+    hard_participant_warmup_iters: int = 5,
+    disable_hard_participant_early_stop: bool = False,
+    debug_continue_after_early_stop: bool = False,
     wandb_log_fn=None,
     local_dataset: Optional[str] = None,
 ):
@@ -3228,6 +3232,12 @@ def run_evolution(
     
     runtime_valid_evolved_found = False
     runtime_error_bank: List[Dict[str, Any]] = []
+    participant_stopped_early = False
+    participant_early_stop_iteration: Optional[int] = None
+    frozen_best_code: Optional[str] = None
+    frozen_best_program_id: Optional[str] = None
+    frozen_overall_best_train: Optional[Dict[str, Any]] = None
+    frozen_overall_best_test: Optional[Dict[str, Any]] = None
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
@@ -4204,6 +4214,43 @@ def run_evolution(
                 "n_runtime_valid": len(selected_results),
             }
         print(f"\nSummary: {_json_dumps_safe(summary, indent=2)}")
+
+        # Hard-participant early-stop rule for phase-2 adaptation under loglik fitness.
+        if (
+            adaptation_mode
+            and (not disable_hard_participant_early_stop)
+            and fitness_metric == "loglik"
+            and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split)
+            and iteration_step >= hard_participant_warmup_iters
+        ):
+            cur_best_train_loglik = overall_best_train.get("train_loglik")
+            if (
+                cur_best_train_loglik is not None
+                and cur_best_train_loglik < hard_participant_train_loglik_threshold
+            ):
+                first_early_stop = not participant_stopped_early
+                participant_stopped_early = True
+                if first_early_stop:
+                    participant_early_stop_iteration = iteration_step
+                    print(
+                        "[EARLY STOP] participant adaptation stopped: "
+                        f"best_train_loglik={cur_best_train_loglik:.6f} < "
+                        f"threshold={hard_participant_train_loglik_threshold:.6f} "
+                        f"after warmup_iters={hard_participant_warmup_iters}."
+                    )
+                if debug_continue_after_early_stop:
+                    if first_early_stop:
+                        frozen_best_code = elite_parents[0][0]
+                        frozen_best_program_id = elite_parents[0][3]
+                        frozen_overall_best_train = dict(overall_best_train)
+                        frozen_overall_best_test = dict(overall_best_test)
+                        print(
+                            "[DEBUG] Continuing evolution for logging; "
+                            "final metrics will use the early-stop snapshot.",
+                            flush=True,
+                        )
+                else:
+                    break
         
         # Log to wandb (use dataset-specific metric names)
         if wandb is not None:
@@ -4360,7 +4407,23 @@ def run_evolution(
 
     # Select final best program directly from the final elite pool (already sorted by train fitness).
     # This guarantees final reporting is paired from one candidate.
-    if ((dataset in {"choice13k", "mixed_gambles"}) or is_cpc18_split) and (not runtime_valid_evolved_found):
+    if (
+        participant_stopped_early
+        and debug_continue_after_early_stop
+        and frozen_best_code is not None
+        and frozen_best_program_id is not None
+    ):
+        final_best_code = frozen_best_code
+        final_best_program_id = frozen_best_program_id
+        if frozen_overall_best_train is not None:
+            overall_best_train = frozen_overall_best_train
+        if frozen_overall_best_test is not None:
+            overall_best_test = frozen_overall_best_test
+        print(
+            "[INFO] Final reporting is frozen at early-stop snapshot "
+            f"(iteration {participant_early_stop_iteration})."
+        )
+    elif ((dataset in {"choice13k", "mixed_gambles"}) or is_cpc18_split) and (not runtime_valid_evolved_found):
         print(
             "[WARN] No runtime-valid evolved program found; using baseline program for final reporting.",
             flush=True,
@@ -4589,6 +4652,8 @@ def run_evolution(
             "test_fitness": -overall_best_test['test_mse'],
             "seed_program_train_fitness": -baseline_results['train_mse'],
             "seed_program_test_fitness": -baseline_results['test_mse'],
+            "stopped_early": participant_stopped_early,
+            "stopped_iteration": participant_early_stop_iteration,
         }
     elif is_cpc18_split:
         result = {
@@ -4617,6 +4682,8 @@ def run_evolution(
                 if fitness_metric == "loglik"
                 else baseline_test_eval["accuracy"]
             ),
+            "stopped_early": participant_stopped_early,
+            "stopped_iteration": participant_early_stop_iteration,
         }
     elif dataset == "choice13k":
         result = {
@@ -4645,6 +4712,8 @@ def run_evolution(
                 if fitness_metric == "loglik"
                 else baseline_results["test_accuracy"]
             ),
+            "stopped_early": participant_stopped_early,
+            "stopped_iteration": participant_early_stop_iteration,
         }
     elif dataset == "mixed_gambles" and fitness_metric == "loglik":
         result = {
@@ -4657,6 +4726,8 @@ def run_evolution(
             "test_fitness": overall_best_test["test_loglik"],
             "seed_program_train_fitness": baseline_results["train_loglik"],
             "seed_program_test_fitness": baseline_results["test_loglik"],
+            "stopped_early": participant_stopped_early,
+            "stopped_iteration": participant_early_stop_iteration,
         }
     else:
         result = {
@@ -4667,6 +4738,8 @@ def run_evolution(
             "test_fitness": overall_best_test['test_accuracy'],
             "seed_program_train_fitness": baseline_results['train_accuracy'],
             "seed_program_test_fitness": baseline_results['test_accuracy'],
+            "stopped_early": participant_stopped_early,
+            "stopped_iteration": participant_early_stop_iteration,
         }
     return result
 
@@ -4684,7 +4757,7 @@ def run_evolution_gridworld_ensemble(
     client_kwargs: Optional[Dict[str, Any]] = None,
     output_dir: Optional[str] = None,
     wandb=None,
-    n_eval_seeds: int = 3,
+    n_eval_seeds: int = 1,
     sample_size: int = 3,
     top_k: int = 0,
 ):
@@ -5015,8 +5088,8 @@ def main():
     parser.add_argument(
         "--aggregate_iterations",
         type=int,
-        default=30,
-        help="Phase 1 aggregate evolution iterations (default: 30)",
+        default=5,
+        help="Phase 1 aggregate evolution iterations (default: 5)",
     )
     parser.add_argument(
         "--n_candidates",
@@ -5055,6 +5128,31 @@ def main():
         help="Phase 2 regularization weight for change-from-aggregate penalty.",
     )
     parser.add_argument(
+        "--hard_participant_train_loglik_threshold",
+        type=float,
+        default=-0.6,
+        help="Early-stop threshold after warmup: stop participant adaptation if best train_loglik stays below this value.",
+    )
+    parser.add_argument(
+        "--hard_participant_warmup_iters",
+        type=int,
+        default=5,
+        help="Number of initial adaptation iterations before applying hard-participant early-stop check.",
+    )
+    parser.add_argument(
+        "--disable_hard_participant_early_stop",
+        action="store_true",
+        help="Disable the hard-participant early-stop rule in phase-2 adaptation.",
+    )
+    parser.add_argument(
+        "--debug_continue_after_early_stop",
+        action="store_true",
+        help=(
+            "When early-stop triggers in phase-2, keep running remaining iterations for logs/plots "
+            "but freeze final reporting to the early-stop best snapshot."
+        ),
+    )
+    parser.add_argument(
         "--top_k",
         type=int,
         default=0,
@@ -5063,8 +5161,8 @@ def main():
     parser.add_argument(
         "--n_eval_seeds",
         type=int,
-        default=3,
-        help="Number of evaluation runs per program (averaged for final accuracy). Default: 3",
+        default=1,
+        help="Number of evaluation runs per program (averaged). Default: 1",
     )
     parser.add_argument(
         "--model_name",
@@ -5221,6 +5319,9 @@ def main():
         return
     if args.lambda_complexity < 0.0 or args.lambda_change < 0.0:
         print("Error: --lambda_complexity and --lambda_change must be >= 0.")
+        return
+    if args.hard_participant_warmup_iters < 1:
+        print("Error: --hard_participant_warmup_iters must be >= 1.")
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
@@ -5469,6 +5570,10 @@ def main():
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
+                hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+                hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+                disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
+                debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                 local_dataset=args.local_dataset,
             )
         finally:
@@ -5619,6 +5724,10 @@ def main():
                     num_diagnostic_trials=args.num_diagnostic_trials,
                     lambda_complexity=args.lambda_complexity,
                     lambda_change=args.lambda_change,
+                    hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+                    hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+                    disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
+                    debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     wandb_log_fn=_wandb_log_with_global_step,
                     local_dataset=args.local_dataset,
                 )
@@ -5708,6 +5817,10 @@ def main():
                     max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
+                    hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+                    hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+                    disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
+                    debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     local_dataset=args.local_dataset,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
@@ -6022,6 +6135,10 @@ def main():
                         max_prompt_train_trials=args.max_prompt_train_trials,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
+                        hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+                        hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+                        disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
+                        debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
                     )
                 
@@ -6143,6 +6260,10 @@ def main():
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         cpc18_official_mse=args.cpc18_official_mse,
+                        hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+                        hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+                        disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
+                        debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
                     )
                 
