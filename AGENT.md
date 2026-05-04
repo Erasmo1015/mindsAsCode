@@ -34,6 +34,12 @@ Local vLLM mode
     - In `fitness_metric=loglik` mode, per-iteration test loglik is evaluated only for the updated-pool best program, and W&B curves use those pool-best paired metrics.
   - `utils/adhoc_fix_report.py` is for legacy runs before 2026-04-28 (use only for pre-fix experiments).
 
+- Recent updates (May 2026, `te_aggregate.py`):
+  - **Hard-participant early stop vs reporting:** `--disable_hard_participant_early_stop` skips the phase-2 rule that would **break** the adaptation loop when train loglik stays below `--hard_participant_train_loglik_threshold` after warmup. It does **not** “stop but keep early-stop metrics”: with the flag on, the run finishes all `--n_iterations`, and final CSV / `results.json` metrics come from the **best program after the last iteration** (`elite_parents[0]`). To **continue** iterations after that early-stop fires but **report** metrics from the first stop, use `--debug_continue_after_early_stop` (freezes final reporting to the early-stop snapshot while the loop keeps going for logs).
+  - **`debug_continue_after_early_stop` wiring:** `run_evolution` now accepts this keyword (fixes `TypeError` when `main()` passed it). On first early stop, optional snapshot fields support the frozen-reporting path above.
+  - **Parent selection:** `--sample_parents` is **on by default** (`BooleanOptionalAction`; disable with `--no-sample_parents`). When on, each iteration draws `min(sample_size, len(elite))` parents **uniformly at random without replacement** from the trimmed elite pool (not “top‑k by fitness”). When off, behavior matches the old rule: first `sample_size` programs after sorting by fitness. Same logic in **phase 1** `run_aggregate_evolution_phase` (RNG uses `--split_seed` + iteration). **Not applied** to `gridworld_ensemble` member pools.
+  - **Elite pool cap:** `--elite_pool_size N` (optional). If omitted, cap remains `max(2 * sample_size, 20)` as before. If set, keep the top `max(1, N)` programs after sorting. Smaller pools concentrate sampling mass; larger pools increase diversity under `--sample_parents`.
+
 - Start your local server (example): `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000`.
 - Run with the new mode switch to route LLM calls externally:  
   `python plot_and_eval.py --baseline_model ROTE --mode local --model_name Qwen/Qwen2.5-7B-Instruct --llm_server_url http://localhost:8000/v1 --llm_api_key EMPTY`

@@ -56,6 +56,13 @@ _REPO_ROOT = Path(__file__).resolve().parent
 _PARTICIPANT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
 
 
+def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> int:
+    """Max programs retained in the elite pool (after sorting by fitness, best first)."""
+    if elite_pool_size is None:
+        return max(sample_size * 2, 20)
+    return max(1, int(elite_pool_size))
+
+
 def load_valid_participant_ids_from_json(
     dataset: str, repo_root: Path, filter_mixed_gambles: bool
 ) -> List[int]:
@@ -2532,6 +2539,9 @@ def run_aggregate_evolution_phase(
     llm_max_tokens: int,
     wandb=None,
     wandb_log_fn=None,
+    sample_parents: bool = True,
+    elite_pool_size: Optional[int] = None,
+    parent_sample_seed: int = 0,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     seed_fn = compile_program(seed_code)
@@ -2549,7 +2559,13 @@ def run_aggregate_evolution_phase(
         iter_dir.mkdir(parents=True, exist_ok=True)
         candidates_dir = iter_dir / "candidates"
         candidates_dir.mkdir(parents=True, exist_ok=True)
-        selected = elite[: max(1, min(sample_size, len(elite)))]
+        num_sel = max(1, min(sample_size, len(elite)))
+        if sample_parents and len(elite) > 0:
+            rng = np.random.default_rng(int(parent_sample_seed) + it * 1_000_003)
+            idxs = rng.choice(len(elite), size=num_sel, replace=False)
+            selected = [elite[int(j)] for j in idxs]
+        else:
+            selected = elite[:num_sel]
         parent_codes = [x[0] for x in selected]
         parent_scores = [x[1] for x in selected]
         parent_runtime_errors: List[Optional[str]] = [None for _ in selected]
@@ -2644,7 +2660,8 @@ def run_aggregate_evolution_phase(
                 elite.append((code, fit, f"aggregate_iter_{it}_cand_{idx}"))
 
         elite.sort(key=lambda x: x[1], reverse=True)
-        elite = elite[: max(sample_size * 2, 20)]
+        elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+        elite = elite[:elite_cap]
         best_code, best_fit, best_id = elite[0]
         best_test_ll = None
         if aggregate_test_trials:
@@ -2758,6 +2775,8 @@ def run_evolution(
     wandb=None,
     n_eval_seeds: int = 1,
     sample_size: int = 10,
+    sample_parents: bool = True,
+    elite_pool_size: Optional[int] = None,
     filter_mixed_gambles: bool = False,
     save_artifacts: bool = True,
     all_data_mode: bool = False,
@@ -3259,16 +3278,28 @@ def run_evolution(
             candidates_dir = iter_dir / "candidates"
             candidates_dir.mkdir(exist_ok=True)
         
-        # Select sample_size parents from elite set (sorted by fitness descending)
-        # For CPC18: fitness = -MSE (higher is better)
-        # For others: fitness = accuracy (higher is better)
-        # Always include the best parent first
+        # Select sample_size parents: either top programs by fitness or uniform sample without replacement
+        # from the trimmed elite pool (see _elite_pool_capacity / elite_pool_size).
         num_parents_to_use = min(sample_size, len(elite_parents))
-        selected_parents = elite_parents[:num_parents_to_use]
+        if sample_parents and len(elite_parents) > 0:
+            pid_key = int(participant_id) if participant_id is not None else 0
+            rng = np.random.default_rng(
+                int(split_seed) + int(iteration_step) * 1_000_003 + pid_key * 17_179
+            )
+            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
+            selected_parents = [elite_parents[int(j)] for j in idxs]
+            print(
+                f"\nUsing {num_parents_to_use} uniformly sampled parent(s) from elite pool "
+                f"(size={len(elite_parents)}, sample_size={sample_size}, sample_parents=True):"
+            )
+        else:
+            selected_parents = elite_parents[:num_parents_to_use]
+            print(
+                f"\nUsing {num_parents_to_use} top parent(s) from elite set "
+                f"(sample_size={sample_size}, sample_parents=False):"
+            )
         parent_codes = [p[0] for p in selected_parents]
         parent_runtime_errors: List[Optional[str]] = [None for _ in selected_parents]
-        
-        print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
         def _fmt_opt(v: Optional[float], ndigits: int = 4) -> str:
             if v is None:
                 return "N/A"
@@ -3910,12 +3941,11 @@ def run_evolution(
             # Sort elite set by fitness (descending) and keep top programs
             # For CPC18: fitness = -MSE (higher is better)
             # For others: fitness = accuracy (higher is better)
-            # Keep at least sample_size * 2 programs to have diversity
             elite_parents.sort(key=lambda x: x[1], reverse=True)
-            max_elite_size = max(sample_size * 2, 20)  # Keep at least 20 or 2x sample_size
-            elite_parents = elite_parents[:max_elite_size]
-            
-            print(f"\nElite set updated: {len(elite_parents)} programs (top {max_elite_size} kept)")
+            elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+            elite_parents = elite_parents[:elite_cap]
+
+            print(f"\nElite set updated: {len(elite_parents)} programs (elite_pool_cap={elite_cap})")
 
             # Use the updated elite-pool best for per-iteration reporting.
             iter_best_code, iter_best_fitness, _, iter_best_program_id = elite_parents[0][:4]
@@ -5110,6 +5140,26 @@ def main():
         help="Number of parent programs to use when generating each child (default: 3)",
     )
     parser.add_argument(
+        "--sample_parents",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When enabled (default), pick parent programs uniformly at random without replacement from the "
+            "elite pool. When disabled, use the top sample_size programs by fitness. "
+            "Does not apply to gridworld_ensemble member pools."
+        ),
+    )
+    parser.add_argument(
+        "--elite_pool_size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Max size of the elite program pool after each iteration (best programs kept). "
+            "Default: max(2 * sample_size, 20). Must be >= 1 when set."
+        ),
+    )
+    parser.add_argument(
         "--num_diagnostic_trials",
         type=int,
         default=None,
@@ -5557,6 +5607,8 @@ def main():
                 wandb_log_fn=_wandb_log_with_global_step,
                 n_eval_seeds=args.n_eval_seeds,
                 sample_size=args.sample_size,
+                sample_parents=args.sample_parents,
+                elite_pool_size=args.elite_pool_size,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 save_artifacts=True,
                 all_data_mode=False,
@@ -5652,6 +5704,9 @@ def main():
             llm_max_tokens=args.llm_max_tokens,
             wandb=wandb,
             wandb_log_fn=_wandb_log_with_global_step,
+            sample_parents=args.sample_parents,
+            elite_pool_size=args.elite_pool_size,
+            parent_sample_seed=args.split_seed,
         )
         aggregate_seed_path.write_text(agg["best_code"], encoding="utf-8")
 
@@ -5711,6 +5766,8 @@ def main():
                     wandb=wandb,
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
+                    sample_parents=args.sample_parents,
+                    elite_pool_size=args.elite_pool_size,
                     filter_mixed_gambles=mixed_gambles_gain_loss_only,
                     fitness_metric=args.fitness_metric,
                     split_ratio=args.split_ratio,
@@ -5806,6 +5863,8 @@ def main():
                     wandb_log_fn=_wandb_log_with_global_step,
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
+                    sample_parents=args.sample_parents,
+                    elite_pool_size=args.elite_pool_size,
                     filter_mixed_gambles=mixed_gambles_gain_loss_only,
                     save_artifacts=False,
                     all_data_mode=True,
@@ -6128,6 +6187,8 @@ def main():
                         wandb_log_fn=_wandb_log_with_global_step,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
+                        sample_parents=args.sample_parents,
+                        elite_pool_size=args.elite_pool_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
@@ -6252,6 +6313,8 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
+                        sample_parents=args.sample_parents,
+                        elite_pool_size=args.elite_pool_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
