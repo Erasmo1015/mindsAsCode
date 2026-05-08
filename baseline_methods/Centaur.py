@@ -344,6 +344,54 @@ def evaluate_centaur_on_trials(
     }
 
 
+def collect_centaur_predictions(
+    chooser: "CentaurChooser",
+    trials: List[Dict[str, Any]],
+    *,
+    participant_id: int,
+    dataset: str,
+    split_name: str,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for i, t in enumerate(trials):
+        y = int(t["action"])
+        p_raw: Optional[float] = None
+        pred: Optional[int] = None
+        error = ""
+        try:
+            p_raw = float(chooser.prob_choose_second_option(trials, i))
+            pred = 1 if p_raw >= 0.5 else 0
+        except Exception as e:
+            error = str(e)
+        rows.append(
+            {
+                "participant_id": participant_id,
+                "dataset": dataset,
+                "split": split_name,
+                "trial_index": i,
+                "actual_action": y,
+                "pred_prob_b": p_raw,
+                "pred_action": pred,
+                "history_len": len(t.get("history", [])),
+                "has_feedback": bool(t.get("problem", {}).get("has_feedback", False)),
+                "error": error,
+            }
+        )
+    return rows
+
+
+def _safe_mean_numeric(values: List[Any]) -> Optional[float]:
+    vals: List[float] = []
+    for v in values:
+        if isinstance(v, (int, float, np.floating)):
+            fv = float(v)
+            if math.isfinite(fv):
+                vals.append(fv)
+    if not vals:
+        return None
+    return float(np.mean(vals))
+
+
 PETERSON_INTRO = (
     "You will encounter a series of gambling problems where you have to select between two options.\n"
     "You can select an option by pressing the corresponding key.\n"
@@ -762,8 +810,8 @@ def _write_all_mode_csvs(
         w.writeheader()
         w.writerows(_round_floats_for_csv_rows(participant_details))
 
-    avg_train = float(np.mean([d["train_fitness"] for d in participant_details]))
-    avg_test = float(np.mean([d["test_fitness"] for d in participant_details]))
+    avg_train = _safe_mean_numeric([d.get("train_fitness") for d in participant_details])
+    avg_test = _safe_mean_numeric([d.get("test_fitness") for d in participant_details])
     with open(summary_file, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f, fieldnames=["num_of_participants", "avg_train_fitness", "avg_test_fitness"]
@@ -784,8 +832,8 @@ def _write_all_mode_csvs(
         w.writeheader()
         w.writerows(_round_floats_for_csv_rows(participant_loglik))
 
-    tr_vals = [d["train_loglik"] for d in participant_loglik if d["train_loglik"] is not None]
-    te_vals = [d["test_loglik"] for d in participant_loglik if d["test_loglik"] is not None]
+    tr_vals = [d["train_loglik"] for d in participant_loglik if d.get("train_loglik") is not None]
+    te_vals = [d["test_loglik"] for d in participant_loglik if d.get("test_loglik") is not None]
     with open(summary_loglik_file, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f, fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
@@ -795,8 +843,8 @@ def _write_all_mode_csvs(
             _round_floats_for_csv_row(
                 {
                     "num_of_participants": len(participant_loglik),
-                    "avg_train_loglik": float(np.mean(tr_vals)) if tr_vals else None,
-                    "avg_test_loglik": float(np.mean(te_vals)) if te_vals else None,
+                    "avg_train_loglik": _safe_mean_numeric(tr_vals),
+                    "avg_test_loglik": _safe_mean_numeric(te_vals),
                 }
             )
         )
@@ -813,6 +861,28 @@ def _write_command_line_log(run_dir: Path) -> Path:
     body = f"# saved {stamp}\n# cwd: {os.getcwd()}\n# host: {socket.gethostname()}\n{cmd}\n"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def _write_predictions_csv(base_run_dir: Path, rows: List[Dict[str, Any]]) -> None:
+    log_dir = base_run_dir / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    out = log_dir / "predictions_vs_actual.csv"
+    fieldnames = [
+        "participant_id",
+        "dataset",
+        "split",
+        "trial_index",
+        "actual_action",
+        "pred_prob_b",
+        "pred_action",
+        "history_len",
+        "has_feedback",
+        "error",
+    ]
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
 
 
 def _load_trials_for_participant(
@@ -860,21 +930,22 @@ def _evaluate_participant(
     chooser: "CentaurChooser",
     args: argparse.Namespace,
     participant_id: int,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     train_trials_raw, test_trials_raw, test_observed_blocks = _load_trials_for_participant(
         args=args, participant_id=participant_id
     )
     train_trials = _prepare_trials_for_centaur(args.dataset, train_trials_raw)
     test_trials = _prepare_trials_for_centaur(args.dataset, test_trials_raw)
 
+    test_preds = collect_centaur_predictions(
+        chooser,
+        test_trials,
+        participant_id=participant_id,
+        dataset=args.dataset,
+        split_name="test",
+    )
+
     if args.dataset in {"choice13k", "mixed_gambles"}:
-        train_eval = evaluate_centaur_on_trials(
-            chooser,
-            train_trials,
-            n_seeds=args.n_eval_seeds,
-            debug_prob=args.debug_prob,
-            debug_limit=args.debug_prob_limit,
-        )
         test_eval = evaluate_centaur_on_trials(
             chooser,
             test_trials,
@@ -882,40 +953,43 @@ def _evaluate_participant(
             debug_prob=args.debug_prob,
             debug_limit=args.debug_prob_limit,
         )
-        return _participant_summary_row(
-            participant_id=participant_id,
-            dataset=args.dataset,
-            fitness_metric=args.fitness_metric,
-            train_eval=train_eval,
-            test_eval=test_eval,
-        )
+        summary = {
+            "participant_id": participant_id,
+            "train_acc": None,
+            "test_acc": test_eval["accuracy"],
+            "train_loglik": None,
+            "test_loglik": test_eval["avg_loglik"],
+            "train_mse": None,
+            "test_mse": None,
+            "train_fitness": None,
+            "test_fitness": test_eval["avg_loglik"] if args.fitness_metric == "loglik" else test_eval["accuracy"],
+            "seed_program_train_fitness": None,
+            "seed_program_test_fitness": test_eval["avg_loglik"] if args.fitness_metric == "loglik" else test_eval["accuracy"],
+        }
+        return summary, test_preds
 
     if args.dataset == "cpc18" and bool(getattr(args, "cpc18_official_mse", False)):
-        train_eval = _eval_accuracy_from_probs(chooser, train_trials)
         test_eval = _eval_accuracy_from_probs(chooser, test_trials)
-        train_mse_eval = _eval_cpc18_mse_from_probs(
-            chooser, train_trials, test_observed_blocks or {}
-        )
         test_mse_eval = _eval_cpc18_mse_from_probs(
             chooser, test_trials, test_observed_blocks or {}
         )
-        return _participant_summary_row(
-            participant_id=participant_id,
-            dataset=args.dataset,
-            fitness_metric=args.fitness_metric,
-            train_eval=train_eval,
-            test_eval=test_eval,
-            train_mse_eval=train_mse_eval,
-            test_mse_eval=test_mse_eval,
-        )
+        te_mse = float(test_mse_eval["mse"])
+        te_fit = -te_mse if math.isfinite(te_mse) else float("-inf")
+        summary = {
+            "participant_id": participant_id,
+            "train_acc": None,
+            "test_acc": test_eval["accuracy"],
+            "train_loglik": None,
+            "test_loglik": None,
+            "train_mse": None,
+            "test_mse": te_mse,
+            "train_fitness": None,
+            "test_fitness": te_fit,
+            "seed_program_train_fitness": None,
+            "seed_program_test_fitness": te_fit,
+        }
+        return summary, test_preds
     if args.dataset == "cpc18":
-        train_eval = evaluate_centaur_on_trials(
-            chooser,
-            train_trials,
-            n_seeds=args.n_eval_seeds,
-            debug_prob=args.debug_prob,
-            debug_limit=args.debug_prob_limit,
-        )
         test_eval = evaluate_centaur_on_trials(
             chooser,
             test_trials,
@@ -923,25 +997,36 @@ def _evaluate_participant(
             debug_prob=args.debug_prob,
             debug_limit=args.debug_prob_limit,
         )
-        return _participant_summary_row(
-            participant_id=participant_id,
-            dataset=args.dataset,
-            fitness_metric=args.fitness_metric,
-            train_eval=train_eval,
-            test_eval=test_eval,
-            train_mse_eval=None,
-            test_mse_eval=None,
-        )
+        summary = {
+            "participant_id": participant_id,
+            "train_acc": None,
+            "test_acc": test_eval["accuracy"],
+            "train_loglik": None,
+            "test_loglik": test_eval["avg_loglik"],
+            "train_mse": None,
+            "test_mse": None,
+            "train_fitness": None,
+            "test_fitness": test_eval["avg_loglik"] if args.fitness_metric == "loglik" else test_eval["accuracy"],
+            "seed_program_train_fitness": None,
+            "seed_program_test_fitness": test_eval["avg_loglik"] if args.fitness_metric == "loglik" else test_eval["accuracy"],
+        }
+        return summary, test_preds
 
-    train_eval = _eval_accuracy_from_probs(chooser, train_trials)
     test_eval = _eval_accuracy_from_probs(chooser, test_trials)
-    return _participant_summary_row(
-        participant_id=participant_id,
-        dataset=args.dataset,
-        fitness_metric=args.fitness_metric,
-        train_eval=train_eval,
-        test_eval=test_eval,
-    )
+    summary = {
+        "participant_id": participant_id,
+        "train_acc": None,
+        "test_acc": test_eval["accuracy"],
+        "train_loglik": None,
+        "test_loglik": None,
+        "train_mse": None,
+        "test_mse": None,
+        "train_fitness": None,
+        "test_fitness": test_eval["accuracy"],
+        "seed_program_train_fitness": None,
+        "seed_program_test_fitness": test_eval["accuracy"],
+    }
+    return summary, test_preds
 
 
 def main() -> None:
@@ -1090,13 +1175,6 @@ def main() -> None:
             test_trials.extend(tr)
         print(f"Across-participants: train trials={len(train_trials)}, test trials={len(test_trials)}")
         t0 = datetime.now()
-        train_eval = evaluate_centaur_on_trials(
-            chooser,
-            train_trials,
-            n_seeds=args.n_eval_seeds,
-            debug_prob=args.debug_prob,
-            debug_limit=args.debug_prob_limit,
-        )
         test_eval = evaluate_centaur_on_trials(
             chooser,
             test_trials,
@@ -1106,27 +1184,28 @@ def main() -> None:
         )
         runtime = (datetime.now() - t0).total_seconds()
         base_run_dir.mkdir(parents=True, exist_ok=True)
-        summ = _participant_summary_row(
-            participant_id=0,
-            dataset="choice13k",
-            fitness_metric=args.fitness_metric,
-            train_eval=train_eval,
-            test_eval=test_eval,
-        )
         row = {
             "participant_id": 0,
-            "train_fitness": summ["train_fitness"],
-            "test_fitness": summ["test_fitness"],
+            "train_fitness": None,
+            "test_fitness": test_eval["avg_loglik"] if args.fitness_metric == "loglik" else test_eval["accuracy"],
             "total_runtime": runtime,
-            "seed_program_train_fitness": summ["seed_program_train_fitness"],
-            "seed_program_test_fitness": summ["seed_program_test_fitness"],
+            "seed_program_train_fitness": None,
+            "seed_program_test_fitness": test_eval["avg_loglik"] if args.fitness_metric == "loglik" else test_eval["accuracy"],
         }
         row_ll = {
             "participant_id": 0,
-            "train_loglik": summ["train_loglik"],
-            "test_loglik": summ["test_loglik"],
+            "train_loglik": None,
+            "test_loglik": test_eval["avg_loglik"],
         }
         _write_all_mode_csvs(base_run_dir, [row], [row_ll])
+        preds = collect_centaur_predictions(
+            chooser,
+            _prepare_trials_for_centaur("choice13k", test_trials),
+            participant_id=0,
+            dataset="choice13k",
+            split_name="test",
+        )
+        _write_predictions_csv(base_run_dir, preds)
         print(f"Wrote CSVs under {base_run_dir}")
         return
 
@@ -1134,10 +1213,12 @@ def main() -> None:
     if args.participant_scope == "all":
         participant_details: List[Dict[str, Any]] = []
         participant_loglik: List[Dict[str, Any]] = []
+        prediction_rows: List[Dict[str, Any]] = []
         for pid in tqdm(participants, desc="Participants"):
             t0 = datetime.now()
-            summ = _evaluate_participant(chooser=chooser, args=args, participant_id=pid)
+            summ, preds = _evaluate_participant(chooser=chooser, args=args, participant_id=pid)
             runtime = (datetime.now() - t0).total_seconds()
+            prediction_rows.extend(preds)
             participant_details.append(
                 {
                     "participant_id": pid,
@@ -1152,6 +1233,7 @@ def main() -> None:
                 {"participant_id": pid, "train_loglik": summ["train_loglik"], "test_loglik": summ["test_loglik"]}
             )
             _write_all_mode_csvs(base_run_dir, participant_details, participant_loglik)
+            _write_predictions_csv(base_run_dir, prediction_rows)
         print(f"Wrote CSVs under {base_run_dir}")
         return
 
@@ -1162,13 +1244,16 @@ def main() -> None:
     summary_file = base_run_dir / "participants_summary.csv"
     summary_loglik_file = base_run_dir / "summary_loglik.csv"
     details_loglik_file = base_run_dir / "participant_details_loglik.csv"
+    prediction_rows: List[Dict[str, Any]] = []
 
     for pid in tqdm(participants, desc="Participants"):
-        summ = _evaluate_participant(chooser=chooser, args=args, participant_id=pid)
+        summ, preds = _evaluate_participant(chooser=chooser, args=args, participant_id=pid)
+        prediction_rows.extend(preds)
         participants_summary.append(summ)
         participants_loglik_summary.append(
             {"participant_id": pid, "train_loglik": summ["train_loglik"], "test_loglik": summ["test_loglik"]}
         )
+        _write_predictions_csv(base_run_dir, prediction_rows)
 
         with open(summary_file, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(summ.keys()))
@@ -1191,8 +1276,8 @@ def main() -> None:
                 _round_floats_for_csv_row(
                     {
                         "num_of_participants": len(participants_loglik_summary),
-                        "avg_train_loglik": float(np.mean(tr_vals)) if tr_vals else None,
-                        "avg_test_loglik": float(np.mean(te_vals)) if te_vals else None,
+                        "avg_train_loglik": _safe_mean_numeric(tr_vals),
+                        "avg_test_loglik": _safe_mean_numeric(te_vals),
                     }
                 )
             )

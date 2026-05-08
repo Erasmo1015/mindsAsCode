@@ -40,6 +40,13 @@ Local vLLM mode
   - **Parent selection:** `--sample_parents` is **on by default** (`BooleanOptionalAction`; disable with `--no-sample_parents`). When on, each iteration draws `min(sample_size, len(elite))` parents **uniformly at random without replacement** from the trimmed elite pool (not “top‑k by fitness”). When off, behavior matches the old rule: first `sample_size` programs after sorting by fitness. Same logic in **phase 1** `run_aggregate_evolution_phase` (RNG uses `--split_seed` + iteration). **Not applied** to `gridworld_ensemble` member pools.
   - **Elite pool cap:** `--elite_pool_size N` (optional). If omitted, cap remains `max(2 * sample_size, 20)` as before. If set, keep the top `max(1, N)` programs after sorting. Smaller pools concentrate sampling mass; larger pools increase diversity under `--sample_parents`.
 
+- Recent updates (May 2026, analysis + baseline tooling):
+  - **Choices13k proposal plotting (`analysis/code/choices13k/proposal_graph.py`):** streamlined to proposal-focused outputs with clearer labels and cleaner defaults; includes delta-from-Centaur and grouped score views plus optional PDF export via `--save_pdf`.
+  - **Participant reward-space map (`analysis/code/choices13k/participant_ev_risk_map.py`):** current plot uses `ΔPositiveReward` (x) and `ΔNegativeReward` (y), overlays both train+test trials, and renders a single-panel red/green `Predicted P(B)` map with participant-specific switching via `--participant_id`.
+  - **Participant split/data utilities:** train/test trial JSONs for participants are maintained under `analysis/data/choices13k/` (e.g., `participant_2_train_trials.json`, `participant_2_test_trials.json`), with helper extraction script `analysis/code/choices13k/extract_participant_split.py`.
+  - **Evidence artifacts:** added `analysis/code/choices13k/participant_evidence_table.py` (figure/table summary) and `analysis/code/choices13k/participant_evidence_csv.py` (raw CSV export) for proposal-ready behavioral evidence.
+  - **Centaur baseline logging (`baseline_methods/Centaur.py`):** evaluation now supports test-only reporting for choice13k/cpc18/mixed_gambles workflows and writes per-trial predictions vs actual actions to `run_dir/log/predictions_vs_actual.csv`.
+
 - Start your local server (example): `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000`.
 - Run with the new mode switch to route LLM calls externally:  
   `python plot_and_eval.py --baseline_model ROTE --mode local --model_name Qwen/Qwen2.5-7B-Instruct --llm_server_url http://localhost:8000/v1 --llm_api_key EMPTY`
