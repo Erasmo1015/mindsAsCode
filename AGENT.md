@@ -35,6 +35,12 @@ Local vLLM mode
   - `utils/adhoc_fix_report.py` is for legacy runs before 2026-04-28 (use only for pre-fix experiments).
 
 - Recent updates (May 2026, `te_aggregate.py`):
+  - **BIR integration (analysis + phase-2 selection):**
+    - Pre-evolution Choice13k runs now compute participant Behavioral Inconsistency Rate (BIR) from the exact train split used by TE and save `run_dir/analysis/behavioral_inconsistency_rate.csv`.
+    - New phase-2-only confidence regularization uses `--bir_lambda` (default `0.1`): `selection_score = train_loglik - bir_lambda * BIR * mean((p-0.5)^2)`.
+    - Phase 1 aggregate evolution is unchanged (still uses raw train loglik for selection).
+    - Phase 2 selection/ranking/parenting uses `selection_score`; raw `train_loglik`/`test_loglik` remain unchanged for reporting.
+    - Participant loglik summaries now include `selection_score` alongside `participant_id`, `train_loglik`, and `test_loglik`.
   - **Hard-participant early stop vs reporting:** `--disable_hard_participant_early_stop` skips the phase-2 rule that would **break** the adaptation loop when train loglik stays below `--hard_participant_train_loglik_threshold` after warmup. It does **not** “stop but keep early-stop metrics”: with the flag on, the run finishes all `--n_iterations`, and final CSV / `results.json` metrics come from the **best program after the last iteration** (`elite_parents[0]`). To **continue** iterations after that early-stop fires but **report** metrics from the first stop, use `--debug_continue_after_early_stop` (freezes final reporting to the early-stop snapshot while the loop keeps going for logs).
   - **`debug_continue_after_early_stop` wiring:** `run_evolution` now accepts this keyword (fixes `TypeError` when `main()` passed it). On first early stop, optional snapshot fields support the frozen-reporting path above.
   - **Parent selection:** `--sample_parents` is **on by default** (`BooleanOptionalAction`; disable with `--no-sample_parents`). When on, each iteration draws `min(sample_size, len(elite))` parents **uniformly at random without replacement** from the trimmed elite pool (not “top‑k by fitness”). When off, behavior matches the old rule: first `sample_size` programs after sorting by fitness. Same logic in **phase 1** `run_aggregate_evolution_phase` (RNG uses `--split_seed` + iteration). **Not applied** to `gridworld_ensemble` member pools.

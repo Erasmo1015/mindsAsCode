@@ -526,6 +526,37 @@ def _safe_prob_for_observed_action(
     return p_obs, ll
 
 
+def _coerce_output_to_prob_b(raw_output: Any) -> float:
+    """Coerce choose(...) output to clipped Bernoulli P(action=1)."""
+    if isinstance(raw_output, bool):
+        p_use = 1.0 if raw_output else 0.0
+    elif isinstance(raw_output, (int, np.integer)) and int(raw_output) in (0, 1):
+        p_use = float(int(raw_output))
+    elif isinstance(raw_output, (float, np.floating)):
+        p_use = float(raw_output)
+    else:
+        raise TypeError(f"choose must return float or 0/1, got {type(raw_output)}")
+    if not np.isfinite(p_use):
+        raise ValueError("non-finite probability")
+    if not (0.0 <= p_use <= 1.0):
+        raise ValueError(f"invalid probability: {p_use!r}")
+    return float(min(max(p_use, 1e-9), 1.0 - 1e-9))
+
+
+def _compute_confidence_penalty(choose_fn: Callable, trials: List[Dict[str, Any]]) -> float:
+    """
+    Mean confidence penalty on train trials:
+      mean((p - 0.5)^2), where p is clipped P(action=1).
+    """
+    if not trials:
+        return 0.0
+    vals: List[float] = []
+    for t in trials:
+        p = _coerce_output_to_prob_b(choose_fn(t["problem"], t["history"]))
+        vals.append((p - 0.5) ** 2)
+    return float(np.mean(vals)) if vals else 0.0
+
+
 def _build_diagnostic_trials_text(
     parent_code: str,
     train_trials: List[Dict[str, Any]],
@@ -606,6 +637,128 @@ def split_trials(
     test_trials = trials_from_blocks_chronological(exp, test_blocks)
     options = exp.blocks[0].option_keys
     return train_trials, test_trials, options
+
+
+def make_problem_key(problem: Dict[str, Any]) -> str:
+    """
+    Deterministic identity key for a gamble problem.
+
+    Includes:
+    - gamble_A probs/rewards
+    - gamble_B probs/rewards
+    - option_keys
+    - has_feedback
+
+    Ignores:
+    - history
+    - action
+    """
+    payload = {
+        "gamble_A": {
+            "probs": problem["gamble_A"].get("probs"),
+            "rewards": problem["gamble_A"].get("rewards"),
+        },
+        "gamble_B": {
+            "probs": problem["gamble_B"].get("probs"),
+            "rewards": problem["gamble_B"].get("rewards"),
+        },
+        "option_keys": problem.get("option_keys"),
+        "has_feedback": bool(problem.get("has_feedback", False)),
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def compute_behavioral_inconsistency_rate(train_trials: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute participant-level Behavioral Inconsistency Rate (BIR) on train trials.
+
+    A problem group is inconsistent when both actions (0 and 1) appear among
+    repeated trials of the same underlying gamble problem.
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for trial in train_trials:
+        key = make_problem_key(trial["problem"])
+        grouped.setdefault(key, []).append(trial)
+
+    num_groups = len(grouped)
+    inconsistent = 0
+    for group in grouped.values():
+        actions = {int(t["action"]) for t in group}
+        if 0 in actions and 1 in actions:
+            inconsistent += 1
+
+    bir = (float(inconsistent) / float(num_groups)) if num_groups > 0 else 0.0
+    return {
+        "num_train_trials": int(len(train_trials)),
+        "num_problem_groups": int(num_groups),
+        "num_inconsistent_problem_groups": int(inconsistent),
+        "behavioral_inconsistency_rate": float(bir),
+    }
+
+
+def _write_behavioral_inconsistency_report(
+    base_run_dir: Path,
+    participant_trials: Dict[int, List[Dict[str, Any]]],
+) -> Dict[int, float]:
+    """Write pre-evolution participant BIR diagnostics to run analysis folder."""
+    analysis_dir = base_run_dir / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = analysis_dir / "behavioral_inconsistency_rate.csv"
+
+    rows: List[Dict[str, Any]] = []
+    for participant_ordinal in sorted(participant_trials.keys()):
+        metrics = compute_behavioral_inconsistency_rate(participant_trials[participant_ordinal])
+        rows.append(
+            {
+                "participant_ordinal": int(participant_ordinal),
+                "num_train_trials": metrics["num_train_trials"],
+                "num_train_problem_groups": metrics["num_problem_groups"],
+                "num_inconsistent_problem_groups": metrics["num_inconsistent_problem_groups"],
+                "behavioral_inconsistency_rate": metrics["behavioral_inconsistency_rate"],
+            }
+        )
+
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        fieldnames = [
+            "participant_ordinal",
+            "num_train_trials",
+            "num_train_problem_groups",
+            "num_inconsistent_problem_groups",
+            "behavioral_inconsistency_rate",
+        ]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(_round_floats_for_csv_rows(rows))
+
+    print("\n[Behavioral Inconsistency Analysis]")
+    if not rows:
+        print("No participant train trials available for BIR computation.")
+        print(f"Saved: {out_csv}")
+        return {}
+
+    bir_values: List[float] = []
+    bir_by_participant: Dict[int, float] = {}
+    for row in rows:
+        bir = float(row["behavioral_inconsistency_rate"])
+        bir_values.append(bir)
+        bir_by_participant[int(row["participant_ordinal"])] = bir
+        print(
+            "participant {pid}: BIR={bir:.2f} ({inc}/{tot} inconsistent groups)".format(
+                pid=int(row["participant_ordinal"]),
+                bir=bir,
+                inc=int(row["num_inconsistent_problem_groups"]),
+                tot=int(row["num_train_problem_groups"]),
+            )
+        )
+    print(
+        "BIR summary: mean={mean:.2f}, min={minv:.2f}, max={maxv:.2f}".format(
+            mean=float(np.mean(bir_values)),
+            minv=float(np.min(bir_values)),
+            maxv=float(np.max(bir_values)),
+        )
+    )
+    print(f"Saved: {out_csv}")
+    return bir_by_participant
 
 
 def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
@@ -2802,6 +2955,8 @@ def run_evolution(
     debug_continue_after_early_stop: bool = False,
     wandb_log_fn=None,
     local_dataset: Optional[str] = None,
+    bir_lambda: float = 0.1,
+    participant_bir: float = 0.0,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -3133,14 +3288,27 @@ def run_evolution(
                 f.write(_json_dumps_safe(baseline_entry) + "\n")
     
     # Initialize best program tracking with baseline
+    baseline_confidence_penalty = 0.0
+    baseline_selection_score = None
+    if (
+        adaptation_mode
+        and fitness_metric == "loglik"
+        and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split)
+    ):
+        baseline_confidence_penalty = _compute_confidence_penalty(baseline_fn, train_trials) if baseline_fn is not None else 0.0
+        baseline_selection_score = (
+            float(baseline_train_eval["avg_loglik"])
+            - float(bir_lambda) * float(participant_bir) * float(baseline_confidence_penalty)
+        )
+
     if is_cpc18_mse and baseline_train_mse_eval is not None:
         best_fitness = -baseline_train_mse_eval['mse']
     elif is_cpc18_split and fitness_metric == "loglik":
-        best_fitness = baseline_train_eval["avg_loglik"]
+        best_fitness = baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"]
     elif is_cpc18_split:
         best_fitness = baseline_train_eval["accuracy"]
     elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
-        best_fitness = baseline_train_eval["avg_loglik"]
+        best_fitness = baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"]
     else:
         best_fitness = baseline_train_eval["accuracy"]
     
@@ -3209,7 +3377,7 @@ def run_evolution(
         )]
     elif is_cpc18_split:
         _bfit = (
-            baseline_train_eval["avg_loglik"]
+            (baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"])
             if fitness_metric == "loglik"
             else baseline_train_eval["accuracy"]
         )
@@ -3225,7 +3393,7 @@ def run_evolution(
     else:
         if dataset in {"choice13k", "mixed_gambles"}:
             _baseline_fit = (
-                baseline_train_eval["avg_loglik"]
+                (baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"])
                 if fitness_metric == "loglik"
                 else baseline_train_eval["accuracy"]
             )
@@ -3315,9 +3483,10 @@ def run_evolution(
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
                 if fitness_metric == "loglik" and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split):
+                    metric_label = "selection_score" if adaptation_mode else "train_loglik"
                     print(
                         f"  Parent {i+1}: {prog_id} "
-                        f"(train_loglik={_fmt_opt(fitness)})"
+                        f"({metric_label}={_fmt_opt(fitness)})"
                     )
                 else:
                     print(
@@ -3378,10 +3547,22 @@ def run_evolution(
             )
         adaptation_instruction = ""
         if adaptation_mode:
+            bir_note = (
+                f"This participant has low BIR = {float(participant_bir):.2f}; "
+                "confident predictions are acceptable when supported, but avoid unnecessary extremes."
+                if float(participant_bir) < 0.2
+                else (
+                    f"This participant has BIR = {float(participant_bir):.2f}; "
+                    "avoid unjustified extreme probabilities such as 0.99/0.01 and prefer calibrated rules."
+                )
+            )
             adaptation_instruction = (
                 "Modify the aggregate program minimally for this participant. "
                 "Small structural edits are allowed, but avoid full rewrites unless necessary. "
                 "Prefer simple changes that improve log-likelihood and generalize to unseen trials.\n"
+                f"Phase 2 uses a BIR-regularized score: "
+                f"selection_score = train_loglik - {float(bir_lambda):.3f} * {float(participant_bir):.3f} * mean((p - 0.5)^2).\n"
+                f"{bir_note}\n"
             )
         if dataset == "gridworld":
             candidate_codes = generate_gridworld_program_variants(
@@ -3413,6 +3594,11 @@ def run_evolution(
                 diagnostic_trials_text=diagnostic_text,
                 extra_prompt_instructions=adaptation_instruction,
                 parent_runtime_errors=parent_runtime_errors,
+                parent_metric_label_override=(
+                    "selection_score"
+                    if adaptation_mode and fitness_metric == "loglik"
+                    else None
+                ),
             )
         
         # Evaluate candidates
@@ -3603,13 +3789,18 @@ def run_evolution(
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
+                confidence_penalty = None
+                selection_score = None
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 if not runtime_valid:
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
                 elif adaptation_mode and fitness_metric == "loglik":
-                    fitness = fitness - (lambda_complexity * _complexity_penalty(code))
-                    if aggregate_base_code:
-                        fitness = fitness - (lambda_change * _change_penalty(code, aggregate_base_code))
+                    confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
+                    selection_score = (
+                        float(train_loglik)
+                        - float(bir_lambda) * float(participant_bir) * float(confidence_penalty)
+                    )
+                    fitness = selection_score
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
@@ -3617,6 +3808,8 @@ def run_evolution(
                     "test_acc": test_acc,
                     "train_loglik": train_loglik,
                     "test_loglik": test_loglik,
+                    "confidence_penalty": confidence_penalty,
+                    "selection_score": selection_score,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"] if test_eval is not None else None,
@@ -3679,13 +3872,18 @@ def run_evolution(
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
+                confidence_penalty = None
+                selection_score = None
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 if not runtime_valid:
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
                 elif adaptation_mode and fitness_metric == "loglik":
-                    fitness = fitness - (lambda_complexity * _complexity_penalty(code))
-                    if aggregate_base_code:
-                        fitness = fitness - (lambda_change * _change_penalty(code, aggregate_base_code))
+                    confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
+                    selection_score = (
+                        float(train_loglik)
+                        - float(bir_lambda) * float(participant_bir) * float(confidence_penalty)
+                    )
+                    fitness = selection_score
                 candidate_results.append({
                     "idx": idx,
                     "code": code,
@@ -3693,6 +3891,8 @@ def run_evolution(
                     "test_acc": test_acc,
                     "train_loglik": train_loglik,
                     "test_loglik": test_loglik,
+                    "confidence_penalty": confidence_penalty,
+                    "selection_score": selection_score,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
                     "test_correct": test_eval["correct"] if test_eval is not None else None,
@@ -3749,6 +3949,8 @@ def run_evolution(
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 fitness = train_eval["avg_loglik"] if fitness_metric == "loglik" else train_acc
                 runtime_valid = True
+                confidence_penalty = None
+                selection_score = None
                 if fitness_metric == "loglik":
                     runtime_valid = (train_eval.get("errors", 0) == 0) and (
                         test_eval is None or test_eval.get("errors", 0) == 0
@@ -3756,9 +3958,12 @@ def run_evolution(
                     if not runtime_valid:
                         fitness = -1e9
                     elif adaptation_mode:
-                        fitness = fitness - (lambda_complexity * _complexity_penalty(code))
-                        if aggregate_base_code:
-                            fitness = fitness - (lambda_change * _change_penalty(code, aggregate_base_code))
+                        confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
+                        selection_score = (
+                            float(train_eval["avg_loglik"])
+                            - float(bir_lambda) * float(participant_bir) * float(confidence_penalty)
+                        )
+                        fitness = selection_score
                 row = {
                     "idx": idx,
                     "code": code,
@@ -3775,6 +3980,8 @@ def run_evolution(
                 if fitness_metric == "loglik":
                     row["train_loglik"] = train_eval["avg_loglik"]
                     row["test_loglik"] = None
+                    row["confidence_penalty"] = confidence_penalty
+                    row["selection_score"] = selection_score
                 candidate_results.append(row)
                 if fitness_metric == "loglik" and not runtime_valid:
                     err_line = _probe_runtime_error_line(choose_fn, train_trials)
@@ -3816,7 +4023,12 @@ def run_evolution(
                         f"fitness={result['fitness']:.2f}"
                     )
             elif is_cpc18_split and fitness_metric == "loglik":
-                print(f"\nTop performers (by train avg log-likelihood, higher is better):")
+                title = (
+                    "Top performers (by selection_score, higher is better):"
+                    if adaptation_mode
+                    else "Top performers (by train avg log-likelihood, higher is better):"
+                )
+                print(f"\n{title}")
                 for i, result in enumerate(selected_results[:5]):
                     _test_ll = (
                         f"{result['test_loglik']:.6f}"
@@ -3832,11 +4044,18 @@ def run_evolution(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
                         f"test_loglik={_test_ll}, "
+                        f"selection_score={_fmt_opt(result.get('selection_score'), 6)}, "
+                        f"confidence_penalty={_fmt_opt(result.get('confidence_penalty'), 6)}, "
                         f"train_acc={result['train_acc']:.4f}, "
                         f"test_acc={_test_acc}"
                     )
             elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
-                print(f"\nTop performers (by train avg log-likelihood, higher is better):")
+                title = (
+                    "Top performers (by selection_score, higher is better):"
+                    if adaptation_mode
+                    else "Top performers (by train avg log-likelihood, higher is better):"
+                )
+                print(f"\n{title}")
                 for i, result in enumerate(selected_results[:5]):
                     _test_ll = (
                         f"{result['test_loglik']:.6f}"
@@ -3852,6 +4071,8 @@ def run_evolution(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
                         f"test_loglik={_test_ll}, "
+                        f"selection_score={_fmt_opt(result.get('selection_score'), 6)}, "
+                        f"confidence_penalty={_fmt_opt(result.get('confidence_penalty'), 6)}, "
                         f"train_acc={result['train_acc']:.4f}, "
                         f"test_acc={_test_acc}"
                     )
@@ -3953,6 +4174,8 @@ def run_evolution(
             iter_best_test_acc = best_result["test_acc"]
             iter_best_train_loglik = best_result.get("train_loglik")
             iter_best_test_loglik = best_result.get("test_loglik")
+            iter_best_confidence_penalty = best_result.get("confidence_penalty")
+            iter_best_selection_score = best_result.get("selection_score")
             if fitness_metric == "loglik" and (is_cpc18_split or dataset in {"choice13k", "mixed_gambles"}):
                 iter_best_fn = compile_program(iter_best_code)
                 if iter_best_fn is not None:
@@ -3974,7 +4197,15 @@ def run_evolution(
                     iter_best_test_acc = iter_best_test_eval["accuracy"]
                     iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
                     iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
-                    iter_best_fitness = iter_best_train_loglik
+                    if adaptation_mode:
+                        iter_best_confidence_penalty = _compute_confidence_penalty(iter_best_fn, train_trials)
+                        iter_best_selection_score = (
+                            float(iter_best_train_loglik)
+                            - float(bir_lambda) * float(participant_bir) * float(iter_best_confidence_penalty)
+                        )
+                        iter_best_fitness = float(iter_best_selection_score)
+                    else:
+                        iter_best_fitness = float(iter_best_train_loglik)
                 else:
                     # Should be rare; keep loop stable if a pool entry cannot recompile.
                     iter_best_test_acc = None
@@ -3994,6 +4225,8 @@ def run_evolution(
                     "test_acc": iter_best_test_acc,
                     "train_loglik": iter_best_train_loglik,
                     "test_loglik": iter_best_test_loglik,
+                    "selection_score": iter_best_selection_score,
+                    "confidence_penalty": iter_best_confidence_penalty,
                 })
             best_fitness = iter_best_fitness
             
@@ -4142,6 +4375,8 @@ def run_evolution(
                         "test_acc": r["test_acc"],
                         "train_loglik": r.get("train_loglik"),
                         "test_loglik": r.get("test_loglik"),
+                        "selection_score": r.get("selection_score"),
+                        "confidence_penalty": r.get("confidence_penalty"),
                         "fitness": r.get("fitness"),
                         "valid": r["valid"],
                         "runtime_valid": r.get("runtime_valid", r["valid"]),
@@ -4153,6 +4388,8 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "best_selection_score": selected_results[0].get("selection_score") if selected_results else None,
+                "best_confidence_penalty": selected_results[0].get("confidence_penalty") if selected_results else None,
             }
         elif dataset in {"choice13k", "mixed_gambles"}:
             metrics = {
@@ -4168,6 +4405,8 @@ def run_evolution(
                         "test_acc": r["test_acc"],
                         "train_loglik": r.get("train_loglik"),
                         "test_loglik": r.get("test_loglik"),
+                        "selection_score": r.get("selection_score"),
+                        "confidence_penalty": r.get("confidence_penalty"),
                         "fitness": r.get("fitness"),
                         "valid": r["valid"],
                         "runtime_valid": r.get("runtime_valid", r["valid"]),
@@ -4221,6 +4460,8 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "best_selection_score": selected_results[0].get("selection_score") if selected_results else None,
+                "best_confidence_penalty": selected_results[0].get("confidence_penalty") if selected_results else None,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
@@ -4232,6 +4473,8 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "best_selection_score": selected_results[0].get("selection_score") if selected_results else None,
+                "best_confidence_penalty": selected_results[0].get("confidence_penalty") if selected_results else None,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
@@ -4357,6 +4600,9 @@ def run_evolution(
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean(
                             [r["train_acc"] for r in valid_results]
                         )
+                        if adaptation_mode and fitness_metric == "loglik":
+                            log_dict[f"p{participant_id}_selection_score"] = iter_best_selection_score
+                            log_dict[f"p{participant_id}_confidence_penalty"] = iter_best_confidence_penalty
                         if fitness_metric != "loglik":
                             log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean(
                                 [r["test_acc"] for r in valid_results]
@@ -4375,6 +4621,9 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
                         log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
                         log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
+                        if adaptation_mode and fitness_metric == "loglik":
+                            log_dict[f"p{participant_id}_selection_score"] = iter_best_selection_score
+                            log_dict[f"p{participant_id}_confidence_penalty"] = iter_best_confidence_penalty
                 else:
                     log_dict = {
                         f"p{participant_id}_n_valid": len(valid_results),
@@ -4393,6 +4642,9 @@ def run_evolution(
                             else iter_best_test_acc
                         )
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
+                        if adaptation_mode and fitness_metric == "loglik":
+                            log_dict[f"p{participant_id}_selection_score"] = iter_best_selection_score
+                            log_dict[f"p{participant_id}_confidence_penalty"] = iter_best_confidence_penalty
                         if fitness_metric != "loglik":
                             log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
             else:
@@ -4415,6 +4667,16 @@ def run_evolution(
                 if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
                     log_dict[f"p{participant_id}/train_loglik"] = iter_best_train_loglik
                     log_dict[f"p{participant_id}/test_loglik"] = iter_best_test_loglik
+                    if adaptation_mode and fitness_metric == "loglik":
+                        log_dict[f"p{participant_id}/selection_score"] = iter_best_selection_score
+                        log_dict[f"p{participant_id}/confidence_penalty"] = iter_best_confidence_penalty
+                        print(
+                            "[W&B BIR]",
+                            participant_id,
+                            iteration_step,
+                            iter_best_selection_score,
+                            iter_best_confidence_penalty,
+                        )
             if wandb_log_fn is not None:
                 wandb_log_fn(log_dict)
             else:
@@ -4491,6 +4753,8 @@ def run_evolution(
             f"Final best program failed to compile: {final_best_program_id}"
         )
 
+    final_confidence_penalty: Optional[float] = None
+    final_selection_score: Optional[float] = None
     if is_cpc18_mse:
         final_train_eval = evaluate_cpc18_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
         final_test_eval = evaluate_cpc18_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
@@ -4517,11 +4781,19 @@ def run_evolution(
     elif is_cpc18_split:
         final_train_eval = evaluate_cpc18_split_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
         final_test_eval = evaluate_cpc18_split_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        if adaptation_mode and fitness_metric == "loglik":
+            final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
+            final_selection_score = (
+                float(final_train_eval["avg_loglik"])
+                - float(bir_lambda) * float(participant_bir) * float(final_confidence_penalty)
+            )
         overall_best_train = {
             "train_accuracy": final_train_eval["accuracy"],
             "test_accuracy": final_test_eval["accuracy"],
             "train_loglik": final_train_eval["avg_loglik"],
             "test_loglik": final_test_eval["avg_loglik"],
+            "confidence_penalty": final_confidence_penalty,
+            "selection_score": final_selection_score,
             "program_id": final_best_program_id,
             "origin_iteration": best_iteration,
             "origin_candidate_idx": best_candidate_idx,
@@ -4531,11 +4803,19 @@ def run_evolution(
     elif dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
         final_train_eval = evaluate_choice13k_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
         final_test_eval = evaluate_choice13k_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        if adaptation_mode and fitness_metric == "loglik":
+            final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
+            final_selection_score = (
+                float(final_train_eval["avg_loglik"])
+                - float(bir_lambda) * float(participant_bir) * float(final_confidence_penalty)
+            )
         overall_best_train = {
             "train_accuracy": final_train_eval["accuracy"],
             "test_accuracy": final_test_eval["accuracy"],
             "train_loglik": final_train_eval["avg_loglik"],
             "test_loglik": final_test_eval["avg_loglik"],
+            "confidence_penalty": final_confidence_penalty,
+            "selection_score": final_selection_score,
             "program_id": final_best_program_id,
             "origin_iteration": best_iteration,
             "origin_candidate_idx": best_candidate_idx,
@@ -4714,6 +4994,9 @@ def run_evolution(
             ),
             "stopped_early": participant_stopped_early,
             "stopped_iteration": participant_early_stop_iteration,
+            "behavioral_inconsistency_rate": float(participant_bir),
+            "confidence_penalty": final_confidence_penalty,
+            "selection_score": final_selection_score,
         }
     elif dataset == "choice13k":
         result = {
@@ -4744,6 +5027,9 @@ def run_evolution(
             ),
             "stopped_early": participant_stopped_early,
             "stopped_iteration": participant_early_stop_iteration,
+            "behavioral_inconsistency_rate": float(participant_bir),
+            "confidence_penalty": final_confidence_penalty,
+            "selection_score": final_selection_score,
         }
     elif dataset == "mixed_gambles" and fitness_metric == "loglik":
         result = {
@@ -4758,6 +5044,9 @@ def run_evolution(
             "seed_program_test_fitness": baseline_results["test_loglik"],
             "stopped_early": participant_stopped_early,
             "stopped_iteration": participant_early_stop_iteration,
+            "behavioral_inconsistency_rate": float(participant_bir),
+            "confidence_penalty": final_confidence_penalty,
+            "selection_score": final_selection_score,
         }
     else:
         result = {
@@ -5178,6 +5467,12 @@ def main():
         help="Phase 2 regularization weight for change-from-aggregate penalty.",
     )
     parser.add_argument(
+        "--bir_lambda",
+        type=float,
+        default=0.1,
+        help="Phase 2 BIR confidence-regularization weight.",
+    )
+    parser.add_argument(
         "--hard_participant_train_loglik_threshold",
         type=float,
         default=-0.6,
@@ -5370,6 +5665,9 @@ def main():
     if args.lambda_complexity < 0.0 or args.lambda_change < 0.0:
         print("Error: --lambda_complexity and --lambda_change must be >= 0.")
         return
+    if args.bir_lambda < 0.0:
+        print("Error: --bir_lambda must be >= 0.")
+        return
     if args.hard_participant_warmup_iters < 1:
         print("Error: --hard_participant_warmup_iters must be >= 1.")
         return
@@ -5554,6 +5852,25 @@ def main():
         (Path(base_run_dir) / "seed_program.py").write_text(seed_code)
         if args.participant_scope != "all":
             print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
+
+    # Pre-evolution reporting-only behavioral inconsistency diagnostics (Choice13k).
+    # This does not affect selection, fitness, prompts, or evolution flow.
+    participant_bir_map: Dict[int, float] = {}
+    if args.dataset == "choice13k" and args.split_mode == "within_participant":
+        bir_participant_train_trials: Dict[int, List[Dict[str, Any]]] = {}
+        if participants_to_process:
+            max_pid_for_bir = max(participants_to_process)
+            cached_choice13k_for_bir = get_choice13k_experiments(
+                n_participants=max_pid_for_bir + 1,
+                local_dataset=args.local_dataset,
+            )
+            for pid in participants_to_process:
+                exp = cached_choice13k_for_bir[pid]
+                tr, _, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
+                bir_participant_train_trials[pid] = tr
+        participant_bir_map = _write_behavioral_inconsistency_report(
+            Path(base_run_dir), bir_participant_train_trials
+        )
 
     if args.dataset == "choice13k" and args.split_mode == "across_participants":
         selected_participants = list(participants_to_process)
@@ -5787,6 +6104,8 @@ def main():
                     debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     wandb_log_fn=_wandb_log_with_global_step,
                     local_dataset=args.local_dataset,
+                    bir_lambda=args.bir_lambda,
+                    participant_bir=participant_bir_map.get(participant_id, 0.0),
                 )
                 best_src = Path(participant_output_dir) / "best_program.py"
                 if best_src.exists():
@@ -5798,11 +6117,14 @@ def main():
                         "participant_id": participant_summary.get("participant_id"),
                         "train_loglik": participant_summary.get("train_loglik"),
                         "test_loglik": participant_summary.get("test_loglik"),
+                        "selection_score": participant_summary.get("selection_score"),
                     }
                 )
 
                 with open(details_loglik_file, "w", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=["participant_id", "train_loglik", "test_loglik"])
+                    w = csv.DictWriter(
+                        f, fieldnames=["participant_id", "train_loglik", "test_loglik", "selection_score"]
+                    )
                     w.writeheader()
                     w.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
                 train_ll_vals = [d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None]
@@ -5896,6 +6218,7 @@ def main():
                     "participant_id": participant_id,
                     "train_loglik": participant_summary.get("train_loglik"),
                     "test_loglik": participant_summary.get("test_loglik"),
+                    "selection_score": participant_summary.get("selection_score"),
                 })
 
                 with open(details_file, "w", newline="") as f:
@@ -5930,7 +6253,7 @@ def main():
                     )
 
                 with open(details_loglik_file, "w", newline="") as f:
-                    fieldnames = ["participant_id", "train_loglik", "test_loglik"]
+                    fieldnames = ["participant_id", "train_loglik", "test_loglik", "selection_score"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
                     writer.writerows(_round_floats_for_csv_rows(participant_details_loglik))
@@ -6345,11 +6668,12 @@ def main():
                             "participant_id": participant_summary.get("participant_id"),
                             "train_loglik": participant_summary.get("train_loglik"),
                             "test_loglik": participant_summary.get("test_loglik"),
+                            "selection_score": participant_summary.get("selection_score"),
                         })
                         if details_loglik_file is not None:
                             with open(details_loglik_file, "w", newline="") as f:
                                 writer = csv.DictWriter(
-                                    f, fieldnames=["participant_id", "train_loglik", "test_loglik"]
+                                    f, fieldnames=["participant_id", "train_loglik", "test_loglik", "selection_score"]
                                 )
                                 writer.writeheader()
                                 writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
