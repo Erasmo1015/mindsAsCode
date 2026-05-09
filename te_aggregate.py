@@ -3091,7 +3091,15 @@ def run_evolution(
     
     # ===== BASELINE EVALUATION =====
     print(f"\n{'='*80}")
-    print(f"BASELINE EVALUATION: Evaluating seed program ({seed_program_path})")
+    if adaptation_mode:
+        print(
+            "BASELINE EVALUATION (phase 2): evaluating initializer from "
+            f"{seed_program_path}\n"
+            "  (te_aggregate passes aggregate/best_aggregate_program.py here — "
+            "phase-1 pool best, not the original LLM persona seed template.)"
+        )
+    else:
+        print(f"BASELINE EVALUATION: Evaluating seed program ({seed_program_path})")
     print(f"{'='*80}")
     
     if dataset == "gridworld":
@@ -3178,7 +3186,27 @@ def run_evolution(
     if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
         baseline_results["train_loglik"] = baseline_train_eval["avg_loglik"]
         baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
-    
+
+    # BIR-regularized baseline (step 0): same formulas as per-iteration pool-best logs.
+    # Must run before W&B / JSONL baseline so iter -1 is comparable to later steps.
+    baseline_confidence_penalty = 0.0
+    baseline_selection_score = None
+    if (
+        adaptation_mode
+        and fitness_metric == "loglik"
+        and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split)
+    ):
+        baseline_confidence_penalty = (
+            _compute_confidence_penalty(baseline_fn, train_trials) if baseline_fn is not None else 0.0
+        )
+        baseline_selection_score = (
+            float(baseline_train_eval["avg_loglik"])
+            - float(bir_lambda) * float(participant_bir) * float(baseline_confidence_penalty)
+        )
+        if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
+            baseline_results["confidence_penalty"] = float(baseline_confidence_penalty)
+            baseline_results["selection_score"] = float(baseline_selection_score)
+
     # Log baseline to wandb at step=0
     if wandb is not None:
         baseline_log_dict = {}
@@ -3272,6 +3300,11 @@ def run_evolution(
             ):
                 baseline_log_dict[f"p{participant_id}/train_loglik"] = baseline_train_eval.get("avg_loglik", None)
                 baseline_log_dict[f"p{participant_id}/test_loglik"] = baseline_test_eval.get("avg_loglik", None)
+                if adaptation_mode and fitness_metric == "loglik" and baseline_selection_score is not None:
+                    baseline_log_dict[f"p{participant_id}/confidence_penalty"] = baseline_confidence_penalty
+                    baseline_log_dict[f"p{participant_id}/selection_score"] = baseline_selection_score
+                    baseline_log_dict[f"p{participant_id}_confidence_penalty"] = baseline_confidence_penalty
+                    baseline_log_dict[f"p{participant_id}_selection_score"] = baseline_selection_score
         if wandb_log_fn is not None:
             wandb_log_fn(baseline_log_dict)
         else:
@@ -3286,21 +3319,8 @@ def run_evolution(
             }
             with open(log_file_path, "a") as f:
                 f.write(_json_dumps_safe(baseline_entry) + "\n")
-    
-    # Initialize best program tracking with baseline
-    baseline_confidence_penalty = 0.0
-    baseline_selection_score = None
-    if (
-        adaptation_mode
-        and fitness_metric == "loglik"
-        and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split)
-    ):
-        baseline_confidence_penalty = _compute_confidence_penalty(baseline_fn, train_trials) if baseline_fn is not None else 0.0
-        baseline_selection_score = (
-            float(baseline_train_eval["avg_loglik"])
-            - float(bir_lambda) * float(participant_bir) * float(baseline_confidence_penalty)
-        )
 
+    # Initialize best program tracking with baseline
     if is_cpc18_mse and baseline_train_mse_eval is not None:
         best_fitness = -baseline_train_mse_eval['mse']
     elif is_cpc18_split and fitness_metric == "loglik":
@@ -4388,8 +4408,8 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
-                "best_selection_score": selected_results[0].get("selection_score") if selected_results else None,
-                "best_confidence_penalty": selected_results[0].get("confidence_penalty") if selected_results else None,
+                "best_selection_score": iter_best_selection_score if selected_results else None,
+                "best_confidence_penalty": iter_best_confidence_penalty if selected_results else None,
             }
         elif dataset in {"choice13k", "mixed_gambles"}:
             metrics = {
@@ -4460,8 +4480,8 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
-                "best_selection_score": selected_results[0].get("selection_score") if selected_results else None,
-                "best_confidence_penalty": selected_results[0].get("confidence_penalty") if selected_results else None,
+                "best_selection_score": iter_best_selection_score if selected_results else None,
+                "best_confidence_penalty": iter_best_confidence_penalty if selected_results else None,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
@@ -4473,8 +4493,8 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
-                "best_selection_score": selected_results[0].get("selection_score") if selected_results else None,
-                "best_confidence_penalty": selected_results[0].get("confidence_penalty") if selected_results else None,
+                "best_selection_score": iter_best_selection_score if selected_results else None,
+                "best_confidence_penalty": iter_best_confidence_penalty if selected_results else None,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
