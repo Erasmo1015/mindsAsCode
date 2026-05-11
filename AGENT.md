@@ -1,10 +1,10 @@
 Local vLLM mode
 
 - Recent updates (Apr 2026):
-  - `te_aggregate.py` (two-phase TE aggregate+adapt) summary:
-    - Implements Phase 1 aggregate evolution (`--aggregate_iterations`, default 30) over the union of participants' train trials.
-    - Implements Phase 2 participant adaptation (`--n_iterations`, default 10) starting from `aggregate/best_aggregate_program.py`.
-    - Aggregate outputs are written under `run_dir/aggregate/` with per-iteration artifacts (`iteration_k/candidates/*.py`, `iteration_k/metrics.json`), rolling `aggregate_results.json`, and `best_aggregate_program.py`.
+  - `te_aggregate.py` (two-phase TE profile+adapt) summary:
+    - Implements Phase 1 **text-profile warmup** (default on): one LLM call per participant using `prompts/Template_evo/<dataset>/text_profile/text_profile.txt` plus a token-budgeted prefix of that participant’s **train** trials; writes `participant_*/profile.txt` and `participant_*/text_profile_meta.json`. Disable with `--profile_warmup False`.
+    - Implements Phase 2 participant adaptation (`--n_iterations`, default 10) starting from the run **seed** program (`--seed_path`), with the saved text profile injected into adaptation prompts when phase 1 ran.
+    - There is **no** global aggregate program evolution or `run_dir/aggregate/` pool anymore.
     - Participant adaptation reuses per-participant logging/output structure and writes final run-level summaries (`participant_details_loglik.csv`, `summary.csv`).
     - Optional diagnostic prompt trials are supported via `--num_diagnostic_trials` (total count, split into bad/good by log-likelihood; recommend 10 = 5 hard + 5 easy).
     - Optional adaptation regularization is supported via `--lambda_complexity` and `--lambda_change` (both default 0.0).
@@ -35,15 +35,10 @@ Local vLLM mode
   - `utils/adhoc_fix_report.py` is for legacy runs before 2026-04-28 (use only for pre-fix experiments).
 
 - Recent updates (May 2026, `te_aggregate.py`):
-  - **BIR integration (analysis + phase-2 selection):**
-    - Pre-evolution Choice13k runs now compute participant Behavioral Inconsistency Rate (BIR) from the exact train split used by TE and save `run_dir/analysis/behavioral_inconsistency_rate.csv`.
-    - New phase-2-only confidence regularization uses `--bir_lambda` (default `0.1`): `selection_score = train_loglik - bir_lambda * BIR * mean((p-0.5)^2)`.
-    - Phase 1 aggregate evolution is unchanged (still uses raw train loglik for selection).
-    - Phase 2 selection/ranking/parenting uses `selection_score`; raw `train_loglik`/`test_loglik` remain unchanged for reporting.
-    - Participant loglik summaries now include `selection_score` alongside `participant_id`, `train_loglik`, and `test_loglik`.
+  - **Text-profile warmup vs phase 2:** `--profile_warmup True|False` (default **True**). Phase 1 only builds per-participant text profiles; phase 2 always adapts from the **seed** program. Removed: global aggregate evolution, elite pool over pooled trials, `aggregate/best_aggregate_program.py`, and `--aggregate_iterations`.
   - **Hard-participant early stop vs reporting:** `--disable_hard_participant_early_stop` skips the phase-2 rule that would **break** the adaptation loop when train loglik stays below `--hard_participant_train_loglik_threshold` after warmup. It does **not** “stop but keep early-stop metrics”: with the flag on, the run finishes all `--n_iterations`, and final CSV / `results.json` metrics come from the **best program after the last iteration** (`elite_parents[0]`). To **continue** iterations after that early-stop fires but **report** metrics from the first stop, use `--debug_continue_after_early_stop` (freezes final reporting to the early-stop snapshot while the loop keeps going for logs).
   - **`debug_continue_after_early_stop` wiring:** `run_evolution` now accepts this keyword (fixes `TypeError` when `main()` passed it). On first early stop, optional snapshot fields support the frozen-reporting path above.
-  - **Parent selection:** `--sample_parents` is **on by default** (`BooleanOptionalAction`; disable with `--no-sample_parents`). When on, each iteration draws `min(sample_size, len(elite))` parents **uniformly at random without replacement** from the trimmed elite pool (not “top‑k by fitness”). When off, behavior matches the old rule: first `sample_size` programs after sorting by fitness. Same logic in **phase 1** `run_aggregate_evolution_phase` (RNG uses `--split_seed` + iteration). **Not applied** to `gridworld_ensemble` member pools.
+  - **Parent selection:** `--sample_parents` is **on by default** (`BooleanOptionalAction`; disable with `--no-sample_parents`). When on, each iteration draws `min(sample_size, len(elite))` parents **uniformly at random without replacement** from the trimmed elite pool (not “top‑k by fitness”). When off, behavior matches the old rule: first `sample_size` programs after sorting by fitness. RNG uses `--split_seed` + iteration index (and participant id where applicable). **Not applied** to `gridworld_ensemble` member pools.
   - **Elite pool cap:** `--elite_pool_size N` (optional). If omitted, cap remains `max(2 * sample_size, 20)` as before. If set, keep the top `max(1, N)` programs after sorting. Smaller pools concentrate sampling mass; larger pools increase diversity under `--sample_parents`.
 
 - Recent updates (May 2026, analysis + baseline tooling):
@@ -168,4 +163,18 @@ Collecting ROTE programs for Template_evo:
 - Once collected, Template_evo can auto-detect these programs when `--seed_path` is not provided.
 
 Extracting best accuracies from old runs: For experiments without `participants_summary.csv`, use `python utils/extract_best_accuracies.py <run_dir>` to extract best train/test accuracies per participant from iteration metrics. Outputs CSV to `run_dir/participants_summary.csv`. Use `--include_program_ids` to see which iteration/candidate had best results.
+
+---
+
+## Recent updates (append-only, May 2026 — `te_aggregate.py` and related)
+
+- **Phase 1 is text-profile warmup, not aggregate code evolution.** Global aggregate iterations, pooled elite selection, `run_dir/aggregate/`, and `--aggregate_iterations` are removed. Phase 1 runs **one LLM call per participant** using `prompts/Template_evo/<dataset>/text_profile/text_profile.txt`, appends a token-budgeted prefix of that participant’s **train** trials, and writes `participant_<id>/profile.txt` plus `participant_<id>/text_profile_meta.json`. Phase 2 always adapts from the run **seed** program (`--seed_path`); when a profile exists, it is injected into adaptation prompts (optional `participant_text_profile` block plus the usual “modify seed minimally” instructions).
+
+- **`--profile_warmup` takes `True` or `False` explicitly** (e.g. `--profile_warmup False` to skip phase 1). Default is `True`. There is no `--no-profile_warmup` flag.
+
+- **CPC18 text-profile trial budget.** For `dataset=cpc18`, serialized **trials only** are capped at approximately **6000 tokens** (`_TEXT_PROFILE_CPC18_MAX_TRIAL_BLOCK_TOKENS`); the profile template and trials header stay full. Other datasets still cap the **entire** user message at the previous ~10k approximate-token budget. Logs and `text_profile_meta.json` can record `max_trial_block_tokens_approx` for CPC18. Token counts remain a **heuristic** (~4 characters per token); real server token counts can be higher, so very long templates plus `max_tokens` for the profile reply can still hit provider context limits.
+
+- **BIR-regularized selection score** is centralized in `_compute_selection_score`: `selection_score = train_loglik - λ * (BIR ** 2) * confidence_penalty`, where `confidence_penalty` is mean `((p - 0.5)^2)` on train and BIR is the precomputed behavioral inconsistency rate. **`--bir_lambda` default is `30.0`** (CLI and `run_evolution` default).
+
+- **Adaptation prompt wording vs BIR.** If `participant_bir < 0.2`, phase-2 **extra** instructions omit all BIR-specific text (no selection-score line, no confidence / extremes / calibration wording) so the model is not nudged toward conservative outputs; the optional text profile and the generic “modify seed minimally” block still apply. If `participant_bir >= 0.2`, the BIR-regularized score explanation and the note about avoiding unjustified extreme probabilities are kept.
 

@@ -557,6 +557,18 @@ def _compute_confidence_penalty(choose_fn: Callable, trials: List[Dict[str, Any]
     return float(np.mean(vals)) if vals else 0.0
 
 
+def _compute_selection_score(
+    train_loglik: float,
+    *,
+    bir_lambda: float,
+    participant_bir: float,
+    confidence_penalty: float,
+) -> float:
+    """BIR-regularized score: train_loglik - lambda * (BIR ** 2) * confidence_penalty."""
+    b = float(participant_bir)
+    return float(train_loglik) - float(bir_lambda) * (b * b) * float(confidence_penalty)
+
+
 def _build_diagnostic_trials_text(
     parent_code: str,
     train_trials: List[Dict[str, Any]],
@@ -2676,240 +2688,193 @@ def _probe_runtime_error_line(
     return "runtime error (not captured)"
 
 
-def run_aggregate_evolution_phase(
+def _approx_prompt_token_count(text: str) -> int:
+    """Lightweight token budget estimate (~4 chars/token for English-ish text)."""
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
+_PROFILE_TRIALS_HEADER = "\n\n## Training trials (chronological)\n"
+# Text-profile phase: CPC18 trial lines are long; cap serialized trials (~approx tokens) separately from choice13k.
+_TEXT_PROFILE_CPC18_MAX_TRIAL_BLOCK_TOKENS = 6000
+
+
+def _text_profile_prompt_path(dataset: str) -> Path:
+    path = _REPO_ROOT / "prompts" / "Template_evo" / dataset / "text_profile" / "text_profile.txt"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Text-profile warmup prompt missing (required when --profile_warmup): {path}"
+        )
+    return path
+
+
+def _format_trials_for_text_profile(train_trials: List[Dict[str, Any]], dataset: str) -> str:
+    """Serialize train trials (+ history when present) for the text-profile LLM prompt."""
+    lines: List[str] = []
+    fmt_ds = "cpc18" if dataset == "cpc18" else "choice13k"
+    for idx, t in enumerate(train_trials):
+        hist = json.dumps(t.get("history", []), default=str)
+        if fmt_ds == "cpc18":
+            prob = t["problem"]
+            action = t["action"]
+            lines.append(
+                f"{idx + 1}. Problem: Option A (Ha={prob['Ha']}, pHa={prob['pHa']}, La={prob['La']}, "
+                f"LotShapeA={prob['LotShapeA']}, LotNumA={prob['LotNumA']}); "
+                f"Option B (Hb={prob['Hb']}, pHb={prob['pHb']}, Lb={prob['Lb']}, "
+                f"LotShapeB={prob['LotShapeB']}, LotNumB={prob['LotNumB']}); "
+                f"Amb={prob['Amb']}, Corr={prob['Corr']}; Observed action: {action}; prior_history={hist}"
+            )
+        else:
+            prob_a = t["problem"]["gamble_A"]["probs"]
+            rew_a = t["problem"]["gamble_A"]["rewards"]
+            prob_b = t["problem"]["gamble_B"]["probs"]
+            rew_b = t["problem"]["gamble_B"]["rewards"]
+            has_fb = t["problem"].get("has_feedback", False)
+            action = t["action"]
+            lines.append(
+                f"{idx + 1}. Problem: Option A probs {prob_a} rewards {rew_a}; "
+                f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}; "
+                f"Observed action: {action}; prior_history={hist}"
+            )
+    return "\n".join(lines)
+
+
+def _select_train_trials_under_token_budget(
+    template_text: str,
+    train_trials: List[Dict[str, Any]],
+    dataset: str,
+    max_prompt_tokens: int,
+    *,
+    max_trial_block_tokens: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], int, bool]:
+    """Greedy prefix of train_trials to include in the text-profile prompt.
+
+    If ``max_trial_block_tokens`` is set (CPC18), only the serialized **trials** block is capped
+    that many approximate tokens; template + header are always kept in full.
+
+    Otherwise, the full user message (template + header + trials) must fit within
+    ``max_prompt_tokens`` approximate tokens.
+    """
+    prefix = template_text + _PROFILE_TRIALS_HEADER
+    prefix_tokens = _approx_prompt_token_count(prefix)
+
+    if max_trial_block_tokens is not None:
+        if not train_trials:
+            return [], prefix_tokens, False
+        full_block = _format_trials_for_text_profile(train_trials, dataset)
+        if _approx_prompt_token_count(full_block) <= max_trial_block_tokens:
+            return (
+                list(train_trials),
+                prefix_tokens + _approx_prompt_token_count(full_block),
+                False,
+            )
+        selected: List[Dict[str, Any]] = []
+        for t in train_trials:
+            cand = selected + [t]
+            block = _format_trials_for_text_profile(cand, dataset)
+            if _approx_prompt_token_count(block) <= max_trial_block_tokens:
+                selected = cand
+            else:
+                break
+        if not selected:
+            selected = [train_trials[0]]
+            block = _format_trials_for_text_profile(selected, dataset)
+            return (
+                selected,
+                prefix_tokens + _approx_prompt_token_count(block),
+                len(train_trials) > 1,
+            )
+        block = _format_trials_for_text_profile(selected, dataset)
+        return (
+            selected,
+            prefix_tokens + _approx_prompt_token_count(block),
+            len(selected) < len(train_trials),
+        )
+
+    if not train_trials:
+        approx = _approx_prompt_token_count(prefix)
+        return [], approx, False
+    full_block = _format_trials_for_text_profile(train_trials, dataset)
+    full_prompt = prefix + full_block
+    if _approx_prompt_token_count(full_prompt) <= max_prompt_tokens:
+        return list(train_trials), _approx_prompt_token_count(full_prompt), False
+    selected = []
+    for t in train_trials:
+        cand = selected + [t]
+        block = _format_trials_for_text_profile(cand, dataset)
+        tot = _approx_prompt_token_count(prefix + block)
+        if tot <= max_prompt_tokens:
+            selected = cand
+        else:
+            break
+    if not selected:
+        selected = [train_trials[0]]
+        block = _format_trials_for_text_profile(selected, dataset)
+        tot = _approx_prompt_token_count(prefix + block)
+        return selected, tot, len(train_trials) > 1
+    block = _format_trials_for_text_profile(selected, dataset)
+    tot = _approx_prompt_token_count(prefix + block)
+    return selected, tot, len(selected) < len(train_trials)
+
+
+def run_text_profile_warmup_participant(
     *,
     dataset: str,
-    seed_code: str,
-    aggregate_train_trials: List[Dict[str, Any]],
-    aggregate_test_trials: Optional[List[Dict[str, Any]]],
-    model_name: str,
+    participant_id: int,
+    train_trials: List[Dict[str, Any]],
     client: OpenAI,
-    output_dir: Path,
-    aggregate_iterations: int,
-    n_candidates_per_iteration: int,
-    sample_size: int,
-    n_eval_seeds: int,
-    llm_max_tokens: int,
-    wandb=None,
-    wandb_log_fn=None,
-    sample_parents: bool = True,
-    elite_pool_size: Optional[int] = None,
-    parent_sample_seed: int = 0,
+    model_name: str,
+    base_run_dir: str,
+    max_prompt_tokens: int = 10_000,
+    profile_response_max_tokens: int = 2048,
 ) -> Dict[str, Any]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    seed_fn = compile_program(seed_code)
-    if seed_fn is None:
-        raise RuntimeError("Aggregate phase: seed code failed to compile.")
-    seed_eval = _evaluate_loglik_for_dataset(dataset, seed_fn, aggregate_train_trials, n_eval_seeds=n_eval_seeds)
-    seed_runtime_valid = (seed_eval.get("errors", 0) == 0)
-    seed_fit = float(seed_eval["avg_loglik"]) if seed_runtime_valid else -1e9
-    elite: List[Tuple[str, float, str]] = [(seed_code, seed_fit, "aggregate_baseline")]
-    runtime_error_bank: List[Dict[str, Any]] = []
-    history: List[Dict[str, Any]] = []
-
-    for it in range(1, aggregate_iterations + 1):
-        iter_dir = output_dir / f"iteration_{it}"
-        iter_dir.mkdir(parents=True, exist_ok=True)
-        candidates_dir = iter_dir / "candidates"
-        candidates_dir.mkdir(parents=True, exist_ok=True)
-        num_sel = max(1, min(sample_size, len(elite)))
-        if sample_parents and len(elite) > 0:
-            rng = np.random.default_rng(int(parent_sample_seed) + it * 1_000_003)
-            idxs = rng.choice(len(elite), size=num_sel, replace=False)
-            selected = [elite[int(j)] for j in idxs]
-        else:
-            selected = elite[:num_sel]
-        parent_codes = [x[0] for x in selected]
-        parent_scores = [x[1] for x in selected]
-        parent_runtime_errors: List[Optional[str]] = [None for _ in selected]
-        needs_fallback = (
-            len(selected) < sample_size
-            or (len(selected) == 1 and selected[0][2] == "aggregate_baseline")
-        )
-        if needs_fallback and runtime_error_bank:
-            selected_ids = {x[2] for x in selected}
-            candidates = [r for r in runtime_error_bank if r["program_id"] not in selected_ids]
-            finite = [r for r in candidates if np.isfinite(float(r["fitness"])) and float(r["fitness"]) > -1e8]
-            if finite:
-                finite.sort(key=lambda r: float(r["fitness"]), reverse=True)
-                extras = finite[:3]
-            else:
-                rng = np.random.default_rng(it)
-                take = min(3, len(candidates))
-                if take > 0:
-                    idxs = rng.choice(len(candidates), size=take, replace=False)
-                    extras = [candidates[int(i)] for i in idxs]
-                else:
-                    extras = []
-            for e in extras:
-                parent_codes.append(e["code"])
-                parent_scores.append(float(e["fitness"]))
-                parent_runtime_errors.append(e.get("runtime_error_line"))
-        extra = (
-            "Target: learn a generalizable program across participants.\n"
-            "Prefer simple, stable rules. Do not overfit to any specific participant. "
-            "The score is average log-likelihood over all training trials.\n"
-        )
-        candidates = generate_program_variants(
-            client=client,
-            model_name=model_name,
-            parent_programs=parent_codes,
-            train_trials=aggregate_train_trials,
-            n_variants=n_candidates_per_iteration,
-            max_tokens=llm_max_tokens,
-            parent_train_accuracies=parent_scores,
-            dataset=dataset,
-            max_prompt_train_trials=0,
-            max_prompt_trials_per_problem=0,
-            prompt_train_trials_seed=0,
-            fitness_metric="loglik",
-            cpc18_official_mse=False,
-            include_train_trials_in_prompt=False,
-            extra_prompt_instructions=extra,
-            parent_metric_label_override="aggregate_train_loglik",
-            parent_runtime_errors=parent_runtime_errors,
-        )
-
-        iter_rows: List[Dict[str, Any]] = []
-        for idx, code in enumerate(candidates):
-            code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
-            (candidates_dir / f"candidate_{idx}.py").write_text(code or "", encoding="utf-8")
-            choose_fn = compile_program(code)
-            if choose_fn is None:
-                row = {
-                    "idx": idx,
-                    "valid": False,
-                    "runtime_valid": False,
-                    "aggregate_train_loglik": None,
-                    "fitness": -1e9,
-                    "code": code,
-                }
-                iter_rows.append(row)
-                continue
-            ev = _evaluate_loglik_for_dataset(dataset, choose_fn, aggregate_train_trials, n_eval_seeds=n_eval_seeds)
-            runtime_valid = (ev.get("errors", 0) == 0)
-            ll = float(ev["avg_loglik"])
-            fit = ll if runtime_valid else -1e9
-            row = {
-                "idx": idx,
-                "valid": True,
-                "runtime_valid": runtime_valid,
-                "aggregate_train_loglik": ll,
-                "fitness": fit,
-                "code": code,
-            }
-            if not runtime_valid:
-                row["runtime_error_line"] = _probe_runtime_error_line(choose_fn, aggregate_train_trials)
-                runtime_error_bank.append(
-                    {
-                        "program_id": f"aggregate_iter_{it}_cand_{idx}",
-                        "code": code,
-                        "fitness": fit,
-                        "runtime_error_line": row["runtime_error_line"],
-                    }
-                )
-            iter_rows.append(row)
-            if runtime_valid:
-                elite.append((code, fit, f"aggregate_iter_{it}_cand_{idx}"))
-
-        elite.sort(key=lambda x: x[1], reverse=True)
-        elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
-        elite = elite[:elite_cap]
-        best_code, best_fit, best_id = elite[0]
-        best_test_ll = None
-        if aggregate_test_trials:
-            best_fn = compile_program(best_code)
-            if best_fn is not None:
-                best_test_eval = _evaluate_loglik_for_dataset(
-                    dataset, best_fn, aggregate_test_trials, n_eval_seeds=n_eval_seeds
-                )
-                if best_test_eval.get("errors", 0) == 0:
-                    best_test_ll = float(best_test_eval["avg_loglik"])
-                else:
-                    best_test_ll = -1e9
-
-        history.append(
-            {
-                "iteration": it,
-                "best_program_id": best_id,
-                "best_aggregate_train_loglik": best_fit,
-                "best_aggregate_test_loglik": best_test_ll,
-                "n_candidates": len(iter_rows),
-                "n_runtime_valid": sum(1 for r in iter_rows if r["runtime_valid"]),
-                "candidate_results": [
-                    {
-                        "idx": r["idx"],
-                        "valid": r["valid"],
-                        "runtime_valid": r["runtime_valid"],
-                        "aggregate_train_loglik": r["aggregate_train_loglik"],
-                        "fitness": r["fitness"],
-                    }
-                    for r in iter_rows
-                ],
-            }
-        )
-        if wandb is not None:
-            agg_log_dict = {
-                "aggregate_iter": it,
-                "aggregate_best_train_loglik": best_fit,
-                "aggregate_best_test_loglik": best_test_ll,
-                "aggregate_step": it,
-                "aggregate/train_loglik": best_fit,
-                "aggregate/test_loglik": best_test_ll,
-            }
-            if wandb_log_fn is not None:
-                wandb_log_fn(agg_log_dict)
-            else:
-                wandb.log(agg_log_dict, step=it)
-        (iter_dir / "metrics.json").write_text(
-            _json_dumps_safe(
-                {
-                    "iteration": it,
-                    "n_candidates": len(iter_rows),
-                    "n_runtime_valid": sum(1 for r in iter_rows if r["runtime_valid"]),
-                    "best_program_id": best_id,
-                    "best_aggregate_train_loglik": best_fit,
-                    "best_aggregate_test_loglik": best_test_ll,
-                    "candidate_results": [
-                        {
-                            "idx": r["idx"],
-                            "valid": r["valid"],
-                            "runtime_valid": r["runtime_valid"],
-                            "aggregate_train_loglik": r["aggregate_train_loglik"],
-                            "fitness": r["fitness"],
-                        }
-                        for r in iter_rows
-                    ],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        # Rolling summary/checkpoint after each iteration.
-        rolling = {
-            "dataset": dataset,
-            "aggregate_iterations": aggregate_iterations,
-            "aggregate_train_trials": len(aggregate_train_trials),
-            "best_program_id": best_id,
-            "best_aggregate_train_loglik": best_fit,
-            "best_aggregate_test_loglik": best_test_ll,
-            "history": history,
-        }
-        (output_dir / "aggregate_results.json").write_text(_json_dumps_safe(rolling, indent=2), encoding="utf-8")
-        (output_dir / "best_aggregate_program.py").write_text(best_code, encoding="utf-8")
-
-    best_code, best_fit, best_id = elite[0]
-    (output_dir / "best_aggregate_program.py").write_text(best_code, encoding="utf-8")
-    result = {
-        "dataset": dataset,
-        "aggregate_iterations": aggregate_iterations,
-        "aggregate_train_trials": len(aggregate_train_trials),
-        "best_program_id": best_id,
-        "best_aggregate_train_loglik": best_fit,
-        "history": history,
+    """Phase 1 (te_aggregate): one LLM call to write participant_{id}/profile.txt."""
+    template_path = _text_profile_prompt_path(dataset)
+    template_text = template_path.read_text(encoding="utf-8")
+    participant_dir = Path(base_run_dir) / f"participant_{participant_id}"
+    participant_dir.mkdir(parents=True, exist_ok=True)
+    trial_cap: Optional[int] = (
+        _TEXT_PROFILE_CPC18_MAX_TRIAL_BLOCK_TOKENS if dataset == "cpc18" else None
+    )
+    selected, approx_tokens, truncated = _select_train_trials_under_token_budget(
+        template_text,
+        train_trials,
+        dataset,
+        max_prompt_tokens,
+        max_trial_block_tokens=trial_cap,
+    )
+    trials_block = _format_trials_for_text_profile(selected, dataset)
+    user_content = f"{template_text}{_PROFILE_TRIALS_HEADER}{trials_block}"
+    cap_note = f" trial_block_cap≈{trial_cap}" if trial_cap is not None else ""
+    print(
+        f"[text-profile] participant={participant_id} "
+        f"trials_in_prompt={len(selected)}/{len(train_trials)} "
+        f"approx_prompt_tokens={approx_tokens} truncated={truncated}{cap_note}"
+    )
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": user_content}],
+        temperature=0.35,
+        top_p=0.95,
+        max_tokens=profile_response_max_tokens,
+    )
+    profile_text = (resp.choices[0].message.content or "").strip()
+    profile_path = participant_dir / "profile.txt"
+    profile_path.write_text(profile_text + ("\n" if profile_text else ""), encoding="utf-8")
+    meta: Dict[str, Any] = {
+        "participant_id": participant_id,
+        "n_train_trials_total": len(train_trials),
+        "n_train_trials_in_prompt": len(selected),
+        "approx_prompt_tokens": approx_tokens,
+        "truncated": truncated,
+        "template_path": str(template_path),
+        "profile_path": str(profile_path),
     }
-    (output_dir / "aggregate_results.json").write_text(_json_dumps_safe(result, indent=2), encoding="utf-8")
-    return {"best_code": best_code, "best_fit": best_fit, "result": result}
+    if trial_cap is not None:
+        meta["max_trial_block_tokens_approx"] = trial_cap
+    (participant_dir / "text_profile_meta.json").write_text(_json_dumps_safe(meta, indent=2), encoding="utf-8")
+    return {**meta, "profile_text": profile_text}
 
 
 def run_evolution(
@@ -2946,6 +2911,7 @@ def run_evolution(
     cpc18_official_mse: bool = False,
     adaptation_mode: bool = False,
     aggregate_base_code: Optional[str] = None,
+    participant_text_profile: Optional[str] = None,
     num_diagnostic_trials: Optional[int] = None,
     lambda_complexity: float = 0.0,
     lambda_change: float = 0.0,
@@ -2955,7 +2921,7 @@ def run_evolution(
     debug_continue_after_early_stop: bool = False,
     wandb_log_fn=None,
     local_dataset: Optional[str] = None,
-    bir_lambda: float = 0.1,
+    bir_lambda: float = 30.0,
     participant_bir: float = 0.0,
 ):
     """
@@ -3095,8 +3061,7 @@ def run_evolution(
         print(
             "BASELINE EVALUATION (phase 2): evaluating initializer from "
             f"{seed_program_path}\n"
-            "  (te_aggregate passes aggregate/best_aggregate_program.py here — "
-            "phase-1 pool best, not the original LLM persona seed template.)"
+            "  (te_aggregate phase 2 adapts from this seed program; optional text profile is injected into prompts.)"
         )
     else:
         print(f"BASELINE EVALUATION: Evaluating seed program ({seed_program_path})")
@@ -3199,9 +3164,11 @@ def run_evolution(
         baseline_confidence_penalty = (
             _compute_confidence_penalty(baseline_fn, train_trials) if baseline_fn is not None else 0.0
         )
-        baseline_selection_score = (
-            float(baseline_train_eval["avg_loglik"])
-            - float(bir_lambda) * float(participant_bir) * float(baseline_confidence_penalty)
+        baseline_selection_score = _compute_selection_score(
+            float(baseline_train_eval["avg_loglik"]),
+            bir_lambda=bir_lambda,
+            participant_bir=participant_bir,
+            confidence_penalty=float(baseline_confidence_penalty),
         )
         if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
             baseline_results["confidence_penalty"] = float(baseline_confidence_penalty)
@@ -3567,23 +3534,33 @@ def run_evolution(
             )
         adaptation_instruction = ""
         if adaptation_mode:
-            bir_note = (
-                f"This participant has low BIR = {float(participant_bir):.2f}; "
-                "confident predictions are acceptable when supported, but avoid unnecessary extremes."
-                if float(participant_bir) < 0.2
-                else (
+            profile_block = ""
+            if participant_text_profile and participant_text_profile.strip():
+                profile_block = (
+                    "\n\nParticipant behavioral profile (qualitative summary from training observations; "
+                    "treat as soft guidance, not hard constraints):\n"
+                    f"{participant_text_profile.strip()}\n"
+                )
+            base_adapt = (
+                "Modify the seed program minimally for this participant. "
+                "Small structural edits are allowed, but avoid full rewrites unless necessary. "
+                "Prefer simple changes that improve log-likelihood and generalize to unseen trials.\n"
+            )
+            if float(participant_bir) < 0.2:
+                adaptation_instruction = profile_block + base_adapt
+            else:
+                bir_note = (
                     f"This participant has BIR = {float(participant_bir):.2f}; "
                     "avoid unjustified extreme probabilities such as 0.99/0.01 and prefer calibrated rules."
                 )
-            )
-            adaptation_instruction = (
-                "Modify the aggregate program minimally for this participant. "
-                "Small structural edits are allowed, but avoid full rewrites unless necessary. "
-                "Prefer simple changes that improve log-likelihood and generalize to unseen trials.\n"
-                f"Phase 2 uses a BIR-regularized score: "
-                f"selection_score = train_loglik - {float(bir_lambda):.3f} * {float(participant_bir):.3f} * mean((p - 0.5)^2).\n"
-                f"{bir_note}\n"
-            )
+                adaptation_instruction = (
+                    profile_block
+                    + base_adapt
+                    + f"Phase 2 uses a BIR-regularized score: "
+                    + f"selection_score = train_loglik - {float(bir_lambda):.3f} * (BIR^2) * mean((p - 0.5)^2), "
+                    + f"with BIR = {float(participant_bir):.3f}.\n"
+                    + f"{bir_note}\n"
+                )
         if dataset == "gridworld":
             candidate_codes = generate_gridworld_program_variants(
                 client=client,
@@ -3816,9 +3793,11 @@ def run_evolution(
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
                 elif adaptation_mode and fitness_metric == "loglik":
                     confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
-                    selection_score = (
-                        float(train_loglik)
-                        - float(bir_lambda) * float(participant_bir) * float(confidence_penalty)
+                    selection_score = _compute_selection_score(
+                        float(train_loglik),
+                        bir_lambda=bir_lambda,
+                        participant_bir=participant_bir,
+                        confidence_penalty=float(confidence_penalty),
                     )
                     fitness = selection_score
                 candidate_results.append({
@@ -3899,9 +3878,11 @@ def run_evolution(
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
                 elif adaptation_mode and fitness_metric == "loglik":
                     confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
-                    selection_score = (
-                        float(train_loglik)
-                        - float(bir_lambda) * float(participant_bir) * float(confidence_penalty)
+                    selection_score = _compute_selection_score(
+                        float(train_loglik),
+                        bir_lambda=bir_lambda,
+                        participant_bir=participant_bir,
+                        confidence_penalty=float(confidence_penalty),
                     )
                     fitness = selection_score
                 candidate_results.append({
@@ -3979,9 +3960,11 @@ def run_evolution(
                         fitness = -1e9
                     elif adaptation_mode:
                         confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
-                        selection_score = (
-                            float(train_eval["avg_loglik"])
-                            - float(bir_lambda) * float(participant_bir) * float(confidence_penalty)
+                        selection_score = _compute_selection_score(
+                            float(train_eval["avg_loglik"]),
+                            bir_lambda=bir_lambda,
+                            participant_bir=participant_bir,
+                            confidence_penalty=float(confidence_penalty),
                         )
                         fitness = selection_score
                 row = {
@@ -4219,9 +4202,11 @@ def run_evolution(
                     iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
                     if adaptation_mode:
                         iter_best_confidence_penalty = _compute_confidence_penalty(iter_best_fn, train_trials)
-                        iter_best_selection_score = (
-                            float(iter_best_train_loglik)
-                            - float(bir_lambda) * float(participant_bir) * float(iter_best_confidence_penalty)
+                        iter_best_selection_score = _compute_selection_score(
+                            float(iter_best_train_loglik),
+                            bir_lambda=bir_lambda,
+                            participant_bir=participant_bir,
+                            confidence_penalty=float(iter_best_confidence_penalty),
                         )
                         iter_best_fitness = float(iter_best_selection_score)
                     else:
@@ -4803,9 +4788,11 @@ def run_evolution(
         final_test_eval = evaluate_cpc18_split_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
         if adaptation_mode and fitness_metric == "loglik":
             final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
-            final_selection_score = (
-                float(final_train_eval["avg_loglik"])
-                - float(bir_lambda) * float(participant_bir) * float(final_confidence_penalty)
+            final_selection_score = _compute_selection_score(
+                float(final_train_eval["avg_loglik"]),
+                bir_lambda=bir_lambda,
+                participant_bir=participant_bir,
+                confidence_penalty=float(final_confidence_penalty),
             )
         overall_best_train = {
             "train_accuracy": final_train_eval["accuracy"],
@@ -4825,9 +4812,11 @@ def run_evolution(
         final_test_eval = evaluate_choice13k_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
         if adaptation_mode and fitness_metric == "loglik":
             final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
-            final_selection_score = (
-                float(final_train_eval["avg_loglik"])
-                - float(bir_lambda) * float(participant_bir) * float(final_confidence_penalty)
+            final_selection_score = _compute_selection_score(
+                float(final_train_eval["avg_loglik"]),
+                bir_lambda=bir_lambda,
+                participant_bir=participant_bir,
+                confidence_penalty=float(final_confidence_penalty),
             )
         overall_best_train = {
             "train_accuracy": final_train_eval["accuracy"],
@@ -5320,6 +5309,18 @@ def _round_floats_for_csv_rows(rows: List[Dict[str, Any]], ndigits: int = 4) -> 
     return [_round_floats_for_csv_row(r, ndigits) for r in rows]
 
 
+def _parse_profile_warmup_arg(value: str) -> bool:
+    """Argparse type for --profile_warmup True|False."""
+    v = str(value).strip().lower()
+    if v in ("true", "t", "1", "yes", "y"):
+        return True
+    if v in ("false", "f", "0", "no", "n"):
+        return False
+    raise ValueError(
+        "Invalid --profile_warmup value: use True or False (e.g. --profile_warmup False)."
+    )
+
+
 def main():
     """Main entry point."""
     import argparse
@@ -5425,10 +5426,15 @@ def main():
         help="Phase 2 per-participant adaptation iterations (default: 10)",
     )
     parser.add_argument(
-        "--aggregate_iterations",
-        type=int,
-        default=5,
-        help="Phase 1 aggregate evolution iterations (default: 5)",
+        "--profile_warmup",
+        type=_parse_profile_warmup_arg,
+        default=True,
+        metavar="True|False",
+        help=(
+            "te_aggregate (participant datasets): pass True to run phase-1 text-profile warmup before phase-2 "
+            "(one LLM call per participant, saves participant_*/profile.txt); pass False to skip phase 1. "
+            "Default: True."
+        ),
     )
     parser.add_argument(
         "--n_candidates",
@@ -5484,13 +5490,16 @@ def main():
         "--lambda_change",
         type=float,
         default=0.0,
-        help="Phase 2 regularization weight for change-from-aggregate penalty.",
+        help="Phase 2 regularization weight for change-from-reference penalty (when used).",
     )
     parser.add_argument(
         "--bir_lambda",
         type=float,
-        default=0.1,
-        help="Phase 2 BIR confidence-regularization weight.",
+        default=30.0,
+        help=(
+            "Phase 2 BIR confidence-regularization weight λ in "
+            "selection_score = train_loglik - λ * (BIR^2) * mean((p-0.5)^2) on train. Default: 30."
+        ),
     )
     parser.add_argument(
         "--hard_participant_train_loglik_threshold",
@@ -5673,9 +5682,6 @@ def main():
     if args.llm_max_tokens < 64:
         print("Error: --llm_max_tokens must be >= 64.")
         return
-    if args.aggregate_iterations < 1:
-        print("Error: --aggregate_iterations must be >= 1.")
-        return
     if args.n_iterations < 1:
         print("Error: --n_iterations must be >= 1.")
         return
@@ -5809,8 +5815,6 @@ def main():
         wandb_global_step += 1
 
     if wandb is not None and args.dataset in _PARTICIPANT_DATASETS:
-        wandb.define_metric("aggregate_step")
-        wandb.define_metric("aggregate/*", step_metric="aggregate_step")
         for pid in participants_to_process:
             wandb.define_metric(f"p{pid}_step")
             wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
@@ -5980,14 +5984,9 @@ def main():
         if args.split_mode != "within_participant":
             raise ValueError("te_aggregate two-phase flow requires --split_mode within_participant.")
 
-        print("\n=== Two-phase mode: aggregate evolution + participant adaptation ===")
-        aggregate_dir = Path(base_run_dir) / "aggregate"
-        aggregate_dir.mkdir(parents=True, exist_ok=True)
-        aggregate_seed_path = aggregate_dir / "best_aggregate_program.py"
+        print("\n=== Two-phase mode: text-profile warmup + participant adaptation ===")
 
         participant_trials: Dict[int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
-        aggregate_train_trials: List[Dict[str, Any]] = []
-        aggregate_test_trials: List[Dict[str, Any]] = []
         max_pid = max(participants_to_process)
         cached_choice13k = (
             get_choice13k_experiments(
@@ -6020,65 +6019,30 @@ def main():
                     split_seed=args.split_seed,
                 )
             participant_trials[pid] = (tr, te)
-            aggregate_train_trials.extend(tr)
-            aggregate_test_trials.extend(te)
 
-        print(
-            f"[Phase1] participants={len(participants_to_process)}, aggregate_train_trials={len(aggregate_train_trials)}"
-        )
-        agg = run_aggregate_evolution_phase(
-            dataset=args.dataset,
-            seed_code=seed_code,
-            aggregate_train_trials=aggregate_train_trials,
-            aggregate_test_trials=aggregate_test_trials,
-            model_name=args.model_name,
-            client=OpenAI(**client_kwargs) if client_kwargs else OpenAI(),
-            output_dir=aggregate_dir,
-            aggregate_iterations=args.aggregate_iterations,
-            n_candidates_per_iteration=args.n_candidates,
-            sample_size=args.sample_size,
-            n_eval_seeds=args.n_eval_seeds,
-            llm_max_tokens=args.llm_max_tokens,
-            wandb=wandb,
-            wandb_log_fn=_wandb_log_with_global_step,
-            sample_parents=args.sample_parents,
-            elite_pool_size=args.elite_pool_size,
-            parent_sample_seed=args.split_seed,
-        )
-        aggregate_seed_path.write_text(agg["best_code"], encoding="utf-8")
-
-        # Evaluate aggregate model per participant before adaptation
-        aggregate_rows: List[Dict[str, Any]] = []
-        agg_fn = compile_program(agg["best_code"])
-        if agg_fn is None:
-            raise RuntimeError("Aggregate best program failed to compile after phase 1.")
-        for pid in participants_to_process:
-            tr, te = participant_trials[pid]
-            tr_eval = _evaluate_loglik_for_dataset(args.dataset, agg_fn, tr, n_eval_seeds=args.n_eval_seeds)
-            te_eval = _evaluate_loglik_for_dataset(args.dataset, agg_fn, te, n_eval_seeds=args.n_eval_seeds)
-            aggregate_rows.append(
-                {"participant_id": pid, "train_loglik": tr_eval["avg_loglik"], "test_loglik": te_eval["avg_loglik"]}
+        profile_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        participant_profiles: Dict[int, str] = {}
+        if args.profile_warmup:
+            _text_profile_prompt_path(args.dataset)
+            print(
+                f"[Phase1] text-profile warmup for {len(participants_to_process)} participant(s); "
+                f"prompt: prompts/Template_evo/{args.dataset}/text_profile/text_profile.txt"
             )
-        agg_details = aggregate_dir / "participant_details_loglik.csv"
-        with open(agg_details, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["participant_id", "train_loglik", "test_loglik"])
-            w.writeheader()
-            w.writerows(_round_floats_for_csv_rows(aggregate_rows))
-        agg_summary = aggregate_dir / "summary.csv"
-        with open(agg_summary, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"])
-            w.writeheader()
-            w.writerow(
-                _round_floats_for_csv_row(
-                    {
-                        "num_of_participants": len(aggregate_rows),
-                        "avg_train_loglik": float(np.mean([r["train_loglik"] for r in aggregate_rows])),
-                        "avg_test_loglik": float(np.mean([r["test_loglik"] for r in aggregate_rows])),
-                    }
+            for participant_id in tqdm(participants_to_process, desc="Participants (phase1 profile)"):
+                tr, _ = participant_trials[participant_id]
+                pinfo = run_text_profile_warmup_participant(
+                    dataset=args.dataset,
+                    participant_id=participant_id,
+                    train_trials=tr,
+                    client=profile_client,
+                    model_name=args.model_name,
+                    base_run_dir=base_run_dir,
                 )
-            )
+                participant_profiles[participant_id] = str(pinfo.get("profile_text") or "")
+        else:
+            print("[Phase1] skipped (--profile_warmup False); phase 2 uses seed program only.")
 
-        # Phase 2: participant adaptation from aggregate best
+        # Phase 2: participant adaptation from seed program (+ optional text profile in prompts)
         participants_summary = []
         participants_loglik_summary = []
         details_loglik_file = Path(base_run_dir) / "participant_details_loglik.csv"
@@ -6087,8 +6051,9 @@ def main():
         try:
             for participant_id in tqdm(participants_to_process, desc="Participants (phase2 adapt)"):
                 participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
+                profile_str = participant_profiles.get(participant_id) if args.profile_warmup else None
                 participant_summary = run_evolution(
-                    seed_program_path=str(aggregate_seed_path),
+                    seed_program_path=seed_program_path,
                     dataset=args.dataset,
                     participant_id=participant_id,
                     data_path=args.data_path,
@@ -6114,7 +6079,8 @@ def main():
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=False,
                     adaptation_mode=True,
-                    aggregate_base_code=agg["best_code"],
+                    aggregate_base_code=None,
+                    participant_text_profile=profile_str,
                     num_diagnostic_trials=args.num_diagnostic_trials,
                     lambda_complexity=args.lambda_complexity,
                     lambda_change=args.lambda_change,

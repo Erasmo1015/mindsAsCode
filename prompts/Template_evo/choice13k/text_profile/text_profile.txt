@@ -1,13 +1,12 @@
-You are given observations of human choices in the CPC18 Track II task (individual behavior).
+You are given observations of human choices in risky-gamble problems.
 
-Each trial presents two options (Option A and Option B) with lottery parameters such as:
-- high outcomes,
-- probabilities,
-- low outcomes,
-- ambiguity,
-- correlation,
-- lottery shape,
-- and number of outcomes.
+Each problem presents two gambles:
+- Option A
+- Option B
+
+A gamble contains:
+- possible rewards
+- probabilities for each reward (percent)
 
 You will also see:
 - a sequence of training trials from a single participant,
@@ -17,22 +16,17 @@ Your task is NOT to write code.
 
 Instead, infer a concise but behaviorally predictive text-based personality/profile for this participant.
 
-The goal is to summarize the participant’s underlying decision-making tendencies so that another language model can later imitate this participant on unseen CPC18 problems.
+The goal is to summarize the participant’s underlying decision-making tendencies so that another language model can later imitate this participant on unseen test problems.
 
 The profile should capture:
 - risk preference,
 - expected-value sensitivity,
-- ambiguity sensitivity,
-- correlation sensitivity,
-- sensitivity to lottery structure or skewness,
+- gain/loss sensitivity,
 - inertia or repetition tendencies,
 - feedback sensitivity,
-- adaptation across repeated trials,
-- switching behavior after gains/losses,
-- exploration vs exploitation tendencies,
 - consistency vs stochasticity,
 - decisiveness/confidence,
-- and any other important behavioral patterns or strategy changes over time.
+- and any other stable behavioral patterns.
 
 Important:
 - Focus on predictive behavioral tendencies rather than surface-level descriptions.
@@ -46,22 +40,20 @@ Behavioral guidance:
 - If the participant behaves consistently, mention strong or deterministic tendencies.
 - If the participant behaves inconsistently or noisily, mention stochasticity or unstable preferences.
 - If history strongly influences choices, describe how.
-- If the participant adapts behavior after feedback or recent outcomes, describe the adaptation pattern.
-- If the participant appears highly sensitive to expected value, ambiguity, correlation, or skewness, describe the strength of these effects.
+- If the participant appears highly sensitive to expected value or risk, describe the strength of this effect.
 
 You may include concise quantitative summaries when helpful, such as:
 - approximate choice frequencies,
 - confidence levels,
 - sensitivity strengths,
 - consistency levels,
-- switching tendencies,
 - or simplified behavioral rules.
 
 Example:
 - "The participant strongly prefers Option B when its expected value exceeds Option A, choosing B roughly 80–90% of the time in such cases."
-- "Recent feedback strongly affects subsequent choices."
-- "The participant becomes more risk-seeking after positive outcomes."
-- "The participant behaves conservatively under ambiguity and tends to avoid highly skewed lotteries."
+- "History strongly influences decisions after repeated choices."
+- "The participant behaves conservatively and avoids highly risky gambles."
+- "The participant shows moderate stochasticity and occasionally switches behavior in similar situations."
 
 Requirements:
 - Output only the participant profile text.

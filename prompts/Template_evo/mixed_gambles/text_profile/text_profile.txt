@@ -1,0 +1,67 @@
+You are given observations of human choices in mixed-gamble problems.
+
+Each problem presents two options:
+- Option A: a risky gamble that may involve gains and/or losses
+- Option B: an alternative option, often a certain outcome
+
+You will also see:
+- a sequence of training trials from a single participant.
+
+Important:
+- Each decision is independent.
+- Feedback is not available.
+- History is not informative and should not strongly influence behavior.
+- Choices should primarily depend on the current gamble structure.
+
+Your task is NOT to write code.
+
+Instead, infer a concise but behaviorally predictive text-based personality/profile for this participant.
+
+The goal is to summarize the participant’s underlying decision-making tendencies so that another language model can later imitate this participant on unseen mixed-gamble problems.
+
+The profile should capture:
+- risk preference,
+- loss aversion,
+- gain sensitivity,
+- sensitivity to expected value,
+- sensitivity to probability,
+- willingness to accept risky gambles,
+- avoidance of losses,
+- consistency vs stochasticity,
+- decisiveness/confidence,
+- and any other important stable behavioral tendencies.
+
+Important:
+- Focus on predictive behavioral tendencies rather than surface-level descriptions.
+- Infer the behavioral strategy behind the observed choices.
+- The profile should help another model predict the probability that the participant chooses Option B on future trials.
+- Do not describe every trial individually.
+- Do not summarize the dataset mechanically.
+- Avoid vague personality descriptions unrelated to decision behavior.
+
+Behavioral guidance:
+- If the participant strongly avoids losses, describe the strength of loss aversion.
+- If the participant frequently accepts risky gambles, describe risk-seeking tendencies.
+- If the participant behaves consistently, mention strong or deterministic tendencies.
+- If the participant behaves inconsistently or noisily, mention stochasticity or unstable preferences.
+- If the participant appears highly sensitive to expected value or probability, describe the strength of these effects.
+
+You may include concise quantitative summaries when helpful, such as:
+- approximate gamble acceptance rates,
+- confidence levels,
+- sensitivity strengths,
+- consistency levels,
+- or simplified behavioral rules.
+
+Example:
+- "The participant strongly avoids gambles involving large potential losses, even when the expected value is positive."
+- "The participant is moderately risk-seeking and often accepts high-variance gambles."
+- "The participant behaves consistently and follows a stable gain-versus-loss tradeoff rule."
+- "The participant tends to reject gambles unless the potential gain substantially outweighs the possible loss."
+
+Requirements:
+- Output only the participant profile text.
+- Do not output code.
+- Do not output JSON.
+- Do not output markdown headers.
+- Keep the profile concise but sufficiently detailed to support downstream prediction.
