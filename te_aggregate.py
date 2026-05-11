@@ -3421,6 +3421,10 @@ def run_evolution(
         simple_iterations_dir.mkdir(parents=True, exist_ok=True)
     for iteration in range(n_iterations):
         iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
+        # Baseline seed is used only for initialization / first generation.
+        # From iteration 2 onward, never allow it in the elite parent pool.
+        if iteration_step >= 2:
+            elite_parents = [p for p in elite_parents if p[3] != "baseline"]
         print(f"\n{'='*80}")
         print(f"Iteration {iteration_step}/{n_iterations}")
         print(f"{'='*80}")
@@ -4161,7 +4165,10 @@ def run_evolution(
                         None,
                         result["train_acc"],
                     ))
-            
+            # Remove seed baseline from pool-best selection/logging from iteration 1 onward.
+            if iteration_step >= 1:
+                elite_parents = [p for p in elite_parents if p[3] != "baseline"]
+
             # Sort elite set by fitness (descending) and keep top programs
             # For CPC18: fitness = -MSE (higher is better)
             # For others: fitness = accuracy (higher is better)
