@@ -2923,6 +2923,7 @@ def run_evolution(
     local_dataset: Optional[str] = None,
     bir_lambda: float = 30.0,
     participant_bir: float = 0.0,
+    bir_prompt_threshold: float = 0.6,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -3550,7 +3551,7 @@ def run_evolution(
                 "Small structural edits are allowed, but avoid full rewrites unless necessary. "
                 "Prefer simple changes that improve log-likelihood and generalize to unseen trials.\n"
             )
-            if float(participant_bir) < 0.2:
+            if float(participant_bir) < float(bir_prompt_threshold):
                 adaptation_instruction = profile_block + base_adapt
             else:
                 bir_note = (
@@ -5509,6 +5510,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--threshold_BIR",
+        dest="threshold_BIR",
+        type=float,
+        default=0.6,
+        help=(
+            "Phase 2 adaptation prompts: if participant BIR is strictly below this value, omit BIR/score/confidence "
+            "wording in extra instructions (default: 0.6)."
+        ),
+    )
+    parser.add_argument(
         "--hard_participant_train_loglik_threshold",
         type=float,
         default=-0.6,
@@ -5700,6 +5711,9 @@ def main():
         return
     if args.bir_lambda < 0.0:
         print("Error: --bir_lambda must be >= 0.")
+        return
+    if args.threshold_BIR < 0.0:
+        print("Error: --threshold_BIR must be >= 0.")
         return
     if args.hard_participant_warmup_iters < 1:
         print("Error: --hard_participant_warmup_iters must be >= 1.")
@@ -5975,6 +5989,7 @@ def main():
                 disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                 debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                 local_dataset=args.local_dataset,
+                bir_prompt_threshold=args.threshold_BIR,
             )
         finally:
             if wandb is not None:
@@ -6099,6 +6114,7 @@ def main():
                     local_dataset=args.local_dataset,
                     bir_lambda=args.bir_lambda,
                     participant_bir=participant_bir_map.get(participant_id, 0.0),
+                    bir_prompt_threshold=args.threshold_BIR,
                 )
                 best_src = Path(participant_output_dir) / "best_program.py"
                 if best_src.exists():
@@ -6196,6 +6212,7 @@ def main():
                     disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                     debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     local_dataset=args.local_dataset,
+                    bir_prompt_threshold=args.threshold_BIR,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -6517,6 +6534,7 @@ def main():
                         disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
+                        bir_prompt_threshold=args.threshold_BIR,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -6644,6 +6662,7 @@ def main():
                         disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
+                        bir_prompt_threshold=args.threshold_BIR,
                     )
                 
                 # Update participants summary after each participant completes
