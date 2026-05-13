@@ -1,61 +1,53 @@
 You are given observations of human choices in the CPC18 Track II task for individual behavior.
 
-Each problem presents two options:
-- Option A
-- Option B
+Each problem presents two options: Option A and Option B.
 
-Each option may include:
-- a high outcome
-- probability of the high outcome
-- a low outcome
-- lottery shape
-- number of outcomes
+Problem format:
+- Ha: high outcome of Option A
+- pHa: probability of Ha
+- La: low outcome of Option A
+- LotShapeA: lottery shape of Option A, one of "-", "Symm", "L-skew", "R-skew"
+- LotNumA: number of outcomes for Option A
+- Hb: high outcome of Option B
+- pHb: probability of Hb
+- Lb: low outcome of Option B
+- LotShapeB: lottery shape of Option B, one of "-", "Symm", "L-skew", "R-skew"
+- LotNumB: number of outcomes for Option B
+- Amb: 1 if ambiguous, 0 otherwise
+- Corr: correlation, one of -1, 0, or 1
 
-The problem may also include:
-- ambiguity information
-- correlation information
+A trial may include history:
+- action: 0 for Option A, 1 for Option B
+- feedback: numeric value or None
 
-You are given training trials for one or more participants.
+You are given training trials for multiple participants.
 
-Your task:
-Evaluate the behavioral structure of each participant using the scoring instruction below.
+Use the scoring instruction below to evaluate each participant’s behavioral structure.
 
-Important:
-- Score participants contrastively when multiple participants are provided.
-- Avoid generic middle scores.
-- Use clearly different scores when participants show clearly different behavioral structure.
-- Do not infer structure from simply choosing Option A or Option B often.
-- Focus on whether choices are conditionally predictable from payoff structure, ambiguity, correlation, lottery shape, repeated-problem behavior, history, or feedback.
-- High scores require repeated evidence of coherent behavior.
-- Low scores should be assigned when behavior is inconsistent, unstable, weakly patterned, or close to random.
+Output only one clean JSON object mapping participant ids to scores.
 
-Output requirements:
-- Output ONLY a clean JSON object.
-- Do not include markdown.
-- Do not include explanations outside the JSON.
-- Do not include extra text before or after the JSON.
-
-Output:
+Each participant must use this format:
 
 {
   "participant_0": {
-    "structure_score": 0.0,
-    "evidence_scores": {
-      "dimension_name_1": 0.0,
-      "dimension_name_2": 0.0
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
     },
     "summary": "text"
   },
   "participant_1": {
-    "structure_score": 0.0,
-    "evidence_scores": {
-      "dimension_name_1": 0.0,
-      "dimension_name_2": 0.0
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
     },
     "summary": "text"
   }
 }
 
-Only include participant_<id> keys for participants whose trials appear in the input.
+Each evidence value must be a number in [0,1].
+The code will compute the final structure score as the average of the evidence values.
+Do not output a structure_score field.
+Do not output markdown or extra text.
 
 Now follow the scoring instruction below.

@@ -1,7 +1,7 @@
 """
 Residual Behavioral Uncertainty (RBU) helpers: structure-score JSON parsing and RBU math.
 
-RBU = clip(BIR - S, 0, 1) where S is the sum of numeric JSON component scores in [0, 1].
+RBU = clip(BIR - S, 0, 1) where S is the mean of clipped numeric evidence scores in [0, 1].
 """
 
 from __future__ import annotations
@@ -65,29 +65,47 @@ def _is_real_number(x: Any) -> bool:
     return False
 
 
-def sum_numeric_components(obj: Mapping[str, Any]) -> Tuple[float, Dict[str, float]]:
+def _extract_clipped_evidence_components(
+    participant_id: int,
+    participant_payload: Mapping[str, Any],
+) -> Dict[str, float]:
     """
-    Sum all **top-level** numeric fields except ``summary``; ignore nested mappings/lists.
+    Extract and validate ``participant_<id>.evidence`` values.
 
-    Returns (raw_sum, component_name -> value).
+    - Requires ``evidence`` to exist and be an object.
+    - Requires at least one evidence entry.
+    - Requires each evidence value to be a finite numeric scalar.
+    - Clips each value to ``[0, 1]``.
     """
-    if not isinstance(obj, Mapping):
-        raise StructureScoreParseError(f"parsed JSON must be an object, got {type(obj).__name__}")
+    if "evidence" not in participant_payload:
+        raise StructureScoreParseError(
+            f"participant_{participant_id}: missing required 'evidence' object; "
+            "structure_score must be computed as mean(evidence values)."
+        )
+    evidence = participant_payload.get("evidence")
+    if not isinstance(evidence, Mapping):
+        raise StructureScoreParseError(
+            f"participant_{participant_id}: 'evidence' must be a JSON object, got {type(evidence).__name__}"
+        )
+    if not evidence:
+        raise StructureScoreParseError(
+            f"participant_{participant_id}: 'evidence' is empty; require at least one numeric evidence value."
+        )
+
     components: Dict[str, float] = {}
-    for k, v in obj.items():
-        if k == "summary":
-            continue
-        if _is_real_number(v):
-            components[str(k)] = float(v)
+    for key, raw_value in evidence.items():
+        if not _is_real_number(raw_value):
+            raise StructureScoreParseError(
+                f"participant_{participant_id}: evidence['{key}'] must be a finite numeric value, "
+                f"got {raw_value!r} ({type(raw_value).__name__})."
+            )
+        components[str(key)] = clip01(float(raw_value))
+
     if not components:
         raise StructureScoreParseError(
-            "no top-level numeric component fields found (excluding 'summary'); "
-            f"keys present: {list(obj.keys())!r}"
+            f"participant_{participant_id}: no numeric evidence values found."
         )
-    total = float(sum(components.values()))
-    if not math.isfinite(total):
-        raise StructureScoreParseError(f"non-finite sum of components: {total!r}")
-    return total, components
+    return components
 
 
 _PARTICIPANT_STRUCTURE_KEY_RE = re.compile(r"^participant_(\d+)$")
@@ -116,11 +134,11 @@ def parse_all_participant_structure_scores(
     """
     Parse combined LLM output: one JSON object mapping ``participant_{id}`` -> per-participant payload.
 
-    Each payload may be:
-    - ``{"structure_score": float, "evidence_scores": {...}, "summary": ...}`` — **S** is ``structure_score`` (clamped);
-      **components** are numeric entries from ``evidence_scores`` (excluding ``summary``), or
-      ``{"structure_score": S}`` if no evidence scores.
-    - Or a flat component object (legacy): sum numeric fields except ``summary`` as **S** (clamped).
+    Each payload must be an object containing ``evidence`` (mapping evidence names -> numeric values)
+    and optional ``summary``. ``structure_score`` in JSON, if present, is ignored.
+
+    **S** is computed as:
+    ``mean(clip01(evidence_value) for evidence_value in participant.evidence.values())``.
     """
     blob = extract_first_json_object(raw_text)
     try:
@@ -143,39 +161,14 @@ def parse_all_participant_structure_scores(
             raise StructureScoreParseError(
                 f"participant_{pid} value must be a JSON object, got {type(v).__name__}"
             )
-        if "structure_score" in v and _is_real_number(v["structure_score"]):
-            s_clamped = float(min(1.0, max(0.0, float(v["structure_score"]))))
-            comps: Dict[str, float] = {}
-            ev = v.get("evidence_scores")
-            if isinstance(ev, Mapping):
-                for ek, evv in ev.items():
-                    if str(ek) == "summary":
-                        continue
-                    if _is_real_number(evv):
-                        comps[str(ek)] = float(evv)
-            if not comps:
-                comps = {"structure_score": s_clamped}
-            out[pid] = (s_clamped, comps)
-        elif isinstance(v.get("evidence_scores"), Mapping):
-            try:
-                raw_sum, comps = sum_numeric_components(v["evidence_scores"])
-            except StructureScoreParseError:
-                flat = {
-                    k: val
-                    for k, val in v.items()
-                    if k not in ("summary", "evidence_scores") and _is_real_number(val)
-                }
-                if not flat:
-                    raise StructureScoreParseError(
-                        f"participant_{pid}: empty or non-numeric evidence_scores and no numeric top-level fields"
-                    )
-                raw_sum, comps = sum_numeric_components(flat)
-            s_clamped = float(min(1.0, max(0.0, raw_sum)))
-            out[pid] = (s_clamped, comps)
-        else:
-            raw_sum, comps = sum_numeric_components(v)
-            s_clamped = float(min(1.0, max(0.0, raw_sum)))
-            out[pid] = (s_clamped, comps)
+        comps = _extract_clipped_evidence_components(pid, v)
+        values = list(comps.values())
+        s_clamped = float(sum(values) / float(len(values)))
+        if not math.isfinite(s_clamped):
+            raise StructureScoreParseError(
+                f"participant_{pid}: non-finite structure_score computed from evidence mean: {s_clamped!r}"
+            )
+        out[pid] = (s_clamped, comps)
 
     if not out:
         raise StructureScoreParseError(
@@ -198,13 +191,13 @@ def parse_structure_score(
     raw_text: Optional[str] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """
-    Parse structure score ``S`` from ``Structure_score.txt`` (or ``raw_text``).
+    Parse structure score ``S`` from a single-participant JSON object in ``Structure_score.txt`` (or ``raw_text``).
 
-    - Extracts the first JSON object from the file/text.
-    - Sums all top-level numeric values except ``summary``.
-    - Clamps ``S`` to ``[0, 1]``.
+    Required schema:
+    ``{"evidence": {"name": number, ...}, "summary": "..."}``
 
-    Returns ``(S_clamped, components)`` where ``components`` maps field names to numeric values.
+    ``structure_score`` in JSON is ignored. ``S`` is the mean of clipped evidence values.
+    Returns ``(S, components)`` where ``components`` maps evidence names to clipped numeric values.
     """
     p = Path(path)
     if raw_text is None:
@@ -226,9 +219,14 @@ def parse_structure_score(
         ) from exc
     if not isinstance(loaded, dict):
         raise StructureScoreParseError(f"JSON root must be an object, got {type(loaded).__name__}")
-    raw_sum, components = sum_numeric_components(loaded)
-    s_clamped = float(min(1.0, max(0.0, raw_sum)))
-    return s_clamped, components
+    components = _extract_clipped_evidence_components(0, loaded)
+    values = list(components.values())
+    s = float(sum(values) / float(len(values)))
+    if not math.isfinite(s):
+        raise StructureScoreParseError(
+            f"non-finite structure_score computed from evidence mean: {s!r}"
+        )
+    return s, components
 
 
 def clip01(x: float) -> float:

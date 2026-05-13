@@ -1,60 +1,57 @@
-You are preparing an instruction for evaluating behavioral structure in the CPC18 Track II individual-choice task.
+You are preparing a scoring instruction for evaluating behavioral structure in the CPC18 Track II individual-choice task.
 
-Each problem contains:
-- Option A and Option B
-- high and low outcomes for each option
-- probabilities of high outcomes
-- lottery shape information
-- number of outcomes
-- ambiguity information
-- correlation information
-- optional trial history and feedback
+Each problem presents two options: Option A and Option B.
 
-Your task:
-Create a concise scoring instruction for assigning a decomposed behavioral structure score to each participant.
+Problem format:
+- Ha: high outcome of Option A
+- pHa: probability of Ha
+- La: low outcome of Option A
+- LotShapeA: lottery shape of Option A, one of "-", "Symm", "L-skew", "R-skew"
+- LotNumA: number of outcomes for Option A
+- Hb: high outcome of Option B
+- pHb: probability of Hb
+- Lb: low outcome of Option B
+- LotShapeB: lottery shape of Option B, one of "-", "Symm", "L-skew", "R-skew"
+- LotNumB: number of outcomes for Option B
+- Amb: 1 if ambiguous, 0 otherwise
+- Corr: correlation, one of -1, 0, or 1
 
-The scoring instruction should define a small number of evidence dimensions that are useful for this task. These dimensions should capture different sources of coherent, predictable behavior.
+A trial may include history:
+- action: 0 for Option A, 1 for Option B
+- feedback: numeric value or None
 
-Do not use fixed example dimension names from this prompt. Choose dimensions that are appropriate for CPC18 decision behavior.
+Create a short instruction for scoring participant-level behavioral structure.
 
-The final score must satisfy:
+The scorer will receive training trials for multiple participants and should output one JSON object mapping participant ids to evidence scores.
 
-S = sum of all numeric evidence scores
-
-where S is in [0,1].
-
-Meaning of S:
-- S close to 1: clear, coherent, predictable behavioral structure.
-- S close to 0: weakly structured, noisy, random, or difficult-to-predict behavior.
-- S around 0.5: partial structure, but with substantial uncertainty or instability.
-
-The scoring instruction should be highly contrastive:
-- use the full [0,1] range when participants clearly differ,
-- avoid generic middle scores,
-- give high evidence scores only when there is repeated behavioral support,
-- give low evidence scores when evidence is weak, unstable, contradictory, or random-like,
-- focus on conditional behavioral patterns, not unconditional preference for Option A or Option B.
-
-Output format:
-Return only the scoring instruction text that will later be used to score participants.
-
-The instruction must require the scorer to output clean JSON with this structure:
+The JSON format must be:
 
 {
-  "structure_score": 0.0,
-  "evidence_scores": {
-    "dimension_name_1": 0.0,
-    "dimension_name_2": 0.0
+  "participant_0": {
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
+    },
+    "summary": "text"
   },
-  "summary": "text"
+  "participant_1": {
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
+    },
+    "summary": "text"
+  }
 }
 
-The instruction must specify:
-- all evidence score values must be numeric,
-- evidence scores must sum to structure_score,
-- structure_score must be in [0,1],
-- summary must briefly explain the main evidence,
-- no markdown or extra text should be included in the scoring output.
+Each evidence value must be a number in [0,1].
+Higher evidence values mean stronger evidence of coherent, predictable behavioral structure.
+The final structure score will be computed by code as the average of the evidence values.
+The scorer should not output the final structure score.
 
+After the JSON format, explain:
+- what each evidence score measures
+- what low evidence means
+- what high evidence means
+
+Return only the scoring instruction text.
 Do not output JSON now.
-Do not include markdown.

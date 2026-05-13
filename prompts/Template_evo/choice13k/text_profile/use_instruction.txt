@@ -21,11 +21,20 @@ Output only one clean JSON object mapping participant ids to scores.
 Each participant must use this format:
 
 {
-  "evidence": {
-    "evidence_name_1": 0.0,
-    "evidence_name_2": 0.0
+  "participant_0": {
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
+    },
+    "summary": "text"
   },
-  "summary": "text"
+  "participant_1": {
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
+    },
+    "summary": "text"
+  }
 }
 
 Each evidence value must be a number in [0,1].

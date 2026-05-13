@@ -5769,13 +5769,18 @@ def main():
         type=_parse_use_rbu_arg,
         default=True,
         help="If True (default), run structure-score LLM steps and use RBU = clip(BIR - w * S, 0, 1) with w from "
-        "--rbu_structure_weight in phase-2 selection. If False, use BIR as the regularization rate (ablation).",
+        "--structure_weight in phase-2 selection. If False, use BIR as the regularization rate (ablation).",
     )
     parser.add_argument(
+        "--structure_weight",
         "--rbu_structure_weight",
+        dest="structure_weight",
         type=float,
         default=0.5,
-        help="Multiplier w in RBU = clip(BIR - w * structure_score, 0, 1) when --use_rbu True (default: 0.5).",
+        help=(
+            "Multiplier w in RBU = clip(BIR - w * structure_score, 0, 1) when --use_rbu True. "
+            "Alias: --rbu_structure_weight (deprecated). Default: 0.5."
+        ),
     )
     parser.add_argument(
         "--structure_prompt_max_tokens",
@@ -6007,8 +6012,8 @@ def main():
     if args.uncertainty_threshold < 0.0:
         print("Error: --uncertainty_threshold must be >= 0.")
         return
-    if args.rbu_structure_weight < 0.0:
-        print("Error: --rbu_structure_weight must be >= 0.")
+    if args.structure_weight < 0.0:
+        print("Error: --structure_weight must be >= 0.")
         return
     if int(args.structure_prompt_max_tokens) < 1:
         print("Error: --structure_prompt_max_tokens must be >= 1.")
@@ -6381,6 +6386,9 @@ def main():
         run_instruction_file = Path(base_run_dir) / "instruction.txt"
         analysis_dir = Path(base_run_dir) / "analysis"
         if args.use_rbu:
+            print(
+                "[RBU] structure_score is computed as mean(clipped evidence values in participant JSON 'evidence')."
+            )
             n_part = len(participants_to_process)
             max_resp_toks = min(32768, max(4096, 768 * max(1, n_part)))
             raw_scores, _, _ = rbu_llm_write_all_participant_structure_scores(
@@ -6411,7 +6419,7 @@ def main():
                 pid = int(r["participant_ordinal"])
                 bir_val = float(r["behavioral_inconsistency_rate"])
                 s_v, comps = parsed[pid]
-                rbu_v = compute_rbu(bir_val, float(s_v), structure_weight=float(args.rbu_structure_weight))
+                rbu_v = compute_rbu(bir_val, float(s_v), structure_weight=float(args.structure_weight))
                 r["structure_score"] = float(s_v)
                 r["rbu"] = float(rbu_v)
                 participant_rbu_map[pid] = float(rbu_v)
