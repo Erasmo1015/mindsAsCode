@@ -1,0 +1,61 @@
+You are given observations of human choices in the CPC18 Track II task for individual behavior.
+
+Each problem presents two options:
+- Option A
+- Option B
+
+Each option may include:
+- a high outcome
+- probability of the high outcome
+- a low outcome
+- lottery shape
+- number of outcomes
+
+The problem may also include:
+- ambiguity information
+- correlation information
+
+You are given training trials for one or more participants.
+
+Your task:
+Evaluate the behavioral structure of each participant using the scoring instruction below.
+
+Important:
+- Score participants contrastively when multiple participants are provided.
+- Avoid generic middle scores.
+- Use clearly different scores when participants show clearly different behavioral structure.
+- Do not infer structure from simply choosing Option A or Option B often.
+- Focus on whether choices are conditionally predictable from payoff structure, ambiguity, correlation, lottery shape, repeated-problem behavior, history, or feedback.
+- High scores require repeated evidence of coherent behavior.
+- Low scores should be assigned when behavior is inconsistent, unstable, weakly patterned, or close to random.
+
+Output requirements:
+- Output ONLY a clean JSON object.
+- Do not include markdown.
+- Do not include explanations outside the JSON.
+- Do not include extra text before or after the JSON.
+
+Output:
+
+{
+  "participant_0": {
+    "structure_score": 0.0,
+    "evidence_scores": {
+      "dimension_name_1": 0.0,
+      "dimension_name_2": 0.0
+    },
+    "summary": "text"
+  },
+  "participant_1": {
+    "structure_score": 0.0,
+    "evidence_scores": {
+      "dimension_name_1": 0.0,
+      "dimension_name_2": 0.0
+    },
+    "summary": "text"
+  }
+}
+
+Only include participant_<id> keys for participants whose trials appear in the input.
+
+Now follow the scoring instruction below.

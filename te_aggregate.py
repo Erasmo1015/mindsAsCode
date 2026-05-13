@@ -50,10 +50,21 @@ from data_modules.choice13k import get_choice13k_experiments, Experiment, Block
 from data_modules import choice13k as choice13k_module
 from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials, ParticipantData
 from agent import AgentExecutionFramework
+from utils.rbu import (
+    StructureScoreParseError,
+    compute_rbu,
+    count_tokens_approx,
+    parse_all_participant_structure_scores,
+)
 
 # Repo root for datasets/*/valid_participant_ids.json (ordinal resolution for choice13k / cpc18 / mixed_gambles).
 _REPO_ROOT = Path(__file__).resolve().parent
 _PARTICIPANT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
+
+_RBU_STRUCTURE_SCORE_ALL_FILENAME = "Structure_score_all.txt"
+_RBU_PREPARED_INSTRUCTION_HEADER = "\n\n## Dataset-specific scoring instruction (prepared once for this run)\n"
+# cl100k_base (and char/3.5 fallback) often undercount vs the server's tokenizer for Qwen-class models.
+_RBU_STRUCTURE_TOKEN_ESTIMATE_SLACK = 1.12
 
 
 def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> int:
@@ -560,13 +571,13 @@ def _compute_confidence_penalty(choose_fn: Callable, trials: List[Dict[str, Any]
 def _compute_selection_score(
     train_loglik: float,
     *,
-    bir_lambda: float,
-    participant_bir: float,
+    rbu_lambda: float,
+    residual_behavioral_uncertainty: float,
     confidence_penalty: float,
 ) -> float:
-    """BIR-regularized score: train_loglik - lambda * (BIR ** 2) * confidence_penalty."""
-    b = float(participant_bir)
-    return float(train_loglik) - float(bir_lambda) * (b * b) * float(confidence_penalty)
+    """Regularized score: train_loglik - λ * (RBU^2) * confidence_penalty (pass BIR as rate when RBU is disabled)."""
+    r = float(residual_behavioral_uncertainty)
+    return float(train_loglik) - float(rbu_lambda) * (r * r) * float(confidence_penalty)
 
 
 def _build_diagnostic_trials_text(
@@ -651,6 +662,14 @@ def split_trials(
     return train_trials, test_trials, options
 
 
+def _trial_problem_identity_key(trial: Dict[str, Any]) -> str:
+    """Stable key for grouping trials by underlying problem (Choice13k / mixed_gambles vs CPC18)."""
+    prob = trial["problem"]
+    if isinstance(prob, dict) and "gamble_A" in prob and "gamble_B" in prob:
+        return make_problem_key(prob)
+    return json.dumps(prob, sort_keys=True, default=str)
+
+
 def make_problem_key(problem: Dict[str, Any]) -> str:
     """
     Deterministic identity key for a gamble problem.
@@ -689,7 +708,7 @@ def compute_behavioral_inconsistency_rate(train_trials: List[Dict[str, Any]]) ->
     """
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for trial in train_trials:
-        key = make_problem_key(trial["problem"])
+        key = _trial_problem_identity_key(trial)
         grouped.setdefault(key, []).append(trial)
 
     num_groups = len(grouped)
@@ -708,56 +727,66 @@ def compute_behavioral_inconsistency_rate(train_trials: List[Dict[str, Any]]) ->
     }
 
 
-def _write_behavioral_inconsistency_report(
-    base_run_dir: Path,
-    participant_trials: Dict[int, List[Dict[str, Any]]],
-) -> Dict[int, float]:
-    """Write pre-evolution participant BIR diagnostics to run analysis folder."""
-    analysis_dir = base_run_dir / "analysis"
-    analysis_dir.mkdir(parents=True, exist_ok=True)
-    out_csv = analysis_dir / "behavioral_inconsistency_rate.csv"
+_BEHAVIORAL_INCONSISTENCY_CSV_FIELDS = [
+    "participant_ordinal",
+    "num_train_trials",
+    "num_train_problem_groups",
+    "num_inconsistent_problem_groups",
+    "behavioral_inconsistency_rate",
+    "rbu",
+    "structure_score",
+]
 
+
+def _build_behavioral_inconsistency_rows(
+    participant_trials: Dict[int, List[Dict[str, Any]]],
+) -> Tuple[List[Dict[str, Any]], Dict[int, float]]:
+    """One row dict per participant with BIR metrics; ``rbu`` / ``structure_score`` filled later."""
     rows: List[Dict[str, Any]] = []
+    bir_by_participant: Dict[int, float] = {}
     for participant_ordinal in sorted(participant_trials.keys()):
         metrics = compute_behavioral_inconsistency_rate(participant_trials[participant_ordinal])
+        bir = float(metrics["behavioral_inconsistency_rate"])
+        bir_by_participant[int(participant_ordinal)] = bir
         rows.append(
             {
                 "participant_ordinal": int(participant_ordinal),
-                "num_train_trials": metrics["num_train_trials"],
-                "num_train_problem_groups": metrics["num_problem_groups"],
-                "num_inconsistent_problem_groups": metrics["num_inconsistent_problem_groups"],
-                "behavioral_inconsistency_rate": metrics["behavioral_inconsistency_rate"],
+                "num_train_trials": int(metrics["num_train_trials"]),
+                "num_train_problem_groups": int(metrics["num_problem_groups"]),
+                "num_inconsistent_problem_groups": int(metrics["num_inconsistent_problem_groups"]),
+                "behavioral_inconsistency_rate": bir,
+                "rbu": bir,
+                "structure_score": "",
             }
         )
+    return rows, bir_by_participant
 
+
+def _write_behavioral_inconsistency_csv(base_run_dir: Path, rows: List[Dict[str, Any]]) -> None:
+    """Write ``analysis/behavioral_inconsistency_rate.csv`` with exactly seven columns (one row per participant)."""
+    analysis_dir = base_run_dir / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = analysis_dir / "behavioral_inconsistency_rate.csv"
+    out_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        out_rows.append({k: row[k] for k in _BEHAVIORAL_INCONSISTENCY_CSV_FIELDS})
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        fieldnames = [
-            "participant_ordinal",
-            "num_train_trials",
-            "num_train_problem_groups",
-            "num_inconsistent_problem_groups",
-            "behavioral_inconsistency_rate",
-        ]
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w = csv.DictWriter(f, fieldnames=list(_BEHAVIORAL_INCONSISTENCY_CSV_FIELDS))
         w.writeheader()
-        w.writerows(_round_floats_for_csv_rows(rows))
+        w.writerows(_round_floats_for_csv_rows(out_rows))
 
     print("\n[Behavioral Inconsistency Analysis]")
     if not rows:
         print("No participant train trials available for BIR computation.")
         print(f"Saved: {out_csv}")
-        return {}
+        return
 
-    bir_values: List[float] = []
-    bir_by_participant: Dict[int, float] = {}
+    bir_values = [float(r["behavioral_inconsistency_rate"]) for r in rows]
     for row in rows:
-        bir = float(row["behavioral_inconsistency_rate"])
-        bir_values.append(bir)
-        bir_by_participant[int(row["participant_ordinal"])] = bir
         print(
             "participant {pid}: BIR={bir:.2f} ({inc}/{tot} inconsistent groups)".format(
                 pid=int(row["participant_ordinal"]),
-                bir=bir,
+                bir=float(row["behavioral_inconsistency_rate"]),
                 inc=int(row["num_inconsistent_problem_groups"]),
                 tot=int(row["num_train_problem_groups"]),
             )
@@ -770,7 +799,6 @@ def _write_behavioral_inconsistency_report(
         )
     )
     print(f"Saved: {out_csv}")
-    return bir_by_participant
 
 
 def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
@@ -2740,6 +2768,175 @@ def _format_trials_for_text_profile(train_trials: List[Dict[str, Any]], dataset:
     return "\n".join(lines)
 
 
+def _rbu_default_prepare_instruction_path(dataset: str) -> Path:
+    p = _REPO_ROOT / "prompts" / "Template_evo" / dataset / "text_profile" / "prepare_instruction.txt"
+    if not p.is_file():
+        raise FileNotFoundError(f"RBU prepare_instruction.txt missing for dataset={dataset!r}: {p}")
+    return p
+
+
+def _rbu_default_use_instruction_path(dataset: str) -> Path:
+    p = _REPO_ROOT / "prompts" / "Template_evo" / dataset / "text_profile" / "use_instruction.txt"
+    if not p.is_file():
+        raise FileNotFoundError(f"RBU use_instruction.txt missing for dataset={dataset!r}: {p}")
+    return p
+
+
+def rbu_llm_write_run_instruction(
+    *,
+    client: OpenAI,
+    model_name: str,
+    prepare_instruction_path: Path,
+    run_dir: Path,
+    max_tokens: int = 4096,
+) -> None:
+    """One LLM call at run start; writes ``run_dir / instruction.txt`` (always fresh for this run)."""
+    prompt = prepare_instruction_path.read_text(encoding="utf-8")
+    out_path = run_dir / "instruction.txt"
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.35,
+        top_p=0.95,
+        max_tokens=max_tokens,
+    )
+    content = (resp.choices[0].message.content or "").strip()
+    if not content:
+        raise RuntimeError(
+            f"RBU dataset instruction LLM returned empty content; expected scoring instruction text in {out_path}"
+        )
+    out_path.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
+
+
+def _rbu_build_all_participant_trials_block(
+    participant_ids: List[int],
+    train_by_pid: Dict[int, List[Dict[str, Any]]],
+    trials_per_participant: int,
+    dataset: str,
+) -> str:
+    """Serialize the first ``trials_per_participant`` training trials for each participant (same k for all)."""
+    parts: List[str] = []
+    for pid in sorted(int(x) for x in participant_ids):
+        tr = train_by_pid.get(pid, [])
+        trials = tr[:trials_per_participant] if trials_per_participant > 0 else []
+        parts.append(
+            f"\n\n## Participant {pid} — training trials (training split only; no test trials)\n"
+        )
+        parts.append(_format_trials_for_text_profile(trials, dataset))
+    return "".join(parts)
+
+
+def rbu_llm_write_all_participant_structure_scores(
+    *,
+    client: OpenAI,
+    model_name: str,
+    use_instruction_path: Path,
+    run_instruction_path: Path,
+    participant_ids: List[int],
+    participant_train_trials: Dict[int, List[Dict[str, Any]]],
+    dataset: str,
+    analysis_dir: Path,
+    structure_prompt_max_tokens: int,
+    max_response_tokens: int,
+    model_context_tokens: int = 32768,
+    token_estimate_slack: float = _RBU_STRUCTURE_TOKEN_ESTIMATE_SLACK,
+) -> Tuple[str, int, int]:
+    """
+    One LLM call for all participants. Writes ``analysis_dir / Structure_score_all.txt`` (raw LLM output).
+
+    The API counts **prompt + max_tokens** against the model context window; trial packing uses an inflated
+    token estimate (``token_estimate_slack``) so cl100k / char heuristics stay below both
+    ``--structure_prompt_max_tokens`` and ``model_context_tokens - max_completion``.
+
+    Returns ``(raw_llm_text, trials_per_participant_used, estimated_prompt_tokens)``.
+    """
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    use_txt = use_instruction_path.read_text(encoding="utf-8")
+    run_txt = run_instruction_path.read_text(encoding="utf-8")
+    prefix = use_txt + _RBU_PREPARED_INSTRUCTION_HEADER + run_txt
+
+    pids = sorted(int(x) for x in participant_ids)
+    train_by: Dict[int, List[Dict[str, Any]]] = {pid: list(participant_train_trials[pid]) for pid in pids}
+    if not pids:
+        raise ValueError("rbu_llm_write_all_participant_structure_scores: empty participant_ids")
+    min_full = min(len(train_by[pid]) for pid in pids)
+
+    slack = float(token_estimate_slack)
+    if slack < 1.0:
+        raise ValueError("token_estimate_slack must be >= 1.0")
+
+    def _inflate(n: int) -> int:
+        return int(math.ceil(float(n) * slack))
+
+    completion_reserve = int(max_response_tokens) + 64
+    if int(model_context_tokens) <= completion_reserve:
+        raise ValueError(
+            f"model_context_tokens={model_context_tokens} must exceed max_response_tokens={max_response_tokens} + 64"
+        )
+    # Fit prompt under user cap AND under (context window − requested completion), both in inflated units.
+    prompt_cap = min(int(structure_prompt_max_tokens), int(model_context_tokens) - completion_reserve)
+    if prompt_cap < 1:
+        raise RuntimeError(
+            f"RBU structure prompt: effective prompt cap is {prompt_cap} "
+            f"(structure_prompt_max_tokens={structure_prompt_max_tokens}, "
+            f"model_context_tokens={model_context_tokens}, max_response_tokens={max_response_tokens})."
+        )
+
+    if _inflate(count_tokens_approx(prefix)) > prompt_cap:
+        raise RuntimeError(
+            f"RBU structure prompt: use_instruction + instruction alone inflate to "
+            f"{_inflate(count_tokens_approx(prefix))} tokens (slack={slack}), exceeds effective prompt cap {prompt_cap}."
+        )
+
+    def _total_tokens_for_k(k: int) -> int:
+        body = _rbu_build_all_participant_trials_block(pids, train_by, k, dataset) if k > 0 else ""
+        return count_tokens_approx(prefix + body)
+
+    lo, hi = 0, min_full
+    best_k = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if _inflate(_total_tokens_for_k(mid)) <= prompt_cap:
+            best_k = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    final_body = _rbu_build_all_participant_trials_block(pids, train_by, best_k, dataset) if best_k > 0 else ""
+    user_content = prefix + final_body
+    est_tokens = count_tokens_approx(user_content)
+    est_inflated = _inflate(est_tokens)
+    max_resp_eff = min(int(max_response_tokens), int(model_context_tokens) - est_inflated - 64)
+    if max_resp_eff < 256:
+        raise RuntimeError(
+            f"RBU structure prompt leaves insufficient room for completion "
+            f"(raw_prompt_est={est_tokens}, inflated={est_inflated}, model_context_tokens={model_context_tokens}). "
+            "Increase --structure_model_context_tokens, reduce --structure_prompt_max_tokens, or use fewer trials."
+        )
+
+    print(
+        f"[RBU] structure_prompt_max_tokens={structure_prompt_max_tokens} "
+        f"effective_prompt_cap={prompt_cap} (inflated est., slack={slack}) "
+        f"estimated_prompt_tokens={est_tokens} inflated_prompt_est={est_inflated} "
+        f"model_context_tokens={model_context_tokens} max_completion_tokens={max_resp_eff} "
+        f"num_participants={len(pids)} training_trials_per_participant={best_k}"
+    )
+
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": user_content}],
+        temperature=0.2,
+        top_p=0.95,
+        max_tokens=max_resp_eff,
+    )
+    raw = (resp.choices[0].message.content or "").strip()
+    if not raw:
+        raise RuntimeError("RBU combined structure-score LLM returned empty output.")
+    out_path = analysis_dir / _RBU_STRUCTURE_SCORE_ALL_FILENAME
+    out_path.write_text(raw + ("\n" if not raw.endswith("\n") else ""), encoding="utf-8")
+    return raw, best_k, est_tokens
+
+
 def _select_train_trials_under_token_budget(
     template_text: str,
     train_trials: List[Dict[str, Any]],
@@ -2747,6 +2944,7 @@ def _select_train_trials_under_token_budget(
     max_prompt_tokens: int,
     *,
     max_trial_block_tokens: Optional[int] = None,
+    trials_block_header: str = _PROFILE_TRIALS_HEADER,
 ) -> Tuple[List[Dict[str, Any]], int, bool]:
     """Greedy prefix of train_trials to include in the text-profile prompt.
 
@@ -2756,7 +2954,7 @@ def _select_train_trials_under_token_budget(
     Otherwise, the full user message (template + header + trials) must fit within
     ``max_prompt_tokens`` approximate tokens.
     """
-    prefix = template_text + _PROFILE_TRIALS_HEADER
+    prefix = template_text + trials_block_header
     prefix_tokens = _approx_prompt_token_count(prefix)
 
     if max_trial_block_tokens is not None:
@@ -2921,9 +3119,13 @@ def run_evolution(
     debug_continue_after_early_stop: bool = False,
     wandb_log_fn=None,
     local_dataset: Optional[str] = None,
-    bir_lambda: float = 30.0,
+    rbu_lambda: float = 30.0,
+    use_rbu: bool = True,
     participant_bir: float = 0.0,
-    bir_prompt_threshold: float = 0.6,
+    participant_rbu: float = 0.0,
+    rbu_prompt_threshold: float = 0.6,
+    structure_score: Optional[float] = None,
+    structure_components: Optional[Dict[str, float]] = None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -3167,8 +3369,8 @@ def run_evolution(
         )
         baseline_selection_score = _compute_selection_score(
             float(baseline_train_eval["avg_loglik"]),
-            bir_lambda=bir_lambda,
-            participant_bir=participant_bir,
+            rbu_lambda=rbu_lambda,
+            residual_behavioral_uncertainty=float(participant_rbu),
             confidence_penalty=float(baseline_confidence_penalty),
         )
         if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
@@ -3551,21 +3753,36 @@ def run_evolution(
                 "Small structural edits are allowed, but avoid full rewrites unless necessary. "
                 "Prefer simple changes that improve log-likelihood and generalize to unseen trials.\n"
             )
-            if float(participant_bir) < float(bir_prompt_threshold):
+            if float(participant_rbu) < float(rbu_prompt_threshold):
                 adaptation_instruction = profile_block + base_adapt
             else:
-                bir_note = (
-                    f"This participant has BIR = {float(participant_bir):.2f}; "
-                    "avoid unjustified extreme probabilities such as 0.99/0.01 and prefer calibrated rules."
-                )
-                adaptation_instruction = (
-                    profile_block
-                    + base_adapt
-                    + f"Phase 2 uses a BIR-regularized score: "
-                    + f"selection_score = train_loglik - {float(bir_lambda):.3f} * (BIR^2) * mean((p - 0.5)^2), "
-                    + f"with BIR = {float(participant_bir):.3f}.\n"
-                    + f"{bir_note}\n"
-                )
+                if use_rbu:
+                    rbu_note = (
+                        f"This participant has residual behavioral uncertainty RBU = {float(participant_rbu):.3f} "
+                        f"(behavioral inconsistency rate BIR = {float(participant_bir):.3f} is diagnostic only); "
+                        "avoid unjustified extreme probabilities such as 0.99/0.01 and prefer calibrated rules."
+                    )
+                    adaptation_instruction = (
+                        profile_block
+                        + base_adapt
+                        + "Phase 2 uses an RBU-regularized score: "
+                        + f"selection_score = train_loglik - {float(rbu_lambda):.3f} * (RBU^2) * mean((p - 0.5)^2), "
+                        + f"with RBU = {float(participant_rbu):.3f}.\n"
+                        + f"{rbu_note}\n"
+                    )
+                else:
+                    bir_note = (
+                        f"This participant has BIR = {float(participant_bir):.2f}; "
+                        "avoid unjustified extreme probabilities such as 0.99/0.01 and prefer calibrated rules."
+                    )
+                    adaptation_instruction = (
+                        profile_block
+                        + base_adapt
+                        + f"Phase 2 uses a BIR-regularized score: "
+                        + f"selection_score = train_loglik - {float(rbu_lambda):.3f} * (BIR^2) * mean((p - 0.5)^2), "
+                        + f"with BIR = {float(participant_bir):.3f}.\n"
+                        + f"{bir_note}\n"
+                    )
         if dataset == "gridworld":
             candidate_codes = generate_gridworld_program_variants(
                 client=client,
@@ -3800,8 +4017,8 @@ def run_evolution(
                     confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
                     selection_score = _compute_selection_score(
                         float(train_loglik),
-                        bir_lambda=bir_lambda,
-                        participant_bir=participant_bir,
+                        rbu_lambda=rbu_lambda,
+                        residual_behavioral_uncertainty=float(participant_rbu),
                         confidence_penalty=float(confidence_penalty),
                     )
                     fitness = selection_score
@@ -3885,8 +4102,8 @@ def run_evolution(
                     confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
                     selection_score = _compute_selection_score(
                         float(train_loglik),
-                        bir_lambda=bir_lambda,
-                        participant_bir=participant_bir,
+                        rbu_lambda=rbu_lambda,
+                        residual_behavioral_uncertainty=float(participant_rbu),
                         confidence_penalty=float(confidence_penalty),
                     )
                     fitness = selection_score
@@ -3967,8 +4184,8 @@ def run_evolution(
                         confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
                         selection_score = _compute_selection_score(
                             float(train_eval["avg_loglik"]),
-                            bir_lambda=bir_lambda,
-                            participant_bir=participant_bir,
+                            rbu_lambda=rbu_lambda,
+                            residual_behavioral_uncertainty=float(participant_rbu),
                             confidence_penalty=float(confidence_penalty),
                         )
                         fitness = selection_score
@@ -4212,8 +4429,8 @@ def run_evolution(
                         iter_best_confidence_penalty = _compute_confidence_penalty(iter_best_fn, train_trials)
                         iter_best_selection_score = _compute_selection_score(
                             float(iter_best_train_loglik),
-                            bir_lambda=bir_lambda,
-                            participant_bir=participant_bir,
+                            rbu_lambda=rbu_lambda,
+                            residual_behavioral_uncertainty=float(participant_rbu),
                             confidence_penalty=float(iter_best_confidence_penalty),
                         )
                         iter_best_fitness = float(iter_best_selection_score)
@@ -4683,12 +4900,14 @@ def run_evolution(
                     if adaptation_mode and fitness_metric == "loglik":
                         log_dict[f"p{participant_id}/selection_score"] = iter_best_selection_score
                         log_dict[f"p{participant_id}/confidence_penalty"] = iter_best_confidence_penalty
+                        wb_tag = "[W&B RBU]" if use_rbu else "[W&B BIR]"
                         print(
-                            "[W&B BIR]",
+                            wb_tag,
                             participant_id,
                             iteration_step,
                             iter_best_selection_score,
                             iter_best_confidence_penalty,
+                            f"rate={'RBU' if use_rbu else 'BIR'}={float(participant_rbu):.4f}",
                         )
             if wandb_log_fn is not None:
                 wandb_log_fn(log_dict)
@@ -4798,8 +5017,8 @@ def run_evolution(
             final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
             final_selection_score = _compute_selection_score(
                 float(final_train_eval["avg_loglik"]),
-                bir_lambda=bir_lambda,
-                participant_bir=participant_bir,
+                rbu_lambda=rbu_lambda,
+                residual_behavioral_uncertainty=float(participant_rbu),
                 confidence_penalty=float(final_confidence_penalty),
             )
         overall_best_train = {
@@ -4822,8 +5041,8 @@ def run_evolution(
             final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
             final_selection_score = _compute_selection_score(
                 float(final_train_eval["avg_loglik"]),
-                bir_lambda=bir_lambda,
-                participant_bir=participant_bir,
+                rbu_lambda=rbu_lambda,
+                residual_behavioral_uncertainty=float(participant_rbu),
                 confidence_penalty=float(final_confidence_penalty),
             )
         overall_best_train = {
@@ -5077,6 +5296,14 @@ def run_evolution(
             "stopped_early": participant_stopped_early,
             "stopped_iteration": participant_early_stop_iteration,
         }
+    if adaptation_mode and fitness_metric == "loglik" and isinstance(result, dict) and "behavioral_inconsistency_rate" in result:
+        result["residual_behavioral_uncertainty"] = float(participant_rbu)
+        result["rbu_squared"] = float(participant_rbu) ** 2
+        result["use_rbu"] = bool(use_rbu)
+        if structure_score is not None:
+            result["structure_score"] = float(structure_score)
+        if structure_components is not None:
+            result["structure_components"] = _json_dumps_safe(structure_components)
     return result
 
 
@@ -5317,6 +5544,16 @@ def _round_floats_for_csv_rows(rows: List[Dict[str, Any]], ndigits: int = 4) -> 
     return [_round_floats_for_csv_row(r, ndigits) for r in rows]
 
 
+def _parse_use_rbu_arg(value: str) -> bool:
+    """Argparse type for --use_rbu True|False."""
+    v = str(value).strip().lower()
+    if v in ("true", "t", "1", "yes", "y"):
+        return True
+    if v in ("false", "f", "0", "no", "n"):
+        return False
+    raise ValueError("Invalid --use_rbu value: use True or False (e.g. --use_rbu False).")
+
+
 def _parse_profile_warmup_arg(value: str) -> bool:
     """Argparse type for --profile_warmup True|False."""
     v = str(value).strip().lower()
@@ -5501,23 +5738,71 @@ def main():
         help="Phase 2 regularization weight for change-from-reference penalty (when used).",
     )
     parser.add_argument(
-        "--bir_lambda",
+        "--rbu_lambda",
         type=float,
         default=30.0,
         help=(
-            "Phase 2 BIR confidence-regularization weight λ in "
-            "selection_score = train_loglik - λ * (BIR^2) * mean((p-0.5)^2) on train. Default: 30."
+            "Phase 2 RBU (or BIR when --use_rbu False) confidence-regularization weight λ in "
+            "selection_score = train_loglik - λ * (rate^2) * mean((p-0.5)^2) on train; rate is RBU when "
+            "--use_rbu True. Default: 30."
         ),
     )
     parser.add_argument(
-        "--threshold_BIR",
-        dest="threshold_BIR",
+        "--rbu_threshold",
+        dest="rbu_threshold",
         type=float,
         default=0.6,
         help=(
-            "Phase 2 adaptation prompts: if participant BIR is strictly below this value, omit BIR/score/confidence "
-            "wording in extra instructions (default: 0.6)."
+            "Phase 2 adaptation prompts: if the regularization rate (RBU with --use_rbu True, else BIR) is strictly "
+            "below this value, omit score/confidence wording in extra instructions (default: 0.6)."
         ),
+    )
+    parser.add_argument(
+        "--use_rbu",
+        type=_parse_use_rbu_arg,
+        default=True,
+        help="If True (default), run structure-score LLM steps and use RBU = clip(BIR - w * S, 0, 1) with w from "
+        "--rbu_structure_weight in phase-2 selection. If False, use BIR as the regularization rate (ablation).",
+    )
+    parser.add_argument(
+        "--rbu_structure_weight",
+        type=float,
+        default=0.5,
+        help="Multiplier w in RBU = clip(BIR - w * structure_score, 0, 1) when --use_rbu True (default: 0.5).",
+    )
+    parser.add_argument(
+        "--structure_prompt_max_tokens",
+        type=int,
+        default=24000,
+        metavar="N",
+        help=(
+            "Target cap (inflated token estimate, see --structure_model_context_tokens) for the combined RBU "
+            "structure-scoring *input* (use_instruction + instruction + symmetric trial prefix per participant). "
+            "The packer also enforces input + max completion <= model context. Default: 24000."
+        ),
+    )
+    parser.add_argument(
+        "--structure_model_context_tokens",
+        type=int,
+        default=32768,
+        metavar="N",
+        help=(
+            "Full context window for the structure-scoring chat model (prompt + max completion). Used to reserve "
+            "completion tokens and to cap inflated prompt estimates (default: 32768). Set to your server's "
+            "context_length when it differs."
+        ),
+    )
+    parser.add_argument(
+        "--prepare_instruction_path",
+        type=str,
+        default=None,
+        help="Override path to prepare_instruction.txt for RBU (default: per-dataset Template_evo/.../prepare_instruction.txt).",
+    )
+    parser.add_argument(
+        "--use_instruction_path",
+        type=str,
+        default=None,
+        help="Override path to use_instruction.txt for RBU (default: per-dataset Template_evo/.../use_instruction.txt).",
     )
     parser.add_argument(
         "--hard_participant_train_loglik_threshold",
@@ -5709,11 +5994,20 @@ def main():
     if args.lambda_complexity < 0.0 or args.lambda_change < 0.0:
         print("Error: --lambda_complexity and --lambda_change must be >= 0.")
         return
-    if args.bir_lambda < 0.0:
-        print("Error: --bir_lambda must be >= 0.")
+    if args.rbu_lambda < 0.0:
+        print("Error: --rbu_lambda must be >= 0.")
         return
-    if args.threshold_BIR < 0.0:
-        print("Error: --threshold_BIR must be >= 0.")
+    if args.rbu_threshold < 0.0:
+        print("Error: --rbu_threshold must be >= 0.")
+        return
+    if args.rbu_structure_weight < 0.0:
+        print("Error: --rbu_structure_weight must be >= 0.")
+        return
+    if int(args.structure_prompt_max_tokens) < 1:
+        print("Error: --structure_prompt_max_tokens must be >= 1.")
+        return
+    if int(args.structure_model_context_tokens) < 256:
+        print("Error: --structure_model_context_tokens must be >= 256.")
         return
     if args.hard_participant_warmup_iters < 1:
         print("Error: --hard_participant_warmup_iters must be >= 1.")
@@ -5898,25 +6192,6 @@ def main():
         if args.participant_scope != "all":
             print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
 
-    # Pre-evolution reporting-only behavioral inconsistency diagnostics (Choice13k).
-    # This does not affect selection, fitness, prompts, or evolution flow.
-    participant_bir_map: Dict[int, float] = {}
-    if args.dataset == "choice13k" and args.split_mode == "within_participant":
-        bir_participant_train_trials: Dict[int, List[Dict[str, Any]]] = {}
-        if participants_to_process:
-            max_pid_for_bir = max(participants_to_process)
-            cached_choice13k_for_bir = get_choice13k_experiments(
-                n_participants=max_pid_for_bir + 1,
-                local_dataset=args.local_dataset,
-            )
-            for pid in participants_to_process:
-                exp = cached_choice13k_for_bir[pid]
-                tr, _, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
-                bir_participant_train_trials[pid] = tr
-        participant_bir_map = _write_behavioral_inconsistency_report(
-            Path(base_run_dir), bir_participant_train_trials
-        )
-
     if args.dataset == "choice13k" and args.split_mode == "across_participants":
         selected_participants = list(participants_to_process)
         if len(selected_participants) < 2:
@@ -5989,7 +6264,11 @@ def main():
                 disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                 debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                 local_dataset=args.local_dataset,
-                bir_prompt_threshold=args.threshold_BIR,
+                rbu_lambda=args.rbu_lambda,
+                use_rbu=False,
+                participant_bir=0.0,
+                participant_rbu=0.0,
+                rbu_prompt_threshold=args.rbu_threshold,
             )
         finally:
             if wandb is not None:
@@ -6042,7 +6321,31 @@ def main():
                 )
             participant_trials[pid] = (tr, te)
 
+        bir_train_only: Dict[int, List[Dict[str, Any]]] = {pid: tr for pid, (tr, _) in participant_trials.items()}
+        bir_report_rows, participant_bir_map = _build_behavioral_inconsistency_rows(bir_train_only)
+
+        rbu_prepare_path = (
+            Path(args.prepare_instruction_path)
+            if args.prepare_instruction_path
+            else _rbu_default_prepare_instruction_path(args.dataset)
+        )
+        rbu_use_path = (
+            Path(args.use_instruction_path)
+            if args.use_instruction_path
+            else _rbu_default_use_instruction_path(args.dataset)
+        )
+
         profile_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        if args.use_rbu:
+            rbu_llm_write_run_instruction(
+                client=profile_client,
+                model_name=args.model_name,
+                prepare_instruction_path=rbu_prepare_path,
+                run_dir=Path(base_run_dir),
+            )
+        else:
+            print("[RBU] skipped (--use_rbu False); phase 2 uses BIR as the regularization rate.")
+
         participant_profiles: Dict[int, str] = {}
         if args.profile_warmup:
             _text_profile_prompt_path(args.dataset)
@@ -6064,6 +6367,56 @@ def main():
         else:
             print("[Phase1] skipped (--profile_warmup False); phase 2 uses seed program only.")
 
+        # RBU: one combined structure-score LLM call for all participants before any Phase 2 evolution.
+        participant_rbu_map: Dict[int, float] = {}
+        participant_structure_score_map: Dict[int, float] = {}
+        participant_structure_components: Dict[int, Dict[str, float]] = {}
+        run_instruction_file = Path(base_run_dir) / "instruction.txt"
+        analysis_dir = Path(base_run_dir) / "analysis"
+        if args.use_rbu:
+            n_part = len(participants_to_process)
+            max_resp_toks = min(32768, max(4096, 768 * max(1, n_part)))
+            raw_scores, _, _ = rbu_llm_write_all_participant_structure_scores(
+                client=profile_client,
+                model_name=args.model_name,
+                use_instruction_path=rbu_use_path,
+                run_instruction_path=run_instruction_file,
+                participant_ids=list(participants_to_process),
+                participant_train_trials=bir_train_only,
+                dataset=args.dataset,
+                analysis_dir=analysis_dir,
+                structure_prompt_max_tokens=int(args.structure_prompt_max_tokens),
+                max_response_tokens=max_resp_toks,
+                model_context_tokens=int(args.structure_model_context_tokens),
+            )
+            score_all_path = analysis_dir / _RBU_STRUCTURE_SCORE_ALL_FILENAME
+            try:
+                parsed = parse_all_participant_structure_scores(
+                    raw_scores,
+                    expected_participant_ids=tuple(sorted(int(x) for x in participants_to_process)),
+                )
+            except StructureScoreParseError as exc:
+                raise RuntimeError(
+                    f"RBU combined structure score parse failed path={score_all_path}: {exc}\n"
+                    f"raw_output (first 2400 chars):\n{raw_scores[:2400]!r}"
+                ) from exc
+            for r in bir_report_rows:
+                pid = int(r["participant_ordinal"])
+                bir_val = float(r["behavioral_inconsistency_rate"])
+                s_v, comps = parsed[pid]
+                rbu_v = compute_rbu(bir_val, float(s_v), structure_weight=float(args.rbu_structure_weight))
+                r["structure_score"] = float(s_v)
+                r["rbu"] = float(rbu_v)
+                participant_rbu_map[pid] = float(rbu_v)
+                participant_structure_score_map[pid] = float(s_v)
+                participant_structure_components[pid] = comps
+        else:
+            for r in bir_report_rows:
+                pid = int(r["participant_ordinal"])
+                participant_rbu_map[pid] = float(r["behavioral_inconsistency_rate"])
+
+        _write_behavioral_inconsistency_csv(Path(base_run_dir), bir_report_rows)
+
         # Phase 2: participant adaptation from seed program (+ optional text profile in prompts)
         participants_summary = []
         participants_loglik_summary = []
@@ -6074,6 +6427,13 @@ def main():
             for participant_id in tqdm(participants_to_process, desc="Participants (phase2 adapt)"):
                 participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
                 profile_str = participant_profiles.get(participant_id) if args.profile_warmup else None
+                bir_val = float(participant_bir_map.get(participant_id, 0.0))
+                rbu_val = float(participant_rbu_map.get(participant_id, bir_val))
+                struct_score: Optional[float] = None
+                struct_comps: Optional[Dict[str, float]] = None
+                if args.use_rbu:
+                    struct_score = participant_structure_score_map.get(participant_id)
+                    struct_comps = participant_structure_components.get(participant_id)
                 participant_summary = run_evolution(
                     seed_program_path=seed_program_path,
                     dataset=args.dataset,
@@ -6112,9 +6472,13 @@ def main():
                     debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     wandb_log_fn=_wandb_log_with_global_step,
                     local_dataset=args.local_dataset,
-                    bir_lambda=args.bir_lambda,
-                    participant_bir=participant_bir_map.get(participant_id, 0.0),
-                    bir_prompt_threshold=args.threshold_BIR,
+                    rbu_lambda=args.rbu_lambda,
+                    use_rbu=bool(args.use_rbu),
+                    participant_bir=bir_val,
+                    participant_rbu=float(rbu_val),
+                    rbu_prompt_threshold=args.rbu_threshold,
+                    structure_score=struct_score,
+                    structure_components=struct_comps,
                 )
                 best_src = Path(participant_output_dir) / "best_program.py"
                 if best_src.exists():
@@ -6212,7 +6576,11 @@ def main():
                     disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                     debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     local_dataset=args.local_dataset,
-                    bir_prompt_threshold=args.threshold_BIR,
+                    rbu_lambda=args.rbu_lambda,
+                    use_rbu=False,
+                    participant_bir=0.0,
+                    participant_rbu=0.0,
+                    rbu_prompt_threshold=args.rbu_threshold,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -6534,7 +6902,11 @@ def main():
                         disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
-                        bir_prompt_threshold=args.threshold_BIR,
+                        rbu_lambda=args.rbu_lambda,
+                    use_rbu=False,
+                    participant_bir=0.0,
+                    participant_rbu=0.0,
+                    rbu_prompt_threshold=args.rbu_threshold,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -6662,7 +7034,11 @@ def main():
                         disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
-                        bir_prompt_threshold=args.threshold_BIR,
+                        rbu_lambda=args.rbu_lambda,
+                    use_rbu=False,
+                    participant_bir=0.0,
+                    participant_rbu=0.0,
+                    rbu_prompt_threshold=args.rbu_threshold,
                     )
                 
                 # Update participants summary after each participant completes
