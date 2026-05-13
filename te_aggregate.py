@@ -32,8 +32,10 @@ import json
 import csv
 import difflib
 import shlex
+import shutil
 import socket
 import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from datetime import datetime
@@ -632,6 +634,9 @@ def _build_diagnostic_trials_text(
     lines = [
         "\n## Participant diagnostic trials (selected by log-likelihood under current parent)",
         "Use these diagnostics only as hints; do not overfit to specific IDs.",
+        "Note: The diagnostic trials below are provided only to illustrate problem structure and feature types. "
+        "They are not behavioral labels or evidence favoring Option A or Option B. "
+        "Do not infer participant preferences from the diagnostic trial set itself.",
         *_trial_block("Low log-likelihood (hard) trials", bad),
         *_trial_block("High log-likelihood (easy) trials", good),
     ]
@@ -823,6 +828,343 @@ def _write_behavioral_inconsistency_csv(base_run_dir: Path, rows: List[Dict[str,
         )
     )
     print(f"Saved: {out_csv}")
+
+
+@dataclass
+class TeAggregateScoringState:
+    """Pre-evolution outputs for te_aggregate within-participant mode (BIR / RBU / structure)."""
+
+    bir_report_rows: List[Dict[str, Any]]
+    participant_bir_map: Dict[int, float]
+    participant_rbu_map: Dict[int, float]
+    participant_structure_score_map: Dict[int, float]
+    participant_structure_components: Dict[int, Dict[str, float]]
+    participant_profiles: Dict[int, str]
+
+
+def _te_aggregate_run_profile_warmup_if_enabled(
+    *,
+    args: Any,
+    participants_to_process: List[int],
+    participant_trials: Dict[int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]],
+    profile_client: OpenAI,
+    base_run_dir: str,
+) -> Dict[int, str]:
+    """Phase-1 text profile per participant when ``--profile_warmup`` is True; else empty dict."""
+    participant_profiles: Dict[int, str] = {}
+    if not args.profile_warmup:
+        print("[Phase1] skipped (--profile_warmup False); phase 2 uses seed program only.")
+        return participant_profiles
+    _text_profile_prompt_path(args.dataset)
+    print(
+        f"[Phase1] text-profile warmup for {len(participants_to_process)} participant(s); "
+        f"prompt: prompts/Template_evo/{args.dataset}/text_profile/text_profile.txt"
+    )
+    for participant_id in tqdm(participants_to_process, desc="Participants (phase1 profile)"):
+        tr, _ = participant_trials[participant_id]
+        pinfo = run_text_profile_warmup_participant(
+            dataset=args.dataset,
+            participant_id=participant_id,
+            train_trials=tr,
+            client=profile_client,
+            model_name=args.model_name,
+            base_run_dir=base_run_dir,
+        )
+        participant_profiles[participant_id] = str(pinfo.get("profile_text") or "")
+    return participant_profiles
+
+
+def _merge_structure_parse_into_bir_rows(
+    bir_report_rows: List[Dict[str, Any]],
+    parsed: Optional[Dict[int, Tuple[float, Dict[str, float]]]],
+    *,
+    use_rbu: bool,
+    structure_weight: float,
+) -> Tuple[Dict[int, float], Dict[int, float], Dict[int, Dict[str, float]]]:
+    """
+    Fill ``rbu`` / ``structure_score`` on each BIR row from parsed structure scores (when ``use_rbu``),
+    or set ``rbu`` to BIR when not using RBU.
+    """
+    participant_rbu_map: Dict[int, float] = {}
+    participant_structure_score_map: Dict[int, float] = {}
+    participant_structure_components: Dict[int, Dict[str, float]] = {}
+    if use_rbu and parsed is not None:
+        for r in bir_report_rows:
+            pid = int(r["participant_ordinal"])
+            bir_val = float(r["behavioral_inconsistency_rate"])
+            s_v, comps = parsed[pid]
+            rbu_v = compute_rbu(bir_val, float(s_v), structure_weight=float(structure_weight))
+            r["structure_score"] = float(s_v)
+            r["rbu"] = float(rbu_v)
+            participant_rbu_map[pid] = float(rbu_v)
+            participant_structure_score_map[pid] = float(s_v)
+            participant_structure_components[pid] = comps
+    else:
+        for r in bir_report_rows:
+            pid = int(r["participant_ordinal"])
+            participant_rbu_map[pid] = float(r["behavioral_inconsistency_rate"])
+    return participant_rbu_map, participant_structure_score_map, participant_structure_components
+
+
+def _te_aggregate_run_scoring_stage(
+    *,
+    args: Any,
+    base_run_dir: str,
+    participants_to_process: List[int],
+    bir_train_only: Dict[int, List[Dict[str, Any]]],
+    participant_trials: Dict[int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]],
+    profile_client: OpenAI,
+    rbu_prepare_path: Path,
+    rbu_use_path: Path,
+) -> TeAggregateScoringState:
+    """
+    BIR report, optional RBU instruction + structure-score LLM, profile warmup, write
+    ``analysis/behavioral_inconsistency_rate.csv``.
+    """
+    bir_report_rows, participant_bir_map = _build_behavioral_inconsistency_rows(bir_train_only)
+
+    if args.use_rbu:
+        rbu_llm_write_run_instruction(
+            client=profile_client,
+            model_name=args.model_name,
+            prepare_instruction_path=rbu_prepare_path,
+            run_dir=Path(base_run_dir),
+        )
+    else:
+        print("[RBU] skipped (--use_rbu False); phase 2 uses BIR as the regularization rate.")
+
+    participant_profiles = _te_aggregate_run_profile_warmup_if_enabled(
+        args=args,
+        participants_to_process=participants_to_process,
+        participant_trials=participant_trials,
+        profile_client=profile_client,
+        base_run_dir=base_run_dir,
+    )
+
+    run_instruction_file = Path(base_run_dir) / "instruction.txt"
+    analysis_dir = Path(base_run_dir) / "analysis"
+    if args.use_rbu:
+        print(
+            "[RBU] structure_score is computed as mean(clipped evidence values in participant JSON 'evidence')."
+        )
+        n_part = len(participants_to_process)
+        max_resp_toks = min(32768, max(4096, 768 * max(1, n_part)))
+        raw_scores, _, _ = rbu_llm_write_all_participant_structure_scores(
+            client=profile_client,
+            model_name=args.model_name,
+            use_instruction_path=rbu_use_path,
+            run_instruction_path=run_instruction_file,
+            participant_ids=list(participants_to_process),
+            participant_train_trials=bir_train_only,
+            dataset=args.dataset,
+            analysis_dir=analysis_dir,
+            structure_prompt_max_tokens=int(args.structure_prompt_max_tokens),
+            max_response_tokens=max_resp_toks,
+            model_context_tokens=int(args.structure_model_context_tokens),
+        )
+        score_all_path = analysis_dir / _RBU_STRUCTURE_SCORE_ALL_FILENAME
+        try:
+            parsed = parse_all_participant_structure_scores(
+                raw_scores,
+                expected_participant_ids=tuple(sorted(int(x) for x in participants_to_process)),
+            )
+        except StructureScoreParseError as exc:
+            raise RuntimeError(
+                f"RBU combined structure score parse failed path={score_all_path}: {exc}\n"
+                f"raw_output (first 2400 chars):\n{raw_scores[:2400]!r}"
+            ) from exc
+        participant_rbu_map, participant_structure_score_map, participant_structure_components = (
+            _merge_structure_parse_into_bir_rows(
+                bir_report_rows,
+                parsed,
+                use_rbu=True,
+                structure_weight=float(args.structure_weight),
+            )
+        )
+    else:
+        participant_rbu_map, participant_structure_score_map, participant_structure_components = (
+            _merge_structure_parse_into_bir_rows(
+                bir_report_rows,
+                None,
+                use_rbu=False,
+                structure_weight=float(args.structure_weight),
+            )
+        )
+
+    _write_behavioral_inconsistency_csv(Path(base_run_dir), bir_report_rows)
+
+    return TeAggregateScoringState(
+        bir_report_rows=bir_report_rows,
+        participant_bir_map=participant_bir_map,
+        participant_rbu_map=participant_rbu_map,
+        participant_structure_score_map=participant_structure_score_map,
+        participant_structure_components=participant_structure_components,
+        participant_profiles=participant_profiles,
+    )
+
+
+def _resolve_scoring_input_path(path: str) -> Path:
+    """Resolve ``--structure_path`` (often repo-relative) to an existing file."""
+    raw = Path(path).expanduser()
+    if raw.is_file():
+        return raw.resolve()
+    cand = (_REPO_ROOT / raw).resolve()
+    if cand.is_file():
+        return cand
+    cwd_try = (Path.cwd() / raw).resolve()
+    if cwd_try.is_file():
+        return cwd_try
+    raise FileNotFoundError(
+        f"--structure_path not found: {path!r} (tried absolute path, cwd-relative, and repo-root-relative)."
+    )
+
+
+def _log_choice13k_evolution_loaded_rates(
+    scoring: TeAggregateScoringState,
+    participant_ids: List[int],
+    *,
+    use_rbu: bool,
+) -> None:
+    """Log BIR (recomputed on this run's train split), structure_score (from file if RBU), and RBU."""
+    print(
+        "\n[phase_option=evolution] BIR recomputed from current train data; "
+        "RBU = clip(BIR - structure_weight * S) using this run's --structure_weight."
+    )
+    if use_rbu:
+        print("  structure_score S parsed from --structure_path (prior combined structure-score output).")
+    else:
+        print("  (--use_rbu False: regularization rate is BIR; --structure_path ignored.)")
+    for pid in sorted(int(x) for x in participant_ids):
+        bir = float(scoring.participant_bir_map.get(pid, 0.0))
+        rbu = float(scoring.participant_rbu_map.get(pid, bir))
+        if use_rbu:
+            s_v = scoring.participant_structure_score_map.get(pid)
+            s_str = f"{float(s_v):.4f}" if s_v is not None else "n/a"
+            print(f"  participant {pid}: BIR={bir:.4f}, S={s_str}, RBU={rbu:.4f}")
+        else:
+            print(f"  participant {pid}: BIR={bir:.4f}, RBU={rbu:.4f}")
+
+
+def _te_aggregate_run_evolution_stage(
+    *,
+    args: Any,
+    base_run_dir: str,
+    seed_program_path: Optional[str],
+    participants_to_process: List[int],
+    participant_trials: Dict[int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]],
+    scoring: TeAggregateScoringState,
+    wandb: Any,
+    client_kwargs: Optional[Dict[str, Any]],
+    mixed_gambles_gain_loss_only: bool,
+    _wandb_log_with_global_step: Any,
+) -> None:
+    """Phase-2 per-participant ``run_evolution`` and aggregate CSV summaries."""
+    participant_bir_map = scoring.participant_bir_map
+    participant_rbu_map = scoring.participant_rbu_map
+    participant_structure_score_map = scoring.participant_structure_score_map
+    participant_structure_components = scoring.participant_structure_components
+    participant_profiles = scoring.participant_profiles
+
+    participants_summary: List[Dict[str, Any]] = []
+    participants_loglik_summary: List[Dict[str, Any]] = []
+    details_loglik_file = Path(base_run_dir) / "participant_details_loglik.csv"
+    summary_loglik_file = Path(base_run_dir) / "summary_loglik.csv"
+    summary_file = Path(base_run_dir) / "summary.csv"
+    for participant_id in tqdm(participants_to_process, desc="Participants (phase2 adapt)"):
+        participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
+        profile_str = participant_profiles.get(participant_id) if args.profile_warmup else None
+        bir_val = float(participant_bir_map.get(participant_id, 0.0))
+        rbu_val = float(participant_rbu_map.get(participant_id, bir_val))
+        struct_score: Optional[float] = None
+        struct_comps: Optional[Dict[str, float]] = None
+        if args.use_rbu:
+            struct_score = participant_structure_score_map.get(participant_id)
+            _comps = participant_structure_components.get(participant_id)
+            struct_comps = _comps if _comps else None
+        participant_summary = run_evolution(
+            seed_program_path=seed_program_path,
+            dataset=args.dataset,
+            participant_id=participant_id,
+            data_path=args.data_path,
+            num_blocks=getattr(args, "num_blocks", None),
+            num_walls=getattr(args, "num_walls", None),
+            agent_id=getattr(args, "agent_id", None),
+            n_iterations=args.n_iterations,
+            n_candidates_per_iteration=args.n_candidates,
+            model_name=args.model_name,
+            client_kwargs=client_kwargs if client_kwargs else None,
+            output_dir=participant_output_dir,
+            wandb=wandb,
+            n_eval_seeds=args.n_eval_seeds,
+            sample_size=args.sample_size,
+            sample_parents=args.sample_parents,
+            elite_pool_size=args.elite_pool_size,
+            filter_mixed_gambles=mixed_gambles_gain_loss_only,
+            fitness_metric=args.fitness_metric,
+            split_ratio=args.split_ratio,
+            split_seed=args.split_seed,
+            max_prompt_train_trials=args.max_prompt_train_trials,
+            max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+            llm_max_tokens=args.llm_max_tokens,
+            cpc18_official_mse=False,
+            adaptation_mode=True,
+            aggregate_base_code=None,
+            participant_text_profile=profile_str,
+            num_diagnostic_trials=args.num_diagnostic_trials,
+            lambda_complexity=args.lambda_complexity,
+            lambda_change=args.lambda_change,
+            hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+            hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+            disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
+            debug_continue_after_early_stop=args.debug_continue_after_early_stop,
+            wandb_log_fn=_wandb_log_with_global_step,
+            local_dataset=args.local_dataset,
+            rbu_lambda=args.uncertainty_lambda,
+            use_rbu=bool(args.use_rbu),
+            participant_bir=bir_val,
+            participant_rbu=float(rbu_val),
+            rbu_prompt_threshold=args.uncertainty_threshold,
+            structure_score=struct_score,
+            structure_components=struct_comps,
+        )
+        best_src = Path(participant_output_dir) / "best_program.py"
+        if best_src.exists():
+            best_dst = Path(participant_output_dir) / f"best_adapted_program_participant_{participant_id}.py"
+            best_dst.write_text(best_src.read_text(encoding="utf-8"), encoding="utf-8")
+        participants_summary.append(participant_summary)
+        participants_loglik_summary.append(
+            {
+                "participant_id": participant_summary.get("participant_id"),
+                "train_loglik": participant_summary.get("train_loglik"),
+                "test_loglik": participant_summary.get("test_loglik"),
+                "selection_score": participant_summary.get("selection_score"),
+            }
+        )
+
+        with open(details_loglik_file, "w", newline="") as f:
+            w = csv.DictWriter(
+                f, fieldnames=["participant_id", "train_loglik", "test_loglik", "selection_score"]
+            )
+            w.writeheader()
+            w.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
+        train_ll_vals = [d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None]
+        test_ll_vals = [d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None]
+        with open(summary_loglik_file, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"])
+            w.writeheader()
+            w.writerow(
+                _round_floats_for_csv_row(
+                    {
+                        "num_of_participants": len(participants_loglik_summary),
+                        "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                        "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
+                    }
+                )
+            )
+        with open(summary_file, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(participant_summary.keys()))
+            w.writeheader()
+            w.writerows(_round_floats_for_csv_rows(participants_summary))
 
 
 def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
@@ -5839,6 +6181,30 @@ def main():
         help="Override path to use_instruction.txt for RBU (default: per-dataset Template_evo/.../use_instruction.txt).",
     )
     parser.add_argument(
+        "--phase_option",
+        type=str,
+        choices=["all", "score", "evolution"],
+        default="all",
+        help=(
+            "choice13k within-participant two-phase te_aggregate only: "
+            "'all' (default) run BIR, structure-score LLM, then evolution; "
+            "'score' stop after writing analysis/behavioral_inconsistency_rate.csv; "
+            "'evolution' skip scoring LLM calls: recompute BIR on this run, parse S from --structure_path, "
+            "then run evolution (RBU uses this run's --structure_weight)."
+        ),
+    )
+    parser.add_argument(
+        "--structure_path",
+        type=str,
+        default=None,
+        help=(
+            "choice13k --phase_option evolution with --use_rbu True: path to a prior run's combined "
+            "structure-score file (same format as analysis/Structure_score_all.txt). "
+            "BIR is recomputed on the current train split; S is read from this file; RBU uses this run's "
+            "--structure_weight. Example: generated_outputs/choice13k/te_aggregate/<run>/analysis/Structure_score_all.txt"
+        ),
+    )
+    parser.add_argument(
         "--hard_participant_train_loglik_threshold",
         type=float,
         default=-0.6,
@@ -6045,6 +6411,29 @@ def main():
         return
     if args.hard_participant_warmup_iters < 1:
         print("Error: --hard_participant_warmup_iters must be >= 1.")
+        return
+    if args.phase_option != "all" and args.dataset != "choice13k":
+        print("Error: --phase_option other than 'all' is only supported for --dataset choice13k.")
+        return
+    if args.phase_option != "all" and getattr(args, "participant_scope", None) == "all":
+        print(
+            "Error: --phase_option score|evolution is not compatible with --participant_scope all "
+            "(use single or range)."
+        )
+        return
+    if args.phase_option == "evolution" and args.dataset == "choice13k" and args.use_rbu:
+        if not args.structure_path or not str(args.structure_path).strip():
+            print(
+                "Error: --structure_path is required when --phase_option evolution (choice13k) and --use_rbu True."
+            )
+            return
+        try:
+            _resolve_scoring_input_path(str(args.structure_path))
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}")
+            return
+    if args.structure_path and str(args.structure_path).strip() and args.phase_option != "evolution":
+        print("Error: --structure_path is only allowed with --phase_option evolution.")
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
@@ -6356,7 +6745,6 @@ def main():
             participant_trials[pid] = (tr, te)
 
         bir_train_only: Dict[int, List[Dict[str, Any]]] = {pid: tr for pid, (tr, _) in participant_trials.items()}
-        bir_report_rows, participant_bir_map = _build_behavioral_inconsistency_rows(bir_train_only)
 
         rbu_prepare_path = (
             Path(args.prepare_instruction_path)
@@ -6370,192 +6758,104 @@ def main():
         )
 
         profile_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
-        if args.use_rbu:
-            rbu_llm_write_run_instruction(
-                client=profile_client,
-                model_name=args.model_name,
-                prepare_instruction_path=rbu_prepare_path,
-                run_dir=Path(base_run_dir),
-            )
-        else:
-            print("[RBU] skipped (--use_rbu False); phase 2 uses BIR as the regularization rate.")
 
-        participant_profiles: Dict[int, str] = {}
-        if args.profile_warmup:
-            _text_profile_prompt_path(args.dataset)
-            print(
-                f"[Phase1] text-profile warmup for {len(participants_to_process)} participant(s); "
-                f"prompt: prompts/Template_evo/{args.dataset}/text_profile/text_profile.txt"
-            )
-            for participant_id in tqdm(participants_to_process, desc="Participants (phase1 profile)"):
-                tr, _ = participant_trials[participant_id]
-                pinfo = run_text_profile_warmup_participant(
-                    dataset=args.dataset,
-                    participant_id=participant_id,
-                    train_trials=tr,
-                    client=profile_client,
-                    model_name=args.model_name,
-                    base_run_dir=base_run_dir,
+        pid_list = list(participants_to_process)
+        if args.dataset == "choice13k" and args.phase_option == "evolution":
+            bir_report_rows_e, participant_bir_map_e = _build_behavioral_inconsistency_rows(bir_train_only)
+            analysis_dir = Path(base_run_dir) / "analysis"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            if args.use_rbu:
+                structure_resolved = _resolve_scoring_input_path(str(args.structure_path))
+                raw_scores = structure_resolved.read_text(encoding="utf-8")
+                dest_structure = analysis_dir / _RBU_STRUCTURE_SCORE_ALL_FILENAME
+                shutil.copy2(structure_resolved, dest_structure)
+                print(
+                    f"[phase_option=evolution] Copied structure score file to {dest_structure} "
+                    f"(from {structure_resolved})"
                 )
-                participant_profiles[participant_id] = str(pinfo.get("profile_text") or "")
-        else:
-            print("[Phase1] skipped (--profile_warmup False); phase 2 uses seed program only.")
-
-        # RBU: one combined structure-score LLM call for all participants before any Phase 2 evolution.
-        participant_rbu_map: Dict[int, float] = {}
-        participant_structure_score_map: Dict[int, float] = {}
-        participant_structure_components: Dict[int, Dict[str, float]] = {}
-        run_instruction_file = Path(base_run_dir) / "instruction.txt"
-        analysis_dir = Path(base_run_dir) / "analysis"
-        if args.use_rbu:
-            print(
-                "[RBU] structure_score is computed as mean(clipped evidence values in participant JSON 'evidence')."
-            )
-            n_part = len(participants_to_process)
-            max_resp_toks = min(32768, max(4096, 768 * max(1, n_part)))
-            raw_scores, _, _ = rbu_llm_write_all_participant_structure_scores(
-                client=profile_client,
-                model_name=args.model_name,
-                use_instruction_path=rbu_use_path,
-                run_instruction_path=run_instruction_file,
-                participant_ids=list(participants_to_process),
-                participant_train_trials=bir_train_only,
-                dataset=args.dataset,
-                analysis_dir=analysis_dir,
-                structure_prompt_max_tokens=int(args.structure_prompt_max_tokens),
-                max_response_tokens=max_resp_toks,
-                model_context_tokens=int(args.structure_model_context_tokens),
-            )
-            score_all_path = analysis_dir / _RBU_STRUCTURE_SCORE_ALL_FILENAME
-            try:
-                parsed = parse_all_participant_structure_scores(
-                    raw_scores,
-                    expected_participant_ids=tuple(sorted(int(x) for x in participants_to_process)),
+                score_all_path = dest_structure
+                try:
+                    parsed = parse_all_participant_structure_scores(
+                        raw_scores,
+                        expected_participant_ids=tuple(sorted(int(x) for x in pid_list)),
+                    )
+                except StructureScoreParseError as exc:
+                    raise RuntimeError(
+                        f"Structure score parse failed path={score_all_path}: {exc}\n"
+                        f"raw_output (first 2400 chars):\n{raw_scores[:2400]!r}"
+                    ) from exc
+                participant_rbu_map_e, participant_structure_score_map_e, participant_structure_components_e = (
+                    _merge_structure_parse_into_bir_rows(
+                        bir_report_rows_e,
+                        parsed,
+                        use_rbu=True,
+                        structure_weight=float(args.structure_weight),
+                    )
                 )
-            except StructureScoreParseError as exc:
-                raise RuntimeError(
-                    f"RBU combined structure score parse failed path={score_all_path}: {exc}\n"
-                    f"raw_output (first 2400 chars):\n{raw_scores[:2400]!r}"
-                ) from exc
-            for r in bir_report_rows:
-                pid = int(r["participant_ordinal"])
-                bir_val = float(r["behavioral_inconsistency_rate"])
-                s_v, comps = parsed[pid]
-                rbu_v = compute_rbu(bir_val, float(s_v), structure_weight=float(args.structure_weight))
-                r["structure_score"] = float(s_v)
-                r["rbu"] = float(rbu_v)
-                participant_rbu_map[pid] = float(rbu_v)
-                participant_structure_score_map[pid] = float(s_v)
-                participant_structure_components[pid] = comps
+            else:
+                participant_rbu_map_e, participant_structure_score_map_e, participant_structure_components_e = (
+                    _merge_structure_parse_into_bir_rows(
+                        bir_report_rows_e,
+                        None,
+                        use_rbu=False,
+                        structure_weight=float(args.structure_weight),
+                    )
+                )
+                print("[phase_option=evolution] --use_rbu False: skipping --structure_path; RBU rate is BIR.")
+
+            _write_behavioral_inconsistency_csv(Path(base_run_dir), bir_report_rows_e)
+            scoring = TeAggregateScoringState(
+                bir_report_rows=bir_report_rows_e,
+                participant_bir_map=participant_bir_map_e,
+                participant_rbu_map=participant_rbu_map_e,
+                participant_structure_score_map=participant_structure_score_map_e,
+                participant_structure_components=participant_structure_components_e,
+                participant_profiles={},
+            )
+            _log_choice13k_evolution_loaded_rates(
+                scoring,
+                pid_list,
+                use_rbu=bool(args.use_rbu),
+            )
+            profiles = _te_aggregate_run_profile_warmup_if_enabled(
+                args=args,
+                participants_to_process=pid_list,
+                participant_trials=participant_trials,
+                profile_client=profile_client,
+                base_run_dir=base_run_dir,
+            )
+            scoring = replace(scoring, participant_profiles=profiles)
         else:
-            for r in bir_report_rows:
-                pid = int(r["participant_ordinal"])
-                participant_rbu_map[pid] = float(r["behavioral_inconsistency_rate"])
+            scoring = _te_aggregate_run_scoring_stage(
+                args=args,
+                base_run_dir=base_run_dir,
+                participants_to_process=pid_list,
+                bir_train_only=bir_train_only,
+                participant_trials=participant_trials,
+                profile_client=profile_client,
+                rbu_prepare_path=rbu_prepare_path,
+                rbu_use_path=rbu_use_path,
+            )
 
-        _write_behavioral_inconsistency_csv(Path(base_run_dir), bir_report_rows)
+        if args.dataset == "choice13k" and args.phase_option == "score":
+            print("\n[phase_option=score] Scoring complete; skipping phase-2 evolution.")
+            if wandb is not None:
+                wandb.finish()
+            return
 
-        # Phase 2: participant adaptation from seed program (+ optional text profile in prompts)
-        participants_summary = []
-        participants_loglik_summary = []
-        details_loglik_file = Path(base_run_dir) / "participant_details_loglik.csv"
-        summary_loglik_file = Path(base_run_dir) / "summary_loglik.csv"
-        summary_file = Path(base_run_dir) / "summary.csv"
         try:
-            for participant_id in tqdm(participants_to_process, desc="Participants (phase2 adapt)"):
-                participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
-                profile_str = participant_profiles.get(participant_id) if args.profile_warmup else None
-                bir_val = float(participant_bir_map.get(participant_id, 0.0))
-                rbu_val = float(participant_rbu_map.get(participant_id, bir_val))
-                struct_score: Optional[float] = None
-                struct_comps: Optional[Dict[str, float]] = None
-                if args.use_rbu:
-                    struct_score = participant_structure_score_map.get(participant_id)
-                    struct_comps = participant_structure_components.get(participant_id)
-                participant_summary = run_evolution(
-                    seed_program_path=seed_program_path,
-                    dataset=args.dataset,
-                    participant_id=participant_id,
-                    data_path=args.data_path,
-                    num_blocks=getattr(args, "num_blocks", None),
-                    num_walls=getattr(args, "num_walls", None),
-                    agent_id=getattr(args, "agent_id", None),
-                    n_iterations=args.n_iterations,
-                    n_candidates_per_iteration=args.n_candidates,
-                    model_name=args.model_name,
-                    client_kwargs=client_kwargs if client_kwargs else None,
-                    output_dir=participant_output_dir,
-                    wandb=wandb,
-                    n_eval_seeds=args.n_eval_seeds,
-                    sample_size=args.sample_size,
-                    sample_parents=args.sample_parents,
-                    elite_pool_size=args.elite_pool_size,
-                    filter_mixed_gambles=mixed_gambles_gain_loss_only,
-                    fitness_metric=args.fitness_metric,
-                    split_ratio=args.split_ratio,
-                    split_seed=args.split_seed,
-                    max_prompt_train_trials=args.max_prompt_train_trials,
-                    max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
-                    llm_max_tokens=args.llm_max_tokens,
-                    cpc18_official_mse=False,
-                    adaptation_mode=True,
-                    aggregate_base_code=None,
-                    participant_text_profile=profile_str,
-                    num_diagnostic_trials=args.num_diagnostic_trials,
-                    lambda_complexity=args.lambda_complexity,
-                    lambda_change=args.lambda_change,
-                    hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
-                    hard_participant_warmup_iters=args.hard_participant_warmup_iters,
-                    disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
-                    debug_continue_after_early_stop=args.debug_continue_after_early_stop,
-                    wandb_log_fn=_wandb_log_with_global_step,
-                    local_dataset=args.local_dataset,
-                    rbu_lambda=args.uncertainty_lambda,
-                    use_rbu=bool(args.use_rbu),
-                    participant_bir=bir_val,
-                    participant_rbu=float(rbu_val),
-                    rbu_prompt_threshold=args.uncertainty_threshold,
-                    structure_score=struct_score,
-                    structure_components=struct_comps,
-                )
-                best_src = Path(participant_output_dir) / "best_program.py"
-                if best_src.exists():
-                    best_dst = Path(participant_output_dir) / f"best_adapted_program_participant_{participant_id}.py"
-                    best_dst.write_text(best_src.read_text(encoding="utf-8"), encoding="utf-8")
-                participants_summary.append(participant_summary)
-                participants_loglik_summary.append(
-                    {
-                        "participant_id": participant_summary.get("participant_id"),
-                        "train_loglik": participant_summary.get("train_loglik"),
-                        "test_loglik": participant_summary.get("test_loglik"),
-                        "selection_score": participant_summary.get("selection_score"),
-                    }
-                )
-
-                with open(details_loglik_file, "w", newline="") as f:
-                    w = csv.DictWriter(
-                        f, fieldnames=["participant_id", "train_loglik", "test_loglik", "selection_score"]
-                    )
-                    w.writeheader()
-                    w.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
-                train_ll_vals = [d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None]
-                test_ll_vals = [d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None]
-                with open(summary_loglik_file, "w", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"])
-                    w.writeheader()
-                    w.writerow(
-                        _round_floats_for_csv_row(
-                            {
-                                "num_of_participants": len(participants_loglik_summary),
-                                "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
-                                "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
-                            }
-                        )
-                    )
-                # Keep summary.csv format comparable with prior flow
-                with open(summary_file, "w", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=list(participant_summary.keys()))
-                    w.writeheader()
-                    w.writerows(_round_floats_for_csv_rows(participants_summary))
+            _te_aggregate_run_evolution_stage(
+                args=args,
+                base_run_dir=base_run_dir,
+                seed_program_path=seed_program_path,
+                participants_to_process=pid_list,
+                participant_trials=participant_trials,
+                scoring=scoring,
+                wandb=wandb,
+                client_kwargs=client_kwargs,
+                mixed_gambles_gain_loss_only=mixed_gambles_gain_loss_only,
+                _wandb_log_with_global_step=_wandb_log_with_global_step,
+            )
         finally:
             if wandb is not None:
                 wandb.finish()
