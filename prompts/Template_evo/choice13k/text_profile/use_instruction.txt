@@ -1,54 +1,36 @@
 You are given observations of human choices in risky-gamble problems.
 
-Each problem presents two gambles:
-- Option A
-- Option B
+Each problem presents two gambles: Option A and Option B.
+A gamble has outcomes and probabilities in percent.
+A trial may include history for the same participant and problem:
+- action: 0 for Option A, 1 for Option B
+- feedback: numeric value or None
 
-A gamble may contain:
-- rewards
-- probabilities for each reward
+Problem format:
+- gamble_A: {"probs": List[float] or None, "rewards": List[float]}
+- gamble_B: {"probs": List[float] or None, "rewards": List[float]}
+- option_keys: e.g., ["A", "B"]
+- has_feedback: bool
 
-You are given training trials for one or more participants.
+You are given training trials for multiple participants.
 
-Your task:
-Evaluate the behavioral structure of each participant using the scoring instruction below.
+Use the scoring instruction below to evaluate each participant’s behavioral structure.
 
-Important:
-- Score participants contrastively when multiple participants are provided.
-- Avoid generic middle scores.
-- Use clearly different scores when participants show clearly different behavioral structure.
-- Do not infer structure from simply choosing Option A or Option B often.
-- Focus on whether choices are conditionally predictable from gamble properties, repeated-problem behavior, history, or feedback.
-- High scores require repeated evidence of coherent behavior.
-- Low scores should be assigned when behavior is inconsistent, unstable, weakly patterned, or close to random.
+Output only one clean JSON object mapping participant ids to scores.
 
-Output requirements:
-- Output ONLY a clean JSON object.
-- Do not include markdown.
-- Do not include explanations outside the JSON.
-- Do not include extra text before or after the JSON.
-
-Output:
+Each participant must use this format:
 
 {
-  "participant_0": {
-    "structure_score": 0.0,
-    "evidence_scores": {
-      "dimension_name_1": 0.0,
-      "dimension_name_2": 0.0
-    },
-    "summary": "text"
+  "evidence": {
+    "evidence_name_1": 0.0,
+    "evidence_name_2": 0.0
   },
-  "participant_1": {
-    "structure_score": 0.0,
-    "evidence_scores": {
-      "dimension_name_1": 0.0,
-      "dimension_name_2": 0.0
-    },
-    "summary": "text"
-  }
+  "summary": "text"
 }
 
-Only include participants that are provided in the input.
+Each evidence value must be a number in [0,1].
+The code will compute the final structure score as the average of the evidence values.
+Do not output a structure_score field.
+Do not output markdown or extra text.
 
 Now follow the scoring instruction below.

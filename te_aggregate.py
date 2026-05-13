@@ -732,6 +732,7 @@ _BEHAVIORAL_INCONSISTENCY_CSV_FIELDS = [
     "num_train_trials",
     "num_train_problem_groups",
     "num_inconsistent_problem_groups",
+    "BIR",
     "behavioral_inconsistency_rate",
     "rbu",
     "structure_score",
@@ -754,6 +755,7 @@ def _build_behavioral_inconsistency_rows(
                 "num_train_trials": int(metrics["num_train_trials"]),
                 "num_train_problem_groups": int(metrics["num_problem_groups"]),
                 "num_inconsistent_problem_groups": int(metrics["num_inconsistent_problem_groups"]),
+                "BIR": bir,
                 "behavioral_inconsistency_rate": bir,
                 "rbu": bir,
                 "structure_score": "",
@@ -763,7 +765,7 @@ def _build_behavioral_inconsistency_rows(
 
 
 def _write_behavioral_inconsistency_csv(base_run_dir: Path, rows: List[Dict[str, Any]]) -> None:
-    """Write ``analysis/behavioral_inconsistency_rate.csv`` with exactly seven columns (one row per participant)."""
+    """Write ``analysis/behavioral_inconsistency_rate.csv`` with one row per participant."""
     analysis_dir = base_run_dir / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
     out_csv = analysis_dir / "behavioral_inconsistency_rate.csv"
@@ -5738,23 +5740,28 @@ def main():
         help="Phase 2 regularization weight for change-from-reference penalty (when used).",
     )
     parser.add_argument(
+        "--uncertainty_lambda",
         "--rbu_lambda",
+        dest="uncertainty_lambda",
         type=float,
         default=30.0,
         help=(
-            "Phase 2 RBU (or BIR when --use_rbu False) confidence-regularization weight λ in "
-            "selection_score = train_loglik - λ * (rate^2) * mean((p-0.5)^2) on train; rate is RBU when "
-            "--use_rbu True. Default: 30."
+            "Phase 2 uncertainty-rate confidence regularization weight λ in "
+            "selection_score = train_loglik - λ * (rate^2) * mean((p-0.5)^2) on train; "
+            "rate is RBU when --use_rbu True, else BIR. "
+            "Alias: --rbu_lambda (deprecated). Default: 30."
         ),
     )
     parser.add_argument(
+        "--uncertainty_threshold",
         "--rbu_threshold",
-        dest="rbu_threshold",
+        dest="uncertainty_threshold",
         type=float,
         default=0.6,
         help=(
             "Phase 2 adaptation prompts: if the regularization rate (RBU with --use_rbu True, else BIR) is strictly "
-            "below this value, omit score/confidence wording in extra instructions (default: 0.6)."
+            "below this value, omit score/confidence wording in extra instructions. "
+            "Alias: --rbu_threshold (deprecated). Default: 0.6."
         ),
     )
     parser.add_argument(
@@ -5994,11 +6001,11 @@ def main():
     if args.lambda_complexity < 0.0 or args.lambda_change < 0.0:
         print("Error: --lambda_complexity and --lambda_change must be >= 0.")
         return
-    if args.rbu_lambda < 0.0:
-        print("Error: --rbu_lambda must be >= 0.")
+    if args.uncertainty_lambda < 0.0:
+        print("Error: --uncertainty_lambda must be >= 0.")
         return
-    if args.rbu_threshold < 0.0:
-        print("Error: --rbu_threshold must be >= 0.")
+    if args.uncertainty_threshold < 0.0:
+        print("Error: --uncertainty_threshold must be >= 0.")
         return
     if args.rbu_structure_weight < 0.0:
         print("Error: --rbu_structure_weight must be >= 0.")
@@ -6264,11 +6271,11 @@ def main():
                 disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                 debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                 local_dataset=args.local_dataset,
-                rbu_lambda=args.rbu_lambda,
+                rbu_lambda=args.uncertainty_lambda,
                 use_rbu=False,
                 participant_bir=0.0,
                 participant_rbu=0.0,
-                rbu_prompt_threshold=args.rbu_threshold,
+                rbu_prompt_threshold=args.uncertainty_threshold,
             )
         finally:
             if wandb is not None:
@@ -6472,11 +6479,11 @@ def main():
                     debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     wandb_log_fn=_wandb_log_with_global_step,
                     local_dataset=args.local_dataset,
-                    rbu_lambda=args.rbu_lambda,
+                    rbu_lambda=args.uncertainty_lambda,
                     use_rbu=bool(args.use_rbu),
                     participant_bir=bir_val,
                     participant_rbu=float(rbu_val),
-                    rbu_prompt_threshold=args.rbu_threshold,
+                    rbu_prompt_threshold=args.uncertainty_threshold,
                     structure_score=struct_score,
                     structure_components=struct_comps,
                 )
@@ -6576,11 +6583,11 @@ def main():
                     disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                     debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                     local_dataset=args.local_dataset,
-                    rbu_lambda=args.rbu_lambda,
+                    rbu_lambda=args.uncertainty_lambda,
                     use_rbu=False,
                     participant_bir=0.0,
                     participant_rbu=0.0,
-                    rbu_prompt_threshold=args.rbu_threshold,
+                    rbu_prompt_threshold=args.uncertainty_threshold,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -6902,11 +6909,11 @@ def main():
                         disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
-                        rbu_lambda=args.rbu_lambda,
+                        rbu_lambda=args.uncertainty_lambda,
                     use_rbu=False,
                     participant_bir=0.0,
                     participant_rbu=0.0,
-                    rbu_prompt_threshold=args.rbu_threshold,
+                    rbu_prompt_threshold=args.uncertainty_threshold,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -7034,11 +7041,11 @@ def main():
                         disable_hard_participant_early_stop=args.disable_hard_participant_early_stop,
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
-                        rbu_lambda=args.rbu_lambda,
+                        rbu_lambda=args.uncertainty_lambda,
                     use_rbu=False,
                     participant_bir=0.0,
                     participant_rbu=0.0,
-                    rbu_prompt_threshold=args.rbu_threshold,
+                    rbu_prompt_threshold=args.uncertainty_threshold,
                     )
                 
                 # Update participants summary after each participant completes

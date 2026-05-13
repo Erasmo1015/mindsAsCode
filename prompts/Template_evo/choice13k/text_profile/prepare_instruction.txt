@@ -1,55 +1,49 @@
-You are preparing an instruction for evaluating behavioral structure in risky-gamble decision tasks.
+You are preparing a scoring instruction for evaluating behavioral structure in risky-gamble choice tasks.
 
-Each problem contains:
-- Option A and Option B
-- rewards and probabilities
-- optional trial history and feedback
+Each problem presents two gambles: Option A and Option B.
+A gamble has outcomes and probabilities in percent.
+A trial may include history for the same participant and problem:
+- action: 0 for Option A, 1 for Option B
+- feedback: numeric value or None
 
-Your task:
-Create a concise scoring instruction for assigning a decomposed behavioral structure score to each participant.
+Problem format:
+- gamble_A: {"probs": List[float] or None, "rewards": List[float]}
+- gamble_B: {"probs": List[float] or None, "rewards": List[float]}
+- option_keys: e.g., ["A", "B"]
+- has_feedback: bool
 
-The scoring instruction should define a small number of evidence dimensions that are useful for this task. These dimensions should capture different sources of coherent, predictable behavior.
+Create a short instruction for scoring participant-level behavioral structure.
 
-Do not use fixed example dimension names from this prompt. Choose dimensions that are appropriate for risky-gamble choice behavior.
+The scorer will receive training trials for multiple participants and should output one JSON object mapping participant ids to evidence scores.
 
-The final score must satisfy:
-
-S = sum of all numeric evidence scores
-
-where S is in [0,1].
-
-Meaning of S:
-- S close to 1: clear, coherent, predictable behavioral structure.
-- S close to 0: weakly structured, noisy, random, or difficult-to-predict behavior.
-- S around 0.5: partial structure, but with substantial uncertainty or instability.
-
-The scoring instruction should be highly contrastive:
-- use the full [0,1] range when participants clearly differ,
-- avoid generic middle scores,
-- give high evidence scores only when there is repeated behavioral support,
-- give low evidence scores when evidence is weak, unstable, contradictory, or random-like,
-- focus on conditional behavioral patterns, not unconditional preference for Option A or Option B.
-
-Output format:
-Return only the scoring instruction text that will later be used to score participants.
-
-The instruction must require the scorer to output clean JSON with this structure:
+The JSON format must be:
 
 {
-  "structure_score": 0.0,
-  "evidence_scores": {
-    "dimension_name_1": 0.0,
-    "dimension_name_2": 0.0
+  "participant_0": {
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
+    },
+    "summary": "text"
   },
-  "summary": "text"
+  "participant_1": {
+    "evidence": {
+      "evidence_name_1": 0.0,
+      "evidence_name_2": 0.0
+    },
+    "summary": "text"
+  }
 }
 
-The instruction must specify:
-- all evidence score values must be numeric,
-- evidence scores must sum to structure_score,
-- structure_score must be in [0,1],
-- summary must briefly explain the main evidence,
-- no markdown or extra text should be included in the scoring output.
+Each evidence value must be a number in [0,1].
+Higher evidence values mean stronger evidence of coherent, predictable behavioral structure.
+The final structure score will be computed by code as the average of the evidence values.
+The scorer should not output the final structure score.
 
+After the JSON format, explain:
+- what each evidence score measures
+- what low evidence means
+- what high evidence means
+
+Return only the scoring instruction text.
 Do not output JSON now.
-Do not include markdown.
