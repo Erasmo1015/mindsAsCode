@@ -16,29 +16,25 @@ You are given training trials for multiple participants.
 
 Use the scoring instruction below to evaluate each participant’s behavioral structure.
 
-Output only one clean JSON object mapping participant ids to scores.
+Output one clean JSON object mapping participant ids to evidence scores and summaries.
 
-Each participant must use this format:
+Example structure:
 
 {
   "participant_0": {
     "evidence": {
-      "evidence_name_1": 0.0,
-      "evidence_name_2": 0.0
+      "behavioral_evidence_name": 0.0
     },
     "summary": "text"
   },
-  "participant_1": {
-    "evidence": {
-      "evidence_name_1": 0.0,
-      "evidence_name_2": 0.0
-    },
-    "summary": "text"
-  }
+  ...
 }
+
+Follow the evidence naming and scoring scheme defined in the scoring instruction below.
 
 Each evidence value must be a number in [0,1].
 The code will compute the final structure score as the average of the evidence values.
+
 Do not output a structure_score field.
 Do not output markdown or extra text.
 

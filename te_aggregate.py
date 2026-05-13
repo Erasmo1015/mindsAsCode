@@ -764,6 +764,28 @@ def _build_behavioral_inconsistency_rows(
     return rows, bir_by_participant
 
 
+def _round_behavioral_inconsistency_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Round every numeric value to 2 decimals for ``behavioral_inconsistency_rate.csv``."""
+    out: Dict[str, Any] = {}
+    for k, v in row.items():
+        if v == "" or v is None:
+            out[k] = v
+        elif isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, np.integer)):
+            out[k] = round(float(v), 2)
+        elif isinstance(v, (float, np.floating)):
+            x = float(v)
+            out[k] = round(x, 2) if math.isfinite(x) else x
+        else:
+            out[k] = v
+    return out
+
+
+def _round_behavioral_inconsistency_csv_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [_round_behavioral_inconsistency_csv_row(r) for r in rows]
+
+
 def _write_behavioral_inconsistency_csv(base_run_dir: Path, rows: List[Dict[str, Any]]) -> None:
     """Write ``analysis/behavioral_inconsistency_rate.csv`` with one row per participant."""
     analysis_dir = base_run_dir / "analysis"
@@ -775,7 +797,7 @@ def _write_behavioral_inconsistency_csv(base_run_dir: Path, rows: List[Dict[str,
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(_BEHAVIORAL_INCONSISTENCY_CSV_FIELDS))
         w.writeheader()
-        w.writerows(_round_floats_for_csv_rows(out_rows))
+        w.writerows(_round_behavioral_inconsistency_csv_rows(out_rows))
 
     print("\n[Behavioral Inconsistency Analysis]")
     if not rows:

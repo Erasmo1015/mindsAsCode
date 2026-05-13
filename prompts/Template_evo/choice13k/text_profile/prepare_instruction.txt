@@ -21,22 +21,24 @@ The JSON format must be:
 {
   "participant_0": {
     "evidence": {
-      "evidence_name_1": 0.0,
-      "evidence_name_2": 0.0
+      "behavioral_evidence_name": 0.0
     },
     "summary": "text"
   },
-  "participant_1": {
-    "evidence": {
-      "evidence_name_1": 0.0,
-      "evidence_name_2": 0.0
-    },
-    "summary": "text"
-  }
+  ...
 }
+
+The evidence field should contain multiple named evidence scores.
+Each evidence name should directly describe the behavioral pattern being measured.
+Use clear behavioral names instead of generic placeholders.
+
+The scorer should choose evidence names that best match the observed participant behavior.
+
+Different participants or datasets may naturally emphasize different kinds of behavioral evidence.
 
 Each evidence value must be a number in [0,1].
 Higher evidence values mean stronger evidence of coherent, predictable behavioral structure.
+
 The final structure score will be computed by code as the average of the evidence values.
 The scorer should not output the final structure score.
 
