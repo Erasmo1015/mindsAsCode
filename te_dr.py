@@ -17,12 +17,14 @@ Participant selection (choice13k / cpc18 / mixed_gambles):
   datasets/*/valid_participant_ids.json from utils/tools/collect_participant_ids.py).
 - --participant_scope range: raw ids = valid_list[--range_start_ordinal : --range_end_ordinal+1]
   (inclusive end, 0-based ordinals into that JSON list).
+- --participant_scope ordinals: raw ids = valid_list[i] for each i in --ordinals (0-based ordinals, same list as range).
 - --participant_scope all: every raw id in JSON, optional cap --all_max_participants (first N).
 - Gridworld / gridworld_ensemble: use --num_agents_to_sample and --agent_id; participant_scope is ignored.
 
-Choice13k within-participant train/test: problems (blocks) are split with --split_ratio / --split_seed; train and test
-use disjoint gamble pairs; per-trial history is within-block only. Across-participants mode still pools all trials per
-participant via experiment_to_trials (full cross-block history).
+Choice13k within-participant split: problems (blocks) are partitioned with ``--split_ratio`` as the **train
+fraction** of blocks; remaining blocks are split equally between validation and test. Per-trial history stays
+within-block only. Across-participants mode still pools trials per participant, then splits the pooled test pool
+into validation and test for data-driven runs.
 """
 
 import math
@@ -113,6 +115,7 @@ def resolve_participants_for_scope(
     range_start_ordinal: Optional[int],
     range_end_ordinal: Optional[int],
     all_max_participants: Optional[int],
+    participant_ordinals: Optional[List[int]],
     filter_mixed_gambles: bool,
 ) -> List[int]:
     """
@@ -120,6 +123,7 @@ def resolve_participants_for_scope(
 
     - participant_scope=single: one raw id (--single_participant_id).
     - participant_scope=range: inclusive ordinal slice into valid_participant_ids.json.
+    - participant_scope=ordinals: raw ids at listed 0-based ordinals (--ordinals), same ordering as range.
     - participant_scope=all: all raw ids from JSON, optionally capped by --all_max_participants (first N valid).
     """
     valid = load_valid_participant_ids_from_json(dataset, repo_root, filter_mixed_gambles)
@@ -141,6 +145,26 @@ def resolve_participants_for_scope(
                 f"for valid list of length {len(valid)} (0-based inclusive end)."
             )
         return valid[range_start_ordinal : range_end_ordinal + 1]
+    if participant_scope == "ordinals":
+        if not participant_ordinals:
+            raise ValueError(
+                "--participant_scope ordinals requires --ordinals with one or more integers "
+                "(0-based indices into valid_participant_ids.json), e.g. --ordinals 0 4 9."
+            )
+        out: List[int] = []
+        seen: set[int] = set()
+        for o in participant_ordinals:
+            oi = int(o)
+            if oi < 0 or oi >= len(valid):
+                raise ValueError(
+                    f"Ordinal {oi} is out of range for valid list of length {len(valid)} "
+                    f"(valid indices: 0..{len(valid) - 1})."
+                )
+            pid = int(valid[oi])
+            if pid not in seen:
+                seen.add(pid)
+                out.append(pid)
+        return out
     if participant_scope == "all":
         if all_max_participants is not None:
             n = max(0, int(all_max_participants))
@@ -647,24 +671,84 @@ def split_trials(
     exp: Experiment,
     split_ratio: float = 0.8,
     split_seed: int = 42,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
-    """Split Choice13k into train/test by **problem (block)**; disjoint gamble pairs; ratio/seed apply to blocks."""
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], list]:
+    """
+    Split Choice13k into train / val / test by **problem (block)**.
+
+    ``split_ratio`` is the train **fraction** of blocks. The remainder is split between validation and test
+    with sizes differing by at most one block (when odd, validation receives one more block than test).
+    """
     n_blocks = len(exp.blocks)
-    if n_blocks < 2:
+    if n_blocks < 3:
         raise ValueError(
-            f"Choice13k within-participant split requires at least 2 problems (blocks); got {n_blocks}."
+            f"Choice13k train/val/test split requires at least 3 problems (blocks); got {n_blocks}."
         )
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+
     rng = np.random.default_rng(split_seed)
     perm = np.arange(n_blocks)
     rng.shuffle(perm)
-    split_idx = int(n_blocks * split_ratio)
-    split_idx = max(1, min(split_idx, n_blocks - 1))
-    train_blocks = set(perm[:split_idx].tolist())
-    test_blocks = set(perm[split_idx:].tolist())
+
+    n_train = int(n_blocks * split_ratio)
+    n_train = max(1, min(n_train, n_blocks - 2))
+    n_rem = n_blocks - n_train
+    n_val = (n_rem + 1) // 2
+    n_test = n_rem - n_val
+    if n_val < 1:
+        n_val = 1
+        n_test = max(1, n_rem - 1)
+        n_train = n_blocks - n_val - n_test
+        n_train = max(1, n_train)
+        n_rem = n_blocks - n_train
+        n_val = n_rem // 2
+        n_test = n_rem - n_val
+    if n_test < 1:
+        n_test = 1
+        n_val = max(1, n_rem - 1)
+        n_train = n_blocks - n_val - n_test
+        n_train = max(1, n_train)
+
+    train_blocks = set(perm[:n_train].tolist())
+    val_blocks = set(perm[n_train : n_train + n_val].tolist())
+    test_blocks = set(perm[n_train + n_val :].tolist())
+    assert len(train_blocks) + len(val_blocks) + len(test_blocks) == n_blocks
+    assert train_blocks.isdisjoint(val_blocks) and train_blocks.isdisjoint(test_blocks) and val_blocks.isdisjoint(test_blocks)
+
     train_trials = trials_from_blocks_chronological(exp, train_blocks)
+    val_trials = trials_from_blocks_chronological(exp, val_blocks)
     test_trials = trials_from_blocks_chronological(exp, test_blocks)
     options = exp.blocks[0].option_keys
-    return train_trials, test_trials, options
+    return train_trials, val_trials, test_trials, options
+
+
+def _build_val_examples_prompt_block(val_trials: List[Dict[str, Any]], max_n: int) -> str:
+    """Serialize up to ``max_n`` validation trials for the LLM prompt (data-driven evolution)."""
+    if max_n <= 0 or not val_trials:
+        return ""
+    take = val_trials[:max_n]
+    body = format_trials_to_text(take, dataset="choice13k")
+    return (
+        f"\n## Validation examples (at most {len(take)} trials; held out from training blocks)\n"
+        f"{body}\n"
+    )
+
+
+def _pool_split_val_test(
+    trials: List[Dict[str, Any]], split_seed: int
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Split a pooled trial list into validation and test when only a single ``test`` pool exists
+    (e.g. across-participant overrides). Uses a single random cut preserving trial order.
+    """
+    if len(trials) < 2:
+        raise ValueError(
+            "data_driven pooled test split requires at least 2 trials to form val and test; got "
+            f"{len(trials)}."
+        )
+    rng = np.random.default_rng(int(split_seed))
+    cut = int(rng.integers(1, len(trials)))
+    return trials[:cut], trials[cut:]
 
 
 def _trial_problem_identity_key(trial: Dict[str, Any]) -> str:
@@ -1110,7 +1194,8 @@ def _te_aggregate_run_evolution_stage(
             adaptation_mode=True,
             aggregate_base_code=None,
             participant_text_profile=profile_str,
-            num_diagnostic_trials=args.num_diagnostic_trials,
+            num_diagnostic_trials=getattr(args, "num_diagnostic_trials", None),
+            max_prompt_val=int(getattr(args, "max_prompt_val", 10)),
             lambda_complexity=args.lambda_complexity,
             lambda_change=args.lambda_change,
             hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
@@ -2745,6 +2830,10 @@ def generate_program_variants(
     extra_prompt_instructions: str = "",
     parent_metric_label_override: Optional[str] = None,
     parent_runtime_errors: Optional[List[Optional[str]]] = None,
+    val_trials_for_prompt: Optional[List[Dict[str, Any]]] = None,
+    max_prompt_val: int = 0,
+    parent_val_logliks: Optional[List[Optional[float]]] = None,
+    choice13k_loglik_prompt_path: Optional[str] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -2785,9 +2874,12 @@ def generate_program_variants(
             )
     else:
         if fitness_metric == "loglik":
-            prompt_path = os.path.join(
-                PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "infer_single_choice.txt"
-            )
+            if choice13k_loglik_prompt_path:
+                prompt_path = choice13k_loglik_prompt_path
+            else:
+                prompt_path = os.path.join(
+                    PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "infer_single_choice.txt"
+                )
             code_template_path = os.path.join(
                 PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "non_strict", "loglik", "single_code_template.txt"
             )
@@ -2917,6 +3009,18 @@ def choose(problem, history):
     num_parents = len(parent_programs)
     if num_parents == 1:
         parent_context = f"\n\nReference program (parent):\n```python\n{parent_programs[0]}\n```\n\n"
+        pm0 = parent_train_accuracies[0] if parent_train_accuracies and len(parent_train_accuracies) >= 1 else None
+        if (
+            pm0 is not None
+            and fitness_metric == "loglik"
+            and dataset == "choice13k"
+            and parent_val_logliks
+            and len(parent_val_logliks) >= 1
+            and parent_val_logliks[0] is not None
+        ):
+            parent_context += (
+                f"Parent scores: train_loglik={pm0:.6f}, val_loglik={float(parent_val_logliks[0]):.6f}\n\n"
+            )
         parent_context += "Generate a variant that improves upon or explores alternatives to the parent program.\n"
     else:
         parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
@@ -2944,7 +3048,18 @@ def choose(problem, history):
                         if is_loglik_prompt_metric
                         else "train_acc"
                     )
-                    metric_str = f" ({metric_label}: {parent_metric:.4f})"
+                    if (
+                        is_loglik_prompt_metric
+                        and dataset == "choice13k"
+                        and parent_val_logliks is not None
+                        and i < len(parent_val_logliks)
+                        and parent_val_logliks[i] is not None
+                    ):
+                        metric_str = (
+                            f" (train_loglik: {parent_metric:.4f}, val_loglik: {float(parent_val_logliks[i]):.4f})"
+                        )
+                    else:
+                        metric_str = f" ({metric_label}: {parent_metric:.4f})"
                 else:
                     metric_str = ""
                 err_str = ""
@@ -2977,10 +3092,12 @@ def choose(problem, history):
             "\n\nReference aggregate/base program:\n"
             f"```python\n{base_program_code}\n```\n"
         )
+    val_examples_block = _build_val_examples_prompt_block(val_trials_for_prompt or [], max_prompt_val)
     prompt_text = (
         f"{base_prompt}\n"
         f"{extra_prompt_instructions}\n"
         f"{state_text}\n"
+        f"{val_examples_block}\n"
         f"{diagnostic_trials_text}\n"
         f"{base_context}\n"
         f"{parent_context}\n"
@@ -3476,6 +3593,10 @@ def run_evolution(
     adaptation_mode: bool = False,
     aggregate_base_code: Optional[str] = None,
     participant_text_profile: Optional[str] = None,
+    max_prompt_val: int = 10,
+    data_driven_mode: bool = False,
+    choice13k_val_trials_override: Optional[List[Dict[str, Any]]] = None,
+    choice13k_loglik_prompt_path: Optional[str] = None,
     num_diagnostic_trials: Optional[int] = None,
     lambda_complexity: float = 0.0,
     lambda_change: float = 0.0,
@@ -3521,6 +3642,8 @@ def run_evolution(
         )
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+
+    val_trials: Optional[List[Dict[str, Any]]] = None
 
     # Initialize client
     if client_kwargs is None:
@@ -3588,6 +3711,14 @@ def run_evolution(
             options = train_trials[0]["options"] if train_trials else ([0, 1] if test_trials else [])
             print("Loading Choice13k data from across-participants split (precomputed).")
             print(f"[Split] Train trials: {len(train_trials)}, Test trials: {len(test_trials)}")
+            if data_driven_mode:
+                if choice13k_val_trials_override is not None:
+                    val_trials = choice13k_val_trials_override
+                else:
+                    val_trials, test_trials = _pool_split_val_test(test_trials, split_seed)
+                print(
+                    f"[Split] data_driven val/test from pooled test: val={len(val_trials)}, test={len(test_trials)}"
+                )
         else:
             print(f"Loading Choice13k data for participant {participant_id}...")
             if choice13k_experiment is not None:
@@ -3598,15 +3729,34 @@ def run_evolution(
                     local_dataset=local_dataset,
                 )
                 exp = experiments[participant_id]
-            # Split trials
-            train_trials, test_trials, options = split_trials(exp, split_ratio=split_ratio, split_seed=split_seed)
-            print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed={split_seed}, ratio={split_ratio:.3f})")
+            train_trials, val_trials, test_trials, options = split_trials(
+                exp, split_ratio=split_ratio, split_seed=split_seed
+            )
+            print(
+                f"[Split] Train: {len(train_trials)}, Val: {len(val_trials)}, Test: {len(test_trials)} "
+                f"(seed={split_seed}, train_fraction={split_ratio:.3f})"
+            )
         test_observed_blocks = None
     
+    use_data_driven_choice13k = (
+        bool(data_driven_mode)
+        and dataset == "choice13k"
+        and fitness_metric == "loglik"
+        and val_trials is not None
+        and len(val_trials) > 0
+    )
+    if data_driven_mode and dataset == "choice13k" and fitness_metric == "loglik":
+        if val_trials is None or len(val_trials) == 0:
+            raise ValueError("data_driven_mode for choice13k+loglik requires non-empty val_trials.")
+
     # Setup output directory
     if output_dir is None:
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
-        mode = "te_aggregate" if dataset in _PARTICIPANT_DATASETS else "non_strict"
+        mode = (
+            "te_dr"
+            if dataset == "choice13k"
+            else ("te_aggregate" if dataset in _PARTICIPANT_DATASETS else "non_strict")
+        )
         if dataset == "gridworld":
             output_dir = f"generated_outputs/gridworld/{mode}/run_{timestamp}/epoch_0/agent_{agent_id}"
         elif dataset == "cpc18":
@@ -3636,6 +3786,7 @@ def run_evolution(
         print(f"BASELINE EVALUATION: Evaluating seed program ({seed_program_path})")
     print(f"{'='*80}")
     
+    baseline_val_eval = None
     if dataset == "gridworld":
         # Train: Evaluate on first 20 steps (matching ROTE's training/weighting phase)
         baseline_train_eval = evaluate_gridworld_program(
@@ -3689,6 +3840,12 @@ def run_evolution(
             baseline_test_eval = evaluate_choice13k_program(
                 baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
             )
+            if use_data_driven_choice13k and val_trials is not None:
+                baseline_val_eval = evaluate_choice13k_program(
+                    baseline_fn, val_trials, verbose=True, n_seeds=n_eval_seeds
+                )
+            else:
+                baseline_val_eval = None
         else:
             baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
             baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
@@ -3701,6 +3858,8 @@ def run_evolution(
             f"  Train avg log-likelihood: {baseline_train_eval['avg_loglik']:.6f}, "
             f"test: {baseline_test_eval['avg_loglik']:.6f}"
         )
+        if use_data_driven_choice13k and baseline_val_eval is not None:
+            print(f"  Val avg log-likelihood: {baseline_val_eval['avg_loglik']:.6f}")
     if is_cpc18_mse:
         print(f"  Train MSE: {baseline_train_mse_eval['mse']:.4f}")
         print(f"  Test MSE (official): {baseline_test_mse_eval['mse']:.4f}")
@@ -3720,6 +3879,8 @@ def run_evolution(
     if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
         baseline_results["train_loglik"] = baseline_train_eval["avg_loglik"]
         baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
+        if use_data_driven_choice13k and baseline_val_eval is not None:
+            baseline_results["val_loglik"] = baseline_val_eval["avg_loglik"]
 
     # BIR-regularized baseline (step 0): same formulas as per-iteration pool-best logs.
     # Must run before W&B / JSONL baseline so iter -1 is comparable to later steps.
@@ -3727,6 +3888,7 @@ def run_evolution(
     baseline_selection_score = None
     if (
         adaptation_mode
+        and (not use_data_driven_choice13k)
         and fitness_metric == "loglik"
         and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split)
     ):
@@ -3806,6 +3968,9 @@ def run_evolution(
                         f"p{participant_id}_train_loglik": baseline_train_eval["avg_loglik"],
                         f"p{participant_id}_test_loglik": baseline_test_eval["avg_loglik"],
                     }
+                    if use_data_driven_choice13k and dataset == "choice13k" and baseline_val_eval is not None:
+                        baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
+                        baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
                 else:
                     baseline_log_dict = {
                         f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
@@ -3827,6 +3992,9 @@ def run_evolution(
                     baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
                     baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
                     baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
+                    if use_data_driven_choice13k and dataset == "choice13k" and baseline_val_eval is not None:
+                        baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
+                        baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
         if participant_id is not None:
             baseline_log_dict[f"p{participant_id}_step"] = 0
             if (
@@ -3836,6 +4004,9 @@ def run_evolution(
             ):
                 baseline_log_dict[f"p{participant_id}/train_loglik"] = baseline_train_eval.get("avg_loglik", None)
                 baseline_log_dict[f"p{participant_id}/test_loglik"] = baseline_test_eval.get("avg_loglik", None)
+                if use_data_driven_choice13k and dataset == "choice13k" and baseline_val_eval is not None:
+                    baseline_log_dict[f"p{participant_id}/val_loglik"] = baseline_val_eval.get("avg_loglik", None)
+                    baseline_log_dict["val_loglik"] = baseline_val_eval.get("avg_loglik", None)
                 if adaptation_mode and fitness_metric == "loglik" and baseline_selection_score is not None:
                     baseline_log_dict[f"p{participant_id}/confidence_penalty"] = baseline_confidence_penalty
                     baseline_log_dict[f"p{participant_id}/selection_score"] = baseline_selection_score
@@ -3860,11 +4031,19 @@ def run_evolution(
     if is_cpc18_mse and baseline_train_mse_eval is not None:
         best_fitness = -baseline_train_mse_eval['mse']
     elif is_cpc18_split and fitness_metric == "loglik":
-        best_fitness = baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"]
+        best_fitness = (
+            baseline_selection_score
+            if adaptation_mode and not use_data_driven_choice13k
+            else baseline_train_eval["avg_loglik"]
+        )
     elif is_cpc18_split:
         best_fitness = baseline_train_eval["accuracy"]
     elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
-        best_fitness = baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"]
+        best_fitness = (
+            baseline_selection_score
+            if adaptation_mode and not use_data_driven_choice13k
+            else baseline_train_eval["avg_loglik"]
+        )
     else:
         best_fitness = baseline_train_eval["accuracy"]
     
@@ -3917,6 +4096,10 @@ def run_evolution(
             overall_best_train["test_loglik"] = baseline_test_eval["avg_loglik"]
             overall_best_test["train_loglik"] = baseline_train_eval["avg_loglik"]
             overall_best_test["test_loglik"] = baseline_test_eval["avg_loglik"]
+            if use_data_driven_choice13k and baseline_val_eval is not None:
+                vl = baseline_val_eval["avg_loglik"]
+                overall_best_train["val_loglik"] = vl
+                overall_best_test["val_loglik"] = vl
     
     # Track elite parents (top programs across all iterations)
     # Format: list of (code, fitness, test_metric, program_id, train_mse, test_mse) tuples
@@ -3933,7 +4116,11 @@ def run_evolution(
         )]
     elif is_cpc18_split:
         _bfit = (
-            (baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"])
+            (
+                baseline_selection_score
+                if adaptation_mode and not use_data_driven_choice13k
+                else baseline_train_eval["avg_loglik"]
+            )
             if fitness_metric == "loglik"
             else baseline_train_eval["accuracy"]
         )
@@ -3947,7 +4134,43 @@ def run_evolution(
             baseline_train_eval["accuracy"],
         )]
     else:
-        if dataset in {"choice13k", "mixed_gambles"}:
+        if dataset == "choice13k":
+            _baseline_fit = (
+                (
+                    baseline_selection_score
+                    if adaptation_mode and not use_data_driven_choice13k
+                    else baseline_train_eval["avg_loglik"]
+                )
+                if fitness_metric == "loglik"
+                else baseline_train_eval["accuracy"]
+            )
+            _baseline_val_ll = (
+                baseline_val_eval["avg_loglik"]
+                if use_data_driven_choice13k and baseline_val_eval is not None
+                else None
+            )
+            if use_data_driven_choice13k:
+                elite_parents = [(
+                    seed_code,
+                    _baseline_fit,
+                    baseline_test_eval["accuracy"],
+                    "baseline",
+                    None,
+                    None,
+                    baseline_train_eval["accuracy"],
+                    _baseline_val_ll,
+                )]
+            else:
+                elite_parents = [(
+                    seed_code,
+                    _baseline_fit,
+                    baseline_test_eval["accuracy"],
+                    "baseline",
+                    None,
+                    None,
+                    baseline_train_eval["accuracy"],
+                )]
+        elif dataset == "mixed_gambles":
             _baseline_fit = (
                 (baseline_selection_score if adaptation_mode else baseline_train_eval["avg_loglik"])
                 if fitness_metric == "loglik"
@@ -3990,6 +4213,7 @@ def run_evolution(
         simple_iterations_dir.mkdir(parents=True, exist_ok=True)
     for iteration in range(n_iterations):
         iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
+        iter_best_val_loglik: Optional[float] = None
         # Baseline seed is used only for initialization / first generation.
         # From iteration 2 onward, never allow it in the elite parent pool.
         if iteration_step >= 2:
@@ -4041,13 +4265,28 @@ def run_evolution(
                 )
         else:
             for i, parent_tuple in enumerate(selected_parents):
-                code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
+                code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple[:7]
                 if fitness_metric == "loglik" and (dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split):
-                    metric_label = "selection_score" if adaptation_mode else "train_loglik"
-                    print(
-                        f"  Parent {i+1}: {prog_id} "
-                        f"({metric_label}={_fmt_opt(fitness)})"
-                    )
+                    if (
+                        use_data_driven_choice13k
+                        and dataset == "choice13k"
+                        and len(parent_tuple) > 7
+                        and parent_tuple[7] is not None
+                    ):
+                        print(
+                            f"  Parent {i+1}: {prog_id} "
+                            f"(train_loglik={_fmt_opt(fitness)}, val_loglik={_fmt_opt(float(parent_tuple[7]))})"
+                        )
+                    else:
+                        metric_label = (
+                            "selection_score"
+                            if adaptation_mode and (not use_data_driven_choice13k)
+                            else "train_loglik"
+                        )
+                        print(
+                            f"  Parent {i+1}: {prog_id} "
+                            f"({metric_label}={_fmt_opt(fitness)})"
+                        )
                 else:
                     print(
                         f"  Parent {i+1}: {prog_id} "
@@ -4066,6 +4305,11 @@ def run_evolution(
                 parent_train_accs = [p[1] for p in selected_parents]
             else:
                 parent_train_accs = [p[6] for p in selected_parents]
+        parent_val_logliks: Optional[List[Optional[float]]] = None
+        if use_data_driven_choice13k and dataset == "choice13k":
+            parent_val_logliks = [
+                float(p[7]) if len(p) > 7 and p[7] is not None else None for p in selected_parents
+            ]
         needs_fallback = (
             len(selected_parents) < sample_size
             or (len(selected_parents) == 1 and selected_parents[0][3] == "baseline")
@@ -4098,7 +4342,11 @@ def run_evolution(
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
         diagnostic_text = ""
-        if adaptation_mode and num_diagnostic_trials:
+        # In data-driven Choice13k+loglik, held-out validation trials are injected via --max_prompt_val
+        # (_build_val_examples_prompt_block), not via --num_diagnostic_trials. Skip diagnostic blocks then to
+        # avoid duplicating "extra trial context" and to keep prompts smaller (te_aggregate phase-2 still uses
+        # num_diagnostic_trials when not on this path).
+        if adaptation_mode and (not use_data_driven_choice13k) and num_diagnostic_trials:
             diagnostic_text = _build_diagnostic_trials_text(
                 parent_code=parent_codes[0] if parent_codes else seed_code,
                 train_trials=train_trials if train_trials is not None else [],
@@ -4106,7 +4354,9 @@ def run_evolution(
                 num_diagnostic_trials=num_diagnostic_trials,
             )
         adaptation_instruction = ""
-        if adaptation_mode:
+        # Same split as diagnostics: data-driven run uses te_data_driven template + val examples; omit the
+        # phase-2 "minimal adaptation" / RBU-BIR instruction block which targets te_aggregate-style prompts.
+        if adaptation_mode and (not use_data_driven_choice13k):
             profile_block = ""
             if participant_text_profile and participant_text_profile.strip():
                 profile_block = (
@@ -4174,15 +4424,25 @@ def run_evolution(
                 prompt_train_trials_seed=split_seed,
                 fitness_metric=fitness_metric,
                 cpc18_official_mse=is_cpc18_mse,
-                include_train_trials_in_prompt=not adaptation_mode,
-                base_program_code=aggregate_base_code if adaptation_mode else None,
+                include_train_trials_in_prompt=(not adaptation_mode) and (not use_data_driven_choice13k),
+                base_program_code=(
+                    aggregate_base_code if adaptation_mode and (not use_data_driven_choice13k) else None
+                ),
                 diagnostic_trials_text=diagnostic_text,
                 extra_prompt_instructions=adaptation_instruction,
                 parent_runtime_errors=parent_runtime_errors,
                 parent_metric_label_override=(
                     "selection_score"
-                    if adaptation_mode and fitness_metric == "loglik"
+                    if adaptation_mode
+                    and fitness_metric == "loglik"
+                    and (not use_data_driven_choice13k)
                     else None
+                ),
+                val_trials_for_prompt=val_trials if use_data_driven_choice13k else None,
+                max_prompt_val=max_prompt_val,
+                parent_val_logliks=parent_val_logliks,
+                choice13k_loglik_prompt_path=(
+                    choice13k_loglik_prompt_path if use_data_driven_choice13k else None
                 ),
             )
         
@@ -4420,7 +4680,7 @@ def run_evolution(
                 choose_fn = compile_program(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
                 if choose_fn is None:
-                    candidate_results.append({
+                    er = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
@@ -4430,17 +4690,24 @@ def run_evolution(
                         "fitness": _worst,
                         "valid": False,
                         "runtime_valid": False,
-                    })
+                    }
+                    if use_data_driven_choice13k:
+                        er["val_loglik"] = float("-inf")
+                    candidate_results.append(er)
                     continue
                 try:
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     test_eval = (
                         None
-                        if adaptation_mode
+                        if adaptation_mode and (not use_data_driven_choice13k)
                         else evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                     )
+                    if use_data_driven_choice13k and val_trials is not None:
+                        val_eval = evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+                    else:
+                        val_eval = None
                 except (AssertionError, TypeError, ValueError):
-                    candidate_results.append({
+                    er = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
@@ -4450,21 +4717,31 @@ def run_evolution(
                         "fitness": _worst,
                         "valid": False,
                         "runtime_valid": False,
-                    })
+                    }
+                    if use_data_driven_choice13k:
+                        er["val_loglik"] = float("-inf")
+                    candidate_results.append(er)
                     continue
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
-                runtime_valid = (train_eval.get("errors", 0) == 0) and (
-                    test_eval is None or test_eval.get("errors", 0) == 0
-                )
+                val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
+                runtime_valid = train_eval.get("errors", 0) == 0
+                if test_eval is not None:
+                    runtime_valid = runtime_valid and test_eval.get("errors", 0) == 0
+                if val_eval is not None:
+                    runtime_valid = runtime_valid and val_eval.get("errors", 0) == 0
                 confidence_penalty = None
                 selection_score = None
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 if not runtime_valid:
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
-                elif adaptation_mode and fitness_metric == "loglik":
+                elif (
+                    adaptation_mode
+                    and fitness_metric == "loglik"
+                    and (not use_data_driven_choice13k)
+                ):
                     confidence_penalty = _compute_confidence_penalty(choose_fn, train_trials)
                     selection_score = _compute_selection_score(
                         float(train_loglik),
@@ -4473,7 +4750,7 @@ def run_evolution(
                         confidence_penalty=float(confidence_penalty),
                     )
                     fitness = selection_score
-                candidate_results.append({
+                row = {
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
@@ -4489,7 +4766,10 @@ def run_evolution(
                     "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
                     "runtime_valid": runtime_valid,
-                })
+                }
+                if use_data_driven_choice13k:
+                    row["val_loglik"] = val_loglik
+                candidate_results.append(row)
                 if not runtime_valid:
                     err_line = _probe_runtime_error_line(choose_fn, train_trials)
                     candidate_results[-1]["runtime_error_line"] = err_line
@@ -4643,7 +4923,7 @@ def run_evolution(
             elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 title = (
                     "Top performers (by selection_score, higher is better):"
-                    if adaptation_mode
+                    if adaptation_mode and (not use_data_driven_choice13k)
                     else "Top performers (by train avg log-likelihood, higher is better):"
                 )
                 print(f"\n{title}")
@@ -4653,20 +4933,35 @@ def run_evolution(
                         if result.get("test_loglik") is not None
                         else "N/A (eval on pool-best only)"
                     )
+                    _val_ll = (
+                        f"{result['val_loglik']:.6f}"
+                        if result.get("val_loglik") is not None
+                        else "N/A"
+                    )
                     _test_acc = (
                         f"{result['test_acc']:.4f}"
                         if result.get("test_acc") is not None
                         else "N/A"
                     )
-                    print(
-                        f"  {i+1}. Candidate {result['idx']}: "
-                        f"train_loglik={result['train_loglik']:.6f}, "
-                        f"test_loglik={_test_ll}, "
-                        f"selection_score={_fmt_opt(result.get('selection_score'), 6)}, "
-                        f"confidence_penalty={_fmt_opt(result.get('confidence_penalty'), 6)}, "
-                        f"train_acc={result['train_acc']:.4f}, "
-                        f"test_acc={_test_acc}"
-                    )
+                    if use_data_driven_choice13k and dataset == "choice13k":
+                        print(
+                            f"  {i+1}. Candidate {result['idx']}: "
+                            f"train_loglik={result['train_loglik']:.6f}, "
+                            f"val_loglik={_val_ll}, "
+                            f"test_loglik={_test_ll}, "
+                            f"train_acc={result['train_acc']:.4f}, "
+                            f"test_acc={_test_acc}"
+                        )
+                    else:
+                        print(
+                            f"  {i+1}. Candidate {result['idx']}: "
+                            f"train_loglik={result['train_loglik']:.6f}, "
+                            f"test_loglik={_test_ll}, "
+                            f"selection_score={_fmt_opt(result.get('selection_score'), 6)}, "
+                            f"confidence_penalty={_fmt_opt(result.get('confidence_penalty'), 6)}, "
+                            f"train_acc={result['train_acc']:.4f}, "
+                            f"test_acc={_test_acc}"
+                        )
             else:
                 print(f"\nTop performers (by train accuracy):")
                 for i, result in enumerate(selected_results[:5]):
@@ -4701,6 +4996,8 @@ def run_evolution(
                     )
             elif dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
+                if use_data_driven_choice13k and dataset == "choice13k" and best_result.get("val_loglik") is not None:
+                    print(f"  Val avg log-likelihood: {best_result['val_loglik']:.6f}")
                 if best_result["test_acc"] is None:
                     print("  Test accuracy: N/A (eval on pool-best only)")
                     print(
@@ -4740,15 +5037,27 @@ def run_evolution(
                         result["train_acc"],
                     ))
                 else:
-                    elite_parents.append((
-                        result["code"],
-                        result["fitness"],
-                        result["test_acc"],
-                        program_id,
-                        None,
-                        None,
-                        result["train_acc"],
-                    ))
+                    if use_data_driven_choice13k and dataset == "choice13k":
+                        elite_parents.append((
+                            result["code"],
+                            result["fitness"],
+                            result["test_acc"],
+                            program_id,
+                            None,
+                            None,
+                            result["train_acc"],
+                            result.get("val_loglik"),
+                        ))
+                    else:
+                        elite_parents.append((
+                            result["code"],
+                            result["fitness"],
+                            result["test_acc"],
+                            program_id,
+                            None,
+                            None,
+                            result["train_acc"],
+                        ))
             # Remove seed baseline from pool-best selection/logging from iteration 1 onward.
             if iteration_step >= 1:
                 elite_parents = [p for p in elite_parents if p[3] != "baseline"]
@@ -4768,6 +5077,7 @@ def run_evolution(
             iter_best_test_acc = best_result["test_acc"]
             iter_best_train_loglik = best_result.get("train_loglik")
             iter_best_test_loglik = best_result.get("test_loglik")
+            iter_best_val_loglik = best_result.get("val_loglik")
             iter_best_confidence_penalty = best_result.get("confidence_penalty")
             iter_best_selection_score = best_result.get("selection_score")
             if fitness_metric == "loglik" and (is_cpc18_split or dataset in {"choice13k", "mixed_gambles"}):
@@ -4787,11 +5097,16 @@ def run_evolution(
                         iter_best_test_eval = evaluate_choice13k_program(
                             iter_best_fn, test_trials, n_seeds=n_eval_seeds
                         )
+                        if use_data_driven_choice13k and val_trials is not None:
+                            iter_best_val_eval = evaluate_choice13k_program(
+                                iter_best_fn, val_trials, n_seeds=n_eval_seeds
+                            )
+                            iter_best_val_loglik = iter_best_val_eval["avg_loglik"]
                     iter_best_train_acc = iter_best_train_eval["accuracy"]
                     iter_best_test_acc = iter_best_test_eval["accuracy"]
                     iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
                     iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
-                    if adaptation_mode:
+                    if adaptation_mode and (not use_data_driven_choice13k):
                         iter_best_confidence_penalty = _compute_confidence_penalty(iter_best_fn, train_trials)
                         iter_best_selection_score = _compute_selection_score(
                             float(iter_best_train_loglik),
@@ -4806,10 +5121,11 @@ def run_evolution(
                     # Should be rare; keep loop stable if a pool entry cannot recompile.
                     iter_best_test_acc = None
                     iter_best_test_loglik = None
+                    iter_best_val_loglik = None
 
             if choice13k_simple_logging and dataset == "choice13k" and save_artifacts and simple_iterations_dir is not None:
                 (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(iter_best_code or "")
-                simple_iterations_rows.append({
+                row_it = {
                     "iteration": iteration_step,
                     "train_fitness": iter_best_fitness,
                     "test_fitness": (
@@ -4823,7 +5139,10 @@ def run_evolution(
                     "test_loglik": iter_best_test_loglik,
                     "selection_score": iter_best_selection_score,
                     "confidence_penalty": iter_best_confidence_penalty,
-                })
+                }
+                if use_data_driven_choice13k:
+                    row_it["val_loglik"] = iter_best_val_loglik
+                simple_iterations_rows.append(row_it)
             best_fitness = iter_best_fitness
             
             # Update overall best tracking
@@ -4878,7 +5197,44 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
-            elif dataset in {"choice13k", "mixed_gambles"}:
+            elif dataset == "choice13k":
+                if fitness_metric == "loglik":
+                    _train_better = (
+                        iter_best_train_loglik is not None
+                        and iter_best_train_loglik > overall_best_train["train_loglik"]
+                    )
+                else:
+                    _train_better = best_result["train_acc"] > overall_best_train["train_accuracy"]
+                if _train_better:
+                    ob = {
+                        "train_accuracy": iter_best_train_acc,
+                        "test_accuracy": iter_best_test_acc,
+                        "train_loglik": iter_best_train_loglik,
+                        "test_loglik": iter_best_test_loglik,
+                        "program_id": iter_best_program_id,
+                    }
+                    if use_data_driven_choice13k:
+                        ob["val_loglik"] = iter_best_val_loglik
+                    overall_best_train = ob
+                if fitness_metric == "loglik":
+                    _test_better = (
+                        iter_best_test_loglik is not None
+                        and iter_best_test_loglik > overall_best_test["test_loglik"]
+                    )
+                else:
+                    _test_better = best_result["test_acc"] > overall_best_test["test_accuracy"]
+                if _test_better:
+                    ob2 = {
+                        "train_accuracy": iter_best_train_acc,
+                        "test_accuracy": iter_best_test_acc,
+                        "train_loglik": iter_best_train_loglik,
+                        "test_loglik": iter_best_test_loglik,
+                        "program_id": iter_best_program_id,
+                    }
+                    if use_data_driven_choice13k:
+                        ob2["val_loglik"] = iter_best_val_loglik
+                    overall_best_test = ob2
+            elif dataset == "mixed_gambles":
                 if fitness_metric == "loglik":
                     _train_better = (
                         iter_best_train_loglik is not None
@@ -5001,6 +5357,7 @@ def run_evolution(
                         "test_acc": r["test_acc"],
                         "train_loglik": r.get("train_loglik"),
                         "test_loglik": r.get("test_loglik"),
+                        "val_loglik": r.get("val_loglik"),
                         "selection_score": r.get("selection_score"),
                         "confidence_penalty": r.get("confidence_penalty"),
                         "fitness": r.get("fitness"),
@@ -5014,6 +5371,11 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "best_val_loglik": (
+                    iter_best_val_loglik
+                    if (selected_results and use_data_driven_choice13k and dataset == "choice13k")
+                    else None
+                ),
             }
         else:
             metrics = {
@@ -5069,6 +5431,11 @@ def run_evolution(
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
+                "best_val_loglik": (
+                    iter_best_val_loglik
+                    if (selected_results and use_data_driven_choice13k and dataset == "choice13k")
+                    else None
+                ),
                 "best_selection_score": iter_best_selection_score if selected_results else None,
                 "best_confidence_penalty": iter_best_confidence_penalty if selected_results else None,
                 "n_valid": len(compile_valid_results),
@@ -5217,6 +5584,9 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
                         log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
                         log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
+                        if use_data_driven_choice13k and dataset == "choice13k":
+                            log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
+                            log_dict["val_loglik"] = iter_best_val_loglik
                         if adaptation_mode and fitness_metric == "loglik":
                             log_dict[f"p{participant_id}_selection_score"] = iter_best_selection_score
                             log_dict[f"p{participant_id}_confidence_penalty"] = iter_best_confidence_penalty
@@ -5231,6 +5601,9 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
                         log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
                         log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
+                        if use_data_driven_choice13k and dataset == "choice13k":
+                            log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
+                            log_dict["val_loglik"] = iter_best_val_loglik
                         log_dict[f"p{participant_id}_train_fitness"] = best_fitness
                         log_dict[f"p{participant_id}_test_fitness"] = (
                             iter_best_test_loglik
@@ -5263,7 +5636,10 @@ def run_evolution(
                 if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
                     log_dict[f"p{participant_id}/train_loglik"] = iter_best_train_loglik
                     log_dict[f"p{participant_id}/test_loglik"] = iter_best_test_loglik
-                    if adaptation_mode and fitness_metric == "loglik":
+                    if use_data_driven_choice13k and dataset == "choice13k":
+                        log_dict[f"p{participant_id}/val_loglik"] = iter_best_val_loglik
+                        log_dict["val_loglik"] = iter_best_val_loglik
+                    if adaptation_mode and fitness_metric == "loglik" and (not use_data_driven_choice13k):
                         log_dict[f"p{participant_id}/selection_score"] = iter_best_selection_score
                         log_dict[f"p{participant_id}/confidence_penalty"] = iter_best_confidence_penalty
                         wb_tag = "[W&B RBU]" if use_rbu else "[W&B BIR]"
@@ -5403,7 +5779,10 @@ def run_evolution(
     elif dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
         final_train_eval = evaluate_choice13k_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
         final_test_eval = evaluate_choice13k_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
-        if adaptation_mode and fitness_metric == "loglik":
+        final_val_eval = None
+        if use_data_driven_choice13k and dataset == "choice13k" and val_trials is not None:
+            final_val_eval = evaluate_choice13k_program(final_best_fn, val_trials, n_seeds=n_eval_seeds)
+        if adaptation_mode and fitness_metric == "loglik" and (not use_data_driven_choice13k):
             final_confidence_penalty = _compute_confidence_penalty(final_best_fn, train_trials)
             final_selection_score = _compute_selection_score(
                 float(final_train_eval["avg_loglik"]),
@@ -5423,6 +5802,8 @@ def run_evolution(
             "origin_candidate_idx": best_candidate_idx,
             "program_file": best_program_filename,
         }
+        if final_val_eval is not None:
+            overall_best_train["val_loglik"] = final_val_eval["avg_loglik"]
         overall_best_test = dict(overall_best_train)
     else:
         final_train_eval = evaluate_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
@@ -5453,19 +5834,9 @@ def run_evolution(
         (output_path / "results.json").write_text(_json_dumps_safe(results, indent=2))
     if save_artifacts and choice13k_simple_logging and dataset == "choice13k":
         if simple_iterations_rows:
+            _it_fields = list(simple_iterations_rows[0].keys())
             with open(output_path / "iterations.csv", "w", newline="") as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=[
-                        "iteration",
-                        "train_fitness",
-                        "test_fitness",
-                        "train_acc",
-                        "test_acc",
-                        "train_loglik",
-                        "test_loglik",
-                    ],
-                )
+                writer = csv.DictWriter(f, fieldnames=_it_fields)
                 writer.writeheader()
                 writer.writerows(simple_iterations_rows)
         summary_row = {
@@ -5485,6 +5856,8 @@ def run_evolution(
             "test_loglik": overall_best_test.get("test_loglik"),
             "fitness_metric": fitness_metric,
         }
+        if use_data_driven_choice13k:
+            summary_row["val_loglik"] = overall_best_train.get("val_loglik")
         with open(output_path / "summary.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(summary_row.keys()))
             writer.writeheader()
@@ -5535,6 +5908,8 @@ def run_evolution(
                 f"Final best train avg log-likelihood: {overall_best_train['train_loglik']:.6f}, "
                 f"test: {overall_best_test['test_loglik']:.6f}"
             )
+            if use_data_driven_choice13k and overall_best_train.get("val_loglik") is not None:
+                print(f"Final best val avg log-likelihood: {overall_best_train['val_loglik']:.6f}")
             print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
             print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
             print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
@@ -5633,6 +6008,9 @@ def run_evolution(
             "confidence_penalty": final_confidence_penalty,
             "selection_score": final_selection_score,
         }
+        if use_data_driven_choice13k:
+            result["val_loglik"] = overall_best_train.get("val_loglik")
+            result["seed_program_val_fitness"] = baseline_results.get("val_loglik")
     elif dataset == "mixed_gambles" and fitness_metric == "loglik":
         result = {
             "participant_id": participant_id,
@@ -6001,11 +6379,12 @@ def main():
         "--participant_scope",
         type=str,
         default="single",
-        choices=["single", "range", "all"],
+        choices=["single", "range", "ordinals", "all"],
         help=(
             "For choice13k / cpc18 / mixed_gambles: how to select participants. "
             "'single' uses --single_participant_id (raw id). "
             "'range' uses --range_start_ordinal/--range_end_ordinal (inclusive) into datasets/*/valid_participant_ids.json. "
+            "'ordinals' uses --ordinals (0-based indices into that same list, not raw ids). "
             "'all' runs all raw ids from that JSON, optionally capped by --all_max_participants. "
             "Ignored for gridworld (use --num_agents_to_sample / --agent_id)."
         ),
@@ -6033,6 +6412,17 @@ def main():
         type=int,
         default=None,
         help="When --participant_scope all: use only the first N valid raw ids from JSON. Omit to run all valids.",
+    )
+    parser.add_argument(
+        "--ordinals",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="I",
+        help=(
+            "When --participant_scope ordinals: 0-based ordinals into datasets/*/valid_participant_ids.json "
+            "(same ordering as range), not raw participant ids. Example: --ordinals 0 4 9"
+        ),
     )
     parser.add_argument(
         "--num_agents_to_sample",
@@ -6096,10 +6486,13 @@ def main():
         ),
     )
     parser.add_argument(
-        "--num_diagnostic_trials",
+        "--max_prompt_val",
         type=int,
-        default=None,
-        help="Optional number of adaptation diagnostic train trials (recommend 10: 5 hard + 5 easy).",
+        default=10,
+        help=(
+            "Data-driven Choice13k: max validation trials to include in each LLM generation prompt "
+            "(structure + calibration context). Default: 10."
+        ),
     )
     parser.add_argument(
         "--lambda_complexity",
@@ -6211,7 +6604,7 @@ def main():
             "choice13k --phase_option evolution with --use_rbu True: path to a prior run's combined "
             "structure-score file (same format as analysis/Structure_score_all.txt). "
             "BIR is recomputed on the current train split; S is read from this file; RBU uses this run's "
-            "--structure_weight. Example: generated_outputs/choice13k/te_aggregate/<run>/analysis/Structure_score_all.txt"
+            "--structure_weight. Example: generated_outputs/choice13k/te_dr/<run>/analysis/Structure_score_all.txt"
         ),
     )
     parser.add_argument(
@@ -6344,8 +6737,11 @@ def main():
     parser.add_argument(
         "--split_ratio",
         type=float,
-        default=0.9,
-        help="Global train ratio for splitting (default: 0.9).",
+        default=0.8,
+        help=(
+            "Train fraction of problems (blocks) for Choice13k within-participant split; "
+            "remaining blocks are split equally between validation and test (e.g. 0.8 → 80%% train, 10%% val, 10%% test)."
+        ),
     )
     parser.add_argument(
         "--split_seed",
@@ -6405,8 +6801,8 @@ def main():
     if args.n_iterations < 1:
         print("Error: --n_iterations must be >= 1.")
         return
-    if args.num_diagnostic_trials is not None and args.num_diagnostic_trials < 1:
-        print("Error: --num_diagnostic_trials must be >= 1 when provided.")
+    if args.max_prompt_val < 0:
+        print("Error: --max_prompt_val must be >= 0.")
         return
     if args.lambda_complexity < 0.0 or args.lambda_change < 0.0:
         print("Error: --lambda_complexity and --lambda_change must be >= 0.")
@@ -6435,7 +6831,7 @@ def main():
     if args.phase_option != "all" and getattr(args, "participant_scope", None) == "all":
         print(
             "Error: --phase_option score|evolution is not compatible with --participant_scope all "
-            "(use single or range)."
+            "(use single, range, or ordinals)."
         )
         return
     if args.phase_option == "evolution" and args.dataset == "choice13k" and args.use_rbu:
@@ -6454,6 +6850,18 @@ def main():
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
 
+    if args.dataset in _PARTICIPANT_DATASETS:
+        if args.participant_scope == "ordinals":
+            if not args.ordinals:
+                print(
+                    "Error: --participant_scope ordinals requires --ordinals with at least one integer "
+                    "(e.g. --ordinals 0 4 9)."
+                )
+                return
+        elif args.ordinals is not None:
+            print("Error: --ordinals is only valid with --participant_scope ordinals.")
+            return
+
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     
@@ -6467,7 +6875,7 @@ def main():
             wandb = _wandb
             # Include dataset in run name
             dataset_prefix = args.dataset if args.dataset else "choice13k"
-            run_tag = "te_aggregate" if args.dataset in _PARTICIPANT_DATASETS else "non_strict"
+            run_tag = "te_dr" if args.dataset in _PARTICIPANT_DATASETS else "non_strict"
             run_name = f"{dataset_prefix}_{run_tag}_{timestamp}"
             if args.dataset in _PARTICIPANT_DATASETS:
                 if args.participant_scope == "single":
@@ -6476,6 +6884,11 @@ def main():
                     run_name = (
                         f"{run_name}_ordinals_{args.range_start_ordinal}_to_{args.range_end_ordinal}"
                     )
+                elif args.participant_scope == "ordinals":
+                    tag = "_".join(str(x) for x in (args.ordinals or []))
+                    if len(tag) > 120:
+                        tag = tag[:120] + "_etc"
+                    run_name = f"{run_name}_ordinals_{tag}"
                 else:
                     run_name = f"{run_name}_all_valid"
             else:
@@ -6514,6 +6927,7 @@ def main():
                 range_start_ordinal=args.range_start_ordinal,
                 range_end_ordinal=args.range_end_ordinal,
                 all_max_participants=args.all_max_participants,
+                participant_ordinals=args.ordinals,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
             )
         except FileNotFoundError as e:
@@ -6538,6 +6952,12 @@ def main():
             print(
                 "Participant scope: range -> using inclusive ordinal slice "
                 f"[{args.range_start_ordinal}, {args.range_end_ordinal}] from valid_participant_ids.json."
+            )
+        elif args.participant_scope == "ordinals":
+            print(
+                "Participant scope: ordinals -> using raw participant ids at 0-based ordinals "
+                f"{list(args.ordinals)} from valid_participant_ids.json "
+                "(duplicate ordinals collapse to one id; order follows first occurrence)."
             )
         else:
             cap_text = (
@@ -6587,8 +7007,10 @@ def main():
             base_run_dir = f"generated_outputs/cpc18/{mode}/run_{timestamp}"
         elif args.dataset == "mixed_gambles":
             base_run_dir = f"generated_outputs/mixed_gambles/{mode}/run_{timestamp}"
+        elif args.dataset == "choice13k":
+            base_run_dir = f"generated_outputs/choice13k/te_dr/run_{timestamp}"
         else:
-            base_run_dir = f"generated_outputs/choice13k/{mode}/run_{timestamp}"
+            base_run_dir = f"generated_outputs/{args.dataset}/{mode}/run_{timestamp}"
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
     elif len(participants_to_process) > 1:
         # Multiple participants with custom output_dir: use that as base directory
@@ -6666,6 +7088,7 @@ def main():
             test_trials.extend(p_trials)
         print(f"Across-participants trial counts: train={len(train_trials)}, test={len(test_trials)}")
 
+        te_dr_prompt = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
         try:
             run_evolution(
                 seed_program_path=seed_program_path,
@@ -6699,6 +7122,10 @@ def main():
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
+                adaptation_mode=False,
+                data_driven_mode=args.fitness_metric == "loglik",
+                max_prompt_val=args.max_prompt_val,
+                choice13k_loglik_prompt_path=te_dr_prompt if args.fitness_metric == "loglik" else None,
                 hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
                 hard_participant_warmup_iters=args.hard_participant_warmup_iters,
                 early_stop=args.early_stop,
@@ -6716,163 +7143,78 @@ def main():
         return
 
     if args.dataset in _PARTICIPANT_DATASETS:
-        if args.dataset == "cpc18" and args.cpc18_official_mse:
-            raise ValueError(
-                "te_aggregate two-phase flow requires cpc18 held-out loglik mode; do not set --cpc18_official_mse."
+        if args.dataset != "choice13k":
+            print(
+                "Error: te_dr.py supports data-driven evolution for --dataset choice13k only. "
+                "Use te_aggregate.py for cpc18 / mixed_gambles participant workflows."
             )
+            if wandb is not None:
+                wandb.finish()
+            return
         if args.fitness_metric != "loglik":
-            raise ValueError("te_aggregate two-phase flow currently supports --fitness_metric loglik only.")
+            print("Error: te_dr.py requires --fitness_metric loglik.")
+            if wandb is not None:
+                wandb.finish()
+            return
         if args.split_mode != "within_participant":
-            raise ValueError("te_aggregate two-phase flow requires --split_mode within_participant.")
-
-        print("\n=== Two-phase mode: text-profile warmup + participant adaptation ===")
-
-        participant_trials: Dict[int, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
-        max_pid = max(participants_to_process)
-        cached_choice13k = (
-            get_choice13k_experiments(
-                n_participants=max_pid + 1,
-                local_dataset=args.local_dataset,
+            print(
+                "Error: te_dr.py requires --split_mode within_participant "
+                "(train/val/test split by problem block)."
             )
-            if args.dataset == "choice13k"
-            else None
-        )
-        for pid in participants_to_process:
-            if args.dataset == "choice13k":
-                exp = cached_choice13k[pid]
-                tr, te, _ = split_trials(exp, split_ratio=args.split_ratio, split_seed=args.split_seed)
-            elif args.dataset == "cpc18":
-                cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
-                pdata = load_cpc18_track2_data(data_path=cpc18_data_path, participant_id=pid)
-                tr, te, _ = split_cpc18_trials(
-                    pdata,
-                    train_ratio=0.8,
-                    cpc18_official_mse=False,
-                    split_ratio=args.split_ratio,
-                    split_seed=args.split_seed,
-                )
-            else:
-                tr, te, _ = load_mixed_gambles_data(
-                    "datasets/mixed_gambles/data_all_2021-01-08.csv",
-                    pid,
-                    filter_gain_loss_only=mixed_gambles_gain_loss_only,
-                    split_ratio=args.split_ratio,
-                    split_seed=args.split_seed,
-                )
-            participant_trials[pid] = (tr, te)
-
-        bir_train_only: Dict[int, List[Dict[str, Any]]] = {pid: tr for pid, (tr, _) in participant_trials.items()}
-
-        rbu_prepare_path = (
-            Path(args.prepare_instruction_path)
-            if args.prepare_instruction_path
-            else _rbu_default_prepare_instruction_path(args.dataset)
-        )
-        rbu_use_path = (
-            Path(args.use_instruction_path)
-            if args.use_instruction_path
-            else _rbu_default_use_instruction_path(args.dataset)
-        )
-
-        profile_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
-
-        pid_list = list(participants_to_process)
-        if args.dataset == "choice13k" and args.phase_option == "evolution":
-            bir_report_rows_e, participant_bir_map_e = _build_behavioral_inconsistency_rows(bir_train_only)
-            analysis_dir = Path(base_run_dir) / "analysis"
-            analysis_dir.mkdir(parents=True, exist_ok=True)
-            if args.use_rbu:
-                structure_resolved = _resolve_scoring_input_path(str(args.structure_path))
-                raw_scores = structure_resolved.read_text(encoding="utf-8")
-                dest_structure = analysis_dir / _RBU_STRUCTURE_SCORE_ALL_FILENAME
-                shutil.copy2(structure_resolved, dest_structure)
-                print(
-                    f"[phase_option=evolution] Copied structure score file to {dest_structure} "
-                    f"(from {structure_resolved})"
-                )
-                score_all_path = dest_structure
-                try:
-                    parsed = parse_all_participant_structure_scores(
-                        raw_scores,
-                        expected_participant_ids=tuple(sorted(int(x) for x in pid_list)),
-                    )
-                except StructureScoreParseError as exc:
-                    raise RuntimeError(
-                        f"Structure score parse failed path={score_all_path}: {exc}\n"
-                        f"raw_output (first 2400 chars):\n{raw_scores[:2400]!r}"
-                    ) from exc
-                participant_rbu_map_e, participant_structure_score_map_e, participant_structure_components_e = (
-                    _merge_structure_parse_into_bir_rows(
-                        bir_report_rows_e,
-                        parsed,
-                        use_rbu=True,
-                        structure_weight=float(args.structure_weight),
-                    )
-                )
-            else:
-                participant_rbu_map_e, participant_structure_score_map_e, participant_structure_components_e = (
-                    _merge_structure_parse_into_bir_rows(
-                        bir_report_rows_e,
-                        None,
-                        use_rbu=False,
-                        structure_weight=float(args.structure_weight),
-                    )
-                )
-                print("[phase_option=evolution] --use_rbu False: skipping --structure_path; RBU rate is BIR.")
-
-            _write_behavioral_inconsistency_csv(Path(base_run_dir), bir_report_rows_e)
-            scoring = TeAggregateScoringState(
-                bir_report_rows=bir_report_rows_e,
-                participant_bir_map=participant_bir_map_e,
-                participant_rbu_map=participant_rbu_map_e,
-                participant_structure_score_map=participant_structure_score_map_e,
-                participant_structure_components=participant_structure_components_e,
-                participant_profiles={},
-            )
-            _log_choice13k_evolution_loaded_rates(
-                scoring,
-                pid_list,
-                use_rbu=bool(args.use_rbu),
-            )
-            profiles = _te_aggregate_run_profile_warmup_if_enabled(
-                args=args,
-                participants_to_process=pid_list,
-                participant_trials=participant_trials,
-                profile_client=profile_client,
-                base_run_dir=base_run_dir,
-            )
-            scoring = replace(scoring, participant_profiles=profiles)
-        else:
-            scoring = _te_aggregate_run_scoring_stage(
-                args=args,
-                base_run_dir=base_run_dir,
-                participants_to_process=pid_list,
-                bir_train_only=bir_train_only,
-                participant_trials=participant_trials,
-                profile_client=profile_client,
-                rbu_prepare_path=rbu_prepare_path,
-                rbu_use_path=rbu_use_path,
-            )
-
-        if args.dataset == "choice13k" and args.phase_option == "score":
-            print("\n[phase_option=score] Scoring complete; skipping phase-2 evolution.")
             if wandb is not None:
                 wandb.finish()
             return
 
+        te_dr_prompt = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
+        print("\n=== Data-driven single-phase evolution (Choice13k) ===")
+        pid_list = list(participants_to_process)
         try:
-            _te_aggregate_run_evolution_stage(
-                args=args,
-                base_run_dir=base_run_dir,
-                seed_program_path=seed_program_path,
-                participants_to_process=pid_list,
-                participant_trials=participant_trials,
-                scoring=scoring,
-                wandb=wandb,
-                client_kwargs=client_kwargs,
-                mixed_gambles_gain_loss_only=mixed_gambles_gain_loss_only,
-                _wandb_log_with_global_step=_wandb_log_with_global_step,
-            )
+            for participant_id in tqdm(pid_list, desc="Participants"):
+                participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
+                run_evolution(
+                    seed_program_path=seed_program_path,
+                    dataset="choice13k",
+                    participant_id=participant_id,
+                    data_path=args.data_path,
+                    num_blocks=getattr(args, "num_blocks", None),
+                    num_walls=getattr(args, "num_walls", None),
+                    agent_id=getattr(args, "agent_id", None),
+                    n_iterations=args.n_iterations,
+                    n_candidates_per_iteration=args.n_candidates,
+                    model_name=args.model_name,
+                    client_kwargs=client_kwargs if client_kwargs else None,
+                    output_dir=participant_output_dir,
+                    wandb=wandb,
+                    wandb_log_fn=_wandb_log_with_global_step,
+                    n_eval_seeds=args.n_eval_seeds,
+                    sample_size=args.sample_size,
+                    sample_parents=args.sample_parents,
+                    elite_pool_size=args.elite_pool_size,
+                    filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                    save_artifacts=True,
+                    all_data_mode=False,
+                    choice13k_experiment=None,
+                    fitness_metric=args.fitness_metric,
+                    split_ratio=args.split_ratio,
+                    split_seed=args.split_seed,
+                    max_prompt_train_trials=args.max_prompt_train_trials,
+                    max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                    llm_max_tokens=args.llm_max_tokens,
+                    adaptation_mode=False,
+                    data_driven_mode=True,
+                    max_prompt_val=args.max_prompt_val,
+                    choice13k_loglik_prompt_path=te_dr_prompt,
+                    hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
+                    hard_participant_warmup_iters=args.hard_participant_warmup_iters,
+                    early_stop=args.early_stop,
+                    debug_continue_after_early_stop=args.debug_continue_after_early_stop,
+                    local_dataset=args.local_dataset,
+                    rbu_lambda=args.uncertainty_lambda,
+                    use_rbu=False,
+                    participant_bir=0.0,
+                    participant_rbu=0.0,
+                    rbu_prompt_threshold=args.uncertainty_threshold,
+                )
         finally:
             if wandb is not None:
                 wandb.finish()
@@ -6891,6 +7233,8 @@ def main():
             f"Participant scope=all using precomputed valid ids. "
             f"Total participants to process: {len(participants_to_process)}."
         )
+
+        te_dr_prompt_all = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
 
         try:
             for participant_id in tqdm(participants_to_process, desc="Participants"):
@@ -6925,6 +7269,12 @@ def main():
                     max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
+                    adaptation_mode=False,
+                    data_driven_mode=(args.dataset == "choice13k" and args.fitness_metric == "loglik"),
+                    max_prompt_val=args.max_prompt_val,
+                    choice13k_loglik_prompt_path=(
+                        te_dr_prompt_all if args.dataset == "choice13k" and args.fitness_metric == "loglik" else None
+                    ),
                     hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
                     hard_participant_warmup_iters=args.hard_participant_warmup_iters,
                     early_stop=args.early_stop,
@@ -6949,6 +7299,7 @@ def main():
                 participant_details_loglik.append({
                     "participant_id": participant_id,
                     "train_loglik": participant_summary.get("train_loglik"),
+                    "val_loglik": participant_summary.get("val_loglik"),
                     "test_loglik": participant_summary.get("test_loglik"),
                     "selection_score": participant_summary.get("selection_score"),
                 })
@@ -6985,7 +7336,7 @@ def main():
                     )
 
                 with open(details_loglik_file, "w", newline="") as f:
-                    fieldnames = ["participant_id", "train_loglik", "test_loglik", "selection_score"]
+                    fieldnames = ["participant_id", "train_loglik", "val_loglik", "test_loglik", "selection_score"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
                     writer.writerows(_round_floats_for_csv_rows(participant_details_loglik))
@@ -6993,15 +7344,24 @@ def main():
                 train_loglik_values = [
                     d["train_loglik"] for d in participant_details_loglik if d["train_loglik"] is not None
                 ]
+                val_loglik_values = [
+                    d["val_loglik"] for d in participant_details_loglik if d.get("val_loglik") is not None
+                ]
                 test_loglik_values = [
                     d["test_loglik"] for d in participant_details_loglik if d["test_loglik"] is not None
                 ]
                 avg_train_loglik = float(np.mean(train_loglik_values)) if train_loglik_values else None
+                avg_val_loglik = float(np.mean(val_loglik_values)) if val_loglik_values else None
                 avg_test_loglik = float(np.mean(test_loglik_values)) if test_loglik_values else None
                 with open(summary_loglik_file, "w", newline="") as f:
                     writer = csv.DictWriter(
                         f,
-                        fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
+                        fieldnames=[
+                            "num_of_participants",
+                            "avg_train_loglik",
+                            "avg_val_loglik",
+                            "avg_test_loglik",
+                        ],
                     )
                     writer.writeheader()
                     writer.writerow(
@@ -7009,6 +7369,7 @@ def main():
                             {
                                 "num_of_participants": len(participant_details_loglik),
                                 "avg_train_loglik": avg_train_loglik,
+                                "avg_val_loglik": avg_val_loglik,
                                 "avg_test_loglik": avg_test_loglik,
                             }
                         )
@@ -7257,10 +7618,10 @@ def main():
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
                         rbu_lambda=args.uncertainty_lambda,
-                    use_rbu=False,
-                    participant_bir=0.0,
-                    participant_rbu=0.0,
-                    rbu_prompt_threshold=args.uncertainty_threshold,
+                        use_rbu=False,
+                        participant_bir=0.0,
+                        participant_rbu=0.0,
+                        rbu_prompt_threshold=args.uncertainty_threshold,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -7389,10 +7750,10 @@ def main():
                         debug_continue_after_early_stop=args.debug_continue_after_early_stop,
                         local_dataset=args.local_dataset,
                         rbu_lambda=args.uncertainty_lambda,
-                    use_rbu=False,
-                    participant_bir=0.0,
-                    participant_rbu=0.0,
-                    rbu_prompt_threshold=args.uncertainty_threshold,
+                        use_rbu=False,
+                        participant_bir=0.0,
+                        participant_rbu=0.0,
+                        rbu_prompt_threshold=args.uncertainty_threshold,
                     )
                 
                 # Update participants summary after each participant completes
@@ -7405,17 +7766,25 @@ def main():
                         writer.writerows(_round_floats_for_csv_rows(participants_summary))
                     print(f"\nParticipants summary updated: {summary_file}")
 
-                    if args.participant_scope == "range":
+                    if args.participant_scope in ("range", "ordinals"):
                         participants_loglik_summary.append({
                             "participant_id": participant_summary.get("participant_id"),
                             "train_loglik": participant_summary.get("train_loglik"),
+                            "val_loglik": participant_summary.get("val_loglik"),
                             "test_loglik": participant_summary.get("test_loglik"),
                             "selection_score": participant_summary.get("selection_score"),
                         })
                         if details_loglik_file is not None:
                             with open(details_loglik_file, "w", newline="") as f:
                                 writer = csv.DictWriter(
-                                    f, fieldnames=["participant_id", "train_loglik", "test_loglik", "selection_score"]
+                                    f,
+                                    fieldnames=[
+                                        "participant_id",
+                                        "train_loglik",
+                                        "val_loglik",
+                                        "test_loglik",
+                                        "selection_score",
+                                    ],
                                 )
                                 writer.writeheader()
                                 writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
@@ -7423,13 +7792,21 @@ def main():
                             train_ll_vals = [
                                 d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None
                             ]
+                            val_ll_vals = [
+                                d["val_loglik"] for d in participants_loglik_summary if d.get("val_loglik") is not None
+                            ]
                             test_ll_vals = [
                                 d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None
                             ]
                             with open(summary_loglik_file, "w", newline="") as f:
                                 writer = csv.DictWriter(
                                     f,
-                                    fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
+                                    fieldnames=[
+                                        "num_of_participants",
+                                        "avg_train_loglik",
+                                        "avg_val_loglik",
+                                        "avg_test_loglik",
+                                    ],
                                 )
                                 writer.writeheader()
                                 writer.writerow(
@@ -7437,6 +7814,7 @@ def main():
                                         {
                                             "num_of_participants": len(participants_loglik_summary),
                                             "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                                            "avg_val_loglik": float(np.mean(val_ll_vals)) if val_ll_vals else None,
                                             "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
                                         }
                                     )
