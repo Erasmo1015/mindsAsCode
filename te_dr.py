@@ -7168,10 +7168,14 @@ def main():
         te_dr_prompt = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
         print("\n=== Data-driven single-phase evolution (Choice13k) ===")
         pid_list = list(participants_to_process)
+        run_root = Path(base_run_dir)
+        details_loglik_file = run_root / "participant_details_loglik.csv"
+        summary_loglik_file = run_root / "summary_loglik.csv"
+        participants_loglik_summary: List[Dict[str, Any]] = []
         try:
             for participant_id in tqdm(pid_list, desc="Participants"):
                 participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
-                run_evolution(
+                participant_summary = run_evolution(
                     seed_program_path=seed_program_path,
                     dataset="choice13k",
                     participant_id=participant_id,
@@ -7215,6 +7219,63 @@ def main():
                     participant_rbu=0.0,
                     rbu_prompt_threshold=args.uncertainty_threshold,
                 )
+                if participant_summary is not None:
+                    participants_loglik_summary.append(
+                        {
+                            "participant_id": participant_summary.get("participant_id"),
+                            "train_loglik": participant_summary.get("train_loglik"),
+                            "val_loglik": participant_summary.get("val_loglik"),
+                            "test_loglik": participant_summary.get("test_loglik"),
+                            "selection_score": participant_summary.get("selection_score"),
+                        }
+                    )
+                    with open(details_loglik_file, "w", newline="") as f:
+                        writer = csv.DictWriter(
+                            f,
+                            fieldnames=[
+                                "participant_id",
+                                "train_loglik",
+                                "val_loglik",
+                                "test_loglik",
+                                "selection_score",
+                            ],
+                        )
+                        writer.writeheader()
+                        writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
+                    train_ll_vals = [
+                        d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None
+                    ]
+                    val_ll_vals = [
+                        d["val_loglik"] for d in participants_loglik_summary if d.get("val_loglik") is not None
+                    ]
+                    test_ll_vals = [
+                        d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None
+                    ]
+                    with open(summary_loglik_file, "w", newline="") as f:
+                        writer = csv.DictWriter(
+                            f,
+                            fieldnames=[
+                                "num_of_participants",
+                                "avg_train_loglik",
+                                "avg_val_loglik",
+                                "avg_test_loglik",
+                            ],
+                        )
+                        writer.writeheader()
+                        writer.writerow(
+                            _round_floats_for_csv_row(
+                                {
+                                    "num_of_participants": len(participants_loglik_summary),
+                                    "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                                    "avg_val_loglik": float(np.mean(val_ll_vals)) if val_ll_vals else None,
+                                    "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
+                                }
+                            )
+                        )
+                    print(
+                        f"\nUpdated run-level loglik CSVs: {details_loglik_file} "
+                        f"and {summary_loglik_file} ({len(participants_loglik_summary)} participant(s))."
+                    )
         finally:
             if wandb is not None:
                 wandb.finish()

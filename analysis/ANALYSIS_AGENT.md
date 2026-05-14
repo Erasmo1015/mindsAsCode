@@ -1,0 +1,1 @@
+Compare Choice13k run test log-likelihoods to Centaur: `python analysis/code/utils/compare.py --experiment_paths <run_dir_or_csv> [<run_dir_or_csv> ...]` (writes `analysis/data/utils/loglik_compare.csv` by default; optional `--centaur_csv`, `--similar_threshold`, `--output`).

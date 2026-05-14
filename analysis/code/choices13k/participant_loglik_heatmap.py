@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Generate per-trial held-out log-likelihood heatmap for one participant."""
+"""Generate per-trial held-out log-likelihood heatmap for one participant (or a range)."""
 
-# use argument --participant_id 2 or 4 to plot the heatmap for participant 2 or 4.
+# use argument --participant_id 2 or 4 to plot the heatmap for participant 2 or 4 (default scope: single).
+# use --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 to match te_dr/te_aggregate
+# choice13k ordinal slicing into datasets/choice13k/valid_participant_ids.json (inclusive end).
 # use argument --include_openevolve to include the openevolve heatmap. (default is False)
 # use argument --pdf to save the heatmap as a PDF file. (default is False)
+# default PNG/CSV output folder: analysis/analysis_plot/proposal/test_heatmap (CSV only with --write_trials_csv)
+# default experiment folder: generated_outputs/choice13k/non_strict/run_260430_013702
+# override runs/CSV with --ours-run-dir, --centaur-predictions-csv, --openevolve-run-dir (relative paths use repo root).
 from __future__ import annotations
 
 import argparse
@@ -12,7 +17,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Callable, List, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,7 +28,7 @@ from matplotlib.colors import TwoSlopeNorm
 OURS_RUN_DIR = Path("generated_outputs/choice13k/non_strict/run_260430_013702")
 CENTAUR_PRED_CSV = Path("generated_outputs/choice13k/centaur/run_260506_224505/log/predictions_vs_actual.csv")
 OPENEVOLVE_RUN_DIR = Path("generated_outputs/choice13k/openevolve/run_260428_011306")
-OUTPUT_DIR = Path("analysis/analysis_plot/proposal")
+OUTPUT_DIR = Path("analysis/analysis_plot/proposal/test_heatmap")
 FALLBACK_SPLIT_RATIO = 0.9
 FALLBACK_SPLIT_SEED = 0
 
@@ -35,6 +40,50 @@ def repo_root() -> Path:
 REPO_ROOT = repo_root()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def _resolved_experiment_path(cli_path: Optional[Path], default_relative: Path) -> Path:
+    """Absolute path for a run directory or CSV: use CLI if set, else default; relative paths are under repo root."""
+    p = Path(default_relative if cli_path is None else cli_path).expanduser()
+    return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+
+def _load_choice13k_valid_participant_ids() -> List[int]:
+    """Same ordering as te_dr / te_aggregate ``valid_participant_ids.json`` for choice13k."""
+    path = REPO_ROOT / "datasets" / "choice13k" / "valid_participant_ids.json"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing {path}. Generate with: python utils/tools/collect_participant_ids.py --dataset choice13k"
+        )
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return [int(x) for x in data["valid_participant_ids"]]
+
+
+def _participant_ids_for_cli(
+    *,
+    participant_scope: str,
+    participant_id: Optional[int],
+    range_start_ordinal: Optional[int],
+    range_end_ordinal: Optional[int],
+) -> List[int]:
+    if participant_scope == "single":
+        if participant_id is None:
+            raise ValueError("--participant_id is required when --participant_scope single.")
+        return [int(participant_id)]
+    if participant_scope != "range":
+        raise ValueError(f"Unsupported --participant_scope {participant_scope!r}.")
+    if range_start_ordinal is None or range_end_ordinal is None:
+        raise ValueError(
+            "--participant_scope range requires --range_start_ordinal and --range_end_ordinal (inclusive)."
+        )
+    valid = _load_choice13k_valid_participant_ids()
+    a, b = int(range_start_ordinal), int(range_end_ordinal)
+    if a < 0 or b >= len(valid) or a > b:
+        raise ValueError(
+            f"Invalid ordinal range [{a}, {b}] for valid list of length {len(valid)} (0-based inclusive end)."
+        )
+    return valid[a : b + 1]
 
 
 def _clip_prob_b(p: float) -> float:
@@ -344,10 +393,8 @@ def _regenerate_program_predictions(
     return out_df
 
 
-def load_ours_test_predictions(participant_id: int) -> pd.DataFrame:
-    root = repo_root()
-    run_dir = root / OURS_RUN_DIR
-    participant_dir = run_dir / f"participant_{participant_id}"
+def load_ours_test_predictions(participant_id: int, *, ours_run_dir: Path) -> pd.DataFrame:
+    participant_dir = ours_run_dir / f"participant_{participant_id}"
     if not participant_dir.exists():
         raise FileNotFoundError(f"Missing participant folder in Ours run: {participant_dir}")
 
@@ -355,8 +402,8 @@ def load_ours_test_predictions(participant_id: int) -> pd.DataFrame:
     return _regenerate_ours_predictions(participant_id, participant_dir)
 
 
-def load_centaur_test_predictions(participant_id: int) -> pd.DataFrame:
-    csv_path = repo_root() / CENTAUR_PRED_CSV
+def load_centaur_test_predictions(participant_id: int, *, predictions_csv: Path) -> pd.DataFrame:
+    csv_path = predictions_csv
     if not csv_path.exists():
         raise FileNotFoundError(f"Missing Centaur predictions CSV: {csv_path}")
 
@@ -373,9 +420,8 @@ def load_centaur_test_predictions(participant_id: int) -> pd.DataFrame:
     return df.sort_values("trial_index").reset_index(drop=True)[["trial_index", "actual_action", "pred_prob_b"]]
 
 
-def load_openevolve_test_predictions(participant_id: int) -> pd.DataFrame:
-    root = repo_root()
-    run_dir = root / OPENEVOLVE_RUN_DIR
+def load_openevolve_test_predictions(participant_id: int, *, openevolve_run_dir: Path) -> pd.DataFrame:
+    run_dir = openevolve_run_dir
     participant_dir = run_dir / f"participant_{participant_id}"
     if not participant_dir.exists():
         raise FileNotFoundError(f"Missing participant folder in OpenEvolve run: {participant_dir}")
@@ -389,7 +435,12 @@ def load_openevolve_test_predictions(participant_id: int) -> pd.DataFrame:
 
 
 def build_aligned_dataframe(
-    participant_id: int, ours: pd.DataFrame, centaur: pd.DataFrame, openevolve: pd.DataFrame | None = None
+    participant_id: int,
+    ours: pd.DataFrame,
+    centaur: pd.DataFrame,
+    openevolve: pd.DataFrame | None = None,
+    *,
+    write_trials_csv: bool = False,
 ) -> pd.DataFrame:
     ours = ours.sort_values("trial_index").reset_index(drop=True)
     centaur = centaur.sort_values("trial_index").reset_index(drop=True)
@@ -398,7 +449,6 @@ def build_aligned_dataframe(
         openevolve = openevolve.sort_values("trial_index").reset_index(drop=True)
 
     out_csv = repo_root() / OUTPUT_DIR / f"participant_{participant_id}_ours_vs_centaur_loglik_trials.csv"
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     if len(ours) != len(centaur) or (include_openevolve and len(ours) != len(openevolve)):
         diagnostic = pd.merge(
@@ -436,6 +486,7 @@ def build_aligned_dataframe(
             on="trial_index",
             how="outer",
         ).sort_values("trial_index")
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
         diagnostic.to_csv(out_csv, index=False)
         length_msg = (
             f"Ours={len(ours)}, Centaur={len(centaur)}, OpenEvolve={len(openevolve)}. "
@@ -506,11 +557,19 @@ def build_aligned_dataframe(
             axis=1,
         )
     merged["delta_loglik"] = merged["ours_loglik"] - merged["centaur_loglik"]
-    merged.to_csv(out_csv, index=False)
+    if write_trials_csv:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(out_csv, index=False)
     return merged
 
 
-def plot_heatmap(participant_id: int, df: pd.DataFrame, save_pdf: bool = False) -> Path:
+def plot_heatmap(
+    participant_id: int,
+    df: pd.DataFrame,
+    save_pdf: bool = False,
+    *,
+    norm_vcenter: float = -0.2,
+) -> Path:
     def _display_loglik(value: float) -> str:
         if abs(value) < 0.005:
             return "0.00"
@@ -531,11 +590,16 @@ def plot_heatmap(participant_id: int, df: pd.DataFrame, save_pdf: bool = False) 
     raw_min = float(np.min(all_loglik))
     vmin = max(-1.5, math.floor(raw_min * 10.0) / 10.0)
     vmax = 0.0
+    if not (vmin < norm_vcenter < vmax):
+        raise ValueError(
+            f"norm_vcenter={norm_vcenter} must satisfy vmin < norm_vcenter < vmax "
+            f"(here vmin={vmin}, vmax={vmax} from data)."
+        )
 
     fig_w = max(8.0, 0.45 * n_trials)
     fig_h = 3.2
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=300)
-    norm = TwoSlopeNorm(vmin=vmin, vcenter=-0.2, vmax=vmax)
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=norm_vcenter, vmax=vmax)
     im = ax.imshow(heat, cmap="RdYlGn", norm=norm, aspect="auto")
 
     if n_trials <= 35:
@@ -599,7 +663,7 @@ def plot_heatmap(participant_id: int, df: pd.DataFrame, save_pdf: bool = False) 
             fontsize=9,
         )
 
-    candidate_ticks = [vmin, -1.0, -0.5, -0.2, 0.0]
+    candidate_ticks = [vmin, -1.0, -0.5, norm_vcenter, 0.0]
     cbar_ticks: List[float] = []
     for tick in candidate_ticks:
         if vmin <= tick <= vmax and tick not in cbar_ticks:
@@ -623,7 +687,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate participant-level Ours vs Centaur vs OpenEvolve test-trial loglik heatmap."
     )
-    parser.add_argument("--participant_id", type=int, required=True, help="Participant id (e.g., 2 or 4).")
+    parser.add_argument(
+        "--participant_scope",
+        choices=("single", "range"),
+        default="single",
+        help="single: one --participant_id. range: inclusive ordinals into valid_participant_ids.json "
+        "(same as te_dr/te_aggregate --participant_scope range).",
+    )
+    parser.add_argument(
+        "--participant_id",
+        type=int,
+        default=None,
+        help="Raw participant id when --participant_scope single (e.g. 2 or 4).",
+    )
+    parser.add_argument(
+        "--range_start_ordinal",
+        type=int,
+        default=None,
+        help="0-based start index into datasets/choice13k/valid_participant_ids.json (inclusive).",
+    )
+    parser.add_argument(
+        "--range_end_ordinal",
+        type=int,
+        default=None,
+        help="0-based end index into valid_participant_ids.json (inclusive).",
+    )
     parser.add_argument(
         "--include_openevolve",
         action="store_true",
@@ -634,28 +722,91 @@ def main() -> None:
         action="store_true",
         help="Also save a PDF version of the heatmap.",
     )
+    parser.add_argument(
+        "--write_trials_csv",
+        action="store_true",
+        help="Write per-trial aligned loglik CSV under the output folder (default: PNG only).",
+    )
+    parser.add_argument(
+        "--heatmap-vcenter",
+        type=float,
+        default=-0.2,
+        metavar="V",
+        help="Pivot loglik for the diverging colormap (TwoSlopeNorm vcenter); must lie between computed vmin and 0. "
+        "Default: -0.2 (yellow-ish at this value).",
+    )
+    parser.add_argument(
+        "--ours-run-dir",
+        type=Path,
+        default=None,
+        help=f"Run directory with participant_<id>/ holding the evolved program (default: {OURS_RUN_DIR}). "
+        "Relative paths are resolved under the repo root.",
+    )
+    parser.add_argument(
+        "--centaur-predictions-csv",
+        type=Path,
+        default=None,
+        help=f"Centaur-style predictions CSV with participant_id, split, trial_index, actual_action, pred_prob_b "
+        f"(default: {CENTAUR_PRED_CSV}).",
+    )
+    parser.add_argument(
+        "--openevolve-run-dir",
+        type=Path,
+        default=None,
+        help=f"OpenEvolve run root when using --include_openevolve (default: {OPENEVOLVE_RUN_DIR}).",
+    )
     args = parser.parse_args()
 
-    ours_df = load_ours_test_predictions(args.participant_id)
-    centaur_df = load_centaur_test_predictions(args.participant_id)
-    openevolve_df = load_openevolve_test_predictions(args.participant_id) if args.include_openevolve else None
-    aligned_df = build_aligned_dataframe(args.participant_id, ours_df, centaur_df, openevolve_df)
-    png_path = plot_heatmap(args.participant_id, aligned_df, save_pdf=args.pdf)
+    try:
+        participant_ids = _participant_ids_for_cli(
+            participant_scope=args.participant_scope,
+            participant_id=args.participant_id,
+            range_start_ordinal=args.range_start_ordinal,
+            range_end_ordinal=args.range_end_ordinal,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    csv_path = repo_root() / OUTPUT_DIR / f"participant_{args.participant_id}_ours_vs_centaur_loglik_trials.csv"
-    ours_mean = float(aligned_df["ours_loglik"].mean())
-    centaur_mean = float(aligned_df["centaur_loglik"].mean())
-    openevolve_mean = float(aligned_df["openevolve_loglik"].mean()) if args.include_openevolve else None
+    ours_run_dir = _resolved_experiment_path(args.ours_run_dir, OURS_RUN_DIR)
+    centaur_csv = _resolved_experiment_path(args.centaur_predictions_csv, CENTAUR_PRED_CSV)
+    openevolve_run_dir = _resolved_experiment_path(args.openevolve_run_dir, OPENEVOLVE_RUN_DIR)
 
-    print(f"Output PNG: {png_path}")
-    if args.pdf:
-        print(f"Output PDF: {png_path.with_suffix('.pdf')}")
-    print(f"Output CSV: {csv_path}")
-    print(f"Number of aligned test trials: {len(aligned_df)}")
-    print(f"Ours mean loglik: {ours_mean:.2f}")
-    print(f"Centaur mean loglik: {centaur_mean:.2f}")
+    print(f"[INFO] Ours run dir: {ours_run_dir}")
+    print(f"[INFO] Centaur predictions CSV: {centaur_csv}")
     if args.include_openevolve:
-        print(f"OpenEvolve mean loglik: {openevolve_mean:.2f}")
+        print(f"[INFO] OpenEvolve run dir: {openevolve_run_dir}")
+
+    for pid in participant_ids:
+        print(f"\n{'='*60}\nParticipant {pid}\n{'='*60}")
+        ours_df = load_ours_test_predictions(pid, ours_run_dir=ours_run_dir)
+        centaur_df = load_centaur_test_predictions(pid, predictions_csv=centaur_csv)
+        openevolve_df = (
+            load_openevolve_test_predictions(pid, openevolve_run_dir=openevolve_run_dir)
+            if args.include_openevolve
+            else None
+        )
+        aligned_df = build_aligned_dataframe(
+            pid, ours_df, centaur_df, openevolve_df, write_trials_csv=args.write_trials_csv
+        )
+        png_path = plot_heatmap(
+            pid, aligned_df, save_pdf=args.pdf, norm_vcenter=args.heatmap_vcenter
+        )
+
+        csv_path = repo_root() / OUTPUT_DIR / f"participant_{pid}_ours_vs_centaur_loglik_trials.csv"
+        ours_mean = float(aligned_df["ours_loglik"].mean())
+        centaur_mean = float(aligned_df["centaur_loglik"].mean())
+        openevolve_mean = float(aligned_df["openevolve_loglik"].mean()) if args.include_openevolve else None
+
+        print(f"Output PNG: {png_path}")
+        if args.pdf:
+            print(f"Output PDF: {png_path.with_suffix('.pdf')}")
+        if args.write_trials_csv:
+            print(f"Output CSV: {csv_path}")
+        print(f"Number of aligned test trials: {len(aligned_df)}")
+        print(f"Ours mean loglik: {ours_mean:.2f}")
+        print(f"Centaur mean loglik: {centaur_mean:.2f}")
+        if args.include_openevolve:
+            print(f"OpenEvolve mean loglik: {openevolve_mean:.2f}")
 
 
 if __name__ == "__main__":
