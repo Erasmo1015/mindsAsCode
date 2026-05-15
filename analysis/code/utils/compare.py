@@ -3,6 +3,9 @@
 Compare per-participant test log-likelihood from one or more runs against a Centaur baseline CSV.
 
 Writes a wide table under analysis/data/utils/ with footer rows Avg, Better, Similar, Worse.
+
+Usage:
+python analysis/code/utils/compare.py --experiment_paths generated_outputs/choice13k/te_dr/run_260514_231815 generated_outputs/choice13k/te_dr/run_260514_235016 generated_outputs/choice13k/te_dr/run_260515_001425 generated_outputs/choice13k/te_dr/run_260515_013558
 """
 
 from __future__ import annotations
@@ -61,10 +64,8 @@ def _read_test_loglik_csv(csv_path: Path) -> Dict[int, float]:
     return out
 
 
-def _read_bir_map(run_or_csv: Path) -> Dict[int, float]:
-    """Load BIR keyed by participant id from analysis/behavioral_inconsistency_rate.csv if present."""
-    base = run_or_csv if run_or_csv.is_dir() else run_or_csv.parent
-    bir_csv = base / "analysis" / "behavioral_inconsistency_rate.csv"
+def _read_bir_csv_file(bir_csv: Path) -> Dict[int, float]:
+    """Load BIR keyed by participant_ordinal from behavioral_inconsistency_rate.csv."""
     if not bir_csv.is_file():
         return {}
     out: Dict[int, float] = {}
@@ -88,6 +89,21 @@ def _read_bir_map(run_or_csv: Path) -> Dict[int, float]:
                 continue
             out[int(float(o))] = float(b)
     return out
+
+
+def _resolve_bir_csv(path: Path) -> Path:
+    """Path to behavioral_inconsistency_rate.csv: file as-is, or run dir / analysis / csv."""
+    path = path.expanduser().resolve()
+    if path.is_file():
+        return path
+    candidate = path / "analysis" / "behavioral_inconsistency_rate.csv"
+    return candidate
+
+
+def _read_bir_map(run_or_csv: Path) -> Dict[int, float]:
+    """Load BIR from analysis/behavioral_inconsistency_rate.csv under run (or next to loglik csv)."""
+    base = run_or_csv if run_or_csv.is_dir() else run_or_csv.parent
+    return _read_bir_csv_file(base / "analysis" / "behavioral_inconsistency_rate.csv")
 
 
 def _merge_bir_from_summaries(run_paths: Sequence[Path]) -> Dict[int, float]:
@@ -115,7 +131,7 @@ def _merge_bir_from_summaries(run_paths: Sequence[Path]) -> Dict[int, float]:
     return {}
 
 
-def _finite_mean(values: Iterable[float], ndigits: int = 6) -> str:
+def _finite_mean(values: Iterable[float], ndigits: int = 2) -> str:
     vals = [v for v in values if v is not None and math.isfinite(v)]
     if not vals:
         return ""
@@ -155,6 +171,15 @@ def main() -> None:
         / "participant_details_loglik.csv"
     )
     default_out = repo / "analysis" / "data" / "utils" / "loglik_compare.csv"
+    default_bir_csv = (
+        repo
+        / "generated_outputs"
+        / "choice13k"
+        / "te_aggregate"
+        / "run_260513_234734"
+        / "analysis"
+        / "behavioral_inconsistency_rate.csv"
+    )
 
     p = argparse.ArgumentParser(description="Compare experiment test_loglik to Centaur baseline.")
     p.add_argument(
@@ -182,6 +207,15 @@ def main() -> None:
         default=default_out,
         help="Output CSV path (default: analysis/data/utils/loglik_compare.csv under repo root).",
     )
+    p.add_argument(
+        "--bir_csv",
+        type=Path,
+        default=default_bir_csv,
+        help=(
+            "behavioral_inconsistency_rate.csv (or its run directory). "
+            "Default: te_aggregate run_260513_234734. If missing, BIR is taken from experiment paths / summaries."
+        ),
+    )
     args = p.parse_args()
 
     centaur_path = _resolve_loglik_csv(Path(args.centaur_csv).expanduser())
@@ -197,10 +231,14 @@ def main() -> None:
         experiments.append((label, _read_test_loglik_csv(csv_path)))
 
     bir: Dict[int, float] = {}
-    for ep in args.experiment_paths:
-        bir = _read_bir_map(Path(ep).expanduser().resolve())
-        if bir:
-            break
+    bir_path = _resolve_bir_csv(Path(args.bir_csv))
+    if bir_path.is_file():
+        bir = _read_bir_csv_file(bir_path)
+    if not bir:
+        for ep in args.experiment_paths:
+            bir = _read_bir_map(Path(ep).expanduser().resolve())
+            if bir:
+                break
     if not bir:
         bir = _merge_bir_from_summaries([p.parent if p.is_file() else p for p in exp_resolved])
 
@@ -218,17 +256,17 @@ def main() -> None:
     for pid in ordered:
         row: Dict[str, str] = {
             "participant_ordinal": str(pid),
-            "BIR": f"{bir[pid]:.4f}" if pid in bir else "",
-            "Centaur": f"{centaur[pid]:.6f}" if pid in centaur else "",
+            "BIR": f"{bir[pid]:.2f}" if pid in bir else "",
+            "Centaur": f"{centaur[pid]:.2f}" if pid in centaur else "",
         }
         for label, m in experiments:
-            row[label] = f"{m[pid]:.6f}" if pid in m else ""
+            row[label] = f"{m[pid]:.2f}" if pid in m else ""
         rows.append(row)
 
     # Footer: Avg
     avg_row: Dict[str, str] = {"participant_ordinal": "Avg", "BIR": "", "Centaur": ""}
     if bir:
-        avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir], ndigits=4)
+        avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir])
     avg_row["Centaur"] = _finite_mean([centaur[pid] for pid in ordered if pid in centaur])
     for label, m in experiments:
         avg_row[label] = _finite_mean([m[pid] for pid in ordered if pid in m])
