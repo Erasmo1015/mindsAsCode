@@ -273,6 +273,118 @@ def _tail_trials_in_problem(
     return out
 
 
+def _three_way_unit_counts(n_units: int, split_ratio: float) -> Tuple[int, int, int]:
+    """Train/val/test unit counts (same rules as te_dr.split_trials for blocks)."""
+    if n_units < 3:
+        raise ValueError(
+            f"train/val/test split requires at least 3 units (problems or trials); got {n_units}."
+        )
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio!r}")
+
+    n_train = int(n_units * split_ratio)
+    n_train = max(1, min(n_train, n_units - 2))
+    n_rem = n_units - n_train
+    n_val = (n_rem + 1) // 2
+    n_test = n_rem - n_val
+    if n_val < 1:
+        n_val = 1
+        n_test = max(1, n_rem - 1)
+        n_train = n_units - n_val - n_test
+        n_train = max(1, n_train)
+        n_rem = n_units - n_train
+        n_val = n_rem // 2
+        n_test = n_rem - n_val
+    if n_test < 1:
+        n_test = 1
+        n_val = max(1, n_rem - 1)
+        n_train = n_units - n_val - n_test
+        n_train = max(1, n_train)
+    return n_train, n_val, n_test
+
+
+def _trials_range_in_problem(
+    participant_data: ParticipantData, problem: Problem, start: int, end: int
+) -> List[Dict[str, Any]]:
+    """Trials [start, end) in one problem; history includes all prior trials in that problem."""
+    problem_trials = participant_data.trials[problem.problem_id]
+    n = len(problem_trials)
+    start = max(0, min(start, n))
+    end = max(start, min(end, n))
+    if start >= end:
+        return []
+    problem_dict = _problem_to_dict(problem)
+    out: List[Dict[str, Any]] = []
+    history_accum: List[Dict[str, Any]] = []
+    for j in range(start):
+        t0 = problem_trials[j]
+        history_accum.append({"action": t0.action, "feedback": t0.feedback})
+    for j in range(start, end):
+        trial = problem_trials[j]
+        out.append(
+            {
+                "problem": problem_dict.copy(),
+                "history": list(history_accum),
+                "action": trial.action,
+                "problem_id": problem.problem_id,
+                "block_id": trial.block_id,
+            }
+        )
+        history_accum.append({"action": trial.action, "feedback": trial.feedback})
+    return out
+
+
+def split_cpc18_trials_three_way(
+    participant_data: ParticipantData,
+    split_ratio: float = 0.8,
+    split_seed: int = 0,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Per-participant train/val/test aligned with te_dr Choice13k block split.
+
+    - Multiple problems (>=3): random partition of whole problems.
+    - Exactly two problems: not supported (need >=3 problems).
+    - One problem: chronological trial split into train/val/test (>=3 trials).
+    """
+    n_p = len(participant_data.problems)
+    if n_p == 0:
+        return [], [], []
+
+    rng = np.random.default_rng(int(split_seed))
+
+    if n_p >= 3:
+        ids = [p.problem_id for p in participant_data.problems]
+        sh = list(ids)
+        rng.shuffle(sh)
+        n_train, n_val, n_test = _three_way_unit_counts(len(sh), split_ratio)
+        train_ids: Set[int] = set(sh[:n_train])
+        val_ids: Set[int] = set(sh[n_train : n_train + n_val])
+        test_ids: Set[int] = set(sh[n_train + n_val :])
+        return (
+            _indexed_trials_for_problems(participant_data, train_ids),
+            _indexed_trials_for_problems(participant_data, val_ids),
+            _indexed_trials_for_problems(participant_data, test_ids),
+        )
+
+    if n_p == 2:
+        raise ValueError(
+            f"CPC18 train/val/test split requires at least 3 problems; participant has {n_p}."
+        )
+
+    prob0 = participant_data.problems[0]
+    n_t = len(participant_data.trials[prob0.problem_id])
+    n_train, n_val, n_test = _three_way_unit_counts(n_t, split_ratio)
+    t0 = 0
+    t1 = n_train
+    t2 = n_train + n_val
+    t3 = n_train + n_val + n_test
+    return (
+        _trials_range_in_problem(participant_data, prob0, t0, t1),
+        _trials_range_in_problem(participant_data, prob0, t1, t2),
+        _trials_range_in_problem(participant_data, prob0, t2, t3),
+    )
+
+
 def _split_cpc18_holdout(
     participant_data: ParticipantData,
     split_ratio: float,

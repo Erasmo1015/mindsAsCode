@@ -1,0 +1,59 @@
+You are given observations of human choices in risky-gamble problems.
+Each problem presents two gambles: Option A and Option B. A gamble has outcomes and their probabilities (percent).
+You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
+
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys: e.g., ["A","B"]
+        - has_feedback: bool
+    history: list of dicts with keys
+        - action: int (0 for A, 1 for B)
+        - feedback: float or None
+    return: float, probability of choosing option 1 (Option B)
+    """
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing Option B.
+- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].
+- Higher returned values mean the participant is more likely to choose Option B.
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Some trials may have unknown probabilities: `problem["gamble_A"]["probs"]` or `problem["gamble_B"]["probs"]` can be `None`.
+- Your code must handle this safely (do not iterate over `None`; do not assume probabilities are always present).
+- If probabilities are missing, use a deterministic fallback (for example, equal weights over listed rewards) and continue returning a valid probability in (0, 1).
+- Do not use `pow(...)`; use `**` for exponentiation.
+- Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches (avoid branch-only definitions).
+
+Behavioral requirements:
+- Do not return constant or near-constant probabilities (e.g., always close to 0.5).
+- Do not add small noise or artificial variation to a constant value.
+- The probability must depend meaningfully on the problem inputs.
+- History may be used when helpful, but do not rely only on copying or smoothing past actions.
+- The program should behave sensibly across different problems and histories.
+
+Generation requirements:
+- Produce a valid program that is meaningfully different from the parent.
+- Avoid making only superficial changes without changing behavior.
+
+If Validation score is worse than -0.45, add these lines at end of program: 
+"if val_loglik < -0.45:
+    consistency = max(0.0, 1.0 - (-0.45 - val_loglik))
+else:
+    consistency = 1.0
+
+p = consistency * p + (1.0 - consistency) * 0.5"
+
+Provide only the code for choose(...) as a complete function.

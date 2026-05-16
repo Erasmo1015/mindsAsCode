@@ -5,6 +5,10 @@ Run from repository root (same as Template_evo_non_strict.py):
   python baseline_methods/Centaur.py --dataset choice13k --fitness_metric loglik \\
     --participant_scope range --range_start_ordinal 0 --range_end_ordinal 2
 
+All participant datasets use te_dr-style train/val/test splits (default --split_ratio 0.6).
+Centaur is evaluated on the held-out test split only. CPC18 --cpc18_official_mse keeps the
+official all-trials MSE protocol (no holdout).
+
 Requires: conda env `centaur` (or torch + unsloth + transformers on a GPU node).
 
 If Psych-101-test is gated for your account, set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN`
@@ -34,7 +38,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data_modules.choice13k import Experiment, get_choice13k_experiments  # noqa: E402
-from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials  # noqa: E402
+from data_modules.cpc18 import (  # noqa: E402
+    load_cpc18_track2_data,
+    split_cpc18_trials,
+    split_cpc18_trials_three_way,
+)
 
 
 def experiment_to_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], list]:
@@ -102,28 +110,69 @@ def trials_from_blocks_chronological(
     return out
 
 
+def _three_way_unit_counts(n_units: int, split_ratio: float) -> Tuple[int, int, int]:
+    """Train/val/test unit counts — same rules as te_dr.split_trials."""
+    if n_units < 3:
+        raise ValueError(
+            f"train/val/test split requires at least 3 units; got {n_units}."
+        )
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+
+    n_train = int(n_units * split_ratio)
+    n_train = max(1, min(n_train, n_units - 2))
+    n_rem = n_units - n_train
+    n_val = (n_rem + 1) // 2
+    n_test = n_rem - n_val
+    if n_val < 1:
+        n_val = 1
+        n_test = max(1, n_rem - 1)
+        n_train = n_units - n_val - n_test
+        n_train = max(1, n_train)
+        n_rem = n_units - n_train
+        n_val = n_rem // 2
+        n_test = n_rem - n_val
+    if n_test < 1:
+        n_test = 1
+        n_val = max(1, n_rem - 1)
+        n_train = n_units - n_val - n_test
+        n_train = max(1, n_train)
+    return n_train, n_val, n_test
+
+
+def _perm_three_way_indices(
+    n_units: int, split_ratio: float, split_seed: int
+) -> Tuple[set, set, set]:
+    rng = np.random.default_rng(split_seed)
+    perm = np.arange(n_units)
+    rng.shuffle(perm)
+    n_train, n_val, n_test = _three_way_unit_counts(n_units, split_ratio)
+    train_i = set(perm[:n_train].tolist())
+    val_i = set(perm[n_train : n_train + n_val].tolist())
+    test_i = set(perm[n_train + n_val :].tolist())
+    return train_i, val_i, test_i
+
+
 def split_trials(
     exp: Experiment,
     split_ratio: float = 0.8,
     split_seed: int = 42,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
-    """Same as Template_evo_non_strict.split_trials (block-level train/test)."""
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], list]:
+    """
+    Split Choice13k into train / val / test by **problem (block)** — same logic as te_dr.split_trials.
+
+    ``split_ratio`` is the train **fraction** of blocks. The remainder is split between validation and test
+    with sizes differing by at most one block (when odd, validation receives one more block than test).
+    """
     n_blocks = len(exp.blocks)
-    if n_blocks < 2:
-        raise ValueError(
-            f"Choice13k within-participant split requires at least 2 problems (blocks); got {n_blocks}."
-        )
-    rng = np.random.default_rng(split_seed)
-    perm = np.arange(n_blocks)
-    rng.shuffle(perm)
-    split_idx = int(n_blocks * split_ratio)
-    split_idx = max(1, min(split_idx, n_blocks - 1))
-    train_blocks = set(perm[:split_idx].tolist())
-    test_blocks = set(perm[split_idx:].tolist())
+    train_blocks, val_blocks, test_blocks = _perm_three_way_indices(
+        n_blocks, split_ratio, split_seed
+    )
     train_trials = trials_from_blocks_chronological(exp, train_blocks)
+    val_trials = trials_from_blocks_chronological(exp, val_blocks)
     test_trials = trials_from_blocks_chronological(exp, test_blocks)
     options = exp.blocks[0].option_keys
-    return train_trials, test_trials, options
+    return train_trials, val_trials, test_trials, options
 
 
 def load_mixed_gambles_trials(
@@ -133,7 +182,7 @@ def load_mixed_gambles_trials(
     filter_gain_loss_only: bool,
     split_ratio: float,
     split_seed: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
     option_keys = [0, 1]  # 0 = gamble option, 1 = certain option
     all_trials: List[Dict[str, Any]] = []
     with open(csv_path, "r", newline="", encoding="utf-8") as f:
@@ -164,24 +213,23 @@ def load_mixed_gambles_trials(
         raise ValueError(f"No rows found for subject {participant_id} in {csv_path}")
 
     signatures = sorted({t["problem_signature"] for t in all_trials})
-    if len(signatures) < 2:
+    if len(signatures) < 3:
         raise ValueError(
-            f"mixed_gambles participant {participant_id} has <2 unique problems; cannot build disjoint train/test."
+            f"mixed_gambles participant {participant_id} has <3 unique problems; "
+            "cannot build te_dr-style train/val/test."
         )
-    rng = np.random.default_rng(int(split_seed))
-    shuffled = list(signatures)
-    rng.shuffle(shuffled)
-    split_point = int(len(shuffled) * float(split_ratio))
-    split_point = max(1, min(split_point, len(shuffled) - 1))
-    train_sigs = set(shuffled[:split_point])
-    test_sigs = set(shuffled[split_point:])
+    train_i, val_i, test_i = _perm_three_way_indices(
+        len(signatures), float(split_ratio), int(split_seed)
+    )
+    train_sigs = {signatures[i] for i in train_i}
+    val_sigs = {signatures[i] for i in val_i}
+    test_sigs = {signatures[i] for i in test_i}
     train_trials = [t for t in all_trials if t["problem_signature"] in train_sigs]
+    val_trials = [t for t in all_trials if t["problem_signature"] in val_sigs]
     test_trials = [t for t in all_trials if t["problem_signature"] in test_sigs]
-    for t in train_trials:
+    for t in train_trials + val_trials + test_trials:
         t.pop("problem_signature", None)
-    for t in test_trials:
-        t.pop("problem_signature", None)
-    return train_trials, test_trials, option_keys
+    return train_trials, val_trials, test_trials, option_keys
 
 
 def load_valid_participant_ids_from_json(
@@ -889,38 +937,50 @@ def _load_trials_for_participant(
     *,
     args: argparse.Namespace,
     participant_id: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[int, Any]]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    Optional[Dict[int, Any]],
+]:
     if args.dataset == "choice13k":
         experiments = get_choice13k_experiments(n_participants=participant_id + 1)
         exp = experiments[participant_id]
-        train_trials, test_trials, _ = split_trials(
+        train_trials, val_trials, test_trials, _ = split_trials(
             exp, split_ratio=args.split_ratio, split_seed=args.split_seed
         )
-        return train_trials, test_trials, None
+        return train_trials, val_trials, test_trials, None
 
     if args.dataset == "cpc18":
         cpc18_data_path = args.data_path if args.data_path != "data" else "datasets/cpc18"
         participant_data = load_cpc18_track2_data(
             data_path=cpc18_data_path, participant_id=participant_id
         )
-        train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
+        if bool(getattr(args, "cpc18_official_mse", False)):
+            train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
+                participant_data,
+                train_ratio=0.8,
+                cpc18_official_mse=True,
+                split_ratio=float(args.split_ratio),
+                split_seed=int(args.split_seed),
+            )
+            return train_trials, [], test_trials, test_observed_blocks
+        train_trials, val_trials, test_trials = split_cpc18_trials_three_way(
             participant_data,
-            train_ratio=0.8,
-            cpc18_official_mse=bool(getattr(args, "cpc18_official_mse", False)),
-            split_ratio=float(getattr(args, "split_ratio", 0.9)),
-            split_seed=int(getattr(args, "split_seed", 0)),
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
         )
-        return train_trials, test_trials, test_observed_blocks
+        return train_trials, val_trials, test_trials, {}
 
     if args.dataset == "mixed_gambles":
-        train_trials, test_trials, _ = load_mixed_gambles_trials(
+        train_trials, val_trials, test_trials, _ = load_mixed_gambles_trials(
             args.mixed_gambles_csv,
             participant_id,
             filter_gain_loss_only=bool(args.filter_mixed_gambles),
             split_ratio=float(args.split_ratio),
             split_seed=int(args.split_seed),
         )
-        return train_trials, test_trials, None
+        return train_trials, val_trials, test_trials, None
 
     raise ValueError(f"Unsupported dataset: {args.dataset!r}")
 
@@ -931,10 +991,17 @@ def _evaluate_participant(
     args: argparse.Namespace,
     participant_id: int,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    train_trials_raw, test_trials_raw, test_observed_blocks = _load_trials_for_participant(
-        args=args, participant_id=participant_id
+    train_trials_raw, val_trials_raw, test_trials_raw, test_observed_blocks = (
+        _load_trials_for_participant(args=args, participant_id=participant_id)
     )
-    train_trials = _prepare_trials_for_centaur(args.dataset, train_trials_raw)
+    if not bool(getattr(args, "cpc18_official_mse", False)):
+        print(
+            f"[Split] {args.dataset} participant {participant_id}: "
+            f"train={len(train_trials_raw)}, val={len(val_trials_raw)}, "
+            f"test={len(test_trials_raw)} (ratio={args.split_ratio:.3f}, seed={args.split_seed}; "
+            "Centaur evaluates test only)"
+        )
+    # Held-out train/val are not passed to Centaur (test-set evaluation only).
     test_trials = _prepare_trials_for_centaur(args.dataset, test_trials_raw)
 
     test_preds = collect_centaur_predictions(
@@ -1072,8 +1139,21 @@ def main() -> None:
     parser.add_argument("--filter_mixed_gambles", action="store_true", default=False)
     parser.add_argument("--fitness_metric", type=str, default="accuracy", choices=["loglik", "accuracy"])
     parser.add_argument("--split_mode", type=str, default="within_participant", choices=["within_participant", "across_participants"])
-    parser.add_argument("--split_ratio", type=float, default=0.9)
-    parser.add_argument("--split_seed", type=int, default=0)
+    parser.add_argument(
+        "--split_ratio",
+        type=float,
+        default=0.6,
+        help=(
+            "Train fraction for te_dr-style train/val/test split (choice13k blocks, CPC18 problems, "
+            "mixed_gambles problem signatures). Default 0.6. Centaur runs on test only."
+        ),
+    )
+    parser.add_argument(
+        "--split_seed",
+        type=int,
+        default=0,
+        help="Seed for deterministic block shuffle (default: 0, same as te_dr).",
+    )
     parser.add_argument(
         "--mixed_gambles_csv",
         type=str,

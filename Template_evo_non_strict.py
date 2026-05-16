@@ -17,14 +17,17 @@ Participant selection (choice13k / cpc18 / mixed_gambles):
   datasets/*/valid_participant_ids.json from utils/tools/collect_participant_ids.py).
 - --participant_scope range: raw ids = valid_list[--range_start_ordinal : --range_end_ordinal+1]
   (inclusive end, 0-based ordinals into that JSON list).
+- --participant_scope ordinals: raw ids = valid_list[i] for each i in --ordinals (0-based ordinals, same list as range).
 - --participant_scope all: every raw id in JSON, optional cap --all_max_participants (first N).
 - Gridworld / gridworld_ensemble: use --num_agents_to_sample and --agent_id; participant_scope is ignored.
 
-Choice13k within-participant train/test: problems (blocks) are split with --split_ratio / --split_seed; train and test
-use disjoint gamble pairs; per-trial history is within-block only. Across-participants mode still pools all trials per
-participant via experiment_to_trials (full cross-block history).
+Choice13k within-participant split: problems (blocks) are partitioned with ``--split_ratio`` as the **train
+fraction** of blocks; the remainder is split between validation and test (val gets the extra block when odd).
+Train, val, and test use disjoint gamble pairs; per-trial history is within-block only. Across-participants mode
+still pools all trials per participant via experiment_to_trials (full cross-block history; no val split).
 """
 
+import ast
 import math
 import os
 import re
@@ -53,6 +56,13 @@ from agent import AgentExecutionFramework
 # Repo root for datasets/*/valid_participant_ids.json (ordinal resolution for choice13k / cpc18 / mixed_gambles).
 _REPO_ROOT = Path(__file__).resolve().parent
 _PARTICIPANT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
+
+
+def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> int:
+    """Max programs retained in the elite pool (after sorting by fitness, best first)."""
+    if elite_pool_size is None:
+        return max(sample_size * 2, 20)
+    return max(1, int(elite_pool_size))
 
 
 def load_valid_participant_ids_from_json(
@@ -92,6 +102,7 @@ def resolve_participants_for_scope(
     range_start_ordinal: Optional[int],
     range_end_ordinal: Optional[int],
     all_max_participants: Optional[int],
+    participant_ordinals: Optional[List[int]],
     filter_mixed_gambles: bool,
 ) -> List[int]:
     """
@@ -99,6 +110,7 @@ def resolve_participants_for_scope(
 
     - participant_scope=single: one raw id (--single_participant_id).
     - participant_scope=range: inclusive ordinal slice into valid_participant_ids.json.
+    - participant_scope=ordinals: raw ids at listed 0-based ordinals (--ordinals), same ordering as range.
     - participant_scope=all: all raw ids from JSON, optionally capped by --all_max_participants (first N valid).
     """
     valid = load_valid_participant_ids_from_json(dataset, repo_root, filter_mixed_gambles)
@@ -120,6 +132,26 @@ def resolve_participants_for_scope(
                 f"for valid list of length {len(valid)} (0-based inclusive end)."
             )
         return valid[range_start_ordinal : range_end_ordinal + 1]
+    if participant_scope == "ordinals":
+        if not participant_ordinals:
+            raise ValueError(
+                "--participant_scope ordinals requires --ordinals with one or more integers "
+                "(0-based indices into valid_participant_ids.json), e.g. --ordinals 0 4 9."
+            )
+        out: List[int] = []
+        seen: set[int] = set()
+        for o in participant_ordinals:
+            oi = int(o)
+            if oi < 0 or oi >= len(valid):
+                raise ValueError(
+                    f"Ordinal {oi} is out of range for valid list of length {len(valid)} "
+                    f"(valid indices: 0..{len(valid) - 1})."
+                )
+            pid = int(valid[oi])
+            if pid not in seen:
+                seen.add(pid)
+                out.append(pid)
+        return out
     if participant_scope == "all":
         if all_max_participants is not None:
             n = max(0, int(all_max_participants))
@@ -288,6 +320,96 @@ def compile_program(code_str: str) -> Optional[Callable]:
     if callable(choose_fn):
         return choose_fn
     return None
+
+
+_GATE_VAL_CONST = "val_loglik"
+_GATE_THRESHOLD = -0.45
+
+
+def _choose_top_level_return_lines(source: str) -> List[int]:
+    """Line numbers of return statements in choose() (excluding nested defs)."""
+    tree = ast.parse(source)
+    choose_fn = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "choose"),
+        None,
+    )
+    if choose_fn is None:
+        raise ValueError("No choose(problem, history) function found.")
+
+    def walk(stmts: List[ast.stmt]) -> List[int]:
+        out: List[int] = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.FunctionDef):
+                continue
+            if isinstance(stmt, ast.Return) and stmt.lineno is not None:
+                out.append(int(stmt.lineno))
+            elif isinstance(stmt, ast.If):
+                out.extend(walk(stmt.body))
+                out.extend(walk(stmt.orelse))
+            elif isinstance(stmt, (ast.For, ast.While, ast.With)):
+                out.extend(walk(stmt.body))
+                out.extend(walk(getattr(stmt, "orelse", [])))
+        return out
+
+    return walk(choose_fn.body)
+
+
+def inject_consistency_gate(source: str, val_loglik: float) -> str:
+    """Inject val_loglik consistency gate before each top-level return in choose()."""
+    return_lines = set(_choose_top_level_return_lines(source))
+    if not return_lines:
+        raise ValueError("No return statement found in choose().")
+
+    header = f"{_GATE_VAL_CONST} = {float(val_loglik)!r}\n\n"
+    out_lines: List[str] = []
+    for i, line in enumerate(source.splitlines(), start=1):
+        if i not in return_lines:
+            out_lines.append(line)
+            continue
+        stripped = line.strip()
+        if not stripped.startswith("return "):
+            out_lines.append(line)
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        expr = stripped[len("return ") :]
+        out_lines.append(f"{indent}p = {expr}")
+        out_lines.append(f"{indent}if {_GATE_VAL_CONST} < {_GATE_THRESHOLD}:")
+        out_lines.append(f"{indent}    consistency = max(0.0, 1.0 - ({_GATE_THRESHOLD} - {_GATE_VAL_CONST}))")
+        out_lines.append(f"{indent}else:")
+        out_lines.append(f"{indent}    consistency = 1.0")
+        out_lines.append(f"{indent}p = consistency * p + (1.0 - consistency) * 0.5")
+        out_lines.append(f"{indent}return p")
+
+    body = "\n".join(out_lines).rstrip() + "\n"
+    if body.lstrip().startswith(f"{_GATE_VAL_CONST} ="):
+        return body
+    return header + body
+
+
+def run_choice13k_gate_phase(
+    program_code: str,
+    val_loglik: float,
+    test_trials: List[Dict[str, Any]],
+    *,
+    n_eval_seeds: int = 1,
+    save_gated_path: Optional[Path] = None,
+) -> Optional[float]:
+    """Apply consistency gate to best program; return gated test avg log-likelihood."""
+    if not test_trials:
+        return None
+    try:
+        gated_code = inject_consistency_gate(program_code, val_loglik)
+        if save_gated_path is not None:
+            save_gated_path.write_text(gated_code, encoding="utf-8")
+        gated_fn = compile_program(gated_code)
+        if gated_fn is None:
+            print("Warning: gate phase failed to compile gated program.")
+            return None
+        gated_eval = evaluate_choice13k_program(gated_fn, test_trials, n_seeds=n_eval_seeds)
+        return float(gated_eval["avg_loglik"])
+    except Exception as e:
+        print(f"Warning: gate phase failed: {e}")
+        return None
 
 
 def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13k") -> str:
@@ -504,24 +626,55 @@ def split_trials(
     exp: Experiment,
     split_ratio: float = 0.8,
     split_seed: int = 42,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], list]:
-    """Split Choice13k into train/test by **problem (block)**; disjoint gamble pairs; ratio/seed apply to blocks."""
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], list]:
+    """
+    Split Choice13k into train / val / test by **problem (block)**.
+
+    ``split_ratio`` is the train **fraction** of blocks. The remainder is split between validation and test
+    with sizes differing by at most one block (when odd, validation receives one more block than test).
+    """
     n_blocks = len(exp.blocks)
-    if n_blocks < 2:
+    if n_blocks < 3:
         raise ValueError(
-            f"Choice13k within-participant split requires at least 2 problems (blocks); got {n_blocks}."
+            f"Choice13k train/val/test split requires at least 3 problems (blocks); got {n_blocks}."
         )
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+
     rng = np.random.default_rng(split_seed)
     perm = np.arange(n_blocks)
     rng.shuffle(perm)
-    split_idx = int(n_blocks * split_ratio)
-    split_idx = max(1, min(split_idx, n_blocks - 1))
-    train_blocks = set(perm[:split_idx].tolist())
-    test_blocks = set(perm[split_idx:].tolist())
+
+    n_train = int(n_blocks * split_ratio)
+    n_train = max(1, min(n_train, n_blocks - 2))
+    n_rem = n_blocks - n_train
+    n_val = (n_rem + 1) // 2
+    n_test = n_rem - n_val
+    if n_val < 1:
+        n_val = 1
+        n_test = max(1, n_rem - 1)
+        n_train = n_blocks - n_val - n_test
+        n_train = max(1, n_train)
+        n_rem = n_blocks - n_train
+        n_val = n_rem // 2
+        n_test = n_rem - n_val
+    if n_test < 1:
+        n_test = 1
+        n_val = max(1, n_rem - 1)
+        n_train = n_blocks - n_val - n_test
+        n_train = max(1, n_train)
+
+    train_blocks = set(perm[:n_train].tolist())
+    val_blocks = set(perm[n_train : n_train + n_val].tolist())
+    test_blocks = set(perm[n_train + n_val :].tolist())
+    assert len(train_blocks) + len(val_blocks) + len(test_blocks) == n_blocks
+    assert train_blocks.isdisjoint(val_blocks) and train_blocks.isdisjoint(test_blocks) and val_blocks.isdisjoint(test_blocks)
+
     train_trials = trials_from_blocks_chronological(exp, train_blocks)
+    val_trials = trials_from_blocks_chronological(exp, val_blocks)
     test_trials = trials_from_blocks_chronological(exp, test_blocks)
     options = exp.blocks[0].option_keys
-    return train_trials, test_trials, options
+    return train_trials, val_trials, test_trials, options
 
 
 def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose: bool = False, n_seeds: int = 1) -> Dict[str, float]:
@@ -2358,6 +2511,8 @@ def run_evolution(
     wandb=None,
     n_eval_seeds: int = 3,
     sample_size: int = 10,
+    sample_parents: bool = True,
+    elite_pool_size: Optional[int] = None,
     filter_mixed_gambles: bool = False,
     save_artifacts: bool = True,
     all_data_mode: bool = False,
@@ -2372,6 +2527,7 @@ def run_evolution(
     max_prompt_trials_per_problem: int = 0,
     llm_max_tokens: int = 800,
     cpc18_official_mse: bool = False,
+    gate_phase: bool = True,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -2401,6 +2557,8 @@ def run_evolution(
         )
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+
+    val_trials: List[Dict[str, Any]] = []
 
     # Initialize client
     if client_kwargs is None:
@@ -2476,8 +2634,13 @@ def run_evolution(
                 experiments = get_choice13k_experiments(n_participants=participant_id + 1)
                 exp = experiments[participant_id]
             # Split trials
-            train_trials, test_trials, options = split_trials(exp, split_ratio=split_ratio, split_seed=split_seed)
-            print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed={split_seed}, ratio={split_ratio:.3f})")
+            train_trials, val_trials, test_trials, options = split_trials(
+                exp, split_ratio=split_ratio, split_seed=split_seed
+            )
+            print(
+                f"[Split] Train: {len(train_trials)}, Val: {len(val_trials)}, Test: {len(test_trials)} "
+                f"(seed={split_seed}, ratio={split_ratio:.3f})"
+            )
         test_observed_blocks = None
     
     # Setup output directory
@@ -2505,6 +2668,8 @@ def run_evolution(
     print(f"\n{'='*80}")
     print(f"BASELINE EVALUATION: Evaluating seed program ({seed_program_path})")
     print(f"{'='*80}")
+
+    baseline_val_eval = None
     
     if dataset == "gridworld":
         # Train: Evaluate on first 20 steps (matching ROTE's training/weighting phase)
@@ -2559,6 +2724,10 @@ def run_evolution(
             baseline_test_eval = evaluate_choice13k_program(
                 baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
             )
+            if val_trials:
+                baseline_val_eval = evaluate_choice13k_program(
+                    baseline_fn, val_trials, verbose=True, n_seeds=n_eval_seeds
+                )
         else:
             baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
             baseline_test_eval = evaluate_program(baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds)
@@ -2571,6 +2740,8 @@ def run_evolution(
             f"  Train avg log-likelihood: {baseline_train_eval['avg_loglik']:.6f}, "
             f"test: {baseline_test_eval['avg_loglik']:.6f}"
         )
+    if baseline_val_eval is not None:
+        print(f"  Val avg log-likelihood: {baseline_val_eval['avg_loglik']:.6f}")
     if is_cpc18_mse:
         print(f"  Train MSE: {baseline_train_mse_eval['mse']:.4f}")
         print(f"  Test MSE (official): {baseline_test_mse_eval['mse']:.4f}")
@@ -2590,6 +2761,8 @@ def run_evolution(
     if dataset in {"choice13k", "mixed_gambles"} or is_cpc18_split:
         baseline_results["train_loglik"] = baseline_train_eval["avg_loglik"]
         baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
+    if baseline_val_eval is not None:
+        baseline_results["val_loglik"] = baseline_val_eval["avg_loglik"]
     
     # Log baseline to wandb at step=0
     if wandb is not None:
@@ -2654,6 +2827,9 @@ def run_evolution(
                         f"p{participant_id}_train_loglik": baseline_train_eval["avg_loglik"],
                         f"p{participant_id}_test_loglik": baseline_test_eval["avg_loglik"],
                     }
+                    if baseline_val_eval is not None:
+                        baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
+                        baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
                 else:
                     baseline_log_dict = {
                         f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
@@ -2664,6 +2840,9 @@ def run_evolution(
                         baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
                         baseline_log_dict[f"p{participant_id}_train_loglik"] = baseline_train_eval["avg_loglik"]
                         baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
+                    if baseline_val_eval is not None:
+                        baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
+                        baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
             else:
                 baseline_log_dict = {
                     f"p{participant_id}_train_accuracy": baseline_train_eval["accuracy"],
@@ -2675,6 +2854,9 @@ def run_evolution(
                     baseline_log_dict[f"p{participant_id}_test_loglik"] = baseline_test_eval["avg_loglik"]
                     baseline_log_dict[f"p{participant_id}_train_acc"] = baseline_train_eval["accuracy"]
                     baseline_log_dict[f"p{participant_id}_test_acc"] = baseline_test_eval["accuracy"]
+                if baseline_val_eval is not None:
+                    baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
+                    baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
         wandb.log(baseline_log_dict, step=0)
         
         # Also save baseline to local JSONL file
@@ -2748,6 +2930,10 @@ def run_evolution(
             overall_best_train["test_loglik"] = baseline_test_eval["avg_loglik"]
             overall_best_test["train_loglik"] = baseline_train_eval["avg_loglik"]
             overall_best_test["test_loglik"] = baseline_test_eval["avg_loglik"]
+        if baseline_val_eval is not None:
+            vl = baseline_val_eval["avg_loglik"]
+            overall_best_train["val_loglik"] = vl
+            overall_best_test["val_loglik"] = vl
     
     # Track elite parents (top programs across all iterations)
     # Format: list of (code, fitness, test_metric, program_id, train_mse, test_mse) tuples
@@ -2826,15 +3012,28 @@ def run_evolution(
             candidates_dir = iter_dir / "candidates"
             candidates_dir.mkdir(exist_ok=True)
         
-        # Select sample_size parents from elite set (sorted by fitness descending)
-        # For CPC18: fitness = -MSE (higher is better)
-        # For others: fitness = accuracy (higher is better)
-        # Always include the best parent first
+        # Select sample_size parents: uniform sample from elite pool, or top by fitness
+        # (from the trimmed elite pool; see _elite_pool_capacity / elite_pool_size).
         num_parents_to_use = min(sample_size, len(elite_parents))
-        selected_parents = elite_parents[:num_parents_to_use]
+        if sample_parents and len(elite_parents) > 0:
+            pid_key = int(participant_id) if participant_id is not None else 0
+            rng = np.random.default_rng(
+                int(split_seed) + int(iteration_step) * 1_000_003 + pid_key * 17_179
+            )
+            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
+            selected_parents = [elite_parents[int(j)] for j in idxs]
+            print(
+                f"\nUsing {num_parents_to_use} uniformly sampled parent(s) from elite pool "
+                f"(size={len(elite_parents)}, sample_size={sample_size}, sample_parents=True):"
+            )
+        else:
+            selected_parents = elite_parents[:num_parents_to_use]
+            print(
+                f"\nUsing {num_parents_to_use} top parent(s) from elite set "
+                f"(sample_size={sample_size}, sample_parents=False):"
+            )
         parent_codes = [p[0] for p in selected_parents]
-        
-        print(f"\nUsing {num_parents_to_use} parent(s) from elite set (sample_size={sample_size}):")
+
         if is_cpc18_mse:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_mse, prog_id, train_mse, test_mse = parent_tuple
@@ -2917,6 +3116,8 @@ def run_evolution(
                     empty_row["test_loglik"] = float("-inf")
                     empty_row["fitness"] = float("-inf") if fitness_metric == "loglik" else 0.0
                     empty_row["runtime_valid"] = False
+                if dataset == "choice13k" and val_trials:
+                    empty_row["val_loglik"] = float("-inf")
                 candidate_results.append(empty_row)
                 continue
             
@@ -3096,7 +3297,7 @@ def run_evolution(
                 choose_fn = compile_program(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
                 if choose_fn is None:
-                    candidate_results.append({
+                    _fail = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
@@ -3106,14 +3307,22 @@ def run_evolution(
                         "fitness": _worst,
                         "valid": False,
                         "runtime_valid": False,
-                    })
+                    }
+                    if val_trials:
+                        _fail["val_loglik"] = float("-inf")
+                    candidate_results.append(_fail)
                     continue
                 try:
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     # Always run test pass for runtime-valid checks; test metrics may be hidden later.
                     test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    val_eval = (
+                        evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+                        if val_trials
+                        else None
+                    )
                 except (AssertionError, TypeError, ValueError):
-                    candidate_results.append({
+                    _fail = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
@@ -3123,19 +3332,23 @@ def run_evolution(
                         "fitness": _worst,
                         "valid": False,
                         "runtime_valid": False,
-                    })
+                    }
+                    if val_trials:
+                        _fail["val_loglik"] = float("-inf")
+                    candidate_results.append(_fail)
                     continue
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
+                val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 if not runtime_valid:
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
-                candidate_results.append({
+                _row = {
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
@@ -3149,7 +3362,10 @@ def run_evolution(
                     "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
                     "runtime_valid": runtime_valid,
-                })
+                }
+                if val_eval is not None:
+                    _row["val_loglik"] = val_loglik
+                candidate_results.append(_row)
             else:
                 # mixed_gambles: support accuracy and optional log-likelihood fitness
                 choose_fn = compile_program(code)
@@ -3259,15 +3475,23 @@ def run_evolution(
                         if result.get("test_loglik") is not None
                         else "N/A (eval on pool-best only)"
                     )
+                    _val_ll = (
+                        f"{result['val_loglik']:.6f}"
+                        if result.get("val_loglik") is not None
+                        else "N/A"
+                    )
                     _test_acc = (
                         f"{result['test_acc']:.4f}"
                         if result.get("test_acc") is not None
                         else "N/A"
                     )
+                    _val_part = (
+                        f", val_loglik={_val_ll}" if dataset == "choice13k" and val_trials else ""
+                    )
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
-                        f"test_loglik={_test_ll}, "
+                        f"test_loglik={_test_ll}{_val_part}, "
                         f"train_acc={result['train_acc']:.4f}, "
                         f"test_acc={_test_acc}"
                     )
@@ -3317,6 +3541,8 @@ def run_evolution(
                         f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
                         f"test: {best_result['test_loglik']:.6f}"
                     )
+                if dataset == "choice13k" and val_trials and best_result.get("val_loglik") is not None:
+                    print(f"  Val avg log-likelihood: {best_result['val_loglik']:.6f}")
             else:
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
                 print(f"  Test accuracy: {best_result['test_acc']:.4f}")
@@ -3357,12 +3583,11 @@ def run_evolution(
             # Sort elite set by fitness (descending) and keep top programs
             # For CPC18: fitness = -MSE (higher is better)
             # For others: fitness = accuracy (higher is better)
-            # Keep at least sample_size * 2 programs to have diversity
             elite_parents.sort(key=lambda x: x[1], reverse=True)
-            max_elite_size = max(sample_size * 2, 20)  # Keep at least 20 or 2x sample_size
-            elite_parents = elite_parents[:max_elite_size]
-            
-            print(f"\nElite set updated: {len(elite_parents)} programs (top {max_elite_size} kept)")
+            elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+            elite_parents = elite_parents[:elite_cap]
+
+            print(f"\nElite set updated: {len(elite_parents)} programs (elite_pool_cap={elite_cap})")
 
             # Use the updated elite-pool best for per-iteration reporting.
             iter_best_code, iter_best_fitness, _, iter_best_program_id = elite_parents[0][:4]
@@ -3370,6 +3595,7 @@ def run_evolution(
             iter_best_test_acc = best_result["test_acc"]
             iter_best_train_loglik = best_result.get("train_loglik")
             iter_best_test_loglik = best_result.get("test_loglik")
+            iter_best_val_loglik = best_result.get("val_loglik")
             if fitness_metric == "loglik" and (is_cpc18_split or dataset in {"choice13k", "mixed_gambles"}):
                 iter_best_fn = compile_program(iter_best_code)
                 if iter_best_fn is not None:
@@ -3392,14 +3618,20 @@ def run_evolution(
                     iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
                     iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
                     iter_best_fitness = iter_best_train_loglik
+                    if dataset == "choice13k" and val_trials:
+                        iter_best_val_eval = evaluate_choice13k_program(
+                            iter_best_fn, val_trials, n_seeds=n_eval_seeds
+                        )
+                        iter_best_val_loglik = iter_best_val_eval["avg_loglik"]
                 else:
                     # Should be rare; keep loop stable if a pool entry cannot recompile.
                     iter_best_test_acc = None
                     iter_best_test_loglik = None
+                    iter_best_val_loglik = None
 
             if choice13k_simple_logging and dataset == "choice13k" and save_artifacts and simple_iterations_dir is not None:
                 (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(iter_best_code or "")
-                simple_iterations_rows.append({
+                _simp_row = {
                     "iteration": iteration_step,
                     "train_fitness": iter_best_fitness,
                     "test_fitness": (
@@ -3411,7 +3643,10 @@ def run_evolution(
                     "test_acc": iter_best_test_acc,
                     "train_loglik": iter_best_train_loglik,
                     "test_loglik": iter_best_test_loglik,
-                })
+                }
+                if val_trials:
+                    _simp_row["val_loglik"] = iter_best_val_loglik
+                simple_iterations_rows.append(_simp_row)
             best_fitness = iter_best_fitness
             
             # Update overall best tracking
@@ -3482,6 +3717,8 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
+                    if dataset == "choice13k" and val_trials:
+                        overall_best_train["val_loglik"] = iter_best_val_loglik
                 if fitness_metric == "loglik":
                     _test_better = (
                         iter_best_test_loglik is not None
@@ -3497,6 +3734,8 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
+                    if dataset == "choice13k" and val_trials:
+                        overall_best_test["val_loglik"] = iter_best_val_loglik
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
                     overall_best_train = {
@@ -3572,31 +3811,36 @@ def run_evolution(
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
         elif dataset in {"choice13k", "mixed_gambles"}:
+            _cand_rows = []
+            for r in candidate_results:
+                _cr = {
+                    "idx": r["idx"],
+                    "train_acc": r["train_acc"],
+                    "test_acc": r["test_acc"],
+                    "train_loglik": r.get("train_loglik"),
+                    "test_loglik": r.get("test_loglik"),
+                    "fitness": r.get("fitness"),
+                    "valid": r["valid"],
+                    "runtime_valid": r.get("runtime_valid", r["valid"]),
+                }
+                if dataset == "choice13k" and val_trials:
+                    _cr["val_loglik"] = r.get("val_loglik")
+                _cand_rows.append(_cr)
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
-                "candidate_results": [
-                    {
-                        "idx": r["idx"],
-                        "train_acc": r["train_acc"],
-                        "test_acc": r["test_acc"],
-                        "train_loglik": r.get("train_loglik"),
-                        "test_loglik": r.get("test_loglik"),
-                        "fitness": r.get("fitness"),
-                        "valid": r["valid"],
-                        "runtime_valid": r.get("runtime_valid", r["valid"]),
-                    }
-                    for r in candidate_results
-                ],
+                "candidate_results": _cand_rows,
                 "best_train_fitness": best_fitness if selected_results else None,
                 "best_train_acc": iter_best_train_acc if selected_results else None,
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
+            if dataset == "choice13k" and val_trials:
+                metrics["best_val_loglik"] = iter_best_val_loglik if selected_results else None
         else:
             metrics = {
                 "iteration": iteration_step,
@@ -3755,6 +3999,9 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
                         log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
                         log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
+                        if dataset == "choice13k" and val_trials and iter_best_val_loglik is not None:
+                            log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
+                            log_dict["val_loglik"] = iter_best_val_loglik
                 else:
                     log_dict = {
                         f"p{participant_id}_n_valid": len(valid_results),
@@ -3772,6 +4019,9 @@ def run_evolution(
                             if fitness_metric == "loglik"
                             else iter_best_test_acc
                         )
+                        if dataset == "choice13k" and val_trials and iter_best_val_loglik is not None:
+                            log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
+                            log_dict["val_loglik"] = iter_best_val_loglik
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         if fitness_metric != "loglik":
                             log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
@@ -3887,6 +4137,11 @@ def run_evolution(
     elif dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
         final_train_eval = evaluate_choice13k_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
         final_test_eval = evaluate_choice13k_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+        final_val_eval = (
+            evaluate_choice13k_program(final_best_fn, val_trials, n_seeds=n_eval_seeds)
+            if dataset == "choice13k" and val_trials
+            else None
+        )
         overall_best_train = {
             "train_accuracy": final_train_eval["accuracy"],
             "test_accuracy": final_test_eval["accuracy"],
@@ -3897,6 +4152,8 @@ def run_evolution(
             "origin_candidate_idx": best_candidate_idx,
             "program_file": best_program_filename,
         }
+        if final_val_eval is not None:
+            overall_best_train["val_loglik"] = final_val_eval["avg_loglik"]
         overall_best_test = dict(overall_best_train)
     else:
         final_train_eval = evaluate_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
@@ -3910,6 +4167,32 @@ def run_evolution(
             "program_file": best_program_filename,
         }
         overall_best_test = dict(overall_best_train)
+
+    gated_test_loglik: Optional[float] = None
+    if (
+        gate_phase
+        and dataset == "choice13k"
+        and val_trials
+        and test_trials
+    ):
+        val_ll_for_gate = overall_best_train.get("val_loglik")
+        if val_ll_for_gate is not None:
+            gated_save = (
+                output_path / "best_program_gated.py"
+                if save_artifacts
+                else None
+            )
+            gated_test_loglik = run_choice13k_gate_phase(
+                final_best_code,
+                float(val_ll_for_gate),
+                test_trials,
+                n_eval_seeds=n_eval_seeds,
+                save_gated_path=gated_save,
+            )
+            if gated_test_loglik is not None:
+                overall_best_train["gated_test_loglik"] = gated_test_loglik
+                overall_best_test["gated_test_loglik"] = gated_test_loglik
+                print(f"Gated test avg log-likelihood: {gated_test_loglik:.6f}")
 
     if is_cpc18_mse or is_cpc18_split:
         results = {
@@ -3928,18 +4211,18 @@ def run_evolution(
     if save_artifacts and choice13k_simple_logging and dataset == "choice13k":
         if simple_iterations_rows:
             with open(output_path / "iterations.csv", "w", newline="") as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=[
-                        "iteration",
-                        "train_fitness",
-                        "test_fitness",
-                        "train_acc",
-                        "test_acc",
-                        "train_loglik",
-                        "test_loglik",
-                    ],
-                )
+                _iter_fields = [
+                    "iteration",
+                    "train_fitness",
+                    "test_fitness",
+                    "train_acc",
+                    "test_acc",
+                    "train_loglik",
+                    "test_loglik",
+                ]
+                if val_trials:
+                    _iter_fields.append("val_loglik")
+                writer = csv.DictWriter(f, fieldnames=_iter_fields)
                 writer.writeheader()
                 writer.writerows(simple_iterations_rows)
         summary_row = {
@@ -3959,6 +4242,10 @@ def run_evolution(
             "test_loglik": overall_best_test.get("test_loglik"),
             "fitness_metric": fitness_metric,
         }
+        if val_trials:
+            summary_row["val_loglik"] = overall_best_train.get("val_loglik")
+        if gated_test_loglik is not None:
+            summary_row["gated_test_loglik"] = gated_test_loglik
         with open(output_path / "summary.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(summary_row.keys()))
             writer.writeheader()
@@ -4009,6 +4296,10 @@ def run_evolution(
                 f"Final best train avg log-likelihood: {overall_best_train['train_loglik']:.6f}, "
                 f"test: {overall_best_test['test_loglik']:.6f}"
             )
+            if overall_best_train.get("val_loglik") is not None:
+                print(f"Final best val avg log-likelihood: {overall_best_train['val_loglik']:.6f}")
+            if gated_test_loglik is not None:
+                print(f"Final gated test avg log-likelihood: {gated_test_loglik:.6f}")
             print(f"Baseline train accuracy: {baseline_train_eval['accuracy']:.4f}")
             print(f"Train accuracy improvement: {overall_best_train['train_accuracy'] - baseline_train_eval['accuracy']:.4f}")
             print(f"Test accuracy improvement: {overall_best_test['test_accuracy'] - baseline_test_eval['accuracy']:.4f}")
@@ -4095,6 +4386,11 @@ def run_evolution(
                 else baseline_results["test_accuracy"]
             ),
         }
+        if val_trials:
+            result["val_loglik"] = overall_best_train.get("val_loglik")
+            result["seed_program_val_fitness"] = baseline_results.get("val_loglik")
+        if gated_test_loglik is not None:
+            result["gated_test_loglik"] = gated_test_loglik
     elif dataset == "mixed_gambles" and fitness_metric == "loglik":
         result = {
             "participant_id": participant_id,
@@ -4416,11 +4712,12 @@ def main():
         "--participant_scope",
         type=str,
         default="single",
-        choices=["single", "range", "all"],
+        choices=["single", "range", "ordinals", "all"],
         help=(
             "For choice13k / cpc18 / mixed_gambles: how to select participants. "
             "'single' uses --single_participant_id (raw id). "
             "'range' uses --range_start_ordinal/--range_end_ordinal (inclusive) into datasets/*/valid_participant_ids.json. "
+            "'ordinals' uses --ordinals (0-based indices into that same list, not raw ids). "
             "'all' runs all raw ids from that JSON, optionally capped by --all_max_participants. "
             "Ignored for gridworld (use --num_agents_to_sample / --agent_id)."
         ),
@@ -4448,6 +4745,17 @@ def main():
         type=int,
         default=None,
         help="When --participant_scope all: use only the first N valid raw ids from JSON. Omit to run all valids.",
+    )
+    parser.add_argument(
+        "--ordinals",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="I",
+        help=(
+            "When --participant_scope ordinals: 0-based ordinals into datasets/*/valid_participant_ids.json "
+            "(same ordering as range), not raw participant ids. Example: --ordinals 0 4 9"
+        ),
     )
     parser.add_argument(
         "--num_agents_to_sample",
@@ -4478,6 +4786,26 @@ def main():
         type=int,
         default=10,
         help="Number of parent programs to use when generating each child (default: 3)",
+    )
+    parser.add_argument(
+        "--sample_parents",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When enabled (default), pick parent programs uniformly at random without replacement from the "
+            "elite pool. When disabled, use the top sample_size programs by fitness. "
+            "Does not apply to gridworld_ensemble member pools."
+        ),
+    )
+    parser.add_argument(
+        "--elite_pool_size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Max size of the elite program pool after each iteration (best programs kept). "
+            "Default: max(2 * sample_size, 20). Must be >= 1 when set."
+        ),
     )
     parser.add_argument(
         "--top_k",
@@ -4565,8 +4893,8 @@ def main():
     parser.add_argument(
         "--split_ratio",
         type=float,
-        default=0.9,
-        help="Global train ratio for splitting (default: 0.9).",
+        default=0.6,
+        help="Global train ratio for splitting (default: 0.6).",
     )
     parser.add_argument(
         "--split_seed",
@@ -4596,6 +4924,15 @@ def main():
         default=800,
         help="Max output tokens per candidate generation request (reduces context-overflow failures).",
     )
+    parser.add_argument(
+        "--gate_phase",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After evolution on choice13k (with val split): apply val_loglik consistency gate to the "
+            "best program and report gated_test_loglik on test (default: True)."
+        ),
+    )
 
     args = parser.parse_args()
     if args.fitness_metric == "loglik" and args.dataset not in {"choice13k", "mixed_gambles"} and not (
@@ -4621,7 +4958,22 @@ def main():
     if args.llm_max_tokens < 64:
         print("Error: --llm_max_tokens must be >= 64.")
         return
+    if args.elite_pool_size is not None and args.elite_pool_size < 1:
+        print("Error: --elite_pool_size must be >= 1 when set.")
+        return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
+
+    if args.dataset in _PARTICIPANT_DATASETS:
+        if args.participant_scope == "ordinals":
+            if not args.ordinals:
+                print(
+                    "Error: --participant_scope ordinals requires --ordinals with at least one integer "
+                    "(e.g. --ordinals 0 4 9)."
+                )
+                return
+        elif args.ordinals is not None:
+            print("Error: --ordinals is only valid with --participant_scope ordinals.")
+            return
 
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
@@ -4644,6 +4996,11 @@ def main():
                     run_name = (
                         f"{run_name}_ordinals_{args.range_start_ordinal}_to_{args.range_end_ordinal}"
                     )
+                elif args.participant_scope == "ordinals":
+                    tag = "_".join(str(x) for x in (args.ordinals or []))
+                    if len(tag) > 120:
+                        tag = tag[:120] + "_etc"
+                    run_name = f"{run_name}_ordinals_{tag}"
                 else:
                     run_name = f"{run_name}_all_valid"
             else:
@@ -4682,6 +5039,7 @@ def main():
                 range_start_ordinal=args.range_start_ordinal,
                 range_end_ordinal=args.range_end_ordinal,
                 all_max_participants=args.all_max_participants,
+                participant_ordinals=args.ordinals,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
             )
         except FileNotFoundError as e:
@@ -4706,6 +5064,12 @@ def main():
             print(
                 "Participant scope: range -> using inclusive ordinal slice "
                 f"[{args.range_start_ordinal}, {args.range_end_ordinal}] from valid_participant_ids.json."
+            )
+        elif args.participant_scope == "ordinals":
+            print(
+                "Participant scope: ordinals -> using raw participant ids at 0-based ordinals "
+                f"{list(args.ordinals)} from valid_participant_ids.json "
+                "(duplicate ordinals collapse to one id; order follows first occurrence)."
             )
         else:
             cap_text = (
@@ -4834,6 +5198,8 @@ def main():
                 wandb=wandb,
                 n_eval_seeds=args.n_eval_seeds,
                 sample_size=args.sample_size,
+                sample_parents=args.sample_parents,
+                elite_pool_size=args.elite_pool_size,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 save_artifacts=True,
                 all_data_mode=False,
@@ -4847,6 +5213,7 @@ def main():
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
+                gate_phase=args.gate_phase,
             )
         finally:
             if wandb is not None:
@@ -4886,6 +5253,8 @@ def main():
                     wandb=wandb,
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
+                    sample_parents=args.sample_parents,
+                    elite_pool_size=args.elite_pool_size,
                     filter_mixed_gambles=mixed_gambles_gain_loss_only,
                     save_artifacts=False,
                     all_data_mode=True,
@@ -4897,6 +5266,7 @@ def main():
                     max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
+                    gate_phase=args.gate_phase,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -4908,11 +5278,17 @@ def main():
                     "seed_program_train_fitness": participant_summary.get("seed_program_train_fitness"),
                     "seed_program_test_fitness": participant_summary.get("seed_program_test_fitness"),
                 })
-                participant_details_loglik.append({
+                _plog = {
                     "participant_id": participant_id,
                     "train_loglik": participant_summary.get("train_loglik"),
                     "test_loglik": participant_summary.get("test_loglik"),
-                })
+                }
+                if args.dataset == "choice13k":
+                    if participant_summary.get("val_loglik") is not None:
+                        _plog["val_loglik"] = participant_summary.get("val_loglik")
+                    if participant_summary.get("gated_test_loglik") is not None:
+                        _plog["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+                participant_details_loglik.append(_plog)
 
                 with open(details_file, "w", newline="") as f:
                     fieldnames = [
@@ -4945,9 +5321,11 @@ def main():
                         )
                     )
 
+                _ll_fields = ["participant_id", "train_loglik", "test_loglik"]
+                if args.dataset == "choice13k":
+                    _ll_fields.extend(["val_loglik", "gated_test_loglik"])
                 with open(details_loglik_file, "w", newline="") as f:
-                    fieldnames = ["participant_id", "train_loglik", "test_loglik"]
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer = csv.DictWriter(f, fieldnames=_ll_fields)
                     writer.writeheader()
                     writer.writerows(_round_floats_for_csv_rows(participant_details_loglik))
 
@@ -4957,23 +5335,34 @@ def main():
                 test_loglik_values = [
                     d["test_loglik"] for d in participant_details_loglik if d["test_loglik"] is not None
                 ]
+                val_loglik_values = [
+                    d["val_loglik"] for d in participant_details_loglik if d.get("val_loglik") is not None
+                ]
+                gated_test_loglik_values = [
+                    d["gated_test_loglik"]
+                    for d in participant_details_loglik
+                    if d.get("gated_test_loglik") is not None
+                ]
                 avg_train_loglik = float(np.mean(train_loglik_values)) if train_loglik_values else None
                 avg_test_loglik = float(np.mean(test_loglik_values)) if test_loglik_values else None
+                _sum_ll_row = {
+                    "num_of_participants": len(participant_details_loglik),
+                    "avg_train_loglik": avg_train_loglik,
+                    "avg_test_loglik": avg_test_loglik,
+                }
+                _sum_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
+                if args.dataset == "choice13k":
+                    _sum_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
+                    _sum_ll_row["avg_val_loglik"] = (
+                        float(np.mean(val_loglik_values)) if val_loglik_values else None
+                    )
+                    _sum_ll_row["avg_gated_test_loglik"] = (
+                        float(np.mean(gated_test_loglik_values)) if gated_test_loglik_values else None
+                    )
                 with open(summary_loglik_file, "w", newline="") as f:
-                    writer = csv.DictWriter(
-                        f,
-                        fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
-                    )
+                    writer = csv.DictWriter(f, fieldnames=_sum_ll_fields)
                     writer.writeheader()
-                    writer.writerow(
-                        _round_floats_for_csv_row(
-                            {
-                                "num_of_participants": len(participant_details_loglik),
-                                "avg_train_loglik": avg_train_loglik,
-                                "avg_test_loglik": avg_test_loglik,
-                            }
-                        )
-                    )
+                    writer.writerow(_round_floats_for_csv_row(_sum_ll_row))
         finally:
             if wandb is not None:
                 wandb.finish()
@@ -5201,6 +5590,8 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
+                        sample_parents=args.sample_parents,
+                        elite_pool_size=args.elite_pool_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
@@ -5208,6 +5599,7 @@ def main():
                         max_prompt_train_trials=args.max_prompt_train_trials,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
+                        gate_phase=args.gate_phase,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -5320,6 +5712,8 @@ def main():
                         wandb=wandb,
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
+                        sample_parents=args.sample_parents,
+                        elite_pool_size=args.elite_pool_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
@@ -5328,6 +5722,7 @@ def main():
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         cpc18_official_mse=args.cpc18_official_mse,
+                        gate_phase=args.gate_phase,
                     )
                 
                 # Update participants summary after each participant completes
@@ -5340,17 +5735,24 @@ def main():
                         writer.writerows(_round_floats_for_csv_rows(participants_summary))
                     print(f"\nParticipants summary updated: {summary_file}")
 
-                    if args.participant_scope == "range":
-                        participants_loglik_summary.append({
+                    if args.participant_scope in ("range", "ordinals"):
+                        _ps_log = {
                             "participant_id": participant_summary.get("participant_id"),
                             "train_loglik": participant_summary.get("train_loglik"),
                             "test_loglik": participant_summary.get("test_loglik"),
-                        })
+                        }
+                        if args.dataset == "choice13k":
+                            if participant_summary.get("val_loglik") is not None:
+                                _ps_log["val_loglik"] = participant_summary.get("val_loglik")
+                            if participant_summary.get("gated_test_loglik") is not None:
+                                _ps_log["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+                        participants_loglik_summary.append(_ps_log)
                         if details_loglik_file is not None:
+                            _det_ll_fields = ["participant_id", "train_loglik", "test_loglik"]
+                            if args.dataset == "choice13k":
+                                _det_ll_fields.extend(["val_loglik", "gated_test_loglik"])
                             with open(details_loglik_file, "w", newline="") as f:
-                                writer = csv.DictWriter(
-                                    f, fieldnames=["participant_id", "train_loglik", "test_loglik"]
-                                )
+                                writer = csv.DictWriter(f, fieldnames=_det_ll_fields)
                                 writer.writeheader()
                                 writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
                         if summary_loglik_file is not None:
@@ -5360,21 +5762,32 @@ def main():
                             test_ll_vals = [
                                 d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None
                             ]
+                            val_ll_vals = [
+                                d["val_loglik"] for d in participants_loglik_summary if d.get("val_loglik") is not None
+                            ]
+                            gated_test_ll_vals = [
+                                d["gated_test_loglik"]
+                                for d in participants_loglik_summary
+                                if d.get("gated_test_loglik") is not None
+                            ]
+                            _agg_ll = {
+                                "num_of_participants": len(participants_loglik_summary),
+                                "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                                "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
+                            }
+                            _agg_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
+                            if args.dataset == "choice13k":
+                                _agg_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
+                                _agg_ll["avg_val_loglik"] = (
+                                    float(np.mean(val_ll_vals)) if val_ll_vals else None
+                                )
+                                _agg_ll["avg_gated_test_loglik"] = (
+                                    float(np.mean(gated_test_ll_vals)) if gated_test_ll_vals else None
+                                )
                             with open(summary_loglik_file, "w", newline="") as f:
-                                writer = csv.DictWriter(
-                                    f,
-                                    fieldnames=["num_of_participants", "avg_train_loglik", "avg_test_loglik"],
-                                )
+                                writer = csv.DictWriter(f, fieldnames=_agg_ll_fields)
                                 writer.writeheader()
-                                writer.writerow(
-                                    _round_floats_for_csv_row(
-                                        {
-                                            "num_of_participants": len(participants_loglik_summary),
-                                            "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
-                                            "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
-                                        }
-                                    )
-                                )
+                                writer.writerow(_round_floats_for_csv_row(_agg_ll))
         finally:
             if wandb is not None:
                 wandb.finish()

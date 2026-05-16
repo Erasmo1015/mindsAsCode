@@ -1,0 +1,470 @@
+[
+  {
+    "id": 0,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.2,
+          0.8
+        ],
+        "rewards": [
+          -3.0,
+          -12.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.4,
+          0.075,
+          0.225,
+          0.225,
+          0.075
+        ],
+        "rewards": [
+          -18.0,
+          -6.5,
+          -5.5,
+          -4.5,
+          -3.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [],
+    "observed_action": 0
+  },
+  {
+    "id": 1,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.2,
+          0.8
+        ],
+        "rewards": [
+          -3.0,
+          -12.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.4,
+          0.075,
+          0.225,
+          0.225,
+          0.075
+        ],
+        "rewards": [
+          -18.0,
+          -6.5,
+          -5.5,
+          -4.5,
+          -3.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 2,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.2,
+          0.8
+        ],
+        "rewards": [
+          -3.0,
+          -12.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.4,
+          0.075,
+          0.225,
+          0.225,
+          0.075
+        ],
+        "rewards": [
+          -18.0,
+          -6.5,
+          -5.5,
+          -4.5,
+          -3.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 3,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.2,
+          0.8
+        ],
+        "rewards": [
+          -3.0,
+          -12.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.4,
+          0.075,
+          0.225,
+          0.225,
+          0.075
+        ],
+        "rewards": [
+          -18.0,
+          -6.5,
+          -5.5,
+          -4.5,
+          -3.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 4,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.2,
+          0.8
+        ],
+        "rewards": [
+          -3.0,
+          -12.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.4,
+          0.075,
+          0.225,
+          0.225,
+          0.075
+        ],
+        "rewards": [
+          -18.0,
+          -6.5,
+          -5.5,
+          -4.5,
+          -3.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 5,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.9,
+          0.1
+        ],
+        "rewards": [
+          -8.0,
+          -27.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.75,
+          0.03125,
+          0.09375,
+          0.09375,
+          0.03125
+        ],
+        "rewards": [
+          -40.0,
+          62.5,
+          63.5,
+          64.5,
+          65.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [],
+    "observed_action": 0
+  },
+  {
+    "id": 6,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.9,
+          0.1
+        ],
+        "rewards": [
+          -8.0,
+          -27.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.75,
+          0.03125,
+          0.09375,
+          0.09375,
+          0.03125
+        ],
+        "rewards": [
+          -40.0,
+          62.5,
+          63.5,
+          64.5,
+          65.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 7,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.9,
+          0.1
+        ],
+        "rewards": [
+          -8.0,
+          -27.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.75,
+          0.03125,
+          0.09375,
+          0.09375,
+          0.03125
+        ],
+        "rewards": [
+          -40.0,
+          62.5,
+          63.5,
+          64.5,
+          65.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 8,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.9,
+          0.1
+        ],
+        "rewards": [
+          -8.0,
+          -27.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.75,
+          0.03125,
+          0.09375,
+          0.09375,
+          0.03125
+        ],
+        "rewards": [
+          -40.0,
+          62.5,
+          63.5,
+          64.5,
+          65.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  },
+  {
+    "id": 9,
+    "problem": {
+      "gamble_A": {
+        "probs": [
+          0.9,
+          0.1
+        ],
+        "rewards": [
+          -8.0,
+          -27.0
+        ]
+      },
+      "gamble_B": {
+        "probs": [
+          0.75,
+          0.03125,
+          0.09375,
+          0.09375,
+          0.03125
+        ],
+        "rewards": [
+          -40.0,
+          62.5,
+          63.5,
+          64.5,
+          65.5
+        ]
+      },
+      "option_keys": [
+        "N",
+        "I"
+      ],
+      "has_feedback": false
+    },
+    "history": [
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      },
+      {
+        "action": 0,
+        "feedback": null
+      }
+    ],
+    "observed_action": 0
+  }
+]

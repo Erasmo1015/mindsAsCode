@@ -734,6 +734,48 @@ def _build_val_examples_prompt_block(val_trials: List[Dict[str, Any]], max_n: in
     )
 
 
+def _te_data_driven_choice13k_prompt_path(max_prompt_val: int) -> str:
+    """Evolution prompt template: val-trials variant when validation examples are injected."""
+    base = _REPO_ROOT / "prompts" / "te_data_driven" / "evolution"
+    if int(max_prompt_val) > 0:
+        return str(base / "choices13k_val_trials.txt")
+    return str(base / "choices13k.txt")
+
+
+def _evolution_stage_cutoff(n_iterations: int) -> int:
+    """Last 1-indexed iteration that uses stage-1 prompt (first half, rounded up)."""
+    return (max(1, int(n_iterations)) + 1) // 2
+
+
+def _default_evolution_stage_prompt_paths() -> Tuple[Path, Path]:
+    base = _REPO_ROOT / "prompts" / "te_data_driven" / "evolution_stages"
+    return base / "stage1.txt", base / "stage2.txt"
+
+
+def _te_data_driven_evolution_stage_prompt_path(
+    iteration_step: int,
+    n_iterations: int,
+    *,
+    stage1_path: Optional[Path] = None,
+    stage2_path: Optional[Path] = None,
+    max_prompt_val: int = 0,
+    fallback_path: Optional[str] = None,
+) -> str:
+    """Stage-1 for first half of iterations, stage-2 for the rest (data-driven evolution)."""
+    s1 = Path(stage1_path) if stage1_path is not None else _default_evolution_stage_prompt_paths()[0]
+    s2 = Path(stage2_path) if stage2_path is not None else _default_evolution_stage_prompt_paths()[1]
+    cutoff = _evolution_stage_cutoff(n_iterations)
+    chosen = s1 if int(iteration_step) <= cutoff else s2
+    if chosen.is_file() and chosen.read_text(encoding="utf-8").strip():
+        return str(chosen.resolve())
+    fb = fallback_path or _te_data_driven_choice13k_prompt_path(max_prompt_val)
+    print(
+        f"[LLM prompt] Warning: stage prompt empty or missing ({chosen}); "
+        f"falling back to {fb}"
+    )
+    return fb
+
+
 def _pool_split_val_test(
     trials: List[Dict[str, Any]], split_seed: int
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -1187,7 +1229,7 @@ def _te_aggregate_run_evolution_stage(
             fitness_metric=args.fitness_metric,
             split_ratio=args.split_ratio,
             split_seed=args.split_seed,
-            max_prompt_train_trials=args.max_prompt_train_trials,
+            max_prompt_train=args.max_prompt_train,
             max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
             llm_max_tokens=args.llm_max_tokens,
             cpc18_official_mse=False,
@@ -2819,7 +2861,7 @@ def generate_program_variants(
     parent_train_accuracies: Optional[List[float]] = None,
     parent_train_mses: Optional[List[float]] = None,
     dataset: str = "choice13k",
-    max_prompt_train_trials: int = 1_000_000,
+    max_prompt_train: int = 10,
     max_prompt_trials_per_problem: int = 0,
     prompt_train_trials_seed: int = 0,
     fitness_metric: str = "accuracy",
@@ -2834,6 +2876,7 @@ def generate_program_variants(
     max_prompt_val: int = 0,
     parent_val_logliks: Optional[List[Optional[float]]] = None,
     choice13k_loglik_prompt_path: Optional[str] = None,
+    show_train_omitted_message: bool = False,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -2981,19 +3024,23 @@ def choose(problem, history):
     # Format training trials for context (evaluation elsewhere still uses full train_trials).
     state_text = ""
     if include_train_trials_in_prompt:
-        trials_for_prompt = list(train_trials)
-        trials_for_prompt = _cap_prompt_trials_per_problem(
-            trials_for_prompt, max_prompt_trials_per_problem
-        )
-        if max_prompt_train_trials > 0 and len(trials_for_prompt) > max_prompt_train_trials:
-            rng = np.random.default_rng(prompt_train_trials_seed)
-            perm = rng.permutation(len(trials_for_prompt))
-            sel = perm[:max_prompt_train_trials]
-            trials_for_prompt = [trials_for_prompt[i] for i in sel]
-            print(
-                f"[LLM prompt] Using {len(trials_for_prompt)} of {len(train_trials)} train trials "
-                f"(max_prompt_train_trials={max_prompt_train_trials}, seed={prompt_train_trials_seed})."
+        if max_prompt_train <= 0:
+            trials_for_prompt: List[Dict[str, Any]] = []
+            print("[LLM prompt] Omitting train trials (max_prompt_train=0).")
+        else:
+            trials_for_prompt = list(train_trials)
+            trials_for_prompt = _cap_prompt_trials_per_problem(
+                trials_for_prompt, max_prompt_trials_per_problem
             )
+            if len(trials_for_prompt) > max_prompt_train:
+                rng = np.random.default_rng(prompt_train_trials_seed)
+                perm = rng.permutation(len(trials_for_prompt))
+                sel = perm[:max_prompt_train]
+                trials_for_prompt = [trials_for_prompt[i] for i in sel]
+                print(
+                    f"[LLM prompt] Using {len(trials_for_prompt)} of {len(train_trials)} train trials "
+                    f"(max_prompt_train={max_prompt_train}, seed={prompt_train_trials_seed})."
+                )
         if trials_for_prompt and "problem" in trials_for_prompt[0]:
             if "gamble_A" in trials_for_prompt[0]["problem"]:
                 dataset_type = "choice13k"
@@ -3001,9 +3048,13 @@ def choose(problem, history):
                 dataset_type = "cpc18"
         else:
             dataset_type = "choice13k"
-        state_text = format_trials_to_text(trials_for_prompt, dataset=dataset_type)
-    else:
+        state_text = (
+            format_trials_to_text(trials_for_prompt, dataset=dataset_type) if trials_for_prompt else ""
+        )
+    elif show_train_omitted_message:
         state_text = "Train-trial history is intentionally omitted for this phase.\n"
+    else:
+        state_text = ""
     
     # Include parent programs as reference
     num_parents = len(parent_programs)
@@ -3586,7 +3637,7 @@ def run_evolution(
     choice13k_train_trials_override: Optional[List[Dict[str, Any]]] = None,
     choice13k_test_trials_override: Optional[List[Dict[str, Any]]] = None,
     choice13k_simple_logging: bool = False,
-    max_prompt_train_trials: int = 1_000_000,
+    max_prompt_train: int = 10,
     max_prompt_trials_per_problem: int = 0,
     llm_max_tokens: int = 800,
     cpc18_official_mse: bool = False,
@@ -3597,6 +3648,9 @@ def run_evolution(
     data_driven_mode: bool = False,
     choice13k_val_trials_override: Optional[List[Dict[str, Any]]] = None,
     choice13k_loglik_prompt_path: Optional[str] = None,
+    use_evolution_stages: bool = False,
+    evolution_stage1_prompt_path: Optional[str] = None,
+    evolution_stage2_prompt_path: Optional[str] = None,
     num_diagnostic_trials: Optional[int] = None,
     lambda_complexity: float = 0.0,
     lambda_change: float = 0.0,
@@ -4339,6 +4393,32 @@ def run_evolution(
                 if parent_train_mses is not None:
                     parent_train_mses.append(None)
         
+        iter_loglik_prompt_path = choice13k_loglik_prompt_path
+        if use_evolution_stages and use_data_driven_choice13k:
+            stage_cutoff = _evolution_stage_cutoff(n_iterations)
+            stage_num = 1 if iteration_step <= stage_cutoff else 2
+            iter_loglik_prompt_path = _te_data_driven_evolution_stage_prompt_path(
+                iteration_step,
+                n_iterations,
+                stage1_path=(
+                    Path(evolution_stage1_prompt_path)
+                    if evolution_stage1_prompt_path
+                    else None
+                ),
+                stage2_path=(
+                    Path(evolution_stage2_prompt_path)
+                    if evolution_stage2_prompt_path
+                    else None
+                ),
+                max_prompt_val=max_prompt_val,
+                fallback_path=choice13k_loglik_prompt_path,
+            )
+            print(
+                f"[LLM prompt] Evolution stage {stage_num} "
+                f"(iteration {iteration_step}/{n_iterations}, stage-1 through {stage_cutoff}): "
+                f"{iter_loglik_prompt_path}"
+            )
+
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
         diagnostic_text = ""
@@ -4419,12 +4499,18 @@ def run_evolution(
                 dataset=dataset,
                 parent_train_accuracies=parent_train_accs if (dataset != "cpc18" or is_cpc18_split) else None,
                 parent_train_mses=parent_train_mses if is_cpc18_mse else None,
-                max_prompt_train_trials=max_prompt_train_trials,
+                max_prompt_train=max_prompt_train,
                 max_prompt_trials_per_problem=max_prompt_trials_per_problem,
                 prompt_train_trials_seed=split_seed,
                 fitness_metric=fitness_metric,
                 cpc18_official_mse=is_cpc18_mse,
-                include_train_trials_in_prompt=(not adaptation_mode) and (not use_data_driven_choice13k),
+                include_train_trials_in_prompt=(
+                    ((not adaptation_mode) and (not use_data_driven_choice13k))
+                    or (use_data_driven_choice13k and max_prompt_train > 0)
+                ),
+                show_train_omitted_message=(
+                    adaptation_mode and (not use_data_driven_choice13k)
+                ),
                 base_program_code=(
                     aggregate_base_code if adaptation_mode and (not use_data_driven_choice13k) else None
                 ),
@@ -4442,7 +4528,7 @@ def run_evolution(
                 max_prompt_val=max_prompt_val,
                 parent_val_logliks=parent_val_logliks,
                 choice13k_loglik_prompt_path=(
-                    choice13k_loglik_prompt_path if use_data_driven_choice13k else None
+                    iter_loglik_prompt_path if use_data_driven_choice13k else None
                 ),
             )
         
@@ -6495,6 +6581,28 @@ def main():
         ),
     )
     parser.add_argument(
+        "--evolution_stages",
+        action="store_true",
+        help=(
+            "Enable 2-stage evolution prompts for data-driven Choice13k+loglik: "
+            "stage1.txt for the first half of iterations, stage2.txt for the rest. "
+            "Default: off (single choices13k template)."
+        ),
+    )
+    _stage1_default, _stage2_default = _default_evolution_stage_prompt_paths()
+    parser.add_argument(
+        "--evolution_stage1_prompt",
+        type=Path,
+        default=_stage1_default,
+        help=f"Stage-1 prompt for the first half of iterations (default: {_stage1_default}).",
+    )
+    parser.add_argument(
+        "--evolution_stage2_prompt",
+        type=Path,
+        default=_stage2_default,
+        help=f"Stage-2 prompt for the remaining iterations (default: {_stage2_default}).",
+    )
+    parser.add_argument(
         "--lambda_complexity",
         type=float,
         default=0.0,
@@ -6750,13 +6858,15 @@ def main():
         help="Seed for deterministic splitting (default: 0).",
     )
     parser.add_argument(
+        "--max_prompt_train",
         "--max_prompt_train_trials",
+        dest="max_prompt_train",
         type=int,
-        default=1_000_000,
+        default=10,
         help=(
-            "Cap on train trials serialized into each LLM generation prompt (random subsample without replacement). "
-            "If len(train_trials) <= this value, all train trials are used. Default 1000000. "
-            "Use 0 to disable capping (always use full train set in the prompt; may exceed context limits)."
+            "Train trials in each LLM generation prompt. 0 = omit train trials entirely. "
+            "N>0: random subsample of at most N train trials (all train trials if fewer than N). "
+            "Independent from --max_prompt_val. Default: 10. Alias: --max_prompt_train_trials."
         ),
     )
     parser.add_argument(
@@ -6789,8 +6899,8 @@ def main():
         return
     if args.local_dataset is not None and args.dataset != "choice13k":
         print("Warning: --local_dataset is only used for --dataset choice13k; ignoring it.")
-    if args.max_prompt_train_trials < 0:
-        print("Error: --max_prompt_train_trials must be >= 0 (0 = no cap).")
+    if args.max_prompt_train < 0:
+        print("Error: --max_prompt_train must be >= 0 (0 = omit train trials from prompt).")
         return
     if args.max_prompt_trials_per_problem < 0:
         print("Error: --max_prompt_trials_per_problem must be >= 0.")
@@ -6849,6 +6959,22 @@ def main():
         print("Error: --structure_path is only allowed with --phase_option evolution.")
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
+
+    use_evolution_stages = (
+        args.evolution_stages
+        and args.dataset == "choice13k"
+        and args.fitness_metric == "loglik"
+    )
+    evolution_stage1_prompt_path = str(Path(args.evolution_stage1_prompt).expanduser().resolve())
+    evolution_stage2_prompt_path = str(Path(args.evolution_stage2_prompt).expanduser().resolve())
+    if use_evolution_stages:
+        stage_cutoff = _evolution_stage_cutoff(args.n_iterations)
+        print(
+            f"[Config] 2-stage evolution prompts: stage1 iterations 1-{stage_cutoff}, "
+            f"stage2 iterations {stage_cutoff + 1}-{args.n_iterations}"
+        )
+        print(f"  stage1: {evolution_stage1_prompt_path}")
+        print(f"  stage2: {evolution_stage2_prompt_path}")
 
     if args.dataset in _PARTICIPANT_DATASETS:
         if args.participant_scope == "ordinals":
@@ -7088,7 +7214,7 @@ def main():
             test_trials.extend(p_trials)
         print(f"Across-participants trial counts: train={len(train_trials)}, test={len(test_trials)}")
 
-        te_dr_prompt = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
+        te_dr_prompt = _te_data_driven_choice13k_prompt_path(args.max_prompt_val)
         try:
             run_evolution(
                 seed_program_path=seed_program_path,
@@ -7119,13 +7245,16 @@ def main():
                 choice13k_train_trials_override=train_trials,
                 choice13k_test_trials_override=test_trials,
                 choice13k_simple_logging=True,
-                max_prompt_train_trials=args.max_prompt_train_trials,
+                max_prompt_train=args.max_prompt_train,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
                 adaptation_mode=False,
                 data_driven_mode=args.fitness_metric == "loglik",
                 max_prompt_val=args.max_prompt_val,
                 choice13k_loglik_prompt_path=te_dr_prompt if args.fitness_metric == "loglik" else None,
+                use_evolution_stages=use_evolution_stages,
+                evolution_stage1_prompt_path=evolution_stage1_prompt_path,
+                evolution_stage2_prompt_path=evolution_stage2_prompt_path,
                 hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
                 hard_participant_warmup_iters=args.hard_participant_warmup_iters,
                 early_stop=args.early_stop,
@@ -7140,7 +7269,7 @@ def main():
         finally:
             if wandb is not None:
                 wandb.finish()
-        return
+            return
 
     if args.dataset in _PARTICIPANT_DATASETS:
         if args.dataset != "choice13k":
@@ -7165,7 +7294,7 @@ def main():
                 wandb.finish()
             return
 
-        te_dr_prompt = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
+        te_dr_prompt = _te_data_driven_choice13k_prompt_path(args.max_prompt_val)
         print("\n=== Data-driven single-phase evolution (Choice13k) ===")
         pid_list = list(participants_to_process)
         run_root = Path(base_run_dir)
@@ -7201,13 +7330,16 @@ def main():
                     fitness_metric=args.fitness_metric,
                     split_ratio=args.split_ratio,
                     split_seed=args.split_seed,
-                    max_prompt_train_trials=args.max_prompt_train_trials,
+                    max_prompt_train=args.max_prompt_train,
                     max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                     llm_max_tokens=args.llm_max_tokens,
                     adaptation_mode=False,
                     data_driven_mode=True,
                     max_prompt_val=args.max_prompt_val,
                     choice13k_loglik_prompt_path=te_dr_prompt,
+                    use_evolution_stages=use_evolution_stages,
+                    evolution_stage1_prompt_path=evolution_stage1_prompt_path,
+                    evolution_stage2_prompt_path=evolution_stage2_prompt_path,
                     hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
                     hard_participant_warmup_iters=args.hard_participant_warmup_iters,
                     early_stop=args.early_stop,
@@ -7295,7 +7427,7 @@ def main():
             f"Total participants to process: {len(participants_to_process)}."
         )
 
-        te_dr_prompt_all = str(_REPO_ROOT / "prompts" / "te_data_driven" / "evolution" / "choices13k.txt")
+        te_dr_prompt_all = _te_data_driven_choice13k_prompt_path(args.max_prompt_val)
 
         try:
             for participant_id in tqdm(participants_to_process, desc="Participants"):
@@ -7326,7 +7458,7 @@ def main():
                     fitness_metric=args.fitness_metric,
                     split_ratio=args.split_ratio,
                     split_seed=args.split_seed,
-                    max_prompt_train_trials=args.max_prompt_train_trials,
+                    max_prompt_train=args.max_prompt_train,
                     max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
@@ -7336,6 +7468,9 @@ def main():
                     choice13k_loglik_prompt_path=(
                         te_dr_prompt_all if args.dataset == "choice13k" and args.fitness_metric == "loglik" else None
                     ),
+                    use_evolution_stages=use_evolution_stages,
+                    evolution_stage1_prompt_path=evolution_stage1_prompt_path,
+                    evolution_stage2_prompt_path=evolution_stage2_prompt_path,
                     hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
                     hard_participant_warmup_iters=args.hard_participant_warmup_iters,
                     early_stop=args.early_stop,
@@ -7670,7 +7805,7 @@ def main():
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
                         split_seed=args.split_seed,
-                        max_prompt_train_trials=args.max_prompt_train_trials,
+                        max_prompt_train=args.max_prompt_train,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         hard_participant_train_loglik_threshold=args.hard_participant_train_loglik_threshold,
@@ -7801,7 +7936,7 @@ def main():
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
                         split_seed=args.split_seed,
-                        max_prompt_train_trials=args.max_prompt_train_trials,
+                        max_prompt_train=args.max_prompt_train,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         cpc18_official_mse=args.cpc18_official_mse,
