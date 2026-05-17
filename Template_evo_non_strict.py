@@ -503,8 +503,44 @@ def run_choice13k_gate_phase(
         return None
 
 
+def _refinement_combined_fitness(train_loglik: float, val_loglik: float) -> float:
+    """Refinement selection fitness: equal weight on train and validation log-likelihood."""
+    return 0.5 * float(train_loglik) + 0.5 * float(val_loglik)
+
+
+def _refinement_pool_best_metrics(
+    elite_parents: List[Tuple[Any, ...]],
+    elite_val_logliks: List[Optional[float]],
+    test_trials: List[Dict[str, Any]],
+    *,
+    n_eval_seeds: int,
+) -> Dict[str, Any]:
+    """Metrics for elite pool rank-1 after an iteration (includes held-out test loglik)."""
+    pool_best = elite_parents[0]
+    program_id = pool_best[3]
+    train_loglik = (
+        float(pool_best[6]) if pool_best[6] is not None else None
+    )
+    val_loglik = (
+        float(elite_val_logliks[0]) if elite_val_logliks and elite_val_logliks[0] is not None else None
+    )
+    fitness = float(pool_best[1])
+    test_loglik: Optional[float] = None
+    choose_fn = compile_program(pool_best[0])
+    if choose_fn is not None:
+        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+        test_loglik = float(test_eval["avg_loglik"])
+    return {
+        "pool_best_program_id": program_id,
+        "pool_best_train_val_loglik": fitness,
+        "pool_best_train_loglik": train_loglik,
+        "pool_best_val_loglik": val_loglik,
+        "pool_best_test_loglik": test_loglik,
+    }
+
+
 def _load_choice13k_refinement_prompt_suffix() -> str:
-    """Suffix appended to the normal choice13k prompt during refinement (train-only evolution)."""
+    """Suffix appended to the normal choice13k prompt during refinement."""
     path = os.path.join(
         os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
         "prompts",
@@ -568,8 +604,8 @@ def run_choice13k_refinement_phase(
     wandb_step_offset: int = 0,
 ) -> Optional[float]:
     """
-    Refinement: train-only selection, val trials in prompt, test loglik returned as gated_test_loglik.
-    Starts from the final best evolved program.
+    Refinement: elite pool sorted by 0.5*train_loglik + 0.5*val_loglik; val trials in prompt;
+    test loglik returned as gated_test_loglik. Starts from the final best evolved program.
     """
     if not val_trials or not test_trials or n_iterations < 1:
         return None
@@ -589,18 +625,27 @@ def run_choice13k_refinement_phase(
     )
     print(f"{'='*80}")
 
+    seed_combined_fitness = _refinement_combined_fitness(
+        initial_train_loglik, initial_val_loglik
+    )
     elite_parents: List[Tuple[Any, ...]] = [
         (
             initial_code,
-            float(initial_train_loglik),
+            seed_combined_fitness,
             None,
             "refinement_seed",
             None,
             None,
-            None,
+            float(initial_train_loglik),
         )
     ]
     elite_val_logliks: List[Optional[float]] = [float(initial_val_loglik)]
+
+    seed_test_loglik: Optional[float] = None
+    seed_fn = compile_program(initial_code)
+    if seed_fn is not None:
+        seed_test_eval = evaluate_choice13k_program(seed_fn, test_trials, n_seeds=n_eval_seeds)
+        seed_test_loglik = float(seed_test_eval["avg_loglik"])
 
     refinement_dir: Optional[Path] = None
     if save_artifacts and output_path is not None:
@@ -640,13 +685,19 @@ def run_choice13k_refinement_phase(
 
         for i, parent_tuple in enumerate(selected_parents):
             prog_id = parent_tuple[3]
-            train_ll = parent_tuple[1]
+            train_ll = float(parent_tuple[6]) if parent_tuple[6] is not None else float(parent_tuple[1])
             val_ll = selected_val_lls[i]
+            comb_fitness = float(parent_tuple[1])
             val_str = f"{val_ll:.4f}" if val_ll is not None else "N/A"
-            print(f"  Parent {i+1}: {prog_id} (train_loglik={train_ll:.4f}, val_loglik={val_str})")
+            print(
+                f"  Parent {i+1}: {prog_id} "
+                f"(fitness={comb_fitness:.4f}, train_loglik={train_ll:.4f}, val_loglik={val_str})"
+            )
 
         parent_codes = [p[0] for p in selected_parents]
-        parent_train_lls = [float(p[1]) for p in selected_parents]
+        parent_train_lls = [
+            float(p[6]) if p[6] is not None else float(p[1]) for p in selected_parents
+        ]
 
         print(
             f"[LLM prompt] Refinement uses {len(val_for_prompt)} validation trials only "
@@ -681,7 +732,7 @@ def run_choice13k_refinement_phase(
                     {
                         "idx": idx,
                         "code": "",
-                        "fitness": float("-inf"),
+                        "train_val_loglik": float("-inf"),
                         "train_loglik": float("-inf"),
                         "val_loglik": float("-inf"),
                         "runtime_valid": False,
@@ -694,7 +745,7 @@ def run_choice13k_refinement_phase(
                     {
                         "idx": idx,
                         "code": code,
-                        "fitness": float("-inf"),
+                        "train_val_loglik": float("-inf"),
                         "train_loglik": float("-inf"),
                         "val_loglik": float("-inf"),
                         "runtime_valid": False,
@@ -709,7 +760,7 @@ def run_choice13k_refinement_phase(
                     {
                         "idx": idx,
                         "code": code,
-                        "fitness": float("-inf"),
+                        "train_val_loglik": float("-inf"),
                         "train_loglik": float("-inf"),
                         "val_loglik": float("-inf"),
                         "runtime_valid": False,
@@ -719,12 +770,16 @@ def run_choice13k_refinement_phase(
             runtime_valid = train_eval.get("errors", 0) == 0
             train_loglik = float(train_eval["avg_loglik"])
             val_loglik = float(val_eval["avg_loglik"])
-            fitness = train_loglik if runtime_valid else float("-inf")
+            train_val_loglik = (
+                _refinement_combined_fitness(train_loglik, val_loglik)
+                if runtime_valid
+                else float("-inf")
+            )
             candidate_results.append(
                 {
                     "idx": idx,
                     "code": code,
-                    "fitness": fitness,
+                    "train_val_loglik": train_val_loglik,
                     "train_loglik": train_loglik,
                     "val_loglik": val_loglik,
                     "runtime_valid": runtime_valid,
@@ -732,89 +787,32 @@ def run_choice13k_refinement_phase(
             )
 
         selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
+        iter_best_result: Optional[Dict[str, Any]] = None
         if not selected_results:
             print("Warning: No runtime-valid refinement candidates; keeping elite pool.")
-            if iter_dir is not None:
-                metrics = {
-                    "iteration": iteration_step,
-                    "n_candidates": n_candidates_per_iteration,
-                    "n_runtime_valid": 0,
-                    "best_program_id": None,
-                    "candidate_results": [
-                        {
-                            "idx": r["idx"],
-                            "train_loglik": r.get("train_loglik"),
-                            "val_loglik": r.get("val_loglik"),
-                            "fitness": r.get("fitness"),
-                            "runtime_valid": r.get("runtime_valid", False),
-                        }
-                        for r in candidate_results
-                    ],
-                    "best_train_fitness": None,
-                    "best_train_loglik": None,
-                    "best_val_loglik": None,
-                }
-                (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-            continue
-
-        selected_results.sort(key=lambda x: x["fitness"], reverse=True)
-        best_result = selected_results[0]
-        print(
-            f"  Best refinement candidate {best_result['idx']}: "
-            f"train_loglik={best_result['train_loglik']:.4f}, "
-            f"val_loglik={best_result['val_loglik']:.4f}"
-        )
-
-        best_program_id = f"refinement_{iteration_step}_candidate_{best_result['idx']}"
-        if iter_dir is not None:
-            metrics = {
-                "iteration": iteration_step,
-                "n_candidates": n_candidates_per_iteration,
-                "n_runtime_valid": len(selected_results),
-                "best_program_id": best_program_id,
-                "candidate_results": [
-                    {
-                        "idx": r["idx"],
-                        "train_loglik": r.get("train_loglik"),
-                        "val_loglik": r.get("val_loglik"),
-                        "fitness": r.get("fitness"),
-                        "runtime_valid": r.get("runtime_valid", False),
-                    }
-                    for r in candidate_results
-                ],
-                "best_train_fitness": best_result["fitness"],
-                "best_train_loglik": best_result["train_loglik"],
-                "best_val_loglik": best_result["val_loglik"],
-            }
-            (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-
-        if wandb_module is not None:
-            refine_iter_log = {
-                f"p{participant_id}_train_loglik": best_result["train_loglik"],
-                f"p{participant_id}_val_loglik": best_result["val_loglik"],
-                f"p{participant_id}_train_fitness": best_result["train_loglik"],
-            }
-            _wandb_log_participant_metrics(
-                wandb_module,
-                refine_iter_log,
-                int(participant_id),
-                int(wandb_step_offset) + iteration_step,
+        else:
+            selected_results.sort(key=lambda x: x["train_val_loglik"], reverse=True)
+            iter_best_result = selected_results[0]
+            print(
+                f"  Best refinement candidate {iter_best_result['idx']}: "
+                f"train_val_loglik={iter_best_result['train_val_loglik']:.4f} "
+                f"(0.5*train+0.5*val), train_loglik={iter_best_result['train_loglik']:.4f}, "
+                f"val_loglik={iter_best_result['val_loglik']:.4f}"
             )
-
-        for result in selected_results:
-            program_id = f"refinement_{iteration_step}_candidate_{result['idx']}"
-            elite_parents.append(
-                (
-                    result["code"],
-                    result["fitness"],
-                    None,
-                    program_id,
-                    None,
-                    None,
-                    None,
+            for result in selected_results:
+                program_id = f"refinement_{iteration_step}_candidate_{result['idx']}"
+                elite_parents.append(
+                    (
+                        result["code"],
+                        result["train_val_loglik"],
+                        None,
+                        program_id,
+                        None,
+                        None,
+                        result["train_loglik"],
+                    )
                 )
-            )
-            elite_val_logliks.append(result.get("val_loglik"))
+                elite_val_logliks.append(result.get("val_loglik"))
 
         paired = list(zip(elite_parents, elite_val_logliks))
         paired.sort(key=lambda x: x[0][1], reverse=True)
@@ -822,6 +820,82 @@ def run_choice13k_refinement_phase(
         paired = paired[:elite_cap]
         elite_parents = [p[0] for p in paired]
         elite_val_logliks = [p[1] for p in paired]
+
+        pool_metrics = _refinement_pool_best_metrics(
+            elite_parents,
+            elite_val_logliks,
+            test_trials,
+            n_eval_seeds=n_eval_seeds,
+        )
+        pool_test_ll = pool_metrics.get("pool_best_test_loglik")
+        pool_id = pool_metrics.get("pool_best_program_id")
+        if pool_test_ll is not None:
+            print(
+                f"  Pool best after iteration {iteration_step}: {pool_id} "
+                f"(train_val_loglik={float(pool_metrics['pool_best_train_val_loglik']):.4f}, "
+                f"test_loglik={float(pool_test_ll):.6f})"
+            )
+        else:
+            print(
+                f"  Pool best after iteration {iteration_step}: {pool_id} "
+                f"(test_loglik unavailable)"
+            )
+
+        if iter_dir is not None:
+            metrics: Dict[str, Any] = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_runtime_valid": len(selected_results),
+                "candidate_results": [
+                    {
+                        "idx": r["idx"],
+                        "train_loglik": r.get("train_loglik"),
+                        "val_loglik": r.get("val_loglik"),
+                        "train_val_loglik": r.get("train_val_loglik"),
+                        "runtime_valid": r.get("runtime_valid", False),
+                    }
+                    for r in candidate_results
+                ],
+                **pool_metrics,
+            }
+            if iter_best_result is not None:
+                metrics["iter_best_program_id"] = (
+                    f"refinement_{iteration_step}_candidate_{iter_best_result['idx']}"
+                )
+                metrics["iter_best_train_val_loglik"] = iter_best_result["train_val_loglik"]
+                metrics["iter_best_train_loglik"] = iter_best_result["train_loglik"]
+                metrics["iter_best_val_loglik"] = iter_best_result["val_loglik"]
+            else:
+                metrics["iter_best_program_id"] = None
+                metrics["iter_best_train_val_loglik"] = None
+                metrics["iter_best_train_loglik"] = None
+                metrics["iter_best_val_loglik"] = None
+            (iter_dir / "metrics.json").write_text(
+                json.dumps(metrics, indent=2), encoding="utf-8"
+            )
+
+        if wandb_module is not None:
+            refine_iter_log: Dict[str, Any] = {
+                f"p{participant_id}_train_val_loglik": pool_metrics.get(
+                    "pool_best_train_val_loglik"
+                ),
+                f"p{participant_id}_train_loglik": pool_metrics.get("pool_best_train_loglik"),
+                f"p{participant_id}_val_loglik": pool_metrics.get("pool_best_val_loglik"),
+            }
+            if pool_metrics.get("pool_best_test_loglik") is not None:
+                refine_iter_log[f"p{participant_id}_test_loglik"] = pool_metrics[
+                    "pool_best_test_loglik"
+                ]
+            if iter_best_result is not None:
+                refine_iter_log[f"p{participant_id}_iter_best_train_val_loglik"] = (
+                    iter_best_result["train_val_loglik"]
+                )
+            _wandb_log_participant_metrics(
+                wandb_module,
+                refine_iter_log,
+                int(participant_id),
+                int(wandb_step_offset) + iteration_step,
+            )
 
     best_code = elite_parents[0][0]
     best_fn = compile_program(best_code)
@@ -840,6 +914,8 @@ def run_choice13k_refinement_phase(
 
     if refinement_dir is not None:
         best_val_ll = elite_val_logliks[0] if elite_val_logliks else None
+        final_program_id = str(elite_parents[0][3])
+        final_is_seed = final_program_id == "refinement_seed"
         _write_refinement_results_json(
             refinement_dir,
             {
@@ -851,15 +927,27 @@ def run_choice13k_refinement_phase(
                     "program_id": "refinement_seed",
                     "train_loglik": float(initial_train_loglik),
                     "val_loglik": float(initial_val_loglik),
+                    "test_loglik": seed_test_loglik,
+                    "train_val_loglik": float(seed_combined_fitness),
                 },
-                "overall_best_train": {
-                    "program_id": elite_parents[0][3],
-                    "train_loglik": float(elite_parents[0][1]),
+                "final_pool_best": {
+                    "program_id": final_program_id,
+                    "train_val_loglik": float(elite_parents[0][1]),
+                    "train_loglik": float(elite_parents[0][6])
+                    if elite_parents[0][6] is not None
+                    else None,
                     "val_loglik": float(best_val_ll) if best_val_ll is not None else None,
+                    "test_loglik": refinement_test_loglik,
                 },
+                "final_program_is_seed": final_is_seed,
                 "gated_test_loglik": refinement_test_loglik,
             },
         )
+        if final_is_seed:
+            print(
+                "Note: Final pool-best is still refinement_seed (no candidate beat seed on "
+                "combined fitness); gated_test_loglik equals seed test loglik."
+            )
     return refinement_test_loglik
 
 
