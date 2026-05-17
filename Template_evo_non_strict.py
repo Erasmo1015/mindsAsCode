@@ -36,6 +36,7 @@ import shlex
 import shutil
 import socket
 import sys
+import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Callable, Optional, Tuple
@@ -58,6 +59,10 @@ from agent import AgentExecutionFramework
 _REPO_ROOT = Path(__file__).resolve().parent
 _PARTICIPANT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
 BEST_PROGRAM_FILENAME = "best_program.py"
+
+# Serializes writes to experiment-level CSVs (participant_details_loglik, summary_loglik, etc.)
+# when --parallel_participants is enabled. Per-participant dirs are not locked (isolated paths).
+_SHARED_EXPERIMENT_CSV_LOCK = threading.Lock()
 _RUN_PHASES = frozenset({"all", "evolution", "refine"})
 
 
@@ -66,6 +71,85 @@ def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> in
     if elite_pool_size is None:
         return max(sample_size * 2, 20)
     return max(1, int(elite_pool_size))
+
+
+_WANDB_PARTICIPANT_CHART_SUFFIXES = (
+    "train_loglik",
+    "val_loglik",
+    "test_loglik",
+    "gated_test_loglik",
+    "train_fitness",
+    "test_fitness",
+    "train_acc",
+    "test_acc",
+    "train_accuracy",
+    "test_accuracy",
+)
+
+
+def _wandb_participant_chart_dict(
+    log_dict: Dict[str, Any],
+    participant_id: int,
+    step: int,
+) -> Dict[str, Any]:
+    """
+    Build W&B log payload with slash-grouped chart keys (p{pid}/metric), matching te_aggregate.py.
+
+    Underscore keys in log_dict are kept for JSONL; wandb.log should use this dict only.
+    """
+    pid = int(participant_id)
+    out: Dict[str, Any] = {f"p{pid}_step": int(step)}
+    for suffix in _WANDB_PARTICIPANT_CHART_SUFFIXES:
+        us_key = f"p{pid}_{suffix}"
+        if us_key in log_dict and log_dict[us_key] is not None:
+            out[f"p{pid}/{suffix}"] = log_dict[us_key]
+    for aux in ("n_valid", "is_baseline"):
+        aux_key = f"p{pid}_{aux}"
+        if aux_key in log_dict:
+            out[aux_key] = log_dict[aux_key]
+    return out
+
+
+def _wandb_log_participant_metrics(
+    wandb_module: Any,
+    log_dict: Dict[str, Any],
+    participant_id: int,
+    step: int,
+) -> None:
+    """Log participant metrics to W&B with te_aggregate-style slash chart grouping."""
+    wandb_module.log(_wandb_participant_chart_dict(log_dict, participant_id, step), step=step)
+
+
+def _parallel_participant_pool_sizes(
+    max_workers: int, n_candidates: int, parallel_participants: bool
+) -> Tuple[int, int]:
+    """Return (participant_workers, candidate_workers_per_participant)."""
+    n_cand = max(1, int(n_candidates))
+    if not parallel_participants:
+        return 1, max(1, int(max_workers))
+    return max(1, int(max_workers) // n_cand), n_cand
+
+
+def _choice13k_val_loglik_below_refinement_threshold(
+    val_loglik: Optional[float], refinement_val_threshold: float
+) -> bool:
+    """True when refinement should run (val loglik strictly below threshold)."""
+    if val_loglik is None:
+        return False
+    return float(val_loglik) < float(refinement_val_threshold)
+
+
+def _resolve_default_seed_program_path(args: Any, participant_id: int) -> Optional[str]:
+    """Default seed path for choice13k/cpc18/mixed_gambles (None if gridworld needs detect)."""
+    if args.seed_path is not None:
+        return args.seed_path
+    if args.dataset in ("gridworld", "gridworld_ensemble"):
+        return None
+    if args.dataset == "cpc18":
+        return "persona_code_example/cpc18/hard.py"
+    if args.dataset == "mixed_gambles":
+        return "persona_code_example/hard_Qwen.py"
+    return "persona_code_example/vanilla.py"
 
 
 def _parallel_generate_children(
@@ -480,6 +564,8 @@ def run_choice13k_refinement_phase(
     fitness_metric: str = "loglik",
     output_path: Optional[Path] = None,
     save_artifacts: bool = True,
+    wandb_module: Optional[Any] = None,
+    wandb_step_offset: int = 0,
 ) -> Optional[float]:
     """
     Refinement: train-only selection, val trials in prompt, test loglik returned as gated_test_loglik.
@@ -562,6 +648,10 @@ def run_choice13k_refinement_phase(
         parent_codes = [p[0] for p in selected_parents]
         parent_train_lls = [float(p[1]) for p in selected_parents]
 
+        print(
+            f"[LLM prompt] Refinement uses {len(val_for_prompt)} validation trials only "
+            f"(not train+val; cap via max_prompt_train_trials={max_prompt_train_trials})."
+        )
         candidate_codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -578,8 +668,7 @@ def run_choice13k_refinement_phase(
             fitness_metric=fitness_metric,
             max_workers=max_workers,
             prompt_suffix=refine_suffix,
-            extra_prompt_trials=val_for_prompt,
-            extra_prompt_trials_label="Validation observations",
+            prompt_observation_trials=val_for_prompt,
         )
 
         candidate_results: List[Dict[str, Any]] = []
@@ -645,6 +734,27 @@ def run_choice13k_refinement_phase(
         selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
         if not selected_results:
             print("Warning: No runtime-valid refinement candidates; keeping elite pool.")
+            if iter_dir is not None:
+                metrics = {
+                    "iteration": iteration_step,
+                    "n_candidates": n_candidates_per_iteration,
+                    "n_runtime_valid": 0,
+                    "best_program_id": None,
+                    "candidate_results": [
+                        {
+                            "idx": r["idx"],
+                            "train_loglik": r.get("train_loglik"),
+                            "val_loglik": r.get("val_loglik"),
+                            "fitness": r.get("fitness"),
+                            "runtime_valid": r.get("runtime_valid", False),
+                        }
+                        for r in candidate_results
+                    ],
+                    "best_train_fitness": None,
+                    "best_train_loglik": None,
+                    "best_val_loglik": None,
+                }
+                (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
             continue
 
         selected_results.sort(key=lambda x: x["fitness"], reverse=True)
@@ -654,6 +764,42 @@ def run_choice13k_refinement_phase(
             f"train_loglik={best_result['train_loglik']:.4f}, "
             f"val_loglik={best_result['val_loglik']:.4f}"
         )
+
+        best_program_id = f"refinement_{iteration_step}_candidate_{best_result['idx']}"
+        if iter_dir is not None:
+            metrics = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_runtime_valid": len(selected_results),
+                "best_program_id": best_program_id,
+                "candidate_results": [
+                    {
+                        "idx": r["idx"],
+                        "train_loglik": r.get("train_loglik"),
+                        "val_loglik": r.get("val_loglik"),
+                        "fitness": r.get("fitness"),
+                        "runtime_valid": r.get("runtime_valid", False),
+                    }
+                    for r in candidate_results
+                ],
+                "best_train_fitness": best_result["fitness"],
+                "best_train_loglik": best_result["train_loglik"],
+                "best_val_loglik": best_result["val_loglik"],
+            }
+            (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+        if wandb_module is not None:
+            refine_iter_log = {
+                f"p{participant_id}_train_loglik": best_result["train_loglik"],
+                f"p{participant_id}_val_loglik": best_result["val_loglik"],
+                f"p{participant_id}_train_fitness": best_result["train_loglik"],
+            }
+            _wandb_log_participant_metrics(
+                wandb_module,
+                refine_iter_log,
+                int(participant_id),
+                int(wandb_step_offset) + iteration_step,
+            )
 
         for result in selected_results:
             program_id = f"refinement_{iteration_step}_candidate_{result['idx']}"
@@ -691,6 +837,29 @@ def run_choice13k_refinement_phase(
     test_eval = evaluate_choice13k_program(best_fn, test_trials, n_seeds=n_eval_seeds)
     refinement_test_loglik = float(test_eval["avg_loglik"])
     print(f"Refinement final test avg log-likelihood (gated_test_loglik): {refinement_test_loglik:.6f}")
+
+    if refinement_dir is not None:
+        best_val_ll = elite_val_logliks[0] if elite_val_logliks else None
+        _write_refinement_results_json(
+            refinement_dir,
+            {
+                "phase": "refinement",
+                "participant_id": int(participant_id),
+                "n_iterations": int(n_iterations),
+                "refinement_skipped": False,
+                "refinement_seed": {
+                    "program_id": "refinement_seed",
+                    "train_loglik": float(initial_train_loglik),
+                    "val_loglik": float(initial_val_loglik),
+                },
+                "overall_best_train": {
+                    "program_id": elite_parents[0][3],
+                    "train_loglik": float(elite_parents[0][1]),
+                    "val_loglik": float(best_val_ll) if best_val_ll is not None else None,
+                },
+                "gated_test_loglik": refinement_test_loglik,
+            },
+        )
     return refinement_test_loglik
 
 
@@ -714,6 +883,53 @@ def _write_participant_details_loglik_csv(
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(_round_floats_for_csv_rows(rows))
+
+
+def _clear_gated_test_loglik_in_loglik_rows(rows: List[Dict[str, Any]]) -> None:
+    """Remove prior-run gated_test_loglik so a new refine experiment starts fresh."""
+    for row in rows:
+        row["gated_test_loglik"] = None
+
+
+def _write_refine_summary_loglik_csv(output_dir: Path, rows: List[Dict[str, Any]]) -> None:
+    """Write experiment-level summary_loglik.csv for refine-only runs."""
+    gated_vals = [
+        float(r["gated_test_loglik"])
+        for r in rows
+        if r.get("gated_test_loglik") not in (None, "")
+    ]
+    val_vals = [float(r["val_loglik"]) for r in rows if r.get("val_loglik") not in (None, "")]
+    train_vals = [float(r["train_loglik"]) for r in rows if r.get("train_loglik") not in (None, "")]
+    test_vals = [float(r["test_loglik"]) for r in rows if r.get("test_loglik") not in (None, "")]
+    summary_loglik_path = output_dir / "summary_loglik.csv"
+    with summary_loglik_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "num_of_participants",
+                "avg_train_loglik",
+                "avg_test_loglik",
+                "avg_val_loglik",
+                "avg_gated_test_loglik",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            _round_floats_for_csv_row(
+                {
+                    "num_of_participants": len(rows),
+                    "avg_train_loglik": float(np.mean(train_vals)) if train_vals else None,
+                    "avg_test_loglik": float(np.mean(test_vals)) if test_vals else None,
+                    "avg_val_loglik": float(np.mean(val_vals)) if val_vals else None,
+                    "avg_gated_test_loglik": float(np.mean(gated_vals)) if gated_vals else None,
+                }
+            )
+        )
+
+
+def _write_refinement_results_json(refinement_dir: Path, results: Dict[str, Any]) -> None:
+    refinement_dir.mkdir(parents=True, exist_ok=True)
+    (refinement_dir / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 
 def _choice13k_trials_for_participant(
@@ -754,6 +970,8 @@ def run_choice13k_refine_participant_from_checkpoint(
     max_workers: int,
     n_eval_seeds: int,
     save_artifacts: bool = True,
+    wandb_module: Optional[Any] = None,
+    refinement_val_threshold: float = -1.0,
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -793,6 +1011,53 @@ def run_choice13k_refine_participant_from_checkpoint(
         f"(train_loglik={train_loglik:.4f}, val_loglik={val_loglik:.4f})"
     )
 
+    test_loglik = prev_loglik_row.get("test_loglik") if prev_loglik_row else None
+    if test_loglik not in (None, ""):
+        test_loglik = float(test_loglik)
+    else:
+        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+        test_loglik = float(test_eval["avg_loglik"])
+
+    refinement_dir = output_dir / "refinement"
+    if save_artifacts:
+        refinement_dir.mkdir(parents=True, exist_ok=True)
+
+    if not _choice13k_val_loglik_below_refinement_threshold(val_loglik, refinement_val_threshold):
+        print(
+            f"Refinement skipped: val_loglik={float(val_loglik):.6f} "
+            f">= threshold={float(refinement_val_threshold):.6f}"
+        )
+        if save_artifacts:
+            _write_refinement_results_json(
+                refinement_dir,
+                {
+                    "phase": "refinement",
+                    "participant_id": int(participant_id),
+                    "n_iterations": int(n_iterations),
+                    "refinement_skipped": True,
+                    "refinement_val_threshold": float(refinement_val_threshold),
+                    "checkpoint": {
+                        "program_id": BEST_PROGRAM_FILENAME,
+                        "train_loglik": train_loglik,
+                        "val_loglik": val_loglik,
+                        "test_loglik": test_loglik,
+                    },
+                    "gated_test_loglik": None,
+                },
+            )
+        return {
+            "participant_id": participant_id,
+            "train_loglik": train_loglik,
+            "val_loglik": val_loglik,
+            "test_loglik": test_loglik,
+            "gated_test_loglik": None,
+            "refinement_skipped": True,
+        }
+
+    print(
+        f"Refinement triggered: val_loglik={float(val_loglik):.6f} "
+        f"< threshold={float(refinement_val_threshold):.6f}"
+    )
     gated_test_loglik = run_choice13k_refinement_phase(
         client=client,
         model_name=model_name,
@@ -817,14 +1082,23 @@ def run_choice13k_refine_participant_from_checkpoint(
         fitness_metric="loglik",
         output_path=output_dir,
         save_artifacts=save_artifacts,
+        wandb_module=wandb_module,
+        wandb_step_offset=0,
     )
 
-    test_loglik = prev_loglik_row.get("test_loglik") if prev_loglik_row else None
-    if test_loglik not in (None, ""):
-        test_loglik = float(test_loglik)
-    else:
-        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
-        test_loglik = float(test_eval["avg_loglik"])
+    if gated_test_loglik is not None and wandb_module is not None:
+        final_refine_log = {
+            f"p{participant_id}_gated_test_loglik": gated_test_loglik,
+            f"p{participant_id}_train_loglik": train_loglik,
+            f"p{participant_id}_val_loglik": val_loglik,
+            f"p{participant_id}_test_loglik": test_loglik,
+        }
+        _wandb_log_participant_metrics(
+            wandb_module,
+            final_refine_log,
+            int(participant_id),
+            int(n_iterations),
+        )
 
     return {
         "participant_id": participant_id,
@@ -832,6 +1106,7 @@ def run_choice13k_refine_participant_from_checkpoint(
         "val_loglik": val_loglik,
         "test_loglik": test_loglik,
         "gated_test_loglik": gated_test_loglik,
+        "refinement_skipped": False,
     }
 
 
@@ -854,24 +1129,76 @@ def run_choice13k_refine_from_prev_experiment(
     llm_max_tokens: int,
     max_workers: int,
     n_eval_seeds: int,
+    wandb_module: Optional[Any] = None,
+    parallel_participants: bool = False,
+    refinement_val_threshold: float = -1.0,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    participant_workers, candidate_workers_per_participant = _parallel_participant_pool_sizes(
+        max_workers, n_candidates_per_iteration, parallel_participants
+    )
+    if parallel_participants:
+        print(
+            "[INFO] Parallel participants enabled: "
+            f"participant_workers={participant_workers}, "
+            f"candidate_workers_per_participant={candidate_workers_per_participant}"
+        )
+
     prev_details_csv = prev_exp_path / "participant_details_loglik.csv"
     loglik_rows = _load_participant_details_loglik_csv(prev_details_csv)
     rows_by_pid: Dict[int, Dict[str, Any]] = {
         int(row["participant_id"]): dict(row) for row in loglik_rows
     }
+    for pid in participants:
+        pid_int = int(pid)
+        if pid_int not in rows_by_pid:
+            rows_by_pid[pid_int] = {"participant_id": pid_int}
 
     out_details_csv = output_dir / "participant_details_loglik.csv"
     shutil.copy2(prev_details_csv, out_details_csv)
     print(f"Copied {prev_details_csv} -> {out_details_csv}")
 
-    for participant_id in participants:
+    _clear_gated_test_loglik_in_loglik_rows(list(rows_by_pid.values()))
+    all_pids = sorted(
+        {int(r["participant_id"]) for r in loglik_rows} | {int(p) for p in participants}
+    )
+    cleared_rows = [rows_by_pid[pid] for pid in all_pids]
+    _write_participant_details_loglik_csv(out_details_csv, cleared_rows, dataset="choice13k")
+    _write_refine_summary_loglik_csv(output_dir, cleared_rows)
+    print("Cleared gated_test_loglik in participant_details_loglik.csv for new refine run.")
+
+    def _commit_participant_refine_metrics(participant_id: int, metrics: Dict[str, Any]) -> None:
+        """Update shared experiment CSVs (main thread / lock only; never call from worker threads)."""
+        with _SHARED_EXPERIMENT_CSV_LOCK:
+            prev_row = rows_by_pid.get(int(participant_id))
+            if prev_row is None:
+                prev_row = {"participant_id": participant_id}
+                rows_by_pid[int(participant_id)] = prev_row
+            for key in ("train_loglik", "val_loglik", "test_loglik"):
+                if metrics.get(key) is not None:
+                    prev_row[key] = metrics[key]
+            prev_row["gated_test_loglik"] = metrics.get("gated_test_loglik")
+            updated_rows = [rows_by_pid[pid] for pid in all_pids]
+            _write_participant_details_loglik_csv(out_details_csv, updated_rows, dataset="choice13k")
+            _write_refine_summary_loglik_csv(output_dir, updated_rows)
+        gated_str = (
+            f"{float(metrics['gated_test_loglik']):.6f}"
+            if metrics.get("gated_test_loglik") is not None
+            else "None"
+        )
+        print(
+            f"Updated CSV for participant {participant_id}: "
+            f"gated_test_loglik={gated_str}"
+        )
+
+    def _refine_one_participant(participant_id: int) -> Tuple[int, Dict[str, Any]]:
+        # Snapshot row so parallel workers never read shared dict state mid-update.
         prev_row = rows_by_pid.get(int(participant_id))
+        prev_loglik_snapshot = dict(prev_row) if prev_row is not None else None
         participant_output_dir = output_dir / f"participant_{participant_id}"
         metrics = run_choice13k_refine_participant_from_checkpoint(
             client=client,
@@ -879,7 +1206,7 @@ def run_choice13k_refine_from_prev_experiment(
             participant_id=int(participant_id),
             prev_exp_path=prev_exp_path,
             output_dir=participant_output_dir,
-            prev_loglik_row=prev_row,
+            prev_loglik_row=prev_loglik_snapshot,
             split_ratio=split_ratio,
             split_seed=split_seed,
             n_iterations=n_iterations,
@@ -890,63 +1217,28 @@ def run_choice13k_refine_from_prev_experiment(
             max_prompt_train_trials=max_prompt_train_trials,
             max_prompt_trials_per_problem=max_prompt_trials_per_problem,
             llm_max_tokens=llm_max_tokens,
-            max_workers=max_workers,
+            max_workers=candidate_workers_per_participant,
             n_eval_seeds=n_eval_seeds,
             save_artifacts=True,
+            wandb_module=wandb_module,
+            refinement_val_threshold=refinement_val_threshold,
         )
-        if prev_row is None:
-            prev_row = {"participant_id": participant_id}
-            rows_by_pid[int(participant_id)] = prev_row
-        prev_row.update(metrics)
-        if metrics.get("gated_test_loglik") is not None:
-            prev_row["gated_test_loglik"] = metrics["gated_test_loglik"]
+        return int(participant_id), metrics
 
-    all_pids = sorted(
-        {int(r["participant_id"]) for r in loglik_rows} | {int(p) for p in participants}
-    )
-    updated_rows = [rows_by_pid[pid] for pid in all_pids]
+    if parallel_participants:
+        with ThreadPoolExecutor(max_workers=participant_workers) as pool:
+            futures = {
+                pool.submit(_refine_one_participant, int(pid)): int(pid) for pid in participants
+            }
+            for fut in as_completed(futures):
+                participant_id, metrics = fut.result()
+                _commit_participant_refine_metrics(participant_id, metrics)
+    else:
+        for participant_id in participants:
+            _pid, metrics = _refine_one_participant(int(participant_id))
+            _commit_participant_refine_metrics(_pid, metrics)
 
-    _write_participant_details_loglik_csv(out_details_csv, updated_rows, dataset="choice13k")
-
-    gated_vals = [
-        float(r["gated_test_loglik"])
-        for r in updated_rows
-        if r.get("gated_test_loglik") not in (None, "")
-    ]
-    summary_loglik_path = output_dir / "summary_loglik.csv"
-    val_vals = [
-        float(r["val_loglik"]) for r in updated_rows if r.get("val_loglik") not in (None, "")
-    ]
-    train_vals = [
-        float(r["train_loglik"]) for r in updated_rows if r.get("train_loglik") not in (None, "")
-    ]
-    test_vals = [
-        float(r["test_loglik"]) for r in updated_rows if r.get("test_loglik") not in (None, "")
-    ]
-    with summary_loglik_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "num_of_participants",
-                "avg_train_loglik",
-                "avg_test_loglik",
-                "avg_val_loglik",
-                "avg_gated_test_loglik",
-            ],
-        )
-        writer.writeheader()
-        writer.writerow(
-            _round_floats_for_csv_row(
-                {
-                    "num_of_participants": len(updated_rows),
-                    "avg_train_loglik": float(np.mean(train_vals)) if train_vals else None,
-                    "avg_test_loglik": float(np.mean(test_vals)) if test_vals else None,
-                    "avg_val_loglik": float(np.mean(val_vals)) if val_vals else None,
-                    "avg_gated_test_loglik": float(np.mean(gated_vals)) if gated_vals else None,
-                }
-            )
-        )
-    print(f"Wrote updated participant loglik details -> {out_details_csv}")
+    print(f"Wrote participant loglik details -> {out_details_csv}")
 
 
 def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13k") -> str:
@@ -2808,6 +3100,7 @@ def generate_program_variants(
     cpc18_official_mse: bool = True,
     max_workers: int = 5,
     prompt_suffix: Optional[str] = None,
+    prompt_observation_trials: Optional[List[Dict[str, Any]]] = None,
     extra_prompt_trials: Optional[List[Dict[str, Any]]] = None,
     extra_prompt_trials_label: str = "Validation observations",
 ) -> List[str]:
@@ -2951,13 +3244,18 @@ def choose(problem, history):
     return 0
 """
     
-    # Format training trials for context (evaluation elsewhere still uses full train_trials).
+    # Trials serialized into the prompt (evaluation still uses full train_trials elsewhere).
+    # Refinement passes prompt_observation_trials=val only; evolution uses train_trials.
+    observation_source = (
+        prompt_observation_trials if prompt_observation_trials is not None else train_trials
+    )
+    obs_label = "validation" if prompt_observation_trials is not None else "train"
     trials_for_prompt = _cap_and_subsample_prompt_trials(
-        train_trials,
+        observation_source,
         max_trials=max_prompt_train_trials,
         max_trials_per_problem=max_prompt_trials_per_problem,
         subsample_seed=prompt_train_trials_seed,
-        label="train",
+        label=obs_label,
     )
     # Note: dataset parameter not available here, but this function is only called for Choice13k/CPC18
     # We'll detect format from trial structure
@@ -2971,7 +3269,7 @@ def choose(problem, history):
     state_text = format_trials_to_text(trials_for_prompt, dataset=dataset_type)
 
     extra_state_text = ""
-    if extra_prompt_trials:
+    if extra_prompt_trials is not None and prompt_observation_trials is None:
         extra_for_prompt = _cap_and_subsample_prompt_trials(
             extra_prompt_trials,
             max_trials=max_prompt_train_trials,
@@ -3454,7 +3752,10 @@ def run_evolution(
                 if baseline_val_eval is not None:
                     baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
                     baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
-        wandb.log(baseline_log_dict, step=0)
+        if participant_id is not None:
+            _wandb_log_participant_metrics(wandb, baseline_log_dict, int(participant_id), 0)
+        else:
+            wandb.log(baseline_log_dict, step=0)
         
         # Also save baseline to local JSONL file
         if log_file_path is not None:
@@ -4644,7 +4945,10 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_accuracy"] = valid_results[0]["test_acc"]
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
-            wandb.log(log_dict, step=iteration + 1)  # Step starts at 1 (baseline is step=0)
+            if participant_id is not None:
+                _wandb_log_participant_metrics(wandb, log_dict, int(participant_id), iteration + 1)
+            else:
+                wandb.log(log_dict, step=iteration + 1)
             
             # Also save to local JSONL file
             if save_artifacts and log_file_path is not None:
@@ -4779,8 +5083,9 @@ def run_evolution(
         and fitness_metric == "loglik"
         and val_trials
         and test_trials
-        and final_val_loglik is not None
-        and float(final_val_loglik) < float(refinement_val_threshold)
+        and _choice13k_val_loglik_below_refinement_threshold(
+            final_val_loglik, refinement_val_threshold
+        )
     ):
         print(
             f"\nRefinement triggered: val_loglik={float(final_val_loglik):.6f} "
@@ -4810,11 +5115,40 @@ def run_evolution(
             fitness_metric=fitness_metric,
             output_path=output_path if save_artifacts else None,
             save_artifacts=save_artifacts,
+            wandb_module=wandb,
+            wandb_step_offset=int(n_iterations),
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
             overall_best_train["gated_test_loglik"] = gated_test_loglik
             overall_best_test["gated_test_loglik"] = gated_test_loglik
+            if wandb is not None and participant_id is not None:
+                refine_step = int(n_iterations) + int(refinement_iters)
+                refine_log = {
+                    f"p{participant_id}_gated_test_loglik": gated_test_loglik,
+                    f"p{participant_id}_train_loglik": overall_best_train.get("train_loglik"),
+                    f"p{participant_id}_val_loglik": overall_best_train.get("val_loglik"),
+                    f"p{participant_id}_test_loglik": overall_best_train.get("test_loglik"),
+                    f"p{participant_id}_train_fitness": overall_best_train.get("train_loglik"),
+                    f"p{participant_id}_test_fitness": overall_best_test.get("test_loglik"),
+                }
+                _wandb_log_participant_metrics(wandb, refine_log, int(participant_id), refine_step)
+    elif (
+        run_phase == "all"
+        and refinement_phase
+        and dataset == "choice13k"
+        and fitness_metric == "loglik"
+        and val_trials
+        and test_trials
+        and final_val_loglik is not None
+        and not _choice13k_val_loglik_below_refinement_threshold(
+            final_val_loglik, refinement_val_threshold
+        )
+    ):
+        print(
+            f"\nRefinement skipped: val_loglik={float(final_val_loglik):.6f} "
+            f">= threshold={float(refinement_val_threshold):.6f}"
+        )
 
     if (
         gate_phase
@@ -4835,6 +5169,15 @@ def run_evolution(
                 overall_best_train["gated_test_loglik"] = gated_test_loglik
                 overall_best_test["gated_test_loglik"] = gated_test_loglik
                 print(f"Gated test avg log-likelihood: {gated_test_loglik:.6f}")
+                if wandb is not None and participant_id is not None:
+                    gate_log = {
+                        f"p{participant_id}_gated_test_loglik": gated_test_loglik,
+                        f"p{participant_id}_val_loglik": overall_best_train.get("val_loglik"),
+                        f"p{participant_id}_test_loglik": overall_best_test.get("test_loglik"),
+                    }
+                    _wandb_log_participant_metrics(
+                        wandb, gate_log, int(participant_id), int(n_iterations) + 1
+                    )
 
     if is_cpc18_mse or is_cpc18_split:
         results = {
@@ -5575,6 +5918,18 @@ def main():
         help="Parallel LLM requests when generating candidate children per iteration (default: 5).",
     )
     parser.add_argument(
+        "--parallel_participants",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run participants in parallel (participant_workers=max_workers//n_candidates, "
+            "candidate_workers_per_participant=n_candidates). Default: True. Used for "
+            "--phase all, --phase evolution, --phase refine, and --participant_scope all "
+            "(not across_participants or gridworld). Pass --no-parallel_participants to disable. "
+            "Shared experiment CSVs are updated on the main thread only."
+        ),
+    )
+    parser.add_argument(
         "--gate_phase",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -5604,7 +5959,8 @@ def main():
         type=float,
         default=-1.0,
         help=(
-            "Run refinement only when final best val_loglik is below this value (default: -1.0)."
+            "Run refinement only when val_loglik is below this value (default: -1.0). "
+            "Applies to --phase all (post-evolution) and --phase refine."
         ),
     )
     parser.add_argument(
@@ -5652,6 +6008,9 @@ def main():
         return
     if args.max_workers < 1:
         print("Error: --max_workers must be >= 1.")
+        return
+    if args.n_candidates < 1:
+        print("Error: --n_candidates must be >= 1.")
         return
     if args.refinement_iters < 1:
         print("Error: --refinement_iters must be >= 1.")
@@ -5745,6 +6104,7 @@ def main():
         }
     
     # Determine which participants to process
+    participants_to_process: List[int] = []
     if args.dataset in _PARTICIPANT_DATASETS:
         try:
             participants_to_process = resolve_participants_for_scope(
@@ -5769,6 +6129,11 @@ def main():
             participants_to_process = [args.agent_id]
         else:
             participants_to_process = list(range(args.num_agents_to_sample))
+
+    if wandb is not None and args.dataset in _PARTICIPANT_DATASETS:
+        for pid in participants_to_process:
+            wandb.define_metric(f"p{pid}_step")
+            wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
 
     if args.dataset in _PARTICIPANT_DATASETS:
         if args.participant_scope == "single":
@@ -5899,6 +6264,9 @@ def main():
                 llm_max_tokens=args.llm_max_tokens,
                 max_workers=args.max_workers,
                 n_eval_seeds=args.n_eval_seeds,
+                wandb_module=wandb,
+                parallel_participants=bool(args.parallel_participants),
+                refinement_val_threshold=args.refinement_val_threshold,
             )
         finally:
             if wandb is not None:
@@ -5994,144 +6362,180 @@ def main():
             f"Total participants to process: {len(participants_to_process)}."
         )
 
+        parallel_participants = bool(args.parallel_participants)
+        participant_workers, candidate_workers_per_participant = _parallel_participant_pool_sizes(
+            args.max_workers, args.n_candidates, parallel_participants
+        )
+        if parallel_participants:
+            print(
+                "[INFO] Parallel participants enabled: "
+                f"participant_workers={participant_workers}, "
+                f"candidate_workers_per_participant={candidate_workers_per_participant}"
+            )
+
+        def _run_all_mode_participant(participant_id: int) -> Dict[str, Any]:
+            participant_start = datetime.now()
+            participant_summary = run_evolution(
+                seed_program_path=seed_program_path,
+                dataset=args.dataset,
+                participant_id=participant_id,
+                data_path=args.data_path,
+                num_blocks=getattr(args, "num_blocks", None),
+                num_walls=getattr(args, "num_walls", None),
+                agent_id=getattr(args, "agent_id", None),
+                n_iterations=args.n_iterations,
+                n_candidates_per_iteration=args.n_candidates,
+                model_name=args.model_name,
+                client_kwargs=client_kwargs if client_kwargs else None,
+                output_dir=base_run_dir,
+                wandb=wandb,
+                n_eval_seeds=args.n_eval_seeds,
+                sample_size=args.sample_size,
+                sample_parents=args.sample_parents,
+                elite_pool_size=args.elite_pool_size,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                save_artifacts=False,
+                all_data_mode=True,
+                choice13k_experiment=None,
+                fitness_metric=args.fitness_metric,
+                split_ratio=args.split_ratio,
+                split_seed=args.split_seed,
+                max_prompt_train_trials=args.max_prompt_train_trials,
+                max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                llm_max_tokens=args.llm_max_tokens,
+                cpc18_official_mse=args.cpc18_official_mse,
+                gate_phase=args.gate_phase,
+                run_phase=evolution_run_phase,
+                refinement_phase=args.refinement_phase,
+                refinement_iters=args.refinement_iters,
+                refinement_val_threshold=args.refinement_val_threshold,
+                max_workers=candidate_workers_per_participant,
+            )
+            runtime_sec = (datetime.now() - participant_start).total_seconds()
+            details_row = {
+                "participant_id": participant_id,
+                "train_fitness": participant_summary.get("train_fitness"),
+                "test_fitness": participant_summary.get("test_fitness"),
+                "total_runtime": runtime_sec,
+                "seed_program_train_fitness": participant_summary.get("seed_program_train_fitness"),
+                "seed_program_test_fitness": participant_summary.get("seed_program_test_fitness"),
+            }
+            loglik_row: Dict[str, Any] = {
+                "participant_id": participant_id,
+                "train_loglik": participant_summary.get("train_loglik"),
+            }
+            if args.dataset == "choice13k":
+                if participant_summary.get("val_loglik") is not None:
+                    loglik_row["val_loglik"] = participant_summary.get("val_loglik")
+                loglik_row["test_loglik"] = participant_summary.get("test_loglik")
+                if participant_summary.get("gated_test_loglik") is not None:
+                    loglik_row["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+            else:
+                loglik_row["test_loglik"] = participant_summary.get("test_loglik")
+            return {
+                "participant_id": participant_id,
+                "details_row": details_row,
+                "loglik_row": loglik_row,
+            }
+
         try:
-            for participant_id in tqdm(participants_to_process, desc="Participants"):
-                participant_start = datetime.now()
-                participant_summary = run_evolution(
-                    seed_program_path=seed_program_path,
-                    dataset=args.dataset,
-                    participant_id=participant_id,
-                    data_path=args.data_path,
-                    num_blocks=getattr(args, "num_blocks", None),
-                    num_walls=getattr(args, "num_walls", None),
-                    agent_id=getattr(args, "agent_id", None),
-                    n_iterations=args.n_iterations,
-                    n_candidates_per_iteration=args.n_candidates,
-                    model_name=args.model_name,
-                    client_kwargs=client_kwargs if client_kwargs else None,
-                    output_dir=base_run_dir,
-                    wandb=wandb,
-                    n_eval_seeds=args.n_eval_seeds,
-                    sample_size=args.sample_size,
-                    sample_parents=args.sample_parents,
-                    elite_pool_size=args.elite_pool_size,
-                    filter_mixed_gambles=mixed_gambles_gain_loss_only,
-                    save_artifacts=False,
-                    all_data_mode=True,
-                    choice13k_experiment=None,
-                    fitness_metric=args.fitness_metric,
-                    split_ratio=args.split_ratio,
-                    split_seed=args.split_seed,
-                    max_prompt_train_trials=args.max_prompt_train_trials,
-                    max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
-                    llm_max_tokens=args.llm_max_tokens,
-                    cpc18_official_mse=args.cpc18_official_mse,
-                    gate_phase=args.gate_phase,
-                    run_phase=evolution_run_phase,
-                    refinement_phase=args.refinement_phase,
-                    refinement_iters=args.refinement_iters,
-                    refinement_val_threshold=args.refinement_val_threshold,
-                    max_workers=args.max_workers,
-                )
-                runtime_sec = (datetime.now() - participant_start).total_seconds()
+            if parallel_participants:
+                all_mode_results: List[Dict[str, Any]] = []
+                with ThreadPoolExecutor(max_workers=participant_workers) as pool:
+                    futures = {
+                        pool.submit(_run_all_mode_participant, int(pid)): int(pid)
+                        for pid in participants_to_process
+                    }
+                    for fut in tqdm(
+                        as_completed(futures), total=len(futures), desc="Participants"
+                    ):
+                        all_mode_results.append(fut.result())
+                all_mode_results.sort(key=lambda r: int(r["participant_id"]))
+            else:
+                all_mode_results = []
+                for participant_id in tqdm(participants_to_process, desc="Participants"):
+                    all_mode_results.append(_run_all_mode_participant(int(participant_id)))
 
-                participant_details.append({
-                    "participant_id": participant_id,
-                    "train_fitness": participant_summary.get("train_fitness"),
-                    "test_fitness": participant_summary.get("test_fitness"),
-                    "total_runtime": runtime_sec,
-                    "seed_program_train_fitness": participant_summary.get("seed_program_train_fitness"),
-                    "seed_program_test_fitness": participant_summary.get("seed_program_test_fitness"),
-                })
-                _plog: Dict[str, Any] = {
-                    "participant_id": participant_id,
-                    "train_loglik": participant_summary.get("train_loglik"),
-                }
-                if args.dataset == "choice13k":
-                    if participant_summary.get("val_loglik") is not None:
-                        _plog["val_loglik"] = participant_summary.get("val_loglik")
-                    _plog["test_loglik"] = participant_summary.get("test_loglik")
-                    if participant_summary.get("gated_test_loglik") is not None:
-                        _plog["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
-                else:
-                    _plog["test_loglik"] = participant_summary.get("test_loglik")
-                participant_details_loglik.append(_plog)
+            participant_details = [r["details_row"] for r in all_mode_results]
+            participant_details_loglik = [r["loglik_row"] for r in all_mode_results]
 
-                with open(details_file, "w", newline="") as f:
-                    fieldnames = [
+            with open(details_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
                         "participant_id",
                         "train_fitness",
                         "test_fitness",
                         "total_runtime",
                         "seed_program_train_fitness",
                         "seed_program_test_fitness",
-                    ]
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(_round_floats_for_csv_rows(participant_details))
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(_round_floats_for_csv_rows(participant_details))
 
-                avg_train_fitness = float(np.mean([d["train_fitness"] for d in participant_details]))
-                avg_test_fitness = float(np.mean([d["test_fitness"] for d in participant_details]))
-                with open(summary_file, "w", newline="") as f:
-                    writer = csv.DictWriter(
-                        f,
-                        fieldnames=["num_of_participants", "avg_train_fitness", "avg_test_fitness"],
+            avg_train_fitness = float(np.mean([d["train_fitness"] for d in participant_details]))
+            avg_test_fitness = float(np.mean([d["test_fitness"] for d in participant_details]))
+            with open(summary_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["num_of_participants", "avg_train_fitness", "avg_test_fitness"],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    _round_floats_for_csv_row(
+                        {
+                            "num_of_participants": len(participant_details),
+                            "avg_train_fitness": avg_train_fitness,
+                            "avg_test_fitness": avg_test_fitness,
+                        }
                     )
-                    writer.writeheader()
-                    writer.writerow(
-                        _round_floats_for_csv_row(
-                            {
-                                "num_of_participants": len(participant_details),
-                                "avg_train_fitness": avg_train_fitness,
-                                "avg_test_fitness": avg_test_fitness,
-                            }
-                        )
-                    )
+                )
 
-                _ll_fields = ["participant_id", "train_loglik"]
-                if args.dataset == "choice13k":
-                    _ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
-                else:
-                    _ll_fields.append("test_loglik")
-                with open(details_loglik_file, "w", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=_ll_fields)
-                    writer.writeheader()
-                    writer.writerows(_round_floats_for_csv_rows(participant_details_loglik))
+            _ll_fields = ["participant_id", "train_loglik"]
+            if args.dataset == "choice13k":
+                _ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
+            else:
+                _ll_fields.append("test_loglik")
+            with open(details_loglik_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=_ll_fields)
+                writer.writeheader()
+                writer.writerows(_round_floats_for_csv_rows(participant_details_loglik))
 
-                train_loglik_values = [
-                    d["train_loglik"] for d in participant_details_loglik if d["train_loglik"] is not None
-                ]
-                test_loglik_values = [
-                    d["test_loglik"] for d in participant_details_loglik if d["test_loglik"] is not None
-                ]
-                val_loglik_values = [
-                    d["val_loglik"] for d in participant_details_loglik if d.get("val_loglik") is not None
-                ]
-                gated_test_loglik_values = [
-                    d["gated_test_loglik"]
-                    for d in participant_details_loglik
-                    if d.get("gated_test_loglik") is not None
-                ]
-                avg_train_loglik = float(np.mean(train_loglik_values)) if train_loglik_values else None
-                avg_test_loglik = float(np.mean(test_loglik_values)) if test_loglik_values else None
-                _sum_ll_row = {
-                    "num_of_participants": len(participant_details_loglik),
-                    "avg_train_loglik": avg_train_loglik,
-                    "avg_test_loglik": avg_test_loglik,
-                }
-                _sum_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
-                if args.dataset == "choice13k":
-                    _sum_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
-                    _sum_ll_row["avg_val_loglik"] = (
-                        float(np.mean(val_loglik_values)) if val_loglik_values else None
-                    )
-                    _sum_ll_row["avg_gated_test_loglik"] = (
-                        float(np.mean(gated_test_loglik_values)) if gated_test_loglik_values else None
-                    )
-                with open(summary_loglik_file, "w", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=_sum_ll_fields)
-                    writer.writeheader()
-                    writer.writerow(_round_floats_for_csv_row(_sum_ll_row))
+            train_loglik_values = [
+                d["train_loglik"] for d in participant_details_loglik if d["train_loglik"] is not None
+            ]
+            test_loglik_values = [
+                d["test_loglik"] for d in participant_details_loglik if d["test_loglik"] is not None
+            ]
+            val_loglik_values = [
+                d["val_loglik"] for d in participant_details_loglik if d.get("val_loglik") is not None
+            ]
+            gated_test_loglik_values = [
+                d["gated_test_loglik"]
+                for d in participant_details_loglik
+                if d.get("gated_test_loglik") is not None
+            ]
+            avg_train_loglik = float(np.mean(train_loglik_values)) if train_loglik_values else None
+            avg_test_loglik = float(np.mean(test_loglik_values)) if test_loglik_values else None
+            _sum_ll_row = {
+                "num_of_participants": len(participant_details_loglik),
+                "avg_train_loglik": avg_train_loglik,
+                "avg_test_loglik": avg_test_loglik,
+            }
+            _sum_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
+            if args.dataset == "choice13k":
+                _sum_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
+                _sum_ll_row["avg_val_loglik"] = (
+                    float(np.mean(val_loglik_values)) if val_loglik_values else None
+                )
+                _sum_ll_row["avg_gated_test_loglik"] = (
+                    float(np.mean(gated_test_loglik_values)) if gated_test_loglik_values else None
+                )
+            with open(summary_loglik_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=_sum_ll_fields)
+                writer.writeheader()
+                writer.writerow(_round_floats_for_csv_row(_sum_ll_row))
         finally:
             if wandb is not None:
                 wandb.finish()
@@ -6399,182 +6803,264 @@ def main():
     else:
         # Original logic for choice13k or random mode
         # Run evolution for each participant
-        try:
-            for participant_id in tqdm(participants_to_process, desc="Participants"):
-                print(f"\n{'='*80}")
-                print(f"Processing participant {participant_id}")
-                print(f"{'='*80}")
-                # If base_run_dir is set, construct participant-specific output_dir
-                if base_run_dir is not None:
-                    participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
-                else:
-                    participant_output_dir = args.output_dir
-                
-                # If summary_file is None (auto-generated single participant), determine it now
-                if summary_file is None and participant_output_dir is not None:
-                    output_path = Path(participant_output_dir)
-                    if output_path.name.startswith("participant_"):
-                        summary_file = output_path.parent / "participants_summary.csv"
-                        summary_loglik_file = output_path.parent / "summary_loglik.csv"
-                        details_loglik_file = output_path.parent / "participant_details_loglik.csv"
-                    else:
-                        summary_file = output_path / "participants_summary.csv"
-                        summary_loglik_file = output_path / "summary_loglik.csv"
-                        details_loglik_file = output_path / "participant_details_loglik.csv"
-                
-                # Determine seed program path
-                if args.seed_path is None:
-                    if args.dataset == "gridworld" or args.dataset == "gridworld_ensemble":
-                        num_blocks = getattr(args, 'num_blocks', None)
-                        num_walls = getattr(args, 'num_walls', None)
-                        agent_id = getattr(args, 'agent_id', None)
-                        if num_blocks is not None and num_walls is not None and agent_id is not None:
-                            detected_seed_path = find_template_program_for_gridworld(num_blocks, num_walls, agent_id)
-                            if detected_seed_path is None:
-                                print(f"Error: Could not auto-detect template program for num_blocks={num_blocks}, num_walls={num_walls}, agent_id={agent_id}")
-                                print(f"Expected location: persona_code_example/gridworld/num_blocks{num_blocks}_num_walls{num_walls}/")
-                                continue
-                            seed_program_path = detected_seed_path
-                            print(f"Auto-detected seed program: {seed_program_path}")
-                        else:
-                            print("Error: For gridworld/gridworld_ensemble without --seed_path, must provide --num_blocks, --num_walls, and --agent_id")
-                            continue
-                    elif args.dataset == "cpc18":
-                        seed_program_path = "persona_code_example/cpc18/hard.py"
-                    elif args.dataset == "mixed_gambles":
-                        seed_program_path = "persona_code_example/hard_Qwen.py"
-                    else:
-                        seed_program_path = "persona_code_example/vanilla.py"
-                else:
-                    seed_program_path = args.seed_path
-                
-                if args.dataset == "gridworld_ensemble":
-                    num_blocks = getattr(args, 'num_blocks', None)
-                    num_walls = getattr(args, 'num_walls', None)
-                    agent_id = getattr(args, 'agent_id', participant_id)
-                    if num_blocks is None or num_walls is None:
-                        print("Error: For gridworld_ensemble must provide --num_blocks and --num_walls")
-                        continue
-                    participant_summary = run_evolution_gridworld_ensemble(
-                        seed_program_path=seed_program_path,
-                        participant_id=participant_id,
-                        data_path=args.data_path,
-                        num_blocks=num_blocks,
-                        num_walls=num_walls,
-                        agent_id=agent_id,
-                        n_iterations=args.n_iterations,
-                        n_candidates_per_iteration=args.n_candidates,
-                        model_name=args.model_name,
-                        client_kwargs=client_kwargs if client_kwargs else None,
-                        output_dir=participant_output_dir,
-                        wandb=wandb,
-                        n_eval_seeds=args.n_eval_seeds,
-                        sample_size=args.sample_size,
-                        top_k=getattr(args, 'top_k', 0),
-                        max_workers=args.max_workers,
-                    )
-                else:
-                    participant_summary = run_evolution(
-                        seed_program_path=seed_program_path,
-                        dataset=args.dataset,
-                        participant_id=participant_id,
-                        data_path=args.data_path,
-                        num_blocks=getattr(args, 'num_blocks', None),
-                        num_walls=getattr(args, 'num_walls', None),
-                        agent_id=getattr(args, 'agent_id', None),
-                        n_iterations=args.n_iterations,
-                        n_candidates_per_iteration=args.n_candidates,
-                        model_name=args.model_name,
-                        client_kwargs=client_kwargs if client_kwargs else None,
-                        output_dir=participant_output_dir,
-                        wandb=wandb,
-                        n_eval_seeds=args.n_eval_seeds,
-                        sample_size=args.sample_size,
-                        sample_parents=args.sample_parents,
-                        elite_pool_size=args.elite_pool_size,
-                        filter_mixed_gambles=mixed_gambles_gain_loss_only,
-                        fitness_metric=args.fitness_metric,
-                        split_ratio=args.split_ratio,
-                        split_seed=args.split_seed,
-                        max_prompt_train_trials=args.max_prompt_train_trials,
-                        max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
-                        llm_max_tokens=args.llm_max_tokens,
-                        cpc18_official_mse=args.cpc18_official_mse,
-                        gate_phase=args.gate_phase,
-                        run_phase=evolution_run_phase,
-                        refinement_phase=args.refinement_phase,
-                        refinement_iters=args.refinement_iters,
-                        refinement_val_threshold=args.refinement_val_threshold,
-                        max_workers=args.max_workers,
-                    )
-                
-                # Update participants summary after each participant completes
-                if participant_summary is not None and summary_file is not None:
-                    participants_summary.append(participant_summary)
-                    # Write CSV file
-                    with open(summary_file, 'w', newline='') as f:
-                        writer = csv.DictWriter(f, fieldnames=list(participant_summary.keys()))
-                        writer.writeheader()
-                        writer.writerows(_round_floats_for_csv_rows(participants_summary))
-                    print(f"\nParticipants summary updated: {summary_file}")
+        parallel_participants = bool(args.parallel_participants)
+        participant_workers, candidate_workers_per_participant = _parallel_participant_pool_sizes(
+            args.max_workers, args.n_candidates, parallel_participants
+        )
+        if parallel_participants:
+            print(
+                "[INFO] Parallel participants enabled: "
+                f"participant_workers={participant_workers}, "
+                f"candidate_workers_per_participant={candidate_workers_per_participant}"
+            )
 
+        def _participant_output_dir(participant_id: int) -> Optional[str]:
+            if base_run_dir is not None:
+                return os.path.join(base_run_dir, f"participant_{participant_id}")
+            return args.output_dir
+
+        def _ensure_summary_paths_from_participant_dir(participant_output_dir: Optional[str]) -> None:
+            nonlocal summary_file, summary_loglik_file, details_loglik_file
+            if summary_file is not None or participant_output_dir is None:
+                return
+            output_path = Path(participant_output_dir)
+            if output_path.name.startswith("participant_"):
+                summary_file = output_path.parent / "participants_summary.csv"
+                summary_loglik_file = output_path.parent / "summary_loglik.csv"
+                details_loglik_file = output_path.parent / "participant_details_loglik.csv"
+            else:
+                summary_file = output_path / "participants_summary.csv"
+                summary_loglik_file = output_path / "summary_loglik.csv"
+                details_loglik_file = output_path / "participant_details_loglik.csv"
+
+        def _loglik_row_from_summary(participant_summary: Dict[str, Any]) -> Dict[str, Any]:
+            _ps_log: Dict[str, Any] = {
+                "participant_id": participant_summary.get("participant_id"),
+                "train_loglik": participant_summary.get("train_loglik"),
+            }
+            if args.dataset == "choice13k":
+                if participant_summary.get("val_loglik") is not None:
+                    _ps_log["val_loglik"] = participant_summary.get("val_loglik")
+                _ps_log["test_loglik"] = participant_summary.get("test_loglik")
+                if participant_summary.get("gated_test_loglik") is not None:
+                    _ps_log["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+            else:
+                _ps_log["test_loglik"] = participant_summary.get("test_loglik")
+            return _ps_log
+
+        def _write_main_loop_experiment_csvs() -> None:
+            """Rewrite experiment-level CSVs from participants_summary / participants_loglik_summary."""
+            if summary_file is None or not participants_summary:
+                return
+            fieldnames = list(participants_summary[0].keys())
+            with open(summary_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(_round_floats_for_csv_rows(participants_summary))
+            print(f"\nParticipants summary updated: {summary_file}")
+
+            if args.participant_scope not in ("range", "ordinals"):
+                return
+            if details_loglik_file is not None:
+                _det_ll_fields = ["participant_id", "train_loglik"]
+                if args.dataset == "choice13k":
+                    _det_ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
+                else:
+                    _det_ll_fields.append("test_loglik")
+                with open(details_loglik_file, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=_det_ll_fields)
+                    writer.writeheader()
+                    writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
+            if summary_loglik_file is not None:
+                train_ll_vals = [
+                    d["train_loglik"]
+                    for d in participants_loglik_summary
+                    if d["train_loglik"] is not None
+                ]
+                test_ll_vals = [
+                    d["test_loglik"]
+                    for d in participants_loglik_summary
+                    if d["test_loglik"] is not None
+                ]
+                val_ll_vals = [
+                    d["val_loglik"]
+                    for d in participants_loglik_summary
+                    if d.get("val_loglik") is not None
+                ]
+                gated_test_ll_vals = [
+                    d["gated_test_loglik"]
+                    for d in participants_loglik_summary
+                    if d.get("gated_test_loglik") is not None
+                ]
+                _agg_ll = {
+                    "num_of_participants": len(participants_loglik_summary),
+                    "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
+                    "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
+                }
+                _agg_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
+                if args.dataset == "choice13k":
+                    _agg_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
+                    _agg_ll["avg_val_loglik"] = (
+                        float(np.mean(val_ll_vals)) if val_ll_vals else None
+                    )
+                    _agg_ll["avg_gated_test_loglik"] = (
+                        float(np.mean(gated_test_ll_vals)) if gated_test_ll_vals else None
+                    )
+                with open(summary_loglik_file, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=_agg_ll_fields)
+                    writer.writeheader()
+                    writer.writerow(_round_floats_for_csv_row(_agg_ll))
+
+        def _append_main_loop_summaries(participant_summary: Optional[Dict[str, Any]]) -> None:
+            if participant_summary is None or summary_file is None:
+                return
+            with _SHARED_EXPERIMENT_CSV_LOCK:
+                participants_summary.append(participant_summary)
+                if args.participant_scope in ("range", "ordinals"):
+                    participants_loglik_summary.append(_loglik_row_from_summary(participant_summary))
+                _write_main_loop_experiment_csvs()
+
+        def _flush_main_loop_csvs_from_completed(
+            completed: Dict[int, Optional[Dict[str, Any]]],
+            participant_ids_ordered: List[int],
+        ) -> None:
+            """Rebuild experiment CSVs from finished participants (parallel mode; main thread only)."""
+            with _SHARED_EXPERIMENT_CSV_LOCK:
+                participants_summary.clear()
+                participants_loglik_summary.clear()
+                for pid in participant_ids_ordered:
+                    summary = completed.get(int(pid))
+                    if summary is None:
+                        continue
+                    participants_summary.append(summary)
                     if args.participant_scope in ("range", "ordinals"):
-                        _ps_log: Dict[str, Any] = {
-                            "participant_id": participant_summary.get("participant_id"),
-                            "train_loglik": participant_summary.get("train_loglik"),
-                        }
-                        if args.dataset == "choice13k":
-                            if participant_summary.get("val_loglik") is not None:
-                                _ps_log["val_loglik"] = participant_summary.get("val_loglik")
-                            _ps_log["test_loglik"] = participant_summary.get("test_loglik")
-                            if participant_summary.get("gated_test_loglik") is not None:
-                                _ps_log["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
-                        else:
-                            _ps_log["test_loglik"] = participant_summary.get("test_loglik")
-                        participants_loglik_summary.append(_ps_log)
-                        if details_loglik_file is not None:
-                            _det_ll_fields = ["participant_id", "train_loglik"]
-                            if args.dataset == "choice13k":
-                                _det_ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
-                            else:
-                                _det_ll_fields.append("test_loglik")
-                            with open(details_loglik_file, "w", newline="") as f:
-                                writer = csv.DictWriter(f, fieldnames=_det_ll_fields)
-                                writer.writeheader()
-                                writer.writerows(_round_floats_for_csv_rows(participants_loglik_summary))
-                        if summary_loglik_file is not None:
-                            train_ll_vals = [
-                                d["train_loglik"] for d in participants_loglik_summary if d["train_loglik"] is not None
-                            ]
-                            test_ll_vals = [
-                                d["test_loglik"] for d in participants_loglik_summary if d["test_loglik"] is not None
-                            ]
-                            val_ll_vals = [
-                                d["val_loglik"] for d in participants_loglik_summary if d.get("val_loglik") is not None
-                            ]
-                            gated_test_ll_vals = [
-                                d["gated_test_loglik"]
-                                for d in participants_loglik_summary
-                                if d.get("gated_test_loglik") is not None
-                            ]
-                            _agg_ll = {
-                                "num_of_participants": len(participants_loglik_summary),
-                                "avg_train_loglik": float(np.mean(train_ll_vals)) if train_ll_vals else None,
-                                "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
-                            }
-                            _agg_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
-                            if args.dataset == "choice13k":
-                                _agg_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
-                                _agg_ll["avg_val_loglik"] = (
-                                    float(np.mean(val_ll_vals)) if val_ll_vals else None
-                                )
-                                _agg_ll["avg_gated_test_loglik"] = (
-                                    float(np.mean(gated_test_ll_vals)) if gated_test_ll_vals else None
-                                )
-                            with open(summary_loglik_file, "w", newline="") as f:
-                                writer = csv.DictWriter(f, fieldnames=_agg_ll_fields)
-                                writer.writeheader()
-                                writer.writerow(_round_floats_for_csv_row(_agg_ll))
+                        participants_loglik_summary.append(_loglik_row_from_summary(summary))
+                _write_main_loop_experiment_csvs()
+
+        def _run_main_loop_participant(participant_id: int) -> Optional[Dict[str, Any]]:
+            print(f"\n{'='*80}")
+            print(f"Processing participant {participant_id}")
+            print(f"{'='*80}")
+            participant_output_dir = _participant_output_dir(participant_id)
+            if not parallel_participants:
+                _ensure_summary_paths_from_participant_dir(participant_output_dir)
+
+            seed_program_path_local = _resolve_default_seed_program_path(args, participant_id)
+            if seed_program_path_local is None:
+                if args.dataset in ("gridworld", "gridworld_ensemble"):
+                    num_blocks = getattr(args, "num_blocks", None)
+                    num_walls = getattr(args, "num_walls", None)
+                    agent_id = getattr(args, "agent_id", None)
+                    if num_blocks is not None and num_walls is not None and agent_id is not None:
+                        detected_seed_path = find_template_program_for_gridworld(
+                            num_blocks, num_walls, agent_id
+                        )
+                        if detected_seed_path is None:
+                            print(
+                                f"Error: Could not auto-detect template program for "
+                                f"num_blocks={num_blocks}, num_walls={num_walls}, agent_id={agent_id}"
+                            )
+                            print(
+                                f"Expected location: persona_code_example/gridworld/"
+                                f"num_blocks{num_blocks}_num_walls{num_walls}/"
+                            )
+                            return None
+                        seed_program_path_local = detected_seed_path
+                        print(f"Auto-detected seed program: {seed_program_path_local}")
+                    else:
+                        print(
+                            "Error: For gridworld/gridworld_ensemble without --seed_path, "
+                            "must provide --num_blocks, --num_walls, and --agent_id"
+                        )
+                        return None
+
+            if args.dataset == "gridworld_ensemble":
+                num_blocks = getattr(args, "num_blocks", None)
+                num_walls = getattr(args, "num_walls", None)
+                agent_id = getattr(args, "agent_id", participant_id)
+                if num_blocks is None or num_walls is None:
+                    print("Error: For gridworld_ensemble must provide --num_blocks and --num_walls")
+                    return None
+                return run_evolution_gridworld_ensemble(
+                    seed_program_path=seed_program_path_local,
+                    participant_id=participant_id,
+                    data_path=args.data_path,
+                    num_blocks=num_blocks,
+                    num_walls=num_walls,
+                    agent_id=agent_id,
+                    n_iterations=args.n_iterations,
+                    n_candidates_per_iteration=args.n_candidates,
+                    model_name=args.model_name,
+                    client_kwargs=client_kwargs if client_kwargs else None,
+                    output_dir=participant_output_dir,
+                    wandb=wandb,
+                    n_eval_seeds=args.n_eval_seeds,
+                    sample_size=args.sample_size,
+                    top_k=getattr(args, "top_k", 0),
+                    max_workers=candidate_workers_per_participant,
+                )
+
+            return run_evolution(
+                seed_program_path=seed_program_path_local,
+                dataset=args.dataset,
+                participant_id=participant_id,
+                data_path=args.data_path,
+                num_blocks=getattr(args, "num_blocks", None),
+                num_walls=getattr(args, "num_walls", None),
+                agent_id=getattr(args, "agent_id", None),
+                n_iterations=args.n_iterations,
+                n_candidates_per_iteration=args.n_candidates,
+                model_name=args.model_name,
+                client_kwargs=client_kwargs if client_kwargs else None,
+                output_dir=participant_output_dir,
+                wandb=wandb,
+                n_eval_seeds=args.n_eval_seeds,
+                sample_size=args.sample_size,
+                sample_parents=args.sample_parents,
+                elite_pool_size=args.elite_pool_size,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                fitness_metric=args.fitness_metric,
+                split_ratio=args.split_ratio,
+                split_seed=args.split_seed,
+                max_prompt_train_trials=args.max_prompt_train_trials,
+                max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                llm_max_tokens=args.llm_max_tokens,
+                cpc18_official_mse=args.cpc18_official_mse,
+                gate_phase=args.gate_phase,
+                run_phase=evolution_run_phase,
+                refinement_phase=args.refinement_phase,
+                refinement_iters=args.refinement_iters,
+                refinement_val_threshold=args.refinement_val_threshold,
+                max_workers=candidate_workers_per_participant,
+            )
+
+        try:
+            if parallel_participants:
+                if summary_file is None and base_run_dir is not None:
+                    summary_file = Path(base_run_dir) / "participants_summary.csv"
+                    summary_loglik_file = Path(base_run_dir) / "summary_loglik.csv"
+                    details_loglik_file = Path(base_run_dir) / "participant_details_loglik.csv"
+                elif summary_file is None and participants_to_process:
+                    _ensure_summary_paths_from_participant_dir(
+                        _participant_output_dir(int(participants_to_process[0]))
+                    )
+                pids_ordered = sorted(int(p) for p in participants_to_process)
+                completed_by_pid: Dict[int, Optional[Dict[str, Any]]] = {}
+                with ThreadPoolExecutor(max_workers=participant_workers) as pool:
+                    futures = {
+                        pool.submit(_run_main_loop_participant, int(pid)): int(pid)
+                        for pid in participants_to_process
+                    }
+                    for fut in tqdm(
+                        as_completed(futures), total=len(futures), desc="Participants"
+                    ):
+                        pid = futures[fut]
+                        completed_by_pid[pid] = fut.result()
+                        _flush_main_loop_csvs_from_completed(completed_by_pid, pids_ordered)
+            else:
+                for participant_id in tqdm(participants_to_process, desc="Participants"):
+                    participant_summary = _run_main_loop_participant(int(participant_id))
+                    _append_main_loop_summaries(participant_summary)
         finally:
             if wandb is not None:
                 wandb.finish()
