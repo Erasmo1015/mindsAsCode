@@ -79,6 +79,18 @@ def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> in
     return max(1, int(elite_pool_size))
 
 
+def _safe_float(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(v):
+        return v
+    return None
+
+
 _WANDB_PARTICIPANT_CHART_SUFFIXES = (
     "train_loglik",
     "val_loglik",
@@ -982,23 +994,47 @@ def run_global_evolution_phase(
     if save_artifacts:
         pool_dir = _save_global_elite_pool(global_dir, elite_parents)
         print(f"Saved global elite pool ({len(elite_parents)} programs) -> {pool_dir}")
+        pool_best_code = elite_parents[0][0]
+        pool_best_global_train_ll = _train_loglik_from_elite_tuple(elite_parents[0])
+        _write_global_phase_summary_loglik_csv(
+            global_dir,
+            dataset=dataset,
+            participant_ids=participant_ids,
+            pool_best_code=pool_best_code or "",
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+            n_eval_seeds=n_eval_seeds,
+        )
+        global_results: Dict[str, Any] = {
+            "phase": "global",
+            "dataset": dataset,
+            "n_participants": len(participant_ids),
+            "participant_ids": participant_ids,
+            "n_iterations": int(n_iterations),
+            "n_pooled_train_trials": len(pooled_train),
+            "pool_size": len(elite_parents),
+            "pool_best_program_id": str(elite_parents[0][3]),
+            "pool_best_global_train_loglik": pool_best_global_train_ll,
+            "baseline_global_train_loglik": baseline_ll,
+        }
+        summary_csv_path = global_dir / "summary_loglik.csv"
+        if summary_csv_path.is_file():
+            with summary_csv_path.open(newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                summary_row = next(reader, None)
+                if summary_row:
+                    for key in (
+                        "avg_train_loglik",
+                        "avg_test_loglik",
+                        "avg_val_loglik",
+                        "avg_gated_test_loglik",
+                    ):
+                        if summary_row.get(key) not in (None, ""):
+                            global_results[key] = float(summary_row[key])
         (global_dir / "results.json").write_text(
-            json.dumps(
-                {
-                    "phase": "global",
-                    "dataset": dataset,
-                    "n_participants": len(participant_ids),
-                    "participant_ids": participant_ids,
-                    "n_iterations": int(n_iterations),
-                    "n_pooled_train_trials": len(pooled_train),
-                    "pool_size": len(elite_parents),
-                    "pool_best_program_id": str(elite_parents[0][3]),
-                    "pool_best_global_train_loglik": _train_loglik_from_elite_tuple(
-                        elite_parents[0]
-                    ),
-                },
-                indent=2,
-            ),
+            json.dumps(global_results, indent=2),
             encoding="utf-8",
         )
     return elite_parents
@@ -1492,6 +1528,16 @@ def run_loglik_refinement_phase(
                 ),
             }
         _write_refinement_results_json(refinement_dir, refine_results)
+        _write_refinement_summary_loglik_csv(
+            refinement_dir,
+            {
+                "participant_id": int(participant_id),
+                "train_loglik": _train_loglik_from_elite_tuple(elite_parents[0]),
+                "val_loglik": float(best_val_ll) if best_val_ll is not None else None,
+                "test_loglik": refinement_test_loglik,
+                "gated_test_loglik": refinement_test_loglik,
+            },
+        )
         if final_is_seed and not pool_from_evolution:
             print(
                 "Note: Final pool-best is still refinement_seed (no candidate beat seed on "
@@ -1538,6 +1584,98 @@ def _clear_gated_test_loglik_in_loglik_rows(rows: List[Dict[str, Any]]) -> None:
     """Remove prior-run gated_test_loglik so a new refine experiment starts fresh."""
     for row in rows:
         row["gated_test_loglik"] = None
+
+
+def _write_global_phase_summary_loglik_csv(
+    global_dir: Path,
+    *,
+    dataset: str,
+    participant_ids: List[int],
+    pool_best_code: str,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
+    n_eval_seeds: int = 3,
+) -> None:
+    """
+    Write global_phase/summary_loglik.csv: pool-best program evaluated per participant,
+    then averaged (same columns as run-level summary_loglik.csv; gated column left empty).
+    """
+    choose_fn = compile_program(pool_best_code)
+    if choose_fn is None:
+        print("Warning: global pool-best failed to compile; skipping summary_loglik.csv.")
+        return
+
+    train_vals: List[float] = []
+    val_vals: List[float] = []
+    test_vals: List[float] = []
+    for pid in participant_ids:
+        train_trials, val_trials, test_trials = _trials_for_loglik_participant(
+            dataset,
+            int(pid),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+        )
+        train_eval = _evaluate_loglik_for_dataset(
+            dataset, choose_fn, train_trials, n_seeds=n_eval_seeds
+        )
+        train_vals.append(float(train_eval["avg_loglik"]))
+        if val_trials:
+            val_eval = _evaluate_loglik_for_dataset(
+                dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
+            )
+            val_vals.append(float(val_eval["avg_loglik"]))
+        test_eval = _evaluate_loglik_for_dataset(
+            dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
+        )
+        test_vals.append(float(test_eval["avg_loglik"]))
+
+    summary_path = global_dir / "summary_loglik.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "num_of_participants",
+                "avg_train_loglik",
+                "avg_test_loglik",
+                "avg_val_loglik",
+                "avg_gated_test_loglik",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            _round_floats_for_csv_row(
+                {
+                    "num_of_participants": len(participant_ids),
+                    "avg_train_loglik": float(np.mean(train_vals)) if train_vals else None,
+                    "avg_test_loglik": float(np.mean(test_vals)) if test_vals else None,
+                    "avg_val_loglik": float(np.mean(val_vals)) if val_vals else None,
+                    "avg_gated_test_loglik": None,
+                }
+            )
+        )
+    print(f"Wrote global phase summary: {summary_path}")
+
+
+def _write_refinement_summary_loglik_csv(refinement_dir: Path, row: Dict[str, Any]) -> None:
+    """Single-participant summary_loglik.csv under refinement/ (mirrors run-level columns)."""
+    summary_path = refinement_dir / "summary_loglik.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "participant_id",
+                "train_loglik",
+                "val_loglik",
+                "test_loglik",
+                "gated_test_loglik",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(_round_floats_for_csv_row(row))
 
 
 def _write_refine_summary_loglik_csv(output_dir: Path, rows: List[Dict[str, Any]]) -> None:

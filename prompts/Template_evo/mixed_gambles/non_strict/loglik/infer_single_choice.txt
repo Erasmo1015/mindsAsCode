@@ -1,71 +1,53 @@
-You are given observations of human choices in the CPC18 Track II task (individual behavior).
+You are given observations of human choices in mixed-gamble problems.
 
-Each trial presents two options (Option A and Option B) with lottery parameters such as:
-- high outcomes,
-- probabilities,
-- low outcomes,
-- ambiguity,
-- correlation,
-- lottery shape,
-- and number of outcomes.
+Each problem presents two options:
+- Option A = risky gamble (gamble_A)
+- Option B = certain outcome (gamble_B)
 
-You will also see:
-- a sequence of training trials from a single participant,
-- including the participant’s previous choices and feedback history when available.
+Option convention:
+- return 0 = gamble_A (accept the gamble)
+- return 1 = gamble_B (certain / reject the gamble)
 
-Your task is NOT to write code.
+IMPORTANT DATA PROPERTIES:
+- has_feedback is always False
+- history does NOT contain useful information (may be empty)
+- There is NO outcome realization shown to the participant
+- Choices depend only on the current gamble, not past trials
 
-Instead, infer a concise but behaviorally predictive text-based personality/profile for this participant.
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
 
-The goal is to summarize the participant’s underlying decision-making tendencies so that another language model can later imitate this participant on unseen CPC18 problems.
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
 
-The profile should capture:
-- risk preference,
-- expected-value sensitivity,
-- ambiguity sensitivity,
-- correlation sensitivity,
-- sensitivity to lottery structure or skewness,
-- inertia or repetition tendencies,
-- feedback sensitivity,
-- adaptation across repeated trials,
-- switching behavior after gains/losses,
-- exploration vs exploitation tendencies,
-- consistency vs stochasticity,
-- decisiveness/confidence,
-- and any other important behavioral patterns or strategy changes over time.
-
-Important:
-- Focus on predictive behavioral tendencies rather than surface-level descriptions.
-- Infer the behavioral strategy behind the observed choices.
-- The profile should help another model predict the probability that the participant chooses Option B on future trials.
-- Do not describe every trial individually.
-- Do not summarize the dataset mechanically.
-- Avoid vague personality descriptions unrelated to decision behavior.
-
-Behavioral guidance:
-- If the participant behaves consistently, mention strong or deterministic tendencies.
-- If the participant behaves inconsistently or noisily, mention stochasticity or unstable preferences.
-- If history strongly influences choices, describe how.
-- If the participant adapts behavior after feedback or recent outcomes, describe the adaptation pattern.
-- If the participant appears highly sensitive to expected value, ambiguity, correlation, or skewness, describe the strength of these effects.
-
-You may include concise quantitative summaries when helpful, such as:
-- approximate choice frequencies,
-- confidence levels,
-- sensitivity strengths,
-- consistency levels,
-- switching tendencies,
-- or simplified behavioral rules.
-
-Example:
-- "The participant strongly prefers Option B when its expected value exceeds Option A, choosing B roughly 80–90% of the time in such cases."
-- "Recent feedback strongly affects subsequent choices."
-- "The participant becomes more risk-seeking after positive outcomes."
-- "The participant behaves conservatively under ambiguity and tends to avoid highly skewed lotteries."
+    problem: dict with keys
+        - gamble_A: {"probs": List[float], "rewards": List[float]}
+        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - option_keys: e.g., ["A","B"]
+        - has_feedback: bool
+    history: list of dicts (may be empty; do not rely on it)
+    return: float, probability of choosing option 1 (Option B / gamble_B)
+    """
 
 Requirements:
-- Output only the participant profile text.
-- Do not output code.
-- Do not output JSON.
-- Do not output markdown headers.
-- Keep the profile concise but sufficiently detailed to support downstream prediction.
+- Pure Python, no imports, deterministic.
+- Use only the provided problem (not history).
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing Option B (action 1).
+- The return value must be strictly inside (0, 1). Clip to a safe range such as [1e-9, 1 - 1e-9] if needed.
+- Higher returned values mean the participant is more likely to choose Option B.
+- Avoid numerical errors (division by zero, overflow, invalid operations).
+- Access gambles via problem["gamble_A"] and problem["gamble_B"] with "probs" and "rewards" keys.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- Keep all helper logic inside `choose(...)` (nested functions are allowed).
+
+Behavioral requirements:
+- Do not return constant or near-constant probabilities (e.g., always ~0.5).
+- The probability must depend meaningfully on gamble_A and gamble_B parameters.
+- Prefer simple, interpretable rules suited to gain/loss mixed gambles.
+
+Generation requirements:
+- Produce a valid program that is meaningfully different from the parent.
+- Output only the complete choose(...) function.
