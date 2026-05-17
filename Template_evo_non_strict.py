@@ -562,6 +562,448 @@ def _refinement_combined_fitness(train_loglik: float, val_loglik: float) -> floa
     return 0.5 * float(train_loglik) + 0.5 * float(val_loglik)
 
 
+def _train_loglik_from_elite_tuple(parent_tuple: Tuple[Any, ...]) -> float:
+    """Train loglik from evolution or refinement elite tuple."""
+    program_id = str(parent_tuple[3]) if len(parent_tuple) > 3 else ""
+    if program_id.startswith("refinement_"):
+        if len(parent_tuple) > 6 and parent_tuple[6] is not None:
+            return float(parent_tuple[6])
+    # Evolution pool: index 1 is train loglik; index 6 is train accuracy for legacy tuples.
+    return float(parent_tuple[1])
+
+
+def _evolution_elite_to_refinement_pool(
+    elite_parents: List[Tuple[Any, ...]],
+    elite_val_logliks: List[Optional[float]],
+) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
+    """Copy evolution elite pool into refinement format; preserve evolution order (no sort)."""
+    refine_parents: List[Tuple[Any, ...]] = []
+    refine_vals: List[Optional[float]] = []
+    for parent, val_ll in zip(elite_parents, elite_val_logliks):
+        program_id = str(parent[3])
+        train_ll = _train_loglik_from_elite_tuple(parent)
+        val_ll_f = _safe_float(val_ll)
+        combined = (
+            _refinement_combined_fitness(train_ll, val_ll_f)
+            if val_ll_f is not None
+            else train_ll
+        )
+        refine_parents.append(
+            (parent[0], combined, None, program_id, None, None, train_ll)
+        )
+        refine_vals.append(val_ll_f)
+    return refine_parents, refine_vals
+
+
+def _save_evolution_elite_pool(
+    output_path: Path,
+    elite_parents: List[Tuple[Any, ...]],
+    elite_val_logliks: List[Optional[float]],
+) -> Path:
+    """Persist evolution-phase elite pool programs and manifest (evolution sort order)."""
+    pool_dir = output_path / "evolution_elite_pool"
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    manifest: List[Dict[str, Any]] = []
+    for rank, (parent, val_ll) in enumerate(zip(elite_parents, elite_val_logliks)):
+        program_id = str(parent[3])
+        train_ll = _train_loglik_from_elite_tuple(parent)
+        val_ll_f = _safe_float(val_ll)
+        combined = (
+            _refinement_combined_fitness(train_ll, val_ll_f)
+            if val_ll_f is not None
+            else train_ll
+        )
+        safe_name = re.sub(r"[^\w.\-]+", "_", program_id) or "program"
+        filename = f"{rank:03d}_{safe_name}.py"
+        (pool_dir / filename).write_text(parent[0] or "", encoding="utf-8")
+        manifest.append(
+            {
+                "rank": rank,
+                "program_id": program_id,
+                "filename": filename,
+                "train_loglik": train_ll,
+                "val_loglik": val_ll_f,
+                "train_val_loglik": combined,
+                "evolution_fitness": _safe_float(parent[1]),
+            }
+        )
+    (pool_dir / "pool_manifest.json").write_text(
+        json.dumps({"n_programs": len(manifest), "programs": manifest}, indent=2),
+        encoding="utf-8",
+    )
+    return pool_dir
+
+
+def _load_evolution_elite_pool(
+    pool_dir: Path,
+) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
+    """Load evolution elite pool from saved manifest + program files."""
+    manifest_path = pool_dir / "pool_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Missing evolution elite pool manifest: {manifest_path}")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    programs = payload.get("programs", payload if isinstance(payload, list) else [])
+    elite_parents: List[Tuple[Any, ...]] = []
+    elite_val_logliks: List[Optional[float]] = []
+    for entry in programs:
+        filename = entry["filename"]
+        code = (pool_dir / filename).read_text(encoding="utf-8")
+        train_ll = float(entry["train_loglik"])
+        val_ll = _safe_float(entry.get("val_loglik"))
+        combined = _safe_float(entry.get("train_val_loglik"))
+        if combined is None and val_ll is not None:
+            combined = _refinement_combined_fitness(train_ll, val_ll)
+        elif combined is None:
+            combined = train_ll
+        program_id = str(entry.get("program_id", filename))
+        elite_parents.append(
+            (code, combined, None, program_id, None, None, train_ll)
+        )
+        elite_val_logliks.append(val_ll)
+    return elite_parents, elite_val_logliks
+
+
+def _collect_pooled_train_trials_for_participants(
+    dataset: str,
+    participant_ids: List[int],
+    *,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
+) -> List[Dict[str, Any]]:
+    """Concatenate per-participant train splits (same splits as evolution uses)."""
+    pooled: List[Dict[str, Any]] = []
+    for pid in participant_ids:
+        train_trials, _, _ = _trials_for_loglik_participant(
+            dataset,
+            int(pid),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+        )
+        pooled.extend(train_trials)
+    return pooled
+
+
+def _save_global_elite_pool(
+    global_dir: Path,
+    elite_parents: List[Tuple[Any, ...]],
+) -> Path:
+    """Persist global-phase elite pool (global sort order)."""
+    pool_dir = global_dir / "global_elite_pool"
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    manifest: List[Dict[str, Any]] = []
+    for rank, parent in enumerate(elite_parents):
+        program_id = str(parent[3])
+        train_ll = _train_loglik_from_elite_tuple(parent)
+        safe_name = re.sub(r"[^\w.\-]+", "_", program_id) or "program"
+        filename = f"{rank:03d}_{safe_name}.py"
+        (pool_dir / filename).write_text(parent[0] or "", encoding="utf-8")
+        manifest.append(
+            {
+                "rank": rank,
+                "program_id": program_id,
+                "filename": filename,
+                "global_train_loglik": train_ll,
+                "global_fitness": _safe_float(parent[1]),
+            }
+        )
+    (pool_dir / "pool_manifest.json").write_text(
+        json.dumps({"n_programs": len(manifest), "programs": manifest}, indent=2),
+        encoding="utf-8",
+    )
+    return pool_dir
+
+
+def _load_global_elite_pool(pool_dir: Path) -> List[Tuple[Any, ...]]:
+    """Load global elite pool from saved manifest + program files."""
+    manifest_path = pool_dir / "pool_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Missing global elite pool manifest: {manifest_path}")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    programs = payload.get("programs", payload if isinstance(payload, list) else [])
+    elite_parents: List[Tuple[Any, ...]] = []
+    for entry in programs:
+        filename = entry["filename"]
+        code = (pool_dir / filename).read_text(encoding="utf-8")
+        train_ll = float(entry.get("global_train_loglik", entry.get("global_fitness", 0.0)))
+        program_id = str(entry.get("program_id", filename))
+        elite_parents.append(
+            (code, train_ll, None, program_id, None, None, train_ll)
+        )
+    return elite_parents
+
+
+def _global_elite_to_participant_elite(
+    global_parents: List[Tuple[Any, ...]],
+    train_trials: List[Dict[str, Any]],
+    val_trials: List[Dict[str, Any]],
+    *,
+    dataset: str,
+    n_eval_seeds: int,
+) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
+    """Map global pool into participant elite tuples; preserve global order (no sort)."""
+    elite_parents: List[Tuple[Any, ...]] = []
+    elite_val_logliks: List[Optional[float]] = []
+    for parent in global_parents:
+        code = parent[0]
+        src_id = str(parent[3])
+        program_id = src_id if src_id.startswith("global_") else f"global_{src_id}"
+        train_ll = _train_loglik_from_elite_tuple(parent)
+        val_ll: Optional[float] = None
+        test_acc = 0.0
+        train_acc = 0.0
+        choose_fn = compile_program(code)
+        if choose_fn is not None:
+            train_eval = _evaluate_loglik_for_dataset(
+                dataset, choose_fn, train_trials, n_seeds=n_eval_seeds
+            )
+            train_ll = float(train_eval["avg_loglik"])
+            train_acc = float(train_eval["accuracy"])
+            test_acc = train_acc
+            if val_trials:
+                val_eval = _evaluate_loglik_for_dataset(
+                    dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
+                )
+                val_ll = float(val_eval["avg_loglik"])
+        elite_parents.append(
+            (code, train_ll, test_acc, program_id, None, None, train_acc)
+        )
+        elite_val_logliks.append(val_ll)
+    return elite_parents, elite_val_logliks
+
+
+def run_global_evolution_phase(
+    *,
+    dataset: str,
+    participants: List[int],
+    seed_program_path: str,
+    n_iterations: int,
+    n_candidates_per_iteration: int,
+    sample_size: int,
+    sample_parents: bool,
+    elite_pool_size: Optional[int],
+    model_name: str,
+    client: OpenAI,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
+    max_prompt_train_trials: int = 1_000_000,
+    max_prompt_trials_per_problem: int = 0,
+    llm_max_tokens: int = 800,
+    max_workers: int = 5,
+    n_eval_seeds: int = 3,
+    output_dir: Path,
+    save_artifacts: bool = True,
+    wandb_module: Optional[Any] = None,
+) -> List[Tuple[Any, ...]]:
+    """
+    Cross-participant evolution on pooled train trials (loglik fitness).
+
+    Runs before per-participant evolution when ``--global_phase`` and ``--phase all``.
+    """
+    participant_ids = [int(p) for p in participants]
+    pooled_train = _collect_pooled_train_trials_for_participants(
+        dataset,
+        participant_ids,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+    )
+    print(f"\n{'='*80}")
+    print(
+        f"Global phase: {n_iterations} iteration(s), "
+        f"{len(participant_ids)} participant(s), {len(pooled_train)} pooled train trials"
+    )
+    print(f"{'='*80}")
+
+    global_dir = output_dir / "global_phase"
+    if save_artifacts:
+        global_dir.mkdir(parents=True, exist_ok=True)
+
+    seed_code = load_seed_program(seed_program_path)
+    seed_fn = compile_program(seed_code)
+    if seed_fn is None:
+        raise RuntimeError(f"Failed to compile seed program for global phase: {seed_program_path}")
+    baseline_eval = _evaluate_loglik_for_dataset(
+        dataset, seed_fn, pooled_train, n_seeds=n_eval_seeds
+    )
+    baseline_ll = float(baseline_eval["avg_loglik"])
+    elite_parents: List[Tuple[Any, ...]] = [
+        (
+            seed_code,
+            baseline_ll,
+            None,
+            "global_baseline",
+            None,
+            None,
+            baseline_ll,
+        )
+    ]
+    print(f"Global baseline train loglik: {baseline_ll:.6f}")
+
+    for iteration in range(n_iterations):
+        iteration_step = iteration + 1
+        print(f"\n{'='*80}")
+        print(f"Global iteration {iteration_step}/{n_iterations}")
+        print(f"{'='*80}")
+
+        iter_dir: Optional[Path] = None
+        if save_artifacts:
+            iter_dir = global_dir / f"iteration_{iteration_step}"
+            iter_dir.mkdir(parents=True, exist_ok=True)
+            (iter_dir / "candidates").mkdir(exist_ok=True)
+
+        num_parents_to_use = min(sample_size, len(elite_parents))
+        if sample_parents and len(elite_parents) > 0:
+            rng = np.random.default_rng(
+                int(split_seed) + 50_000 + int(iteration_step) * 1_000_003
+            )
+            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
+            selected_parents = [elite_parents[int(j)] for j in idxs]
+            print(
+                f"\nUsing {num_parents_to_use} sampled global parent(s) "
+                f"(pool size={len(elite_parents)}):"
+            )
+        else:
+            selected_parents = elite_parents[:num_parents_to_use]
+            print(f"\nUsing top {num_parents_to_use} global parent(s):")
+
+        for i, parent_tuple in enumerate(selected_parents):
+            prog_id = parent_tuple[3]
+            train_ll = _train_loglik_from_elite_tuple(parent_tuple)
+            print(f"  Parent {i+1}: {prog_id} (global_train_loglik={train_ll:.4f})")
+
+        parent_codes = [p[0] for p in selected_parents]
+        parent_train_lls = [_train_loglik_from_elite_tuple(p) for p in selected_parents]
+
+        candidate_codes = generate_program_variants(
+            client=client,
+            model_name=model_name,
+            parent_programs=parent_codes,
+            train_trials=pooled_train,
+            n_variants=n_candidates_per_iteration,
+            max_tokens=llm_max_tokens,
+            dataset=dataset,
+            parent_train_accuracies=parent_train_lls,
+            max_prompt_train_trials=max_prompt_train_trials,
+            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+            prompt_train_trials_seed=int(split_seed) + 60_000 + iteration_step,
+            fitness_metric="loglik",
+            max_workers=max_workers,
+        )
+
+        selected_results: List[Dict[str, Any]] = []
+        for idx, code in enumerate(candidate_codes):
+            if iter_dir is not None:
+                (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "")
+            code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
+            if not code:
+                continue
+            choose_fn = compile_program(code)
+            if choose_fn is None:
+                continue
+            try:
+                train_eval = _evaluate_loglik_for_dataset(
+                    dataset, choose_fn, pooled_train, n_seeds=n_eval_seeds
+                )
+            except (AssertionError, TypeError, ValueError):
+                continue
+            if train_eval.get("errors", 0) != 0:
+                continue
+            train_loglik = float(train_eval["avg_loglik"])
+            selected_results.append(
+                {
+                    "idx": idx,
+                    "code": code,
+                    "train_loglik": train_loglik,
+                    "fitness": train_loglik,
+                }
+            )
+
+        if not selected_results:
+            print("Warning: No runtime-valid global candidates; keeping elite pool.")
+        else:
+            selected_results.sort(key=lambda x: x["fitness"], reverse=True)
+            best = selected_results[0]
+            print(
+                f"  Best global candidate {best['idx']}: "
+                f"train_loglik={best['train_loglik']:.6f}"
+            )
+            for result in selected_results:
+                program_id = f"global_iteration_{iteration_step}_candidate_{result['idx']}"
+                elite_parents.append(
+                    (
+                        result["code"],
+                        result["fitness"],
+                        None,
+                        program_id,
+                        None,
+                        None,
+                        result["train_loglik"],
+                    )
+                )
+
+        elite_parents.sort(key=lambda x: x[1], reverse=True)
+        elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+        elite_parents = elite_parents[:elite_cap]
+        pool_best_ll = _train_loglik_from_elite_tuple(elite_parents[0])
+        print(
+            f"\nGlobal elite set updated: {len(elite_parents)} programs "
+            f"(cap={elite_cap}, pool_best_train_loglik={pool_best_ll:.6f})"
+        )
+
+        if iter_dir is not None:
+            metrics = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_runtime_valid": len(selected_results),
+                "pool_best_program_id": elite_parents[0][3],
+                "pool_best_global_train_loglik": pool_best_ll,
+            }
+            (iter_dir / "metrics.json").write_text(
+                json.dumps(metrics, indent=2), encoding="utf-8"
+            )
+
+        if wandb_module is not None:
+            wandb_module.log(
+                {
+                    "global/train_loglik": pool_best_ll,
+                    "global/pool_size": len(elite_parents),
+                    "global/iteration": iteration_step,
+                },
+                step=iteration_step,
+            )
+
+    if save_artifacts:
+        pool_dir = _save_global_elite_pool(global_dir, elite_parents)
+        print(f"Saved global elite pool ({len(elite_parents)} programs) -> {pool_dir}")
+        (global_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "phase": "global",
+                    "dataset": dataset,
+                    "n_participants": len(participant_ids),
+                    "participant_ids": participant_ids,
+                    "n_iterations": int(n_iterations),
+                    "n_pooled_train_trials": len(pooled_train),
+                    "pool_size": len(elite_parents),
+                    "pool_best_program_id": str(elite_parents[0][3]),
+                    "pool_best_global_train_loglik": _train_loglik_from_elite_tuple(
+                        elite_parents[0]
+                    ),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return elite_parents
+
+
 def _refinement_pool_best_metrics(
     elite_parents: List[Tuple[Any, ...]],
     elite_val_logliks: List[Optional[float]],
@@ -573,9 +1015,7 @@ def _refinement_pool_best_metrics(
     """Metrics for elite pool rank-1 after an iteration (includes held-out test loglik)."""
     pool_best = elite_parents[0]
     program_id = pool_best[3]
-    train_loglik = (
-        float(pool_best[6]) if pool_best[6] is not None else None
-    )
+    train_loglik = _train_loglik_from_elite_tuple(pool_best)
     val_loglik = (
         float(elite_val_logliks[0]) if elite_val_logliks and elite_val_logliks[0] is not None else None
     )
@@ -637,9 +1077,6 @@ def run_loglik_refinement_phase(
     dataset: str,
     client: OpenAI,
     model_name: str,
-    initial_code: str,
-    initial_train_loglik: float,
-    initial_val_loglik: float,
     train_trials: List[Dict[str, Any]],
     val_trials: List[Dict[str, Any]],
     test_trials: List[Dict[str, Any]],
@@ -660,10 +1097,18 @@ def run_loglik_refinement_phase(
     save_artifacts: bool = True,
     wandb_module: Optional[Any] = None,
     wandb_step_offset: int = 0,
+    evolution_elite_parents: Optional[List[Tuple[Any, ...]]] = None,
+    evolution_elite_val_logliks: Optional[List[Optional[float]]] = None,
+    initial_code: Optional[str] = None,
+    initial_train_loglik: Optional[float] = None,
+    initial_val_loglik: Optional[float] = None,
 ) -> Optional[float]:
     """
-    Refinement: elite pool sorted by 0.5*train_loglik + 0.5*val_loglik; val trials in prompt;
-    test loglik returned as gated_test_loglik. Starts from the final best evolved program.
+    Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
+
+    When ``evolution_elite_parents`` / ``evolution_elite_val_logliks`` are provided, the full
+    evolution elite pool is copied in evolution order (no re-sort). Otherwise falls back to a
+    single-program pool from ``initial_code``.
     """
     if not val_trials or not test_trials or n_iterations < 1:
         return None
@@ -683,35 +1128,66 @@ def run_loglik_refinement_phase(
     )
     print(f"{'='*80}")
 
-    seed_combined_fitness = _refinement_combined_fitness(
-        initial_train_loglik, initial_val_loglik
-    )
-    elite_parents: List[Tuple[Any, ...]] = [
-        (
-            initial_code,
-            seed_combined_fitness,
-            None,
-            "refinement_seed",
-            None,
-            None,
-            float(initial_train_loglik),
+    pool_from_evolution = bool(evolution_elite_parents)
+    if pool_from_evolution:
+        elite_parents = [tuple(p) for p in evolution_elite_parents]
+        elite_val_logliks = list(evolution_elite_val_logliks or [])
+        if len(elite_val_logliks) != len(elite_parents):
+            raise ValueError(
+                "evolution_elite_val_logliks length must match evolution_elite_parents"
+            )
+        print(
+            f"Refinement initial pool: {len(elite_parents)} program(s) copied from evolution "
+            f"(evolution order preserved; sort by train_val_loglik starts after iteration 1)."
         )
-    ]
-    elite_val_logliks: List[Optional[float]] = [float(initial_val_loglik)]
-
-    seed_test_loglik: Optional[float] = None
-    seed_fn = compile_program(initial_code)
-    if seed_fn is not None:
-        seed_test_eval = _evaluate_loglik_for_dataset(
-            dataset, seed_fn, test_trials, n_seeds=n_eval_seeds
+        seed_test_loglik: Optional[float] = None
+        top_fn = compile_program(elite_parents[0][0])
+        if top_fn is not None:
+            seed_test_eval = _evaluate_loglik_for_dataset(
+                dataset, top_fn, test_trials, n_seeds=n_eval_seeds
+            )
+            seed_test_loglik = float(seed_test_eval["avg_loglik"])
+    else:
+        if initial_code is None or initial_train_loglik is None or initial_val_loglik is None:
+            raise ValueError(
+                "Refinement requires evolution_elite_parents or initial_code with loglik metrics."
+            )
+        seed_combined_fitness = _refinement_combined_fitness(
+            initial_train_loglik, initial_val_loglik
         )
-        seed_test_loglik = float(seed_test_eval["avg_loglik"])
+        elite_parents = [
+            (
+                initial_code,
+                seed_combined_fitness,
+                None,
+                "refinement_seed",
+                None,
+                None,
+                float(initial_train_loglik),
+            )
+        ]
+        elite_val_logliks = [float(initial_val_loglik)]
+        seed_test_loglik = None
+        seed_fn = compile_program(initial_code)
+        if seed_fn is not None:
+            seed_test_eval = _evaluate_loglik_for_dataset(
+                dataset, seed_fn, test_trials, n_seeds=n_eval_seeds
+            )
+            seed_test_loglik = float(seed_test_eval["avg_loglik"])
+        print("Refinement initial pool: single checkpoint program (refinement_seed).")
 
     refinement_dir: Optional[Path] = None
     if save_artifacts and output_path is not None:
         refinement_dir = output_path / "refinement"
         refinement_dir.mkdir(parents=True, exist_ok=True)
-        (refinement_dir / "seed_program.py").write_text(initial_code or "")
+        if pool_from_evolution and (output_path / "evolution_elite_pool").is_dir():
+            src_pool = output_path / "evolution_elite_pool"
+            dst_pool = refinement_dir / "initial_pool_from_evolution"
+            if dst_pool.exists():
+                shutil.rmtree(dst_pool)
+            shutil.copytree(src_pool, dst_pool)
+        elif initial_code is not None:
+            (refinement_dir / "seed_program.py").write_text(initial_code or "")
 
     for iteration in range(n_iterations):
         iteration_step = iteration + 1
@@ -745,7 +1221,7 @@ def run_loglik_refinement_phase(
 
         for i, parent_tuple in enumerate(selected_parents):
             prog_id = parent_tuple[3]
-            train_ll = float(parent_tuple[6]) if parent_tuple[6] is not None else float(parent_tuple[1])
+            train_ll = _train_loglik_from_elite_tuple(parent_tuple)
             val_ll = selected_val_lls[i]
             comb_fitness = float(parent_tuple[1])
             val_str = f"{val_ll:.4f}" if val_ll is not None else "N/A"
@@ -755,9 +1231,7 @@ def run_loglik_refinement_phase(
             )
 
         parent_codes = [p[0] for p in selected_parents]
-        parent_train_lls = [
-            float(p[6]) if p[6] is not None else float(p[1]) for p in selected_parents
-        ]
+        parent_train_lls = [_train_loglik_from_elite_tuple(p) for p in selected_parents]
 
         print(
             f"[LLM prompt] Refinement uses {len(val_for_prompt)} validation trials only "
@@ -879,7 +1353,8 @@ def run_loglik_refinement_phase(
                 elite_val_logliks.append(result.get("val_loglik"))
 
         paired = list(zip(elite_parents, elite_val_logliks))
-        paired.sort(key=lambda x: x[0][1], reverse=True)
+        if iteration_step >= 1:
+            paired.sort(key=lambda x: x[0][1], reverse=True)
         elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
         paired = paired[:elite_cap]
         elite_parents = [p[0] for p in paired]
@@ -983,35 +1458,41 @@ def run_loglik_refinement_phase(
         best_val_ll = elite_val_logliks[0] if elite_val_logliks else None
         final_program_id = str(elite_parents[0][3])
         final_is_seed = final_program_id == "refinement_seed"
-        _write_refinement_results_json(
-            refinement_dir,
-            {
-                "phase": "refinement",
-                "dataset": dataset,
-                "participant_id": int(participant_id),
-                "n_iterations": int(n_iterations),
-                "refinement_skipped": False,
-                "refinement_seed": {
-                    "program_id": "refinement_seed",
-                    "train_loglik": float(initial_train_loglik),
-                    "val_loglik": float(initial_val_loglik),
-                    "test_loglik": seed_test_loglik,
-                    "train_val_loglik": float(seed_combined_fitness),
-                },
-                "final_pool_best": {
-                    "program_id": final_program_id,
-                    "train_val_loglik": float(elite_parents[0][1]),
-                    "train_loglik": float(elite_parents[0][6])
-                    if elite_parents[0][6] is not None
-                    else None,
-                    "val_loglik": float(best_val_ll) if best_val_ll is not None else None,
-                    "test_loglik": refinement_test_loglik,
-                },
-                "final_program_is_seed": final_is_seed,
-                "gated_test_loglik": refinement_test_loglik,
+        refine_results: Dict[str, Any] = {
+            "phase": "refinement",
+            "dataset": dataset,
+            "participant_id": int(participant_id),
+            "n_iterations": int(n_iterations),
+            "refinement_skipped": False,
+            "initial_pool_from_evolution": pool_from_evolution,
+            "initial_pool_size": len(elite_parents),
+            "final_pool_best": {
+                "program_id": final_program_id,
+                "train_val_loglik": float(elite_parents[0][1]),
+                "train_loglik": _train_loglik_from_elite_tuple(elite_parents[0]),
+                "val_loglik": float(best_val_ll) if best_val_ll is not None else None,
+                "test_loglik": refinement_test_loglik,
             },
-        )
-        if final_is_seed:
+            "final_program_is_seed": final_is_seed,
+            "gated_test_loglik": refinement_test_loglik,
+        }
+        if pool_from_evolution:
+            refine_results["evolution_pool_transfer"] = {
+                "n_programs": len(evolution_elite_parents or []),
+                "sort_by_train_val_loglik_after_iteration": 1,
+            }
+        else:
+            refine_results["refinement_seed"] = {
+                "program_id": "refinement_seed",
+                "train_loglik": float(initial_train_loglik),
+                "val_loglik": float(initial_val_loglik),
+                "test_loglik": seed_test_loglik,
+                "train_val_loglik": _refinement_combined_fitness(
+                    float(initial_train_loglik), float(initial_val_loglik)
+                ),
+            }
+        _write_refinement_results_json(refinement_dir, refine_results)
+        if final_is_seed and not pool_from_evolution:
             print(
                 "Note: Final pool-best is still refinement_seed (no candidate beat seed on "
                 "combined fitness); gated_test_loglik equals seed test loglik."
@@ -1275,34 +1756,49 @@ def run_loglik_refine_participant_from_checkpoint(
         f"Refinement triggered: val_loglik={float(val_loglik):.6f} "
         f"< threshold={float(refinement_val_threshold):.6f}"
     )
-    gated_test_loglik = run_loglik_refinement_phase(
-        dataset=dataset,
-        client=client,
-        model_name=model_name,
-        initial_code=initial_code,
-        initial_train_loglik=train_loglik,
-        initial_val_loglik=val_loglik,
-        train_trials=train_trials,
-        val_trials=val_trials,
-        test_trials=test_trials,
-        n_iterations=n_iterations,
-        n_candidates_per_iteration=n_candidates_per_iteration,
-        sample_size=sample_size,
-        sample_parents=sample_parents,
-        elite_pool_size=elite_pool_size,
-        participant_id=int(participant_id),
-        split_seed=int(split_seed),
-        max_prompt_train_trials=max_prompt_train_trials,
-        max_prompt_trials_per_problem=max_prompt_trials_per_problem,
-        llm_max_tokens=llm_max_tokens,
-        max_workers=max_workers,
-        n_eval_seeds=n_eval_seeds,
-        fitness_metric="loglik",
-        output_path=output_dir,
-        save_artifacts=save_artifacts,
-        wandb_module=wandb_module,
-        wandb_step_offset=0,
-    )
+    evolution_pool_dir = prev_participant_dir / "evolution_elite_pool"
+    refine_kwargs: Dict[str, Any] = {
+        "dataset": dataset,
+        "client": client,
+        "model_name": model_name,
+        "train_trials": train_trials,
+        "val_trials": val_trials,
+        "test_trials": test_trials,
+        "n_iterations": n_iterations,
+        "n_candidates_per_iteration": n_candidates_per_iteration,
+        "sample_size": sample_size,
+        "sample_parents": sample_parents,
+        "elite_pool_size": elite_pool_size,
+        "participant_id": int(participant_id),
+        "split_seed": int(split_seed),
+        "max_prompt_train_trials": max_prompt_train_trials,
+        "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
+        "llm_max_tokens": llm_max_tokens,
+        "max_workers": max_workers,
+        "n_eval_seeds": n_eval_seeds,
+        "fitness_metric": "loglik",
+        "output_path": output_dir,
+        "save_artifacts": save_artifacts,
+        "wandb_module": wandb_module,
+        "wandb_step_offset": 0,
+    }
+    if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
+        ref_parents, ref_vals = _load_evolution_elite_pool(evolution_pool_dir)
+        if save_artifacts:
+            out_pool = output_dir / "evolution_elite_pool"
+            if out_pool.exists():
+                shutil.rmtree(out_pool)
+            shutil.copytree(evolution_pool_dir, out_pool)
+        print(
+            f"Loaded evolution elite pool ({len(ref_parents)} programs) from {evolution_pool_dir}"
+        )
+        refine_kwargs["evolution_elite_parents"] = ref_parents
+        refine_kwargs["evolution_elite_val_logliks"] = ref_vals
+    else:
+        refine_kwargs["initial_code"] = initial_code
+        refine_kwargs["initial_train_loglik"] = train_loglik
+        refine_kwargs["initial_val_loglik"] = val_loglik
+    gated_test_loglik = run_loglik_refinement_phase(**refine_kwargs)
 
     if gated_test_loglik is not None and wandb_module is not None:
         final_refine_log = {
@@ -3672,6 +4168,8 @@ def run_evolution(
     refinement_iters: int = 5,
     refinement_val_threshold: float = -1.0,
     max_workers: int = 5,
+    global_elite_parents: Optional[List[Tuple[Any, ...]]] = None,
+    global_pool_handoff: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -4170,8 +4668,46 @@ def run_evolution(
                 None,  # test_mse not applicable
                 baseline_train_eval["accuracy"],
             )]
-    
+
     runtime_valid_evolved_found = False
+    track_elite_val_loglik = bool(
+        val_trials and fitness_metric == "loglik"
+    )
+    elite_val_logliks: List[Optional[float]] = []
+    if global_elite_parents:
+        if fitness_metric != "loglik":
+            raise ValueError("global_elite_parents requires fitness_metric='loglik'")
+        elite_parents, elite_val_logliks = _global_elite_to_participant_elite(
+            global_elite_parents,
+            train_trials,
+            val_trials,
+            dataset=dataset,
+            n_eval_seeds=n_eval_seeds,
+        )
+        global_pool_handoff = True
+        print(
+            f"\nEvolution initial pool: {len(elite_parents)} program(s) from global phase "
+            f"(global order preserved; per-participant sort by train loglik starts after iteration 1)."
+        )
+        if save_artifacts and output_path is not None:
+            run_root = (
+                output_path.parent
+                if output_path.name.startswith("participant_")
+                else output_path
+            )
+            src_pool = run_root / "global_phase" / "global_elite_pool"
+            if src_pool.is_dir():
+                dst_pool = output_path / "initial_pool_from_global"
+                if dst_pool.exists():
+                    shutil.rmtree(dst_pool)
+                shutil.copytree(src_pool, dst_pool)
+    elif track_elite_val_loglik:
+        base_val = (
+            _safe_float(baseline_val_eval["avg_loglik"])
+            if baseline_val_eval is not None
+            else None
+        )
+        elite_val_logliks = [base_val]
 
     if run_phase not in _RUN_PHASES:
         raise ValueError(f"run_phase must be one of {sorted(_RUN_PHASES)}, got {run_phase!r}")
@@ -4790,13 +5326,25 @@ def run_evolution(
                         None,
                         result["train_acc"],
                     ))
-            
-            # Sort elite set by fitness (descending) and keep top programs
-            # For CPC18: fitness = -MSE (higher is better)
-            # For others: fitness = accuracy (higher is better)
-            elite_parents.sort(key=lambda x: x[1], reverse=True)
-            elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
-            elite_parents = elite_parents[:elite_cap]
+                if track_elite_val_loglik:
+                    elite_val_logliks.append(_safe_float(result.get("val_loglik")))
+
+            # Sort elite set by fitness (descending) and keep top programs.
+            # Global handoff: preserve global order through iteration 1; sort from iteration 2+.
+            should_sort_elite = (not global_pool_handoff) or (iteration_step >= 1)
+            if track_elite_val_loglik:
+                paired_elite = list(zip(elite_parents, elite_val_logliks))
+                if should_sort_elite:
+                    paired_elite.sort(key=lambda x: x[0][1], reverse=True)
+                elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+                paired_elite = paired_elite[:elite_cap]
+                elite_parents = [p[0] for p in paired_elite]
+                elite_val_logliks = [p[1] for p in paired_elite]
+            else:
+                if should_sort_elite:
+                    elite_parents.sort(key=lambda x: x[1], reverse=True)
+                elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+                elite_parents = elite_parents[:elite_cap]
 
             print(f"\nElite set updated: {len(elite_parents)} programs (elite_pool_cap={elite_cap})")
 
@@ -5398,6 +5946,14 @@ def run_evolution(
         }
         overall_best_test = dict(overall_best_train)
 
+    if save_artifacts and track_elite_val_loglik and output_path is not None:
+        pool_dir = _save_evolution_elite_pool(
+            output_path, elite_parents, elite_val_logliks
+        )
+        print(
+            f"Saved evolution elite pool ({len(elite_parents)} programs) -> {pool_dir}"
+        )
+
     gated_test_loglik: Optional[float] = None
     refinement_ran = False
     final_val_loglik = overall_best_train.get("val_loglik")
@@ -5419,13 +5975,13 @@ def run_evolution(
             f"\nRefinement triggered: val_loglik={float(final_val_loglik):.6f} "
             f"< threshold={float(refinement_val_threshold):.6f}"
         )
+        ref_parents, ref_vals = _evolution_elite_to_refinement_pool(
+            elite_parents, elite_val_logliks
+        )
         gated_test_loglik = run_loglik_refinement_phase(
             dataset=dataset,
             client=client,
             model_name=model_name,
-            initial_code=final_best_code,
-            initial_train_loglik=float(overall_best_train["train_loglik"]),
-            initial_val_loglik=float(final_val_loglik),
             train_trials=train_trials,
             val_trials=val_trials,
             test_trials=test_trials,
@@ -5446,6 +6002,8 @@ def run_evolution(
             save_artifacts=save_artifacts,
             wandb_module=wandb,
             wandb_step_offset=int(n_iterations),
+            evolution_elite_parents=ref_parents,
+            evolution_elite_val_logliks=ref_vals,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -6281,6 +6839,22 @@ def main():
         ),
     )
     parser.add_argument(
+        "--global_phase",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "With --phase all: run cross-participant global evolution on pooled train trials "
+            "before per-participant evolution (loglik only; uses --global_iters and the same "
+            "parent/candidate args as evolution). Default: False."
+        ),
+    )
+    parser.add_argument(
+        "--global_iters",
+        type=int,
+        default=10,
+        help="Number of global-phase iterations when --global_phase is enabled (default: 10).",
+    )
+    parser.add_argument(
         "--prev_exp_path",
         type=str,
         default=None,
@@ -6322,6 +6896,21 @@ def main():
         return
     if args.refinement_iters < 1:
         print("Error: --refinement_iters must be >= 1.")
+        return
+    if args.global_iters < 1:
+        print("Error: --global_iters must be >= 1.")
+        return
+    if args.global_phase and args.phase != "all":
+        print("Error: --global_phase requires --phase all.")
+        return
+    if args.global_phase and args.dataset not in _PARTICIPANT_DATASETS:
+        print("Error: --global_phase requires a participant dataset (choice13k, cpc18, mixed_gambles).")
+        return
+    if args.global_phase and args.split_mode != "within_participant":
+        print("Error: --global_phase requires --split_mode within_participant.")
+        return
+    if args.global_phase and args.fitness_metric != "loglik":
+        print("Error: --global_phase requires --fitness_metric loglik.")
         return
     if args.phase not in _RUN_PHASES:
         print(f"Error: --phase must be one of {sorted(_RUN_PHASES)}, got {args.phase!r}.")
@@ -6547,6 +7136,39 @@ def main():
 
     evolution_run_phase = "evolution" if args.phase == "evolution" else "all"
 
+    global_elite_for_handoff: Optional[List[Tuple[Any, ...]]] = None
+    if args.global_phase and args.phase == "all" and args.dataset in _PARTICIPANT_DATASETS:
+        if seed_program_path is None:
+            print("Error: --global_phase requires a seed program (--seed_path or dataset default).")
+            if wandb is not None:
+                wandb.finish()
+            return
+        global_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        global_elite_for_handoff = run_global_evolution_phase(
+            dataset=args.dataset,
+            participants=[int(p) for p in participants_to_process],
+            seed_program_path=seed_program_path,
+            n_iterations=args.global_iters,
+            n_candidates_per_iteration=args.n_candidates,
+            sample_size=args.sample_size,
+            sample_parents=args.sample_parents,
+            elite_pool_size=args.elite_pool_size,
+            model_name=args.model_name,
+            client=global_client,
+            split_ratio=args.split_ratio,
+            split_seed=args.split_seed,
+            data_path=args.data_path,
+            filter_mixed_gambles=mixed_gambles_gain_loss_only,
+            max_prompt_train_trials=args.max_prompt_train_trials,
+            max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+            llm_max_tokens=args.llm_max_tokens,
+            max_workers=args.max_workers,
+            n_eval_seeds=args.n_eval_seeds,
+            output_dir=Path(base_run_dir),
+            save_artifacts=True,
+            wandb_module=wandb,
+        )
+
     if args.phase == "refine":
         if args.dataset not in _PARTICIPANT_DATASETS:
             print("Error: --phase refine requires a participant dataset.")
@@ -6729,6 +7351,7 @@ def main():
                 refinement_iters=args.refinement_iters,
                 refinement_val_threshold=args.refinement_val_threshold,
                 max_workers=candidate_workers_per_participant,
+                global_elite_parents=global_elite_for_handoff,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -7361,6 +7984,7 @@ def main():
                 refinement_iters=args.refinement_iters,
                 refinement_val_threshold=args.refinement_val_threshold,
                 max_workers=candidate_workers_per_participant,
+                global_elite_parents=global_elite_for_handoff,
             )
 
         try:
