@@ -227,3 +227,13 @@ This section is a **short orientation** for anyone (human or agent) touching Min
 - **Early stop flags:** **`--early_stop True|False`** (default **`False`**) and **`--debug_continue_after_early_stop`** are passed into `run_evolution`. The hard-participant early-stop **break** only runs when **`adaptation_mode=True`** inside `run_evolution` (e.g. the embedded **`_te_aggregate_run_evolution_stage`** / phase-2 adaptation path). The main Choice13k **data-driven** loops call `run_evolution` with **`adaptation_mode=False`**, so **`--early_stop` does not change behavior** on those paths. Thresholds: **`--hard_participant_train_loglik_threshold`**, **`--hard_participant_warmup_iters`**.
 
 - **Other datasets:** `te_dr.py` still supports **gridworld**, **gridworld_ensemble**, **cpc18**, and **mixed_gambles** entry points similar to other TE runners; the **data-driven block-split Choice13k** behavior above is the distinguishing feature.
+
+### Latest updates (`Template_evo_non_strict.py`, May 2026)
+
+- **`--parallel_participants`** (default **True**; disable with **`--no-parallel_participants`**): nested parallelism — `participant_workers = max(1, max_workers // n_candidates)`, each participant still uses **`n_candidates`** candidate LLM workers. Applies to **`--phase all`**, **`--phase evolution`**, **`--phase refine`**, and **`--participant_scope all`**. Not used for **`across_participants`** or gridworld paths. Experiment-level CSVs (`participants_summary.csv`, `participant_details_loglik.csv`, `summary_loglik.csv`) are written on the **main thread only** (lock-protected); workers write only under **`participant_<id>/`**.
+
+- **`--phase {all,evolution,refine}`** (default **`all`**): **`evolution`** skips post-evolution refinement; **`refine`** runs refinement-only from **`--prev_exp_path`** (each **`participant_<id>/best_program.py`** required). Refine copies prior loglik CSV, **clears `gated_test_loglik`**, then updates it per participant after refinement.
+
+- **Refinement (choice13k, loglik):** **`--refinement_phase`** (default on for **`all`**), **`--refinement_iters`**, **`--refinement_val_threshold`** (default **-1.0**). Refinement runs only when **`val_loglik < threshold`** (same gate for **`all`** and **`refine`**). Refinement uses **val trials only** in the LLM prompt (not train+val). **`gated_test_loglik`** in CSVs is the refinement **test** loglik (external val gate unchanged unless **`--gate_phase`**). Artifacts: **`participant_<id>/refinement/iteration_*/metrics.json`**, **`participant_<id>/refinement/results.json`**, final **`participant_<id>/best_program.py`**.
+
+- **Best program filename:** per-participant checkpoint is always **`best_program.py`** (not `best_program_fr_iter*_cand*.py`).
