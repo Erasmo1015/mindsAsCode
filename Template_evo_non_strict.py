@@ -33,6 +33,7 @@ import re
 import json
 import csv
 import shlex
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -56,6 +57,8 @@ from agent import AgentExecutionFramework
 # Repo root for datasets/*/valid_participant_ids.json (ordinal resolution for choice13k / cpc18 / mixed_gambles).
 _REPO_ROOT = Path(__file__).resolve().parent
 _PARTICIPANT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
+BEST_PROGRAM_FILENAME = "best_program.py"
+_RUN_PHASES = frozenset({"all", "evolution", "refine"})
 
 
 def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> int:
@@ -414,6 +417,536 @@ def run_choice13k_gate_phase(
     except Exception as e:
         print(f"Warning: gate phase failed: {e}")
         return None
+
+
+def _load_choice13k_refinement_prompt_suffix() -> str:
+    """Suffix appended to the normal choice13k prompt during refinement (train-only evolution)."""
+    path = os.path.join(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
+        "prompts",
+        "Template_evo",
+        "choice13k",
+        "refine",
+        "infer_single_choice.txt",
+    )
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _cap_and_subsample_prompt_trials(
+    trials: List[Dict[str, Any]],
+    *,
+    max_trials: int,
+    max_trials_per_problem: int,
+    subsample_seed: int,
+    label: str,
+) -> List[Dict[str, Any]]:
+    """Apply per-problem cap and optional subsample (same limits as train prompt trials)."""
+    out = _cap_prompt_trials_per_problem(list(trials), max_trials_per_problem)
+    if max_trials > 0 and len(out) > max_trials:
+        rng = np.random.default_rng(subsample_seed)
+        perm = rng.permutation(len(out))
+        sel = perm[:max_trials]
+        out = [out[int(i)] for i in sel]
+        print(
+            f"[LLM prompt] Using {len(out)} of {len(trials)} {label} trials "
+            f"(max={max_trials}, seed={subsample_seed})."
+        )
+    return out
+
+
+def run_choice13k_refinement_phase(
+    *,
+    client: OpenAI,
+    model_name: str,
+    initial_code: str,
+    initial_train_loglik: float,
+    initial_val_loglik: float,
+    train_trials: List[Dict[str, Any]],
+    val_trials: List[Dict[str, Any]],
+    test_trials: List[Dict[str, Any]],
+    n_iterations: int,
+    n_candidates_per_iteration: int,
+    sample_size: int,
+    sample_parents: bool,
+    elite_pool_size: Optional[int],
+    participant_id: int,
+    split_seed: int,
+    max_prompt_train_trials: int,
+    max_prompt_trials_per_problem: int,
+    llm_max_tokens: int,
+    max_workers: int,
+    n_eval_seeds: int,
+    fitness_metric: str = "loglik",
+    output_path: Optional[Path] = None,
+    save_artifacts: bool = True,
+) -> Optional[float]:
+    """
+    Refinement: train-only selection, val trials in prompt, test loglik returned as gated_test_loglik.
+    Starts from the final best evolved program.
+    """
+    if not val_trials or not test_trials or n_iterations < 1:
+        return None
+
+    refine_suffix = _load_choice13k_refinement_prompt_suffix()
+    val_for_prompt = _cap_and_subsample_prompt_trials(
+        val_trials,
+        max_trials=max_prompt_train_trials,
+        max_trials_per_problem=max_prompt_trials_per_problem,
+        subsample_seed=int(split_seed) + 9_001_001,
+        label="validation",
+    )
+
+    print(f"\n{'='*80}")
+    print(
+        f"Refinement phase ({n_iterations} iter(s), val trials in prompt: {len(val_for_prompt)})"
+    )
+    print(f"{'='*80}")
+
+    elite_parents: List[Tuple[Any, ...]] = [
+        (
+            initial_code,
+            float(initial_train_loglik),
+            None,
+            "refinement_seed",
+            None,
+            None,
+            None,
+        )
+    ]
+    elite_val_logliks: List[Optional[float]] = [float(initial_val_loglik)]
+
+    refinement_dir: Optional[Path] = None
+    if save_artifacts and output_path is not None:
+        refinement_dir = output_path / "refinement"
+        refinement_dir.mkdir(parents=True, exist_ok=True)
+        (refinement_dir / "seed_program.py").write_text(initial_code or "")
+
+    for iteration in range(n_iterations):
+        iteration_step = iteration + 1
+        print(f"\n{'='*80}")
+        print(f"Refinement iteration {iteration_step}/{n_iterations}")
+        print(f"{'='*80}")
+
+        iter_dir: Optional[Path] = None
+        if refinement_dir is not None:
+            iter_dir = refinement_dir / f"iteration_{iteration_step}"
+            iter_dir.mkdir(parents=True, exist_ok=True)
+            (iter_dir / "candidates").mkdir(exist_ok=True)
+
+        num_parents_to_use = min(sample_size, len(elite_parents))
+        if sample_parents and len(elite_parents) > 0:
+            pid_key = int(participant_id) if participant_id is not None else 0
+            rng = np.random.default_rng(
+                int(split_seed) + 9_000_000 + int(iteration_step) * 1_000_003 + pid_key * 17_179
+            )
+            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
+            selected_parents = [elite_parents[int(j)] for j in idxs]
+            selected_val_lls = [elite_val_logliks[int(j)] for j in idxs]
+            print(
+                f"\nUsing {num_parents_to_use} sampled refinement parent(s) "
+                f"(elite pool size={len(elite_parents)}):"
+            )
+        else:
+            selected_parents = elite_parents[:num_parents_to_use]
+            selected_val_lls = elite_val_logliks[:num_parents_to_use]
+            print(f"\nUsing top {num_parents_to_use} refinement parent(s):")
+
+        for i, parent_tuple in enumerate(selected_parents):
+            prog_id = parent_tuple[3]
+            train_ll = parent_tuple[1]
+            val_ll = selected_val_lls[i]
+            val_str = f"{val_ll:.4f}" if val_ll is not None else "N/A"
+            print(f"  Parent {i+1}: {prog_id} (train_loglik={train_ll:.4f}, val_loglik={val_str})")
+
+        parent_codes = [p[0] for p in selected_parents]
+        parent_train_lls = [float(p[1]) for p in selected_parents]
+
+        candidate_codes = generate_program_variants(
+            client=client,
+            model_name=model_name,
+            parent_programs=parent_codes,
+            train_trials=train_trials,
+            n_variants=n_candidates_per_iteration,
+            max_tokens=llm_max_tokens,
+            dataset="choice13k",
+            parent_train_accuracies=parent_train_lls,
+            parent_val_logliks=selected_val_lls,
+            max_prompt_train_trials=max_prompt_train_trials,
+            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+            prompt_train_trials_seed=split_seed,
+            fitness_metric=fitness_metric,
+            max_workers=max_workers,
+            prompt_suffix=refine_suffix,
+            extra_prompt_trials=val_for_prompt,
+            extra_prompt_trials_label="Validation observations",
+        )
+
+        candidate_results: List[Dict[str, Any]] = []
+        for idx, code in enumerate(candidate_codes):
+            if iter_dir is not None:
+                (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "")
+            code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
+            if not code:
+                candidate_results.append(
+                    {
+                        "idx": idx,
+                        "code": "",
+                        "fitness": float("-inf"),
+                        "train_loglik": float("-inf"),
+                        "val_loglik": float("-inf"),
+                        "runtime_valid": False,
+                    }
+                )
+                continue
+            choose_fn = compile_program(code)
+            if choose_fn is None:
+                candidate_results.append(
+                    {
+                        "idx": idx,
+                        "code": code,
+                        "fitness": float("-inf"),
+                        "train_loglik": float("-inf"),
+                        "val_loglik": float("-inf"),
+                        "runtime_valid": False,
+                    }
+                )
+                continue
+            try:
+                train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+                val_eval = evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+            except (AssertionError, TypeError, ValueError):
+                candidate_results.append(
+                    {
+                        "idx": idx,
+                        "code": code,
+                        "fitness": float("-inf"),
+                        "train_loglik": float("-inf"),
+                        "val_loglik": float("-inf"),
+                        "runtime_valid": False,
+                    }
+                )
+                continue
+            runtime_valid = train_eval.get("errors", 0) == 0
+            train_loglik = float(train_eval["avg_loglik"])
+            val_loglik = float(val_eval["avg_loglik"])
+            fitness = train_loglik if runtime_valid else float("-inf")
+            candidate_results.append(
+                {
+                    "idx": idx,
+                    "code": code,
+                    "fitness": fitness,
+                    "train_loglik": train_loglik,
+                    "val_loglik": val_loglik,
+                    "runtime_valid": runtime_valid,
+                }
+            )
+
+        selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
+        if not selected_results:
+            print("Warning: No runtime-valid refinement candidates; keeping elite pool.")
+            continue
+
+        selected_results.sort(key=lambda x: x["fitness"], reverse=True)
+        best_result = selected_results[0]
+        print(
+            f"  Best refinement candidate {best_result['idx']}: "
+            f"train_loglik={best_result['train_loglik']:.4f}, "
+            f"val_loglik={best_result['val_loglik']:.4f}"
+        )
+
+        for result in selected_results:
+            program_id = f"refinement_{iteration_step}_candidate_{result['idx']}"
+            elite_parents.append(
+                (
+                    result["code"],
+                    result["fitness"],
+                    None,
+                    program_id,
+                    None,
+                    None,
+                    None,
+                )
+            )
+            elite_val_logliks.append(result.get("val_loglik"))
+
+        paired = list(zip(elite_parents, elite_val_logliks))
+        paired.sort(key=lambda x: x[0][1], reverse=True)
+        elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+        paired = paired[:elite_cap]
+        elite_parents = [p[0] for p in paired]
+        elite_val_logliks = [p[1] for p in paired]
+
+    best_code = elite_parents[0][0]
+    best_fn = compile_program(best_code)
+    if best_fn is None:
+        print("Warning: Refinement best program failed to compile; skipping gated_test_loglik.")
+        return None
+
+    if refinement_dir is not None:
+        (refinement_dir / BEST_PROGRAM_FILENAME).write_text(best_code or "")
+    if output_path is not None and save_artifacts:
+        (output_path / BEST_PROGRAM_FILENAME).write_text(best_code or "")
+
+    test_eval = evaluate_choice13k_program(best_fn, test_trials, n_seeds=n_eval_seeds)
+    refinement_test_loglik = float(test_eval["avg_loglik"])
+    print(f"Refinement final test avg log-likelihood (gated_test_loglik): {refinement_test_loglik:.6f}")
+    return refinement_test_loglik
+
+
+def _load_participant_details_loglik_csv(csv_path: Path) -> List[Dict[str, Any]]:
+    if not csv_path.exists():
+        raise FileNotFoundError(f"participant_details_loglik.csv not found: {csv_path}")
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return [dict(row) for row in reader]
+
+
+def _write_participant_details_loglik_csv(
+    csv_path: Path, rows: List[Dict[str, Any]], *, dataset: str = "choice13k"
+) -> None:
+    fieldnames = ["participant_id", "train_loglik"]
+    if dataset == "choice13k":
+        fieldnames.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
+    else:
+        fieldnames.append("test_loglik")
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(_round_floats_for_csv_rows(rows))
+
+
+def _choice13k_trials_for_participant(
+    participant_id: int,
+    *,
+    split_ratio: float,
+    split_seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    experiments = get_choice13k_experiments(n_participants=int(participant_id) + 1)
+    if participant_id >= len(experiments):
+        raise ValueError(
+            f"participant_id={participant_id} out of range (only {len(experiments)} experiments loaded)."
+        )
+    train_trials, val_trials, test_trials, _options = split_trials(
+        experiments[participant_id], split_ratio=split_ratio, split_seed=split_seed
+    )
+    return train_trials, val_trials, test_trials
+
+
+def run_choice13k_refine_participant_from_checkpoint(
+    *,
+    client: OpenAI,
+    model_name: str,
+    participant_id: int,
+    prev_exp_path: Path,
+    output_dir: Path,
+    prev_loglik_row: Optional[Dict[str, Any]],
+    split_ratio: float,
+    split_seed: int,
+    n_iterations: int,
+    n_candidates_per_iteration: int,
+    sample_size: int,
+    sample_parents: bool,
+    elite_pool_size: Optional[int],
+    max_prompt_train_trials: int,
+    max_prompt_trials_per_problem: int,
+    llm_max_tokens: int,
+    max_workers: int,
+    n_eval_seeds: int,
+    save_artifacts: bool = True,
+) -> Dict[str, Any]:
+    """
+    Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
+    """
+    prev_participant_dir = prev_exp_path / f"participant_{participant_id}"
+    program_path = prev_participant_dir / BEST_PROGRAM_FILENAME
+    if not program_path.exists():
+        raise FileNotFoundError(
+            f"Missing {BEST_PROGRAM_FILENAME} for participant {participant_id}: {program_path}"
+        )
+
+    initial_code = program_path.read_text(encoding="utf-8")
+    train_trials, val_trials, test_trials = _choice13k_trials_for_participant(
+        participant_id, split_ratio=split_ratio, split_seed=split_seed
+    )
+    choose_fn = compile_program(initial_code)
+    if choose_fn is None:
+        raise RuntimeError(f"Failed to compile checkpoint program: {program_path}")
+
+    train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
+    val_eval = evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+    train_loglik = float(train_eval["avg_loglik"])
+    val_loglik = float(val_eval["avg_loglik"])
+
+    if prev_loglik_row is not None:
+        if prev_loglik_row.get("train_loglik") not in (None, ""):
+            train_loglik = float(prev_loglik_row["train_loglik"])
+        if prev_loglik_row.get("val_loglik") not in (None, ""):
+            val_loglik = float(prev_loglik_row["val_loglik"])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if save_artifacts:
+        (output_dir / BEST_PROGRAM_FILENAME).write_text(initial_code)
+
+    print(
+        f"\nRefine-only participant {participant_id}: checkpoint={program_path} "
+        f"(train_loglik={train_loglik:.4f}, val_loglik={val_loglik:.4f})"
+    )
+
+    gated_test_loglik = run_choice13k_refinement_phase(
+        client=client,
+        model_name=model_name,
+        initial_code=initial_code,
+        initial_train_loglik=train_loglik,
+        initial_val_loglik=val_loglik,
+        train_trials=train_trials,
+        val_trials=val_trials,
+        test_trials=test_trials,
+        n_iterations=n_iterations,
+        n_candidates_per_iteration=n_candidates_per_iteration,
+        sample_size=sample_size,
+        sample_parents=sample_parents,
+        elite_pool_size=elite_pool_size,
+        participant_id=int(participant_id),
+        split_seed=int(split_seed),
+        max_prompt_train_trials=max_prompt_train_trials,
+        max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+        llm_max_tokens=llm_max_tokens,
+        max_workers=max_workers,
+        n_eval_seeds=n_eval_seeds,
+        fitness_metric="loglik",
+        output_path=output_dir,
+        save_artifacts=save_artifacts,
+    )
+
+    test_loglik = prev_loglik_row.get("test_loglik") if prev_loglik_row else None
+    if test_loglik not in (None, ""):
+        test_loglik = float(test_loglik)
+    else:
+        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+        test_loglik = float(test_eval["avg_loglik"])
+
+    return {
+        "participant_id": participant_id,
+        "train_loglik": train_loglik,
+        "val_loglik": val_loglik,
+        "test_loglik": test_loglik,
+        "gated_test_loglik": gated_test_loglik,
+    }
+
+
+def run_choice13k_refine_from_prev_experiment(
+    *,
+    client: OpenAI,
+    model_name: str,
+    participants: List[int],
+    prev_exp_path: Path,
+    output_dir: Path,
+    split_ratio: float,
+    split_seed: int,
+    n_iterations: int,
+    n_candidates_per_iteration: int,
+    sample_size: int,
+    sample_parents: bool,
+    elite_pool_size: Optional[int],
+    max_prompt_train_trials: int,
+    max_prompt_trials_per_problem: int,
+    llm_max_tokens: int,
+    max_workers: int,
+    n_eval_seeds: int,
+) -> None:
+    """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
+    prev_exp_path = prev_exp_path.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    prev_details_csv = prev_exp_path / "participant_details_loglik.csv"
+    loglik_rows = _load_participant_details_loglik_csv(prev_details_csv)
+    rows_by_pid: Dict[int, Dict[str, Any]] = {
+        int(row["participant_id"]): dict(row) for row in loglik_rows
+    }
+
+    out_details_csv = output_dir / "participant_details_loglik.csv"
+    shutil.copy2(prev_details_csv, out_details_csv)
+    print(f"Copied {prev_details_csv} -> {out_details_csv}")
+
+    for participant_id in participants:
+        prev_row = rows_by_pid.get(int(participant_id))
+        participant_output_dir = output_dir / f"participant_{participant_id}"
+        metrics = run_choice13k_refine_participant_from_checkpoint(
+            client=client,
+            model_name=model_name,
+            participant_id=int(participant_id),
+            prev_exp_path=prev_exp_path,
+            output_dir=participant_output_dir,
+            prev_loglik_row=prev_row,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            n_iterations=n_iterations,
+            n_candidates_per_iteration=n_candidates_per_iteration,
+            sample_size=sample_size,
+            sample_parents=sample_parents,
+            elite_pool_size=elite_pool_size,
+            max_prompt_train_trials=max_prompt_train_trials,
+            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+            llm_max_tokens=llm_max_tokens,
+            max_workers=max_workers,
+            n_eval_seeds=n_eval_seeds,
+            save_artifacts=True,
+        )
+        if prev_row is None:
+            prev_row = {"participant_id": participant_id}
+            rows_by_pid[int(participant_id)] = prev_row
+        prev_row.update(metrics)
+        if metrics.get("gated_test_loglik") is not None:
+            prev_row["gated_test_loglik"] = metrics["gated_test_loglik"]
+
+    all_pids = sorted(
+        {int(r["participant_id"]) for r in loglik_rows} | {int(p) for p in participants}
+    )
+    updated_rows = [rows_by_pid[pid] for pid in all_pids]
+
+    _write_participant_details_loglik_csv(out_details_csv, updated_rows, dataset="choice13k")
+
+    gated_vals = [
+        float(r["gated_test_loglik"])
+        for r in updated_rows
+        if r.get("gated_test_loglik") not in (None, "")
+    ]
+    summary_loglik_path = output_dir / "summary_loglik.csv"
+    val_vals = [
+        float(r["val_loglik"]) for r in updated_rows if r.get("val_loglik") not in (None, "")
+    ]
+    train_vals = [
+        float(r["train_loglik"]) for r in updated_rows if r.get("train_loglik") not in (None, "")
+    ]
+    test_vals = [
+        float(r["test_loglik"]) for r in updated_rows if r.get("test_loglik") not in (None, "")
+    ]
+    with summary_loglik_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "num_of_participants",
+                "avg_train_loglik",
+                "avg_test_loglik",
+                "avg_val_loglik",
+                "avg_gated_test_loglik",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            _round_floats_for_csv_row(
+                {
+                    "num_of_participants": len(updated_rows),
+                    "avg_train_loglik": float(np.mean(train_vals)) if train_vals else None,
+                    "avg_test_loglik": float(np.mean(test_vals)) if test_vals else None,
+                    "avg_val_loglik": float(np.mean(val_vals)) if val_vals else None,
+                    "avg_gated_test_loglik": float(np.mean(gated_vals)) if gated_vals else None,
+                }
+            )
+        )
+    print(f"Wrote updated participant loglik details -> {out_details_csv}")
 
 
 def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13k") -> str:
@@ -2266,6 +2799,7 @@ def generate_program_variants(
     max_tokens: int = 800,
     parent_train_accuracies: Optional[List[float]] = None,
     parent_train_mses: Optional[List[float]] = None,
+    parent_val_logliks: Optional[List[Optional[float]]] = None,
     dataset: str = "choice13k",
     max_prompt_train_trials: int = 1_000_000,
     max_prompt_trials_per_problem: int = 0,
@@ -2273,6 +2807,9 @@ def generate_program_variants(
     fitness_metric: str = "accuracy",
     cpc18_official_mse: bool = True,
     max_workers: int = 5,
+    prompt_suffix: Optional[str] = None,
+    extra_prompt_trials: Optional[List[Dict[str, Any]]] = None,
+    extra_prompt_trials_label: str = "Validation observations",
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -2415,19 +2952,13 @@ def choose(problem, history):
 """
     
     # Format training trials for context (evaluation elsewhere still uses full train_trials).
-    trials_for_prompt = list(train_trials)
-    trials_for_prompt = _cap_prompt_trials_per_problem(
-        trials_for_prompt, max_prompt_trials_per_problem
+    trials_for_prompt = _cap_and_subsample_prompt_trials(
+        train_trials,
+        max_trials=max_prompt_train_trials,
+        max_trials_per_problem=max_prompt_trials_per_problem,
+        subsample_seed=prompt_train_trials_seed,
+        label="train",
     )
-    if max_prompt_train_trials > 0 and len(trials_for_prompt) > max_prompt_train_trials:
-        rng = np.random.default_rng(prompt_train_trials_seed)
-        perm = rng.permutation(len(trials_for_prompt))
-        sel = perm[:max_prompt_train_trials]
-        trials_for_prompt = [trials_for_prompt[i] for i in sel]
-        print(
-            f"[LLM prompt] Using {len(trials_for_prompt)} of {len(train_trials)} train trials "
-            f"(max_prompt_train_trials={max_prompt_train_trials}, seed={prompt_train_trials_seed})."
-        )
     # Note: dataset parameter not available here, but this function is only called for Choice13k/CPC18
     # We'll detect format from trial structure
     if trials_for_prompt and "problem" in trials_for_prompt[0]:
@@ -2438,11 +2969,43 @@ def choose(problem, history):
     else:
         dataset_type = "choice13k"
     state_text = format_trials_to_text(trials_for_prompt, dataset=dataset_type)
-    
+
+    extra_state_text = ""
+    if extra_prompt_trials:
+        extra_for_prompt = _cap_and_subsample_prompt_trials(
+            extra_prompt_trials,
+            max_trials=max_prompt_train_trials,
+            max_trials_per_problem=max_prompt_trials_per_problem,
+            subsample_seed=int(prompt_train_trials_seed) + 424_242,
+            label="validation",
+        )
+        extra_state_text = (
+            f"\n\n{extra_prompt_trials_label}:\n"
+            f"{format_trials_to_text(extra_for_prompt, dataset=dataset_type)}\n"
+        )
+
+    if prompt_suffix:
+        base_prompt = f"{base_prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
+
     # Include parent programs as reference
     num_parents = len(parent_programs)
     if num_parents == 1:
         parent_context = f"\n\nReference program (parent):\n```python\n{parent_programs[0]}\n```\n\n"
+        if (
+            parent_train_accuracies
+            and len(parent_train_accuracies) > 0
+            and parent_train_accuracies[0] is not None
+            and fitness_metric == "loglik"
+            and dataset in {"choice13k", "mixed_gambles"}
+        ):
+            train_ll = parent_train_accuracies[0]
+            if parent_val_logliks and len(parent_val_logliks) > 0 and parent_val_logliks[0] is not None:
+                parent_context += (
+                    f"Parent performance: train_loglik={train_ll:.4f}, "
+                    f"val_loglik={parent_val_logliks[0]:.4f}\n\n"
+                )
+            else:
+                parent_context += f"Parent performance: train_loglik={train_ll:.4f}\n\n"
         parent_context += "Generate a variant that improves upon or explores alternatives to the parent program.\n"
     else:
         parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
@@ -2458,12 +3021,24 @@ def choose(problem, history):
                     else None
                 )
                 if parent_metric is not None:
-                    metric_label = (
-                        "train_loglik"
-                        if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}
-                        else "train_acc"
-                    )
-                    metric_str = f" ({metric_label}: {parent_metric:.4f})"
+                    if (
+                        fitness_metric == "loglik"
+                        and dataset in {"choice13k", "mixed_gambles"}
+                        and parent_val_logliks
+                        and i < len(parent_val_logliks)
+                        and parent_val_logliks[i] is not None
+                    ):
+                        metric_str = (
+                            f" (train_loglik: {parent_metric:.4f}, "
+                            f"val_loglik: {parent_val_logliks[i]:.4f})"
+                        )
+                    else:
+                        metric_label = (
+                            "train_loglik"
+                            if fitness_metric == "loglik" and dataset in {"choice13k", "mixed_gambles"}
+                            else "train_acc"
+                        )
+                        metric_str = f" ({metric_label}: {parent_metric:.4f})"
                 else:
                     metric_str = ""
                 parent_context += f"\nParent {i+1}{metric_str}:\n```python\n{parent_program}\n```\n"
@@ -2487,7 +3062,7 @@ def choose(problem, history):
         
         parent_context += "\nGenerate a variant that combines the best ideas from these parent programs.\n"
     
-    prompt_text = f"{base_prompt}\n{state_text}\n{parent_context}\n{code_template}"
+    prompt_text = f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}\n{code_template}"
 
     def _generate_one() -> str:
         try:
@@ -2544,7 +3119,11 @@ def run_evolution(
     max_prompt_trials_per_problem: int = 0,
     llm_max_tokens: int = 800,
     cpc18_official_mse: bool = False,
-    gate_phase: bool = True,
+    gate_phase: bool = False,
+    run_phase: str = "all",
+    refinement_phase: bool = True,
+    refinement_iters: int = 5,
+    refinement_val_threshold: float = -1.0,
     max_workers: int = 5,
 ):
     """
@@ -3009,6 +3588,11 @@ def run_evolution(
             )]
     
     runtime_valid_evolved_found = False
+
+    if run_phase not in _RUN_PHASES:
+        raise ValueError(f"run_phase must be one of {sorted(_RUN_PHASES)}, got {run_phase!r}")
+    if run_phase == "refine":
+        raise ValueError("run_phase='refine' must use run_choice13k_refine_from_prev_experiment(), not run_evolution().")
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
@@ -4097,16 +4681,13 @@ def run_evolution(
     if match is not None:
         best_iteration = int(match.group(1))
         best_candidate_idx = int(match.group(2))
-        best_program_filename = f"best_program_fr_iter{best_iteration}_cand{best_candidate_idx}.py"
     elif final_best_program_id == "baseline":
         best_iteration = -1
         best_candidate_idx = -1
-        best_program_filename = "best_program_fr_baseline.py"
     else:
         best_iteration = None
         best_candidate_idx = None
-        safe_program_id = re.sub(r"[^A-Za-z0-9_.-]", "_", final_best_program_id)
-        best_program_filename = f"best_program_fr_{safe_program_id}.py"
+    best_program_filename = BEST_PROGRAM_FILENAME
 
     if save_artifacts:
         (output_path / best_program_filename).write_text(final_best_code or "")
@@ -4189,8 +4770,55 @@ def run_evolution(
         overall_best_test = dict(overall_best_train)
 
     gated_test_loglik: Optional[float] = None
+    refinement_ran = False
+    final_val_loglik = overall_best_train.get("val_loglik")
+    if (
+        run_phase == "all"
+        and refinement_phase
+        and dataset == "choice13k"
+        and fitness_metric == "loglik"
+        and val_trials
+        and test_trials
+        and final_val_loglik is not None
+        and float(final_val_loglik) < float(refinement_val_threshold)
+    ):
+        print(
+            f"\nRefinement triggered: val_loglik={float(final_val_loglik):.6f} "
+            f"< threshold={float(refinement_val_threshold):.6f}"
+        )
+        gated_test_loglik = run_choice13k_refinement_phase(
+            client=client,
+            model_name=model_name,
+            initial_code=final_best_code,
+            initial_train_loglik=float(overall_best_train["train_loglik"]),
+            initial_val_loglik=float(final_val_loglik),
+            train_trials=train_trials,
+            val_trials=val_trials,
+            test_trials=test_trials,
+            n_iterations=refinement_iters,
+            n_candidates_per_iteration=n_candidates_per_iteration,
+            sample_size=sample_size,
+            sample_parents=sample_parents,
+            elite_pool_size=elite_pool_size,
+            participant_id=int(participant_id),
+            split_seed=int(split_seed),
+            max_prompt_train_trials=max_prompt_train_trials,
+            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+            llm_max_tokens=llm_max_tokens,
+            max_workers=max_workers,
+            n_eval_seeds=n_eval_seeds,
+            fitness_metric=fitness_metric,
+            output_path=output_path if save_artifacts else None,
+            save_artifacts=save_artifacts,
+        )
+        refinement_ran = gated_test_loglik is not None
+        if gated_test_loglik is not None:
+            overall_best_train["gated_test_loglik"] = gated_test_loglik
+            overall_best_test["gated_test_loglik"] = gated_test_loglik
+
     if (
         gate_phase
+        and not refinement_ran
         and dataset == "choice13k"
         and val_trials
         and test_trials
@@ -4949,10 +5577,52 @@ def main():
     parser.add_argument(
         "--gate_phase",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "After evolution on choice13k (with val split): apply external val_loglik consistency "
-            "gate during test evaluation and report gated_test_loglik (default: True)."
+            "gate during test evaluation and report gated_test_loglik (default: False)."
+        ),
+    )
+    parser.add_argument(
+        "--refinement_phase",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After evolution on choice13k: if val_loglik < --refinement_val_threshold, run a "
+            "train-only refinement loop with validation trials in the prompt; report test loglik "
+            "as gated_test_loglik (default: True)."
+        ),
+    )
+    parser.add_argument(
+        "--refinement_iters",
+        type=int,
+        default=5,
+        help="Number of refinement iterations when --refinement_phase is enabled (default: 5).",
+    )
+    parser.add_argument(
+        "--refinement_val_threshold",
+        type=float,
+        default=-1.0,
+        help=(
+            "Run refinement only when final best val_loglik is below this value (default: -1.0)."
+        ),
+    )
+    parser.add_argument(
+        "--phase",
+        choices=sorted(_RUN_PHASES),
+        default="all",
+        help=(
+            "Pipeline stage: all=evolution then optional refinement; evolution=evolution only; "
+            "refine=refinement-only from --prev_exp_path (default: all)."
+        ),
+    )
+    parser.add_argument(
+        "--prev_exp_path",
+        type=str,
+        default=None,
+        help=(
+            "Prior run directory for --phase refine (e.g. generated_outputs/choice13k/non_strict/"
+            "run_260517_091545). Each participant_* folder must contain best_program.py."
         ),
     )
 
@@ -4983,6 +5653,27 @@ def main():
     if args.max_workers < 1:
         print("Error: --max_workers must be >= 1.")
         return
+    if args.refinement_iters < 1:
+        print("Error: --refinement_iters must be >= 1.")
+        return
+    if args.phase not in _RUN_PHASES:
+        print(f"Error: --phase must be one of {sorted(_RUN_PHASES)}, got {args.phase!r}.")
+        return
+    if args.phase == "refine":
+        if args.dataset != "choice13k":
+            print("Error: --phase refine only supports --dataset choice13k.")
+            return
+        if args.fitness_metric != "loglik":
+            print("Error: --phase refine requires --fitness_metric loglik.")
+            return
+        if not args.prev_exp_path:
+            print("Error: --phase refine requires --prev_exp_path.")
+            return
+        if not Path(args.prev_exp_path).exists():
+            print(f"Error: --prev_exp_path does not exist: {args.prev_exp_path}")
+            return
+    if args.phase == "evolution" and args.refinement_phase:
+        print("Note: --refinement_phase is ignored when --phase evolution.")
     if args.elite_pool_size is not None and args.elite_pool_size < 1:
         print("Error: --elite_pool_size must be >= 1 when set.")
         return
@@ -5175,6 +5866,45 @@ def main():
         if args.participant_scope != "all":
             print(f"Seed program saved to: {Path(base_run_dir) / 'seed_program.py'}")
 
+    evolution_run_phase = "evolution" if args.phase == "evolution" else "all"
+
+    if args.phase == "refine":
+        if args.dataset not in _PARTICIPANT_DATASETS:
+            print("Error: --phase refine requires a participant dataset (choice13k).")
+            if wandb is not None:
+                wandb.finish()
+            return
+        if args.split_mode == "across_participants":
+            print("Error: --phase refine does not support --split_mode across_participants.")
+            if wandb is not None:
+                wandb.finish()
+            return
+        refine_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        try:
+            run_choice13k_refine_from_prev_experiment(
+                client=refine_client,
+                model_name=args.model_name,
+                participants=[int(p) for p in participants_to_process],
+                prev_exp_path=Path(args.prev_exp_path),
+                output_dir=Path(base_run_dir),
+                split_ratio=args.split_ratio,
+                split_seed=args.split_seed,
+                n_iterations=args.refinement_iters,
+                n_candidates_per_iteration=args.n_candidates,
+                sample_size=args.sample_size,
+                sample_parents=args.sample_parents,
+                elite_pool_size=args.elite_pool_size,
+                max_prompt_train_trials=args.max_prompt_train_trials,
+                max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+                llm_max_tokens=args.llm_max_tokens,
+                max_workers=args.max_workers,
+                n_eval_seeds=args.n_eval_seeds,
+            )
+        finally:
+            if wandb is not None:
+                wandb.finish()
+        return
+
     if args.dataset == "choice13k" and args.split_mode == "across_participants":
         selected_participants = list(participants_to_process)
         if len(selected_participants) < 2:
@@ -5239,6 +5969,10 @@ def main():
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
                 gate_phase=args.gate_phase,
+                run_phase=evolution_run_phase,
+                refinement_phase=args.refinement_phase,
+                refinement_iters=args.refinement_iters,
+                refinement_val_threshold=args.refinement_val_threshold,
                 max_workers=args.max_workers,
             )
         finally:
@@ -5293,6 +6027,10 @@ def main():
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
                     gate_phase=args.gate_phase,
+                    run_phase=evolution_run_phase,
+                    refinement_phase=args.refinement_phase,
+                    refinement_iters=args.refinement_iters,
+                    refinement_val_threshold=args.refinement_val_threshold,
                     max_workers=args.max_workers,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
@@ -5634,6 +6372,10 @@ def main():
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         gate_phase=args.gate_phase,
+                        run_phase=evolution_run_phase,
+                        refinement_phase=args.refinement_phase,
+                        refinement_iters=args.refinement_iters,
+                        refinement_val_threshold=args.refinement_val_threshold,
                         max_workers=args.max_workers,
                     )
                 
@@ -5759,6 +6501,10 @@ def main():
                         llm_max_tokens=args.llm_max_tokens,
                         cpc18_official_mse=args.cpc18_official_mse,
                         gate_phase=args.gate_phase,
+                        run_phase=evolution_run_phase,
+                        refinement_phase=args.refinement_phase,
+                        refinement_iters=args.refinement_iters,
+                        refinement_val_threshold=args.refinement_val_threshold,
                         max_workers=args.max_workers,
                     )
                 
