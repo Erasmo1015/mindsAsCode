@@ -167,7 +167,7 @@ def main() -> None:
         / "generated_outputs"
         / "choice13k"
         / "centaur"
-        / "run_260416_000815"
+        / "run_260517_013408"
         / "participant_details_loglik.csv"
     )
     default_out = repo / "analysis" / "data" / "utils" / "loglik_compare.csv"

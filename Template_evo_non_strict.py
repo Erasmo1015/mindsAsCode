@@ -27,7 +27,6 @@ Train, val, and test use disjoint gamble pairs; per-trial history is within-bloc
 still pools all trials per participant via experiment_to_trials (full cross-block history; no val split).
 """
 
-import ast
 import math
 import os
 import re
@@ -37,6 +36,7 @@ import shlex
 import socket
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from datetime import datetime
 import numpy as np
@@ -63,6 +63,31 @@ def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> in
     if elite_pool_size is None:
         return max(sample_size * 2, 20)
     return max(1, int(elite_pool_size))
+
+
+def _parallel_generate_children(
+    n_children: int,
+    generate_one: Callable[[], str],
+    *,
+    max_workers: int = 5,
+    desc: str = "Generating candidate programs",
+) -> List[str]:
+    """Run independent LLM child generations in parallel; preserve child index order."""
+    if n_children <= 0:
+        return []
+    workers = max(1, min(int(max_workers), n_children))
+    if workers == 1:
+        return [generate_one() for _ in tqdm(range(n_children), desc=desc)]
+
+    results: List[Optional[str]] = [None] * n_children
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_idx = {pool.submit(generate_one): i for i in range(n_children)}
+        with tqdm(total=n_children, desc=f"{desc} (workers={workers})") as pbar:
+            for fut in as_completed(future_to_idx):
+                idx = future_to_idx[fut]
+                results[idx] = fut.result()
+                pbar.update(1)
+    return [r if r is not None else "" for r in results]
 
 
 def load_valid_participant_ids_from_json(
@@ -322,89 +347,68 @@ def compile_program(code_str: str) -> Optional[Callable]:
     return None
 
 
-_GATE_VAL_CONST = "val_loglik"
-_GATE_THRESHOLD = -0.45
+_CHOICE13K_GATE_THRESHOLD = -0.45
+_CHOICE13K_LOGLIK_CLAMP_EPS = 1e-9
 
 
-def _choose_top_level_return_lines(source: str) -> List[int]:
-    """Line numbers of return statements in choose() (excluding nested defs)."""
-    tree = ast.parse(source)
-    choose_fn = next(
-        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "choose"),
-        None,
-    )
-    if choose_fn is None:
-        raise ValueError("No choose(problem, history) function found.")
-
-    def walk(stmts: List[ast.stmt]) -> List[int]:
-        out: List[int] = []
-        for stmt in stmts:
-            if isinstance(stmt, ast.FunctionDef):
-                continue
-            if isinstance(stmt, ast.Return) and stmt.lineno is not None:
-                out.append(int(stmt.lineno))
-            elif isinstance(stmt, ast.If):
-                out.extend(walk(stmt.body))
-                out.extend(walk(stmt.orelse))
-            elif isinstance(stmt, (ast.For, ast.While, ast.With)):
-                out.extend(walk(stmt.body))
-                out.extend(walk(getattr(stmt, "orelse", [])))
-        return out
-
-    return walk(choose_fn.body)
+def _parse_choice13k_choose_output(p_raw: Any) -> float:
+    """Coerce choose() return value to a float probability in [0, 1] (before clamping)."""
+    if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
+        return 1.0 if int(p_raw) == 1 else 0.0
+    if isinstance(p_raw, float):
+        p_use = p_raw
+    else:
+        raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
+    if not (0.0 <= p_use <= 1.0):
+        raise ValueError(f"invalid probability: {p_use!r}")
+    return p_use
 
 
-def inject_consistency_gate(source: str, val_loglik: float) -> str:
-    """Inject val_loglik consistency gate before each top-level return in choose()."""
-    return_lines = set(_choose_top_level_return_lines(source))
-    if not return_lines:
-        raise ValueError("No return statement found in choose().")
+def _clamp_choice13k_probability(p: float) -> float:
+    return min(max(p, _CHOICE13K_LOGLIK_CLAMP_EPS), 1.0 - _CHOICE13K_LOGLIK_CLAMP_EPS)
 
-    header = f"{_GATE_VAL_CONST} = {float(val_loglik)!r}\n\n"
-    out_lines: List[str] = []
-    for i, line in enumerate(source.splitlines(), start=1):
-        if i not in return_lines:
-            out_lines.append(line)
-            continue
-        stripped = line.strip()
-        if not stripped.startswith("return "):
-            out_lines.append(line)
-            continue
-        indent = line[: len(line) - len(line.lstrip())]
-        expr = stripped[len("return ") :]
-        out_lines.append(f"{indent}p = {expr}")
-        out_lines.append(f"{indent}if {_GATE_VAL_CONST} < {_GATE_THRESHOLD}:")
-        out_lines.append(f"{indent}    consistency = max(0.0, 1.0 - ({_GATE_THRESHOLD} - {_GATE_VAL_CONST}))")
-        out_lines.append(f"{indent}else:")
-        out_lines.append(f"{indent}    consistency = 1.0")
-        out_lines.append(f"{indent}p = consistency * p + (1.0 - consistency) * 0.5")
-        out_lines.append(f"{indent}return p")
 
-    body = "\n".join(out_lines).rstrip() + "\n"
-    if body.lstrip().startswith(f"{_GATE_VAL_CONST} ="):
-        return body
-    return header + body
+def apply_consistency_gate_to_probability(
+    raw_p: float,
+    val_loglik: float,
+    *,
+    threshold: float = _CHOICE13K_GATE_THRESHOLD,
+) -> float:
+    """Blend clamped raw_p toward 0.5 using validation log-likelihood consistency."""
+    clamped = _clamp_choice13k_probability(raw_p)
+    if val_loglik < threshold:
+        consistency = max(0.0, 1.0 - (threshold - val_loglik))
+    else:
+        consistency = 1.0
+    return consistency * clamped + (1.0 - consistency) * 0.5
+
+
+def wrap_choose_with_consistency_gate(
+    choose_fn: Callable,
+    val_loglik: float,
+) -> Callable:
+    """Return choose(problem, history) that applies the external consistency gate."""
+
+    def gated_choose(problem: Any, history: Any) -> float:
+        p_raw = choose_fn(problem, history)
+        raw_p = _parse_choice13k_choose_output(p_raw)
+        return apply_consistency_gate_to_probability(raw_p, val_loglik)
+
+    return gated_choose
 
 
 def run_choice13k_gate_phase(
-    program_code: str,
+    choose_fn: Callable,
     val_loglik: float,
     test_trials: List[Dict[str, Any]],
     *,
     n_eval_seeds: int = 1,
-    save_gated_path: Optional[Path] = None,
 ) -> Optional[float]:
-    """Apply consistency gate to best program; return gated test avg log-likelihood."""
+    """Evaluate test log-likelihood with external consistency gate (source unchanged)."""
     if not test_trials:
         return None
     try:
-        gated_code = inject_consistency_gate(program_code, val_loglik)
-        if save_gated_path is not None:
-            save_gated_path.write_text(gated_code, encoding="utf-8")
-        gated_fn = compile_program(gated_code)
-        if gated_fn is None:
-            print("Warning: gate phase failed to compile gated program.")
-            return None
+        gated_fn = wrap_choose_with_consistency_gate(choose_fn, float(val_loglik))
         gated_eval = evaluate_choice13k_program(gated_fn, test_trials, n_seeds=n_eval_seeds)
         return float(gated_eval["avg_loglik"])
     except Exception as e:
@@ -745,26 +749,19 @@ def evaluate_choice13k_program(
             y = int(t["action"])
             try:
                 p_raw = choose_fn(t["problem"], t["history"])
+                p_use = _parse_choice13k_choose_output(p_raw)
             except Exception as e:
                 errors += 1
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error: {e}")
                 p = 0.5
-                p_clamped = min(max(p, 1e-9), 1.0 - 1e-9)
+                p_clamped = _clamp_choice13k_probability(p)
                 loglik_acc += y * np.log(p_clamped) + (1 - y) * np.log(1.0 - p_clamped)
                 pred = 1 if p >= 0.5 else 0
                 correct += int(pred == y)
                 continue
 
-            if isinstance(p_raw, bool) or (isinstance(p_raw, (int, np.integer)) and int(p_raw) in (0, 1)):
-                p_use = 1.0 if int(p_raw) == 1 else 0.0
-            elif isinstance(p_raw, float):
-                p_use = p_raw
-            else:
-                raise TypeError(f"choose must return float or 0/1, got {type(p_raw)}")
-            if not (0.0 <= p_use <= 1.0):
-                raise ValueError(f"invalid probability: {p_use!r}")
-            p = min(max(p_use, 1e-9), 1.0 - 1e-9)
+            p = _clamp_choice13k_probability(p_use)
             loglik_acc += y * np.log(p) + (1 - y) * np.log(1.0 - p)
             if isinstance(p_raw, float):
                 pred = 1 if p_raw >= 0.5 else 0
@@ -1784,6 +1781,7 @@ def generate_gridworld_initial_candidates(
     prefix_text: str,
     n_candidates: int,
     max_tokens: int = 2000,
+    max_workers: int = 5,
 ) -> List[str]:
     """Generate K initial candidate programs for one episode. Prompt injects episode prefix (ROTE-style).
     Used at episode start; no parent code, only environment description + prefix observations + template.
@@ -1805,8 +1803,8 @@ Observed trajectory (first 20 steps) for this episode:
 {code_template}
 
 Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Generate the variant now:"""
-    candidates = []
-    for _ in range(n_candidates):
+
+    def _generate_one() -> str:
         try:
             response = client.chat.completions.create(
                 model=model_name,
@@ -1819,13 +1817,18 @@ Output ONLY runnable Python code (no explanations, no markdown fences, no preamb
             code = _sanitize_llm_python_candidate(
                 content, required_markers=("class FSMAgent", "def act(")
             )
-            if code and ('class FSMAgent' in code or 'def act' in code):
-                candidates.append(code)
-            else:
-                candidates.append(template_code)
-        except Exception:
-            candidates.append(template_code)
-    return candidates
+            if code and ("class FSMAgent" in code or "def act" in code):
+                return code
+        except Exception as e:
+            print(f"Warning: Failed to generate gridworld initial candidate: {e}")
+        return template_code
+
+    return _parallel_generate_children(
+        n_candidates,
+        _generate_one,
+        max_workers=max_workers,
+        desc="Generating gridworld initial candidates",
+    )
 
 
 def generate_gridworld_evolution_variants(
@@ -1838,6 +1841,7 @@ def generate_gridworld_evolution_variants(
     prefix_text: str,
     n_variants: int = 10,
     max_tokens: int = 2000,
+    max_workers: int = 5,
 ) -> List[str]:
     """Generate evolution variants. Prompt MUST include: serialized prefix trajectory, parent code, prefix accuracy (X/20), optional mismatch summary.
     test_acc is NEVER included.
@@ -1865,8 +1869,9 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
     full_prompt = f"""Improve the following agent program. Use only prefix (first 20 steps) performance; do not use any future-step metrics.
 
 {obs_section}{parent_section}{mismatch_section}Generate an improved program variant. Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Actions: 0=stay, 1=right, 2=left, 3=down, 4=up, 5=interact. Generate now:"""
-    variants = []
-    for _ in range(n_variants):
+    fallback = parent_codes[0] if parent_codes else ""
+
+    def _generate_one() -> str:
         try:
             response = client.chat.completions.create(
                 model=model_name,
@@ -1879,13 +1884,18 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
             code = _sanitize_llm_python_candidate(
                 content, required_markers=("class FSMAgent", "def act(")
             )
-            if code and ('class FSMAgent' in code or 'def act' in code):
-                variants.append(code)
-            else:
-                variants.append(parent_codes[0])
-        except Exception:
-            variants.append(parent_codes[0])
-    return variants
+            if code and ("class FSMAgent" in code or "def act" in code):
+                return code
+        except Exception as e:
+            print(f"Warning: Failed to generate gridworld evolution variant: {e}")
+        return fallback
+
+    return _parallel_generate_children(
+        n_variants,
+        _generate_one,
+        max_workers=max_workers,
+        desc="Generating gridworld evolution variants",
+    )
 
 
 def _make_gridworld_dataloader_args(data_path: str, num_blocks: int, num_walls: int, num_steps: int = 100):
@@ -1963,6 +1973,7 @@ def run_evolution_gridworld_rote_episodes(
     client: OpenAI,
     output_dir: str,
     wandb: Optional[Any] = None,
+    max_workers: int = 5,
 ) -> Tuple[List[Dict[str, Any]], float]:
     """
     ROTE-aligned Gridworld: episode loop. For each episode:
@@ -1991,7 +2002,7 @@ def run_evolution_gridworld_rote_episodes(
 
         # Generate K initial candidates conditioned on this episode's prefix (inside episode loop; not global)
         initial_candidates = generate_gridworld_initial_candidates(
-            client, model_name, seed_code, prefix_text, n_candidates=K,
+            client, model_name, seed_code, prefix_text, n_candidates=K, max_workers=max_workers,
         )
         final_programs = []
         # Ensemble weights use raw prefix correct counts only (integers 0..19). Do NOT use train_acc or any normalized metric.
@@ -2030,6 +2041,7 @@ def run_evolution_gridworld_rote_episodes(
                     prefix_mismatch_summary=parent_mismatch,
                     prefix_text=prefix_text,
                     n_variants=n_candidates_per_iteration,
+                    max_workers=max_workers,
                 )
                 best_acc = parent_train_acc
                 best_code = current_code
@@ -2132,6 +2144,7 @@ def generate_gridworld_program_variants(
     n_variants: int = 10,
     max_tokens: int = 2000,
     parent_train_accuracies: Optional[List[float]] = None,
+    max_workers: int = 5,
 ) -> List[str]:
     """
     Generate full program code variants for gridworld (non-strict mode).
@@ -2215,34 +2228,33 @@ The variant must be a complete, runnable program.
 
 Generate the variant now:"""
 
-    # Generate variants one at a time to avoid huge prompts (especially with multiple parents)
-    variants = []
     best_parent = parent_codes[0] if parent_codes else ""
-    
-    for _ in tqdm(range(n_variants), desc="Generating gridworld variants"):
+
+    def _generate_one() -> str:
         try:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": base_prompt_template_final}],
                 temperature=0.7,
                 top_p=0.95,
-                max_tokens=max_tokens,  # Per variant - keep original max_tokens
+                max_tokens=max_tokens,
             )
             content = response.choices[0].message.content
-            
             code = _sanitize_llm_python_candidate(
                 content, required_markers=("class FSMAgent", "def act(")
             )
-            if code and ('class FSMAgent' in code or 'def act' in code):
-                variants.append(code)
-            else:
-                variants.append(best_parent)
+            if code and ("class FSMAgent" in code or "def act" in code):
+                return code
         except Exception as e:
-            print(f"Warning: Failed to generate program variant: {e}")
-            # Fallback: use best parent code
-            variants.append(best_parent)
-    
-    return variants[:n_variants]
+            print(f"Warning: Failed to generate gridworld program variant: {e}")
+        return best_parent
+
+    return _parallel_generate_children(
+        n_variants,
+        _generate_one,
+        max_workers=max_workers,
+        desc="Generating gridworld variants",
+    )[:n_variants]
 
 
 def generate_program_variants(
@@ -2260,6 +2272,7 @@ def generate_program_variants(
     prompt_train_trials_seed: int = 0,
     fitness_metric: str = "accuracy",
     cpc18_official_mse: bool = True,
+    max_workers: int = 5,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -2475,9 +2488,8 @@ def choose(problem, history):
         parent_context += "\nGenerate a variant that combines the best ideas from these parent programs.\n"
     
     prompt_text = f"{base_prompt}\n{state_text}\n{parent_context}\n{code_template}"
-    
-    programs = []
-    for _ in tqdm(range(n_variants), desc="Generating candidate programs"):
+
+    def _generate_one() -> str:
         try:
             resp = client.chat.completions.create(
                 model=model_name,
@@ -2487,12 +2499,17 @@ def choose(problem, history):
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content
-            code = _sanitize_llm_python_candidate(content, required_markers=("def choose(",))
-            programs.append(code)
+            return _sanitize_llm_python_candidate(content, required_markers=("def choose(",))
         except Exception as e:
             print(f"Warning: Failed to generate program variant: {e}")
-            programs.append("")
-    return programs
+            return ""
+
+    return _parallel_generate_children(
+        n_variants,
+        _generate_one,
+        max_workers=max_workers,
+        desc="Generating candidate programs",
+    )
 
 
 def run_evolution(
@@ -2528,6 +2545,7 @@ def run_evolution(
     llm_max_tokens: int = 800,
     cpc18_official_mse: bool = False,
     gate_phase: bool = True,
+    max_workers: int = 5,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -3069,6 +3087,7 @@ def run_evolution(
                 parent_codes=parent_codes,
                 n_variants=n_candidates_per_iteration,
                 parent_train_accuracies=parent_train_accs,
+                max_workers=max_workers,
             )
         else:
             candidate_codes = generate_program_variants(
@@ -3086,6 +3105,7 @@ def run_evolution(
                 prompt_train_trials_seed=split_seed,
                 fitness_metric=fitness_metric,
                 cpc18_official_mse=is_cpc18_mse,
+                max_workers=max_workers,
             )
         
         # Evaluate candidates
@@ -4177,17 +4197,11 @@ def run_evolution(
     ):
         val_ll_for_gate = overall_best_train.get("val_loglik")
         if val_ll_for_gate is not None:
-            gated_save = (
-                output_path / "best_program_gated.py"
-                if save_artifacts
-                else None
-            )
             gated_test_loglik = run_choice13k_gate_phase(
-                final_best_code,
+                final_best_fn,
                 float(val_ll_for_gate),
                 test_trials,
                 n_eval_seeds=n_eval_seeds,
-                save_gated_path=gated_save,
             )
             if gated_test_loglik is not None:
                 overall_best_train["gated_test_loglik"] = gated_test_loglik
@@ -4432,6 +4446,7 @@ def run_evolution_gridworld_ensemble(
     n_eval_seeds: int = 3,
     sample_size: int = 3,
     top_k: int = 0,
+    max_workers: int = 5,
 ):
     """
     Run gridworld evolution with K independent ensemble members; test = ROTE-aligned weighted ensemble.
@@ -4519,6 +4534,7 @@ def run_evolution_gridworld_ensemble(
                 parent_codes=parent_codes,
                 n_variants=n_candidates_per_iteration,
                 parent_train_accuracies=parent_train_accs,
+                max_workers=max_workers,
             )
 
             candidate_results = []
@@ -4925,12 +4941,18 @@ def main():
         help="Max output tokens per candidate generation request (reduces context-overflow failures).",
     )
     parser.add_argument(
+        "--max_workers",
+        type=int,
+        default=5,
+        help="Parallel LLM requests when generating candidate children per iteration (default: 5).",
+    )
+    parser.add_argument(
         "--gate_phase",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "After evolution on choice13k (with val split): apply val_loglik consistency gate to the "
-            "best program and report gated_test_loglik on test (default: True)."
+            "After evolution on choice13k (with val split): apply external val_loglik consistency "
+            "gate during test evaluation and report gated_test_loglik (default: True)."
         ),
     )
 
@@ -4957,6 +4979,9 @@ def main():
         return
     if args.llm_max_tokens < 64:
         print("Error: --llm_max_tokens must be >= 64.")
+        return
+    if args.max_workers < 1:
+        print("Error: --max_workers must be >= 1.")
         return
     if args.elite_pool_size is not None and args.elite_pool_size < 1:
         print("Error: --elite_pool_size must be >= 1 when set.")
@@ -5214,6 +5239,7 @@ def main():
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
                 gate_phase=args.gate_phase,
+                max_workers=args.max_workers,
             )
         finally:
             if wandb is not None:
@@ -5267,6 +5293,7 @@ def main():
                     llm_max_tokens=args.llm_max_tokens,
                     cpc18_official_mse=args.cpc18_official_mse,
                     gate_phase=args.gate_phase,
+                    max_workers=args.max_workers,
                 )
                 runtime_sec = (datetime.now() - participant_start).total_seconds()
 
@@ -5278,16 +5305,18 @@ def main():
                     "seed_program_train_fitness": participant_summary.get("seed_program_train_fitness"),
                     "seed_program_test_fitness": participant_summary.get("seed_program_test_fitness"),
                 })
-                _plog = {
+                _plog: Dict[str, Any] = {
                     "participant_id": participant_id,
                     "train_loglik": participant_summary.get("train_loglik"),
-                    "test_loglik": participant_summary.get("test_loglik"),
                 }
                 if args.dataset == "choice13k":
                     if participant_summary.get("val_loglik") is not None:
                         _plog["val_loglik"] = participant_summary.get("val_loglik")
+                    _plog["test_loglik"] = participant_summary.get("test_loglik")
                     if participant_summary.get("gated_test_loglik") is not None:
                         _plog["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+                else:
+                    _plog["test_loglik"] = participant_summary.get("test_loglik")
                 participant_details_loglik.append(_plog)
 
                 with open(details_file, "w", newline="") as f:
@@ -5321,9 +5350,11 @@ def main():
                         )
                     )
 
-                _ll_fields = ["participant_id", "train_loglik", "test_loglik"]
+                _ll_fields = ["participant_id", "train_loglik"]
                 if args.dataset == "choice13k":
-                    _ll_fields.extend(["val_loglik", "gated_test_loglik"])
+                    _ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
+                else:
+                    _ll_fields.append("test_loglik")
                 with open(details_loglik_file, "w", newline="") as f:
                     writer = csv.DictWriter(f, fieldnames=_ll_fields)
                     writer.writeheader()
@@ -5431,6 +5462,7 @@ def main():
             client=client,
             output_dir=output_dir,
             wandb=wandb,
+            max_workers=args.max_workers,
         )
         if wandb is not None:
             wandb.log({"gridworld_mean_episode_test_acc": mean_test_acc})
@@ -5484,6 +5516,7 @@ def main():
                     n_eval_seeds=args.n_eval_seeds,
                     sample_size=args.sample_size,
                     top_k=getattr(args, 'top_k', 0),
+                    max_workers=args.max_workers,
                 )
                 if agent_summary is not None and summary_file is not None:
                     participants_summary.append({
@@ -5572,6 +5605,7 @@ def main():
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         top_k=getattr(args, 'top_k', 0),
+                        max_workers=args.max_workers,
                     )
                 else:
                     participant_summary = run_evolution(
@@ -5600,6 +5634,7 @@ def main():
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
                         gate_phase=args.gate_phase,
+                        max_workers=args.max_workers,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -5694,6 +5729,7 @@ def main():
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         top_k=getattr(args, 'top_k', 0),
+                        max_workers=args.max_workers,
                     )
                 else:
                     participant_summary = run_evolution(
@@ -5723,6 +5759,7 @@ def main():
                         llm_max_tokens=args.llm_max_tokens,
                         cpc18_official_mse=args.cpc18_official_mse,
                         gate_phase=args.gate_phase,
+                        max_workers=args.max_workers,
                     )
                 
                 # Update participants summary after each participant completes
@@ -5736,21 +5773,25 @@ def main():
                     print(f"\nParticipants summary updated: {summary_file}")
 
                     if args.participant_scope in ("range", "ordinals"):
-                        _ps_log = {
+                        _ps_log: Dict[str, Any] = {
                             "participant_id": participant_summary.get("participant_id"),
                             "train_loglik": participant_summary.get("train_loglik"),
-                            "test_loglik": participant_summary.get("test_loglik"),
                         }
                         if args.dataset == "choice13k":
                             if participant_summary.get("val_loglik") is not None:
                                 _ps_log["val_loglik"] = participant_summary.get("val_loglik")
+                            _ps_log["test_loglik"] = participant_summary.get("test_loglik")
                             if participant_summary.get("gated_test_loglik") is not None:
                                 _ps_log["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+                        else:
+                            _ps_log["test_loglik"] = participant_summary.get("test_loglik")
                         participants_loglik_summary.append(_ps_log)
                         if details_loglik_file is not None:
-                            _det_ll_fields = ["participant_id", "train_loglik", "test_loglik"]
+                            _det_ll_fields = ["participant_id", "train_loglik"]
                             if args.dataset == "choice13k":
-                                _det_ll_fields.extend(["val_loglik", "gated_test_loglik"])
+                                _det_ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
+                            else:
+                                _det_ll_fields.append("test_loglik")
                             with open(details_loglik_file, "w", newline="") as f:
                                 writer = csv.DictWriter(f, fieldnames=_det_ll_fields)
                                 writer.writeheader()
