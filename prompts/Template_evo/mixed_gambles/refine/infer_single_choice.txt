@@ -1,0 +1,11 @@
+Additional validation information is provided because the current behavioral program does not generalize well to held-out validation trials.
+
+Your goal is to improve the behavioral rule so it explains BOTH:
+
+* the training behavior,
+* and the validation behavior.
+
+Validation failures may indicate that the current program is missing an important behavioral pattern or decision rule.
+
+Use the validation trials to identify behavioral structure that consistently explains both train and validation examples.
+Do not fit only the validation examples that harms training score; preserve broader behavioural modelling.

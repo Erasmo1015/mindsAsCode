@@ -21,10 +21,10 @@ Participant selection (choice13k / cpc18 / mixed_gambles):
 - --participant_scope all: every raw id in JSON, optional cap --all_max_participants (first N).
 - Gridworld / gridworld_ensemble: use --num_agents_to_sample and --agent_id; participant_scope is ignored.
 
-Choice13k within-participant split: problems (blocks) are partitioned with ``--split_ratio`` as the **train
-fraction** of blocks; the remainder is split between validation and test (val gets the extra block when odd).
-Train, val, and test use disjoint gamble pairs; per-trial history is within-block only. Across-participants mode
-still pools all trials per participant via experiment_to_trials (full cross-block history; no val split).
+Choice13k / CPC18 loglik / mixed_gambles loglik within-participant splits use ``--split_ratio`` as the **train
+fraction**; the remainder is split between validation and test (val gets the extra unit when odd). CPC18 official
+MSE mode is unchanged (all trials, no val split). Across-participants choice13k mode still pools all trials per
+participant via experiment_to_trials (full cross-block history; no val split).
 """
 
 import math
@@ -52,7 +52,13 @@ from datasets import load_dataset
 # Import data loading (this is acceptable as it's a data module, not ROTE/evo code)
 from data_modules.choice13k import get_choice13k_experiments, Experiment, Block
 from data_modules import choice13k as choice13k_module
-from data_modules.cpc18 import load_cpc18_track2_data, split_cpc18_trials, ParticipantData
+from data_modules.cpc18 import (
+    ParticipantData,
+    _three_way_unit_counts,
+    load_cpc18_track2_data,
+    split_cpc18_trials,
+    split_cpc18_trials_three_way,
+)
 from agent import AgentExecutionFramework
 
 # Repo root for datasets/*/valid_participant_ids.json (ordinal resolution for choice13k / cpc18 / mixed_gambles).
@@ -130,13 +136,61 @@ def _parallel_participant_pool_sizes(
     return max(1, int(max_workers) // n_cand), n_cand
 
 
-def _choice13k_val_loglik_below_refinement_threshold(
+_LOGlik_VAL_SPLIT_DATASETS = frozenset({"choice13k", "cpc18", "mixed_gambles"})
+
+
+def _uses_train_val_test_loglik_split(
+    dataset: str, fitness_metric: str, *, cpc18_official_mse: bool = False
+) -> bool:
+    """True when evolution/refinement use disjoint train/val/test with log-likelihood."""
+    if fitness_metric != "loglik":
+        return False
+    if dataset == "cpc18" and cpc18_official_mse:
+        return False
+    return dataset in _LOGlik_VAL_SPLIT_DATASETS
+
+
+def _supports_loglik_refinement(
+    dataset: str,
+    fitness_metric: str,
+    val_trials: List[Dict[str, Any]],
+    test_trials: List[Dict[str, Any]],
+    *,
+    cpc18_official_mse: bool = False,
+) -> bool:
+    return _uses_train_val_test_loglik_split(
+        dataset, fitness_metric, cpc18_official_mse=cpc18_official_mse
+    ) and bool(val_trials and test_trials)
+
+
+def _val_loglik_below_refinement_threshold(
     val_loglik: Optional[float], refinement_val_threshold: float
 ) -> bool:
     """True when refinement should run (val loglik strictly below threshold)."""
     if val_loglik is None:
         return False
     return float(val_loglik) < float(refinement_val_threshold)
+
+
+def _choice13k_val_loglik_below_refinement_threshold(
+    val_loglik: Optional[float], refinement_val_threshold: float
+) -> bool:
+    return _val_loglik_below_refinement_threshold(val_loglik, refinement_val_threshold)
+
+
+def _evaluate_loglik_for_dataset(
+    dataset: str,
+    choose_fn: Callable,
+    trials: List[Dict[str, Any]],
+    *,
+    verbose: bool = False,
+    n_seeds: int = 1,
+) -> Dict[str, float]:
+    if dataset == "cpc18":
+        return evaluate_cpc18_split_program(
+            choose_fn, trials, verbose=verbose, n_seeds=n_seeds
+        )
+    return evaluate_choice13k_program(choose_fn, trials, verbose=verbose, n_seeds=n_seeds)
 
 
 def _resolve_default_seed_program_path(args: Any, participant_id: int) -> Optional[str]:
@@ -513,6 +567,7 @@ def _refinement_pool_best_metrics(
     elite_val_logliks: List[Optional[float]],
     test_trials: List[Dict[str, Any]],
     *,
+    dataset: str,
     n_eval_seeds: int,
 ) -> Dict[str, Any]:
     """Metrics for elite pool rank-1 after an iteration (includes held-out test loglik)."""
@@ -528,7 +583,9 @@ def _refinement_pool_best_metrics(
     test_loglik: Optional[float] = None
     choose_fn = compile_program(pool_best[0])
     if choose_fn is not None:
-        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+        test_eval = _evaluate_loglik_for_dataset(
+            dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
+        )
         test_loglik = float(test_eval["avg_loglik"])
     return {
         "pool_best_program_id": program_id,
@@ -539,13 +596,13 @@ def _refinement_pool_best_metrics(
     }
 
 
-def _load_choice13k_refinement_prompt_suffix() -> str:
-    """Suffix appended to the normal choice13k prompt during refinement."""
+def _load_refinement_prompt_suffix(dataset: str) -> str:
+    """Suffix appended to the dataset prompt during log-likelihood refinement."""
     path = os.path.join(
         os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
         "prompts",
         "Template_evo",
-        "choice13k",
+        dataset,
         "refine",
         "infer_single_choice.txt",
     )
@@ -575,8 +632,9 @@ def _cap_and_subsample_prompt_trials(
     return out
 
 
-def run_choice13k_refinement_phase(
+def run_loglik_refinement_phase(
     *,
+    dataset: str,
     client: OpenAI,
     model_name: str,
     initial_code: str,
@@ -610,7 +668,7 @@ def run_choice13k_refinement_phase(
     if not val_trials or not test_trials or n_iterations < 1:
         return None
 
-    refine_suffix = _load_choice13k_refinement_prompt_suffix()
+    refine_suffix = _load_refinement_prompt_suffix(dataset)
     val_for_prompt = _cap_and_subsample_prompt_trials(
         val_trials,
         max_trials=max_prompt_train_trials,
@@ -644,7 +702,9 @@ def run_choice13k_refinement_phase(
     seed_test_loglik: Optional[float] = None
     seed_fn = compile_program(initial_code)
     if seed_fn is not None:
-        seed_test_eval = evaluate_choice13k_program(seed_fn, test_trials, n_seeds=n_eval_seeds)
+        seed_test_eval = _evaluate_loglik_for_dataset(
+            dataset, seed_fn, test_trials, n_seeds=n_eval_seeds
+        )
         seed_test_loglik = float(seed_test_eval["avg_loglik"])
 
     refinement_dir: Optional[Path] = None
@@ -710,7 +770,7 @@ def run_choice13k_refinement_phase(
             train_trials=train_trials,
             n_variants=n_candidates_per_iteration,
             max_tokens=llm_max_tokens,
-            dataset="choice13k",
+            dataset=dataset,
             parent_train_accuracies=parent_train_lls,
             parent_val_logliks=selected_val_lls,
             max_prompt_train_trials=max_prompt_train_trials,
@@ -753,8 +813,12 @@ def run_choice13k_refinement_phase(
                 )
                 continue
             try:
-                train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                val_eval = evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+                train_eval = _evaluate_loglik_for_dataset(
+                    dataset, choose_fn, train_trials, n_seeds=n_eval_seeds
+                )
+                val_eval = _evaluate_loglik_for_dataset(
+                    dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
+                )
             except (AssertionError, TypeError, ValueError):
                 candidate_results.append(
                     {
@@ -825,6 +889,7 @@ def run_choice13k_refinement_phase(
             elite_parents,
             elite_val_logliks,
             test_trials,
+            dataset=dataset,
             n_eval_seeds=n_eval_seeds,
         )
         pool_test_ll = pool_metrics.get("pool_best_test_loglik")
@@ -908,7 +973,9 @@ def run_choice13k_refinement_phase(
     if output_path is not None and save_artifacts:
         (output_path / BEST_PROGRAM_FILENAME).write_text(best_code or "")
 
-    test_eval = evaluate_choice13k_program(best_fn, test_trials, n_seeds=n_eval_seeds)
+    test_eval = _evaluate_loglik_for_dataset(
+        dataset, best_fn, test_trials, n_seeds=n_eval_seeds
+    )
     refinement_test_loglik = float(test_eval["avg_loglik"])
     print(f"Refinement final test avg log-likelihood (gated_test_loglik): {refinement_test_loglik:.6f}")
 
@@ -920,6 +987,7 @@ def run_choice13k_refinement_phase(
             refinement_dir,
             {
                 "phase": "refinement",
+                "dataset": dataset,
                 "participant_id": int(participant_id),
                 "n_iterations": int(n_iterations),
                 "refinement_skipped": False,
@@ -951,6 +1019,11 @@ def run_choice13k_refinement_phase(
     return refinement_test_loglik
 
 
+def run_choice13k_refinement_phase(**kwargs: Any) -> Optional[float]:
+    """Backward-compatible wrapper for Choice13k refinement."""
+    return run_loglik_refinement_phase(**kwargs, dataset="choice13k")
+
+
 def _load_participant_details_loglik_csv(csv_path: Path) -> List[Dict[str, Any]]:
     if not csv_path.exists():
         raise FileNotFoundError(f"participant_details_loglik.csv not found: {csv_path}")
@@ -960,10 +1033,17 @@ def _load_participant_details_loglik_csv(csv_path: Path) -> List[Dict[str, Any]]
 
 
 def _write_participant_details_loglik_csv(
-    csv_path: Path, rows: List[Dict[str, Any]], *, dataset: str = "choice13k"
+    csv_path: Path,
+    rows: List[Dict[str, Any]],
+    *,
+    dataset: str = "choice13k",
+    fitness_metric: str = "loglik",
+    cpc18_official_mse: bool = False,
 ) -> None:
     fieldnames = ["participant_id", "train_loglik"]
-    if dataset == "choice13k":
+    if _uses_train_val_test_loglik_split(
+        dataset, fitness_metric, cpc18_official_mse=cpc18_official_mse
+    ):
         fieldnames.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
     else:
         fieldnames.append("test_loglik")
@@ -1037,8 +1117,43 @@ def _choice13k_trials_for_participant(
     return train_trials, val_trials, test_trials
 
 
-def run_choice13k_refine_participant_from_checkpoint(
+def _trials_for_loglik_participant(
+    dataset: str,
+    participant_id: int,
     *,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if dataset == "choice13k":
+        return _choice13k_trials_for_participant(
+            participant_id, split_ratio=split_ratio, split_seed=split_seed
+        )
+    if dataset == "cpc18":
+        cpc18_data_path = data_path if data_path != "data" else "datasets/cpc18"
+        participant_data = load_cpc18_track2_data(
+            data_path=cpc18_data_path, participant_id=participant_id
+        )
+        return split_cpc18_trials_three_way(
+            participant_data, split_ratio=split_ratio, split_seed=split_seed
+        )
+    if dataset == "mixed_gambles":
+        csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
+        train_trials, val_trials, test_trials, _options = load_mixed_gambles_data(
+            csv_path,
+            participant_id,
+            filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+        return train_trials, val_trials, test_trials
+    raise ValueError(f"Unsupported dataset for loglik train/val/test split: {dataset}")
+
+
+def run_loglik_refine_participant_from_checkpoint(
+    *,
+    dataset: str,
     client: OpenAI,
     model_name: str,
     participant_id: int,
@@ -1047,6 +1162,8 @@ def run_choice13k_refine_participant_from_checkpoint(
     prev_loglik_row: Optional[Dict[str, Any]],
     split_ratio: float,
     split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
     n_iterations: int,
     n_candidates_per_iteration: int,
     sample_size: int,
@@ -1072,15 +1189,24 @@ def run_choice13k_refine_participant_from_checkpoint(
         )
 
     initial_code = program_path.read_text(encoding="utf-8")
-    train_trials, val_trials, test_trials = _choice13k_trials_for_participant(
-        participant_id, split_ratio=split_ratio, split_seed=split_seed
+    train_trials, val_trials, test_trials = _trials_for_loglik_participant(
+        dataset,
+        participant_id,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
     )
     choose_fn = compile_program(initial_code)
     if choose_fn is None:
         raise RuntimeError(f"Failed to compile checkpoint program: {program_path}")
 
-    train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-    val_eval = evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+    train_eval = _evaluate_loglik_for_dataset(
+        dataset, choose_fn, train_trials, n_seeds=n_eval_seeds
+    )
+    val_eval = _evaluate_loglik_for_dataset(
+        dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
+    )
     train_loglik = float(train_eval["avg_loglik"])
     val_loglik = float(val_eval["avg_loglik"])
 
@@ -1103,14 +1229,16 @@ def run_choice13k_refine_participant_from_checkpoint(
     if test_loglik not in (None, ""):
         test_loglik = float(test_loglik)
     else:
-        test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+        test_eval = _evaluate_loglik_for_dataset(
+            dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
+        )
         test_loglik = float(test_eval["avg_loglik"])
 
     refinement_dir = output_dir / "refinement"
     if save_artifacts:
         refinement_dir.mkdir(parents=True, exist_ok=True)
 
-    if not _choice13k_val_loglik_below_refinement_threshold(val_loglik, refinement_val_threshold):
+    if not _val_loglik_below_refinement_threshold(val_loglik, refinement_val_threshold):
         print(
             f"Refinement skipped: val_loglik={float(val_loglik):.6f} "
             f">= threshold={float(refinement_val_threshold):.6f}"
@@ -1120,6 +1248,7 @@ def run_choice13k_refine_participant_from_checkpoint(
                 refinement_dir,
                 {
                     "phase": "refinement",
+                    "dataset": dataset,
                     "participant_id": int(participant_id),
                     "n_iterations": int(n_iterations),
                     "refinement_skipped": True,
@@ -1146,7 +1275,8 @@ def run_choice13k_refine_participant_from_checkpoint(
         f"Refinement triggered: val_loglik={float(val_loglik):.6f} "
         f"< threshold={float(refinement_val_threshold):.6f}"
     )
-    gated_test_loglik = run_choice13k_refinement_phase(
+    gated_test_loglik = run_loglik_refinement_phase(
+        dataset=dataset,
         client=client,
         model_name=model_name,
         initial_code=initial_code,
@@ -1198,8 +1328,13 @@ def run_choice13k_refine_participant_from_checkpoint(
     }
 
 
-def run_choice13k_refine_from_prev_experiment(
+def run_choice13k_refine_participant_from_checkpoint(**kwargs: Any) -> Dict[str, Any]:
+    return run_loglik_refine_participant_from_checkpoint(**kwargs, dataset="choice13k")
+
+
+def run_loglik_refine_from_prev_experiment(
     *,
+    dataset: str,
     client: OpenAI,
     model_name: str,
     participants: List[int],
@@ -1207,6 +1342,8 @@ def run_choice13k_refine_from_prev_experiment(
     output_dir: Path,
     split_ratio: float,
     split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
     n_iterations: int,
     n_candidates_per_iteration: int,
     sample_size: int,
@@ -1220,6 +1357,8 @@ def run_choice13k_refine_from_prev_experiment(
     wandb_module: Optional[Any] = None,
     parallel_participants: bool = False,
     refinement_val_threshold: float = -1.0,
+    fitness_metric: str = "loglik",
+    cpc18_official_mse: bool = False,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -1255,7 +1394,13 @@ def run_choice13k_refine_from_prev_experiment(
         {int(r["participant_id"]) for r in loglik_rows} | {int(p) for p in participants}
     )
     cleared_rows = [rows_by_pid[pid] for pid in all_pids]
-    _write_participant_details_loglik_csv(out_details_csv, cleared_rows, dataset="choice13k")
+    _write_participant_details_loglik_csv(
+        out_details_csv,
+        cleared_rows,
+        dataset=dataset,
+        fitness_metric=fitness_metric,
+        cpc18_official_mse=cpc18_official_mse,
+    )
     _write_refine_summary_loglik_csv(output_dir, cleared_rows)
     print("Cleared gated_test_loglik in participant_details_loglik.csv for new refine run.")
 
@@ -1271,7 +1416,13 @@ def run_choice13k_refine_from_prev_experiment(
                     prev_row[key] = metrics[key]
             prev_row["gated_test_loglik"] = metrics.get("gated_test_loglik")
             updated_rows = [rows_by_pid[pid] for pid in all_pids]
-            _write_participant_details_loglik_csv(out_details_csv, updated_rows, dataset="choice13k")
+            _write_participant_details_loglik_csv(
+                out_details_csv,
+                updated_rows,
+                dataset=dataset,
+                fitness_metric=fitness_metric,
+                cpc18_official_mse=cpc18_official_mse,
+            )
             _write_refine_summary_loglik_csv(output_dir, updated_rows)
         gated_str = (
             f"{float(metrics['gated_test_loglik']):.6f}"
@@ -1288,7 +1439,8 @@ def run_choice13k_refine_from_prev_experiment(
         prev_row = rows_by_pid.get(int(participant_id))
         prev_loglik_snapshot = dict(prev_row) if prev_row is not None else None
         participant_output_dir = output_dir / f"participant_{participant_id}"
-        metrics = run_choice13k_refine_participant_from_checkpoint(
+        metrics = run_loglik_refine_participant_from_checkpoint(
+            dataset=dataset,
             client=client,
             model_name=model_name,
             participant_id=int(participant_id),
@@ -1297,6 +1449,8 @@ def run_choice13k_refine_from_prev_experiment(
             prev_loglik_row=prev_loglik_snapshot,
             split_ratio=split_ratio,
             split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
             n_iterations=n_iterations,
             n_candidates_per_iteration=n_candidates_per_iteration,
             sample_size=sample_size,
@@ -1327,6 +1481,10 @@ def run_choice13k_refine_from_prev_experiment(
             _commit_participant_refine_metrics(_pid, metrics)
 
     print(f"Wrote participant loglik details -> {out_details_csv}")
+
+
+def run_choice13k_refine_from_prev_experiment(**kwargs: Any) -> None:
+    return run_loglik_refine_from_prev_experiment(**kwargs, dataset="choice13k")
 
 
 def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13k") -> str:
@@ -1411,12 +1569,15 @@ def load_mixed_gambles_data(
     filter_gain_loss_only: bool = False,
     split_ratio: float = 0.8,
     split_seed: int = 42,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
-    """Load mixed_gambles CSV, filter by subject == participant_id, and split by disjoint problem signatures.
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[int]]:
+    """Load mixed_gambles CSV, filter by subject == participant_id, and split signatures train/val/test.
 
     Each row: Option A (gamble) = [gain, loss] with probs [0.5, 0.5]; Option B (certain) = [cert] with probs [1.0].
     Raw CSV `took_gamble`: 1 = chose gamble, 0 = chose certain. TE option index: action = 1 - took_gamble
     (0 = Option A gamble_A / accept gamble, 1 = Option B gamble_B / certain). history = [] (no temporal dependence).
+
+    ``split_ratio`` is the train **fraction** of unique problem signatures; the remainder is split between
+    validation and test (val gets the extra signature when odd), same as Choice13k block split.
 
     Args:
         filter_gain_loss_only: If True, keep only gamble_type == "gain_loss" trials (Section 4.2 mixed gambles).
@@ -1452,26 +1613,26 @@ def load_mixed_gambles_data(
     if filter_gain_loss_only and not getattr(load_mixed_gambles_data, "_printed_gain_loss", False):
         print("[Mixed Gambles] Using gain_loss trials only.")
         load_mixed_gambles_data._printed_gain_loss = True
-    # Split by unique (gain, loss, cert) signatures so train/test never share the same problem.
+    # Split by unique (gain, loss, cert) signatures so train/val/test never share the same problem.
     signatures = sorted({t["problem_signature"] for t in all_trials})
-    if len(signatures) < 2:
+    if len(signatures) < 3:
         raise ValueError(
-            f"mixed_gambles participant {participant_id} has <2 unique problems; cannot build disjoint train/test."
+            f"mixed_gambles participant {participant_id} has <3 unique problem signatures; "
+            "cannot build disjoint train/val/test."
         )
     rng = np.random.default_rng(split_seed)
     shuffled = list(signatures)
     rng.shuffle(shuffled)
-    split_point = int(len(shuffled) * split_ratio)
-    split_point = max(1, min(split_point, len(shuffled) - 1))
-    train_sigs = set(shuffled[:split_point])
-    test_sigs = set(shuffled[split_point:])
+    n_train, n_val, n_test = _three_way_unit_counts(len(shuffled), split_ratio)
+    train_sigs = set(shuffled[:n_train])
+    val_sigs = set(shuffled[n_train : n_train + n_val])
+    test_sigs = set(shuffled[n_train + n_val :])
     train_trials = [t for t in all_trials if t["problem_signature"] in train_sigs]
+    val_trials = [t for t in all_trials if t["problem_signature"] in val_sigs]
     test_trials = [t for t in all_trials if t["problem_signature"] in test_sigs]
-    for t in train_trials:
+    for t in train_trials + val_trials + test_trials:
         t.pop("problem_signature", None)
-    for t in test_trials:
-        t.pop("problem_signature", None)
-    return train_trials, test_trials, option_keys
+    return train_trials, val_trials, test_trials, option_keys
 
 
 def experiment_to_trials(exp: Experiment) -> Tuple[List[Dict[str, Any]], list]:
@@ -3571,17 +3732,37 @@ def run_evolution(
         participant_data = load_cpc18_track2_data(data_path=cpc18_data_path, participant_id=participant_id)
         is_cpc18_mse = bool(cpc18_official_mse)
         is_cpc18_split = not is_cpc18_mse
-        # Official: all trials, block MSE. Otherwise: per-participant holdout (problem or trial split).
-        train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
-            participant_data,
-            train_ratio=0.8,
-            cpc18_official_mse=is_cpc18_mse,
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-        )
+        # Official: all trials, block MSE. Loglik: train/val/test. Else accuracy: train/test holdout.
+        if is_cpc18_mse:
+            train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
+                participant_data,
+                train_ratio=0.8,
+                cpc18_official_mse=True,
+                split_ratio=split_ratio,
+                split_seed=split_seed,
+            )
+        elif fitness_metric == "loglik":
+            train_trials, val_trials, test_trials = split_cpc18_trials_three_way(
+                participant_data, split_ratio=split_ratio, split_seed=split_seed
+            )
+            test_observed_blocks = {}
+        else:
+            train_trials, test_trials, test_observed_blocks = split_cpc18_trials(
+                participant_data,
+                train_ratio=0.8,
+                cpc18_official_mse=False,
+                split_ratio=split_ratio,
+                split_seed=split_seed,
+            )
         if is_cpc18_mse:
             print(f"CPC18 official: ALL {len(train_trials)} trials; block MSE vs Data-to-predict-Track-2")
             print(f"Problems: {len(participant_data.problems)} total; block targets: {len(test_observed_blocks)}")
+        elif fitness_metric == "loglik":
+            print(
+                f"CPC18 train/val/test split: train={len(train_trials)} val={len(val_trials)} "
+                f"test={len(test_trials)} (split_ratio={split_ratio:.3f} seed={split_seed})"
+            )
+            print(f"Problems: {len(participant_data.problems)} total (partition by problem when possible).")
         else:
             print(
                 f"CPC18 held-out split: train={len(train_trials)} test={len(test_trials)} "
@@ -3592,14 +3773,23 @@ def run_evolution(
     elif dataset == "mixed_gambles":
         csv_path = "datasets/mixed_gambles/data_all_2021-01-08.csv"
         print(f"Loading mixed_gambles data for participant (subject) {participant_id} from {csv_path}...")
-        train_trials, test_trials, options = load_mixed_gambles_data(
+        train_trials, val_trials, test_trials, options = load_mixed_gambles_data(
             csv_path,
             participant_id,
             filter_gain_loss_only=filter_mixed_gambles,
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
-        print(f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} (seed={split_seed}, ratio={split_ratio:.3f})")
+        if fitness_metric == "loglik":
+            print(
+                f"[Split] Train: {len(train_trials)}, Val: {len(val_trials)}, Test: {len(test_trials)} "
+                f"(seed={split_seed}, ratio={split_ratio:.3f})"
+            )
+        else:
+            print(
+                f"[Split] Train: {len(train_trials)}, Test: {len(test_trials)} "
+                f"(seed={split_seed}, ratio={split_ratio:.3f})"
+            )
         test_observed_blocks = None
     else:
         # Load Choice13k data
@@ -3700,16 +3890,18 @@ def run_evolution(
         if baseline_fn is None:
             print("ERROR: Failed to compile baseline program!")
             return None
-        if dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
-            baseline_train_eval = evaluate_choice13k_program(
-                baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds
+        if _uses_train_val_test_loglik_split(
+            dataset, fitness_metric, cpc18_official_mse=is_cpc18_mse
+        ) or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
+            baseline_train_eval = _evaluate_loglik_for_dataset(
+                dataset, baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds
             )
-            baseline_test_eval = evaluate_choice13k_program(
-                baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
+            baseline_test_eval = _evaluate_loglik_for_dataset(
+                dataset, baseline_fn, test_trials, verbose=True, n_seeds=n_eval_seeds
             )
             if val_trials:
-                baseline_val_eval = evaluate_choice13k_program(
-                    baseline_fn, val_trials, verbose=True, n_seeds=n_eval_seeds
+                baseline_val_eval = _evaluate_loglik_for_dataset(
+                    dataset, baseline_fn, val_trials, verbose=True, n_seeds=n_eval_seeds
                 )
         else:
             baseline_train_eval = evaluate_program(baseline_fn, train_trials, verbose=True, n_seeds=n_eval_seeds)
@@ -3799,6 +3991,9 @@ def run_evolution(
                 f"p{participant_id}_train_acc": baseline_train_eval["accuracy"],
                 f"p{participant_id}_test_acc": baseline_test_eval["accuracy"],
             }
+            if baseline_val_eval is not None:
+                baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
+                baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
         else:
             if all_data_mode:
                 if dataset in {"choice13k", "mixed_gambles"} and fitness_metric == "loglik":
@@ -3981,7 +4176,9 @@ def run_evolution(
     if run_phase not in _RUN_PHASES:
         raise ValueError(f"run_phase must be one of {sorted(_RUN_PHASES)}, got {run_phase!r}")
     if run_phase == "refine":
-        raise ValueError("run_phase='refine' must use run_choice13k_refine_from_prev_experiment(), not run_evolution().")
+        raise ValueError(
+            "run_phase='refine' must use run_loglik_refine_from_prev_experiment(), not run_evolution()."
+        )
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
@@ -4109,7 +4306,7 @@ def run_evolution(
                     empty_row["test_loglik"] = float("-inf")
                     empty_row["fitness"] = float("-inf") if fitness_metric == "loglik" else 0.0
                     empty_row["runtime_valid"] = False
-                if dataset == "choice13k" and val_trials:
+                if val_trials:
                     empty_row["val_loglik"] = float("-inf")
                 candidate_results.append(empty_row)
                 continue
@@ -4232,7 +4429,7 @@ def run_evolution(
                 choose_fn = compile_program(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
                 if choose_fn is None:
-                    candidate_results.append({
+                    _fail = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
@@ -4242,14 +4439,22 @@ def run_evolution(
                         "fitness": _worst,
                         "valid": False,
                         "runtime_valid": False,
-                    })
+                    }
+                    if val_trials:
+                        _fail["val_loglik"] = float("-inf")
+                    candidate_results.append(_fail)
                     continue
                 try:
                     train_eval = evaluate_cpc18_split_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     # Always run test pass for runtime-valid checks; test metrics may be hidden later.
                     test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    val_eval = (
+                        evaluate_cpc18_split_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+                        if val_trials
+                        else None
+                    )
                 except (TypeError, ValueError, AssertionError):
-                    candidate_results.append({
+                    _fail = {
                         "idx": idx,
                         "code": code,
                         "train_acc": 0.0,
@@ -4259,19 +4464,23 @@ def run_evolution(
                         "fitness": _worst,
                         "valid": False,
                         "runtime_valid": False,
-                    })
+                    }
+                    if val_trials:
+                        _fail["val_loglik"] = float("-inf")
+                    candidate_results.append(_fail)
                     continue
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
+                val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
                 fitness = train_loglik if fitness_metric == "loglik" else train_acc
                 if not runtime_valid:
                     fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
-                candidate_results.append({
+                _row = {
                     "idx": idx,
                     "code": code,
                     "train_acc": train_acc,
@@ -4285,7 +4494,10 @@ def run_evolution(
                     "test_total": test_eval["total"] if test_eval is not None else None,
                     "valid": True,
                     "runtime_valid": runtime_valid,
-                })
+                }
+                if val_eval is not None:
+                    _row["val_loglik"] = val_loglik
+                candidate_results.append(_row)
             elif dataset == "choice13k":
                 choose_fn = compile_program(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
@@ -4382,9 +4594,15 @@ def run_evolution(
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     # Always run test pass for runtime-valid checks; test metrics are still excluded downstream.
                     test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    val_eval = (
+                        evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+                        if val_trials
+                        else None
+                    )
                 else:
                     train_eval = evaluate_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
                     test_eval = evaluate_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                    val_eval = None
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 fitness = train_eval["avg_loglik"] if fitness_metric == "loglik" else train_acc
@@ -4410,7 +4628,9 @@ def run_evolution(
                 }
                 if fitness_metric == "loglik":
                     row["train_loglik"] = train_eval["avg_loglik"]
-                    row["test_loglik"] = None
+                    row["test_loglik"] = test_eval["avg_loglik"] if test_eval is not None else None
+                    if val_eval is not None:
+                        row["val_loglik"] = val_eval["avg_loglik"]
                 candidate_results.append(row)
             
         # Report results
@@ -4478,9 +4698,7 @@ def run_evolution(
                         if result.get("test_acc") is not None
                         else "N/A"
                     )
-                    _val_part = (
-                        f", val_loglik={_val_ll}" if dataset == "choice13k" and val_trials else ""
-                    )
+                    _val_part = f", val_loglik={_val_ll}" if val_trials else ""
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
@@ -4534,7 +4752,7 @@ def run_evolution(
                         f"  Train avg log-likelihood: {best_result['train_loglik']:.6f}, "
                         f"test: {best_result['test_loglik']:.6f}"
                     )
-                if dataset == "choice13k" and val_trials and best_result.get("val_loglik") is not None:
+                if val_trials and best_result.get("val_loglik") is not None:
                     print(f"  Val avg log-likelihood: {best_result['val_loglik']:.6f}")
             else:
                 print(f"  Train accuracy: {best_result['train_acc']:.4f}")
@@ -4611,9 +4829,9 @@ def run_evolution(
                     iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
                     iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
                     iter_best_fitness = iter_best_train_loglik
-                    if dataset == "choice13k" and val_trials:
-                        iter_best_val_eval = evaluate_choice13k_program(
-                            iter_best_fn, val_trials, n_seeds=n_eval_seeds
+                    if val_trials:
+                        iter_best_val_eval = _evaluate_loglik_for_dataset(
+                            dataset, iter_best_fn, val_trials, n_seeds=n_eval_seeds
                         )
                         iter_best_val_loglik = iter_best_val_eval["avg_loglik"]
                 else:
@@ -4710,7 +4928,7 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
-                    if dataset == "choice13k" and val_trials:
+                    if val_trials:
                         overall_best_train["val_loglik"] = iter_best_val_loglik
                 if fitness_metric == "loglik":
                     _test_better = (
@@ -4727,7 +4945,7 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
-                    if dataset == "choice13k" and val_trials:
+                    if val_trials:
                         overall_best_test["val_loglik"] = iter_best_val_loglik
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
@@ -4778,31 +4996,36 @@ def run_evolution(
                 "best_test_mse": selected_results[0]["test_mse"] if selected_results else None,
             }
         elif is_cpc18_split:
+            _cpc_cand_rows = []
+            for r in candidate_results:
+                _cr = {
+                    "idx": r["idx"],
+                    "train_acc": r["train_acc"],
+                    "test_acc": r["test_acc"],
+                    "train_loglik": r.get("train_loglik"),
+                    "test_loglik": r.get("test_loglik"),
+                    "fitness": r.get("fitness"),
+                    "valid": r["valid"],
+                    "runtime_valid": r.get("runtime_valid", r["valid"]),
+                }
+                if val_trials:
+                    _cr["val_loglik"] = r.get("val_loglik")
+                _cpc_cand_rows.append(_cr)
             metrics = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
-                "candidate_results": [
-                    {
-                        "idx": r["idx"],
-                        "train_acc": r["train_acc"],
-                        "test_acc": r["test_acc"],
-                        "train_loglik": r.get("train_loglik"),
-                        "test_loglik": r.get("test_loglik"),
-                        "fitness": r.get("fitness"),
-                        "valid": r["valid"],
-                        "runtime_valid": r.get("runtime_valid", r["valid"]),
-                    }
-                    for r in candidate_results
-                ],
+                "candidate_results": _cpc_cand_rows,
                 "best_train_fitness": best_fitness if selected_results else None,
                 "best_train_acc": iter_best_train_acc if selected_results else None,
                 "best_test_acc": iter_best_test_acc if selected_results else None,
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
+            if val_trials:
+                metrics["best_val_loglik"] = iter_best_val_loglik if selected_results else None
         elif dataset in {"choice13k", "mixed_gambles"}:
             _cand_rows = []
             for r in candidate_results:
@@ -4816,7 +5039,7 @@ def run_evolution(
                     "valid": r["valid"],
                     "runtime_valid": r.get("runtime_valid", r["valid"]),
                 }
-                if dataset == "choice13k" and val_trials:
+                if val_trials:
                     _cr["val_loglik"] = r.get("val_loglik")
                 _cand_rows.append(_cr)
             metrics = {
@@ -4832,7 +5055,7 @@ def run_evolution(
                 "best_train_loglik": iter_best_train_loglik if selected_results else None,
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
-            if dataset == "choice13k" and val_trials:
+            if val_trials:
                 metrics["best_val_loglik"] = iter_best_val_loglik if selected_results else None
         else:
             metrics = {
@@ -4956,6 +5179,9 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
                         log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
                         log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
+                        if val_trials and iter_best_val_loglik is not None:
+                            log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
+                            log_dict["val_loglik"] = iter_best_val_loglik
                 else:
                     log_dict = {f"p{participant_id}_n_valid": len(valid_results)}
                     if valid_results:
@@ -4971,6 +5197,9 @@ def run_evolution(
                             if fitness_metric == "loglik"
                             else iter_best_test_acc
                         )
+                        if val_trials and iter_best_val_loglik is not None:
+                            log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
+                            log_dict["val_loglik"] = iter_best_val_loglik
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean(
                             [r["train_acc"] for r in valid_results]
                         )
@@ -4992,7 +5221,7 @@ def run_evolution(
                         log_dict[f"p{participant_id}_test_acc"] = iter_best_test_acc
                         log_dict[f"p{participant_id}_train_loglik"] = iter_best_train_loglik
                         log_dict[f"p{participant_id}_test_loglik"] = iter_best_test_loglik
-                        if dataset == "choice13k" and val_trials and iter_best_val_loglik is not None:
+                        if val_trials and iter_best_val_loglik is not None:
                             log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
                             log_dict["val_loglik"] = iter_best_val_loglik
                 else:
@@ -5012,7 +5241,7 @@ def run_evolution(
                             if fitness_metric == "loglik"
                             else iter_best_test_acc
                         )
-                        if dataset == "choice13k" and val_trials and iter_best_val_loglik is not None:
+                        if val_trials and iter_best_val_loglik is not None:
                             log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
                             log_dict["val_loglik"] = iter_best_val_loglik
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
@@ -5127,12 +5356,20 @@ def run_evolution(
             "program_file": best_program_filename,
         }
         overall_best_test = dict(overall_best_train)
-    elif dataset == "choice13k" or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
-        final_train_eval = evaluate_choice13k_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
-        final_test_eval = evaluate_choice13k_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
+    elif _uses_train_val_test_loglik_split(
+        dataset, fitness_metric, cpc18_official_mse=is_cpc18_mse
+    ) or (dataset == "mixed_gambles" and fitness_metric == "loglik"):
+        final_train_eval = _evaluate_loglik_for_dataset(
+            dataset, final_best_fn, train_trials, n_seeds=n_eval_seeds
+        )
+        final_test_eval = _evaluate_loglik_for_dataset(
+            dataset, final_best_fn, test_trials, n_seeds=n_eval_seeds
+        )
         final_val_eval = (
-            evaluate_choice13k_program(final_best_fn, val_trials, n_seeds=n_eval_seeds)
-            if dataset == "choice13k" and val_trials
+            _evaluate_loglik_for_dataset(
+                dataset, final_best_fn, val_trials, n_seeds=n_eval_seeds
+            )
+            if val_trials
             else None
         )
         overall_best_train = {
@@ -5167,11 +5404,14 @@ def run_evolution(
     if (
         run_phase == "all"
         and refinement_phase
-        and dataset == "choice13k"
-        and fitness_metric == "loglik"
-        and val_trials
-        and test_trials
-        and _choice13k_val_loglik_below_refinement_threshold(
+        and _supports_loglik_refinement(
+            dataset,
+            fitness_metric,
+            val_trials,
+            test_trials,
+            cpc18_official_mse=is_cpc18_mse,
+        )
+        and _val_loglik_below_refinement_threshold(
             final_val_loglik, refinement_val_threshold
         )
     ):
@@ -5179,7 +5419,8 @@ def run_evolution(
             f"\nRefinement triggered: val_loglik={float(final_val_loglik):.6f} "
             f"< threshold={float(refinement_val_threshold):.6f}"
         )
-        gated_test_loglik = run_choice13k_refinement_phase(
+        gated_test_loglik = run_loglik_refinement_phase(
+            dataset=dataset,
             client=client,
             model_name=model_name,
             initial_code=final_best_code,
@@ -5224,12 +5465,15 @@ def run_evolution(
     elif (
         run_phase == "all"
         and refinement_phase
-        and dataset == "choice13k"
-        and fitness_metric == "loglik"
-        and val_trials
-        and test_trials
+        and _supports_loglik_refinement(
+            dataset,
+            fitness_metric,
+            val_trials,
+            test_trials,
+            cpc18_official_mse=is_cpc18_mse,
+        )
         and final_val_loglik is not None
-        and not _choice13k_val_loglik_below_refinement_threshold(
+        and not _val_loglik_below_refinement_threshold(
             final_val_loglik, refinement_val_threshold
         )
     ):
@@ -5362,7 +5606,9 @@ def run_evolution(
                 f"Test avg log-likelihood improvement: "
                 f"{overall_best_test['test_loglik'] - baseline_test_eval['avg_loglik']:.6f}"
             )
-        elif dataset == "choice13k":
+        elif _uses_train_val_test_loglik_split(
+            dataset, fitness_metric, cpc18_official_mse=is_cpc18_mse
+        ):
             print(f"Final best train accuracy: {overall_best_train['train_accuracy']:.4f} (from {overall_best_train['program_id']})")
             print(f"Final best test accuracy: {overall_best_test['test_accuracy']:.4f} (from {overall_best_test['program_id']})")
             print(
@@ -5403,35 +5649,21 @@ def run_evolution(
             "seed_program_train_fitness": -baseline_results['train_mse'],
             "seed_program_test_fitness": -baseline_results['test_mse'],
         }
-    elif is_cpc18_split:
+    elif is_cpc18_split and fitness_metric != "loglik":
         result = {
             "participant_id": participant_id,
             "train_acc": overall_best_train["train_accuracy"],
             "test_acc": overall_best_test["test_accuracy"],
             "train_loglik": overall_best_train["train_loglik"],
             "test_loglik": overall_best_test["test_loglik"],
-            "train_fitness": (
-                overall_best_train["train_loglik"]
-                if fitness_metric == "loglik"
-                else overall_best_train["train_accuracy"]
-            ),
-            "test_fitness": (
-                overall_best_test["test_loglik"]
-                if fitness_metric == "loglik"
-                else overall_best_test["test_accuracy"]
-            ),
-            "seed_program_train_fitness": (
-                baseline_train_eval["avg_loglik"]
-                if fitness_metric == "loglik"
-                else baseline_train_eval["accuracy"]
-            ),
-            "seed_program_test_fitness": (
-                baseline_test_eval["avg_loglik"]
-                if fitness_metric == "loglik"
-                else baseline_test_eval["accuracy"]
-            ),
+            "train_fitness": overall_best_train["train_accuracy"],
+            "test_fitness": overall_best_test["test_accuracy"],
+            "seed_program_train_fitness": baseline_train_eval["accuracy"],
+            "seed_program_test_fitness": baseline_test_eval["accuracy"],
         }
-    elif dataset == "choice13k":
+    elif _uses_train_val_test_loglik_split(
+        dataset, fitness_metric, cpc18_official_mse=is_cpc18_mse
+    ):
         result = {
             "participant_id": participant_id,
             "train_acc": overall_best_train["train_accuracy"],
@@ -5464,18 +5696,6 @@ def run_evolution(
             result["seed_program_val_fitness"] = baseline_results.get("val_loglik")
         if gated_test_loglik is not None:
             result["gated_test_loglik"] = gated_test_loglik
-    elif dataset == "mixed_gambles" and fitness_metric == "loglik":
-        result = {
-            "participant_id": participant_id,
-            "train_acc": overall_best_train["train_accuracy"],
-            "test_acc": overall_best_test["test_accuracy"],
-            "train_loglik": overall_best_train["train_loglik"],
-            "test_loglik": overall_best_test["test_loglik"],
-            "train_fitness": overall_best_train["train_loglik"],
-            "test_fitness": overall_best_test["test_loglik"],
-            "seed_program_train_fitness": baseline_results["train_loglik"],
-            "seed_program_test_fitness": baseline_results["test_loglik"],
-        }
     else:
         result = {
             "participant_id": participant_id if dataset in ["choice13k", "cpc18", "mixed_gambles"] else agent_id,
@@ -6022,7 +6242,7 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "After evolution on choice13k (with val split): apply external val_loglik consistency "
+            "After evolution on choice13k only (with val split): apply external val_loglik consistency "
             "gate during test evaluation and report gated_test_loglik (default: False)."
         ),
     )
@@ -6031,9 +6251,9 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "After evolution on choice13k: if val_loglik < --refinement_val_threshold, run a "
-            "train-only refinement loop with validation trials in the prompt; report test loglik "
-            "as gated_test_loglik (default: True)."
+            "After evolution on choice13k / cpc18 loglik / mixed_gambles loglik: if val_loglik < "
+            "--refinement_val_threshold, run refinement with validation trials in the prompt; "
+            "report test loglik as gated_test_loglik (default: True)."
         ),
     )
     parser.add_argument(
@@ -6107,8 +6327,14 @@ def main():
         print(f"Error: --phase must be one of {sorted(_RUN_PHASES)}, got {args.phase!r}.")
         return
     if args.phase == "refine":
-        if args.dataset != "choice13k":
-            print("Error: --phase refine only supports --dataset choice13k.")
+        if args.dataset not in _LOGlik_VAL_SPLIT_DATASETS:
+            print(
+                "Error: --phase refine only supports loglik datasets with val split: "
+                f"{sorted(_LOGlik_VAL_SPLIT_DATASETS)}."
+            )
+            return
+        if args.dataset == "cpc18" and args.cpc18_official_mse:
+            print("Error: --phase refine does not support CPC18 official MSE mode.")
             return
         if args.fitness_metric != "loglik":
             print("Error: --phase refine requires --fitness_metric loglik.")
@@ -6323,7 +6549,7 @@ def main():
 
     if args.phase == "refine":
         if args.dataset not in _PARTICIPANT_DATASETS:
-            print("Error: --phase refine requires a participant dataset (choice13k).")
+            print("Error: --phase refine requires a participant dataset.")
             if wandb is not None:
                 wandb.finish()
             return
@@ -6334,7 +6560,8 @@ def main():
             return
         refine_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
         try:
-            run_choice13k_refine_from_prev_experiment(
+            run_loglik_refine_from_prev_experiment(
+                dataset=args.dataset,
                 client=refine_client,
                 model_name=args.model_name,
                 participants=[int(p) for p in participants_to_process],
@@ -6342,6 +6569,8 @@ def main():
                 output_dir=Path(base_run_dir),
                 split_ratio=args.split_ratio,
                 split_seed=args.split_seed,
+                data_path=args.data_path,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 n_iterations=args.refinement_iters,
                 n_candidates_per_iteration=args.n_candidates,
                 sample_size=args.sample_size,
@@ -6355,6 +6584,8 @@ def main():
                 wandb_module=wandb,
                 parallel_participants=bool(args.parallel_participants),
                 refinement_val_threshold=args.refinement_val_threshold,
+                fitness_metric=args.fitness_metric,
+                cpc18_official_mse=args.cpc18_official_mse,
             )
         finally:
             if wandb is not None:
@@ -6512,7 +6743,9 @@ def main():
                 "participant_id": participant_id,
                 "train_loglik": participant_summary.get("train_loglik"),
             }
-            if args.dataset == "choice13k":
+            if _uses_train_val_test_loglik_split(
+                args.dataset, args.fitness_metric, cpc18_official_mse=args.cpc18_official_mse
+            ):
                 if participant_summary.get("val_loglik") is not None:
                     loglik_row["val_loglik"] = participant_summary.get("val_loglik")
                 loglik_row["test_loglik"] = participant_summary.get("test_loglik")
@@ -6581,7 +6814,9 @@ def main():
                 )
 
             _ll_fields = ["participant_id", "train_loglik"]
-            if args.dataset == "choice13k":
+            if _uses_train_val_test_loglik_split(
+                args.dataset, args.fitness_metric, cpc18_official_mse=args.cpc18_official_mse
+            ):
                 _ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
             else:
                 _ll_fields.append("test_loglik")
@@ -6926,7 +7161,9 @@ def main():
                 "participant_id": participant_summary.get("participant_id"),
                 "train_loglik": participant_summary.get("train_loglik"),
             }
-            if args.dataset == "choice13k":
+            if _uses_train_val_test_loglik_split(
+                args.dataset, args.fitness_metric, cpc18_official_mse=args.cpc18_official_mse
+            ):
                 if participant_summary.get("val_loglik") is not None:
                     _ps_log["val_loglik"] = participant_summary.get("val_loglik")
                 _ps_log["test_loglik"] = participant_summary.get("test_loglik")
@@ -6951,7 +7188,9 @@ def main():
                 return
             if details_loglik_file is not None:
                 _det_ll_fields = ["participant_id", "train_loglik"]
-                if args.dataset == "choice13k":
+                if _uses_train_val_test_loglik_split(
+                    args.dataset, args.fitness_metric, cpc18_official_mse=args.cpc18_official_mse
+                ):
                     _det_ll_fields.extend(["val_loglik", "test_loglik", "gated_test_loglik"])
                 else:
                     _det_ll_fields.append("test_loglik")
@@ -6986,14 +7225,16 @@ def main():
                     "avg_test_loglik": float(np.mean(test_ll_vals)) if test_ll_vals else None,
                 }
                 _agg_ll_fields = ["num_of_participants", "avg_train_loglik", "avg_test_loglik"]
-                if args.dataset == "choice13k":
-                    _agg_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
-                    _agg_ll["avg_val_loglik"] = (
-                        float(np.mean(val_ll_vals)) if val_ll_vals else None
-                    )
-                    _agg_ll["avg_gated_test_loglik"] = (
-                        float(np.mean(gated_test_ll_vals)) if gated_test_ll_vals else None
-                    )
+            if _uses_train_val_test_loglik_split(
+                args.dataset, args.fitness_metric, cpc18_official_mse=args.cpc18_official_mse
+            ):
+                _agg_ll_fields.extend(["avg_val_loglik", "avg_gated_test_loglik"])
+                _agg_ll["avg_val_loglik"] = (
+                    float(np.mean(val_ll_vals)) if val_ll_vals else None
+                )
+                _agg_ll["avg_gated_test_loglik"] = (
+                    float(np.mean(gated_test_ll_vals)) if gated_test_ll_vals else None
+                )
                 with open(summary_loglik_file, "w", newline="", encoding="utf-8") as f:
                     writer = csv.DictWriter(f, fieldnames=_agg_ll_fields)
                     writer.writeheader()
