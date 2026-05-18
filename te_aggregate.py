@@ -42,6 +42,10 @@ from datetime import datetime
 import numpy as np
 from openai import OpenAI
 from tqdm import tqdm
+from utils.prompt_flags import (
+    load_single_code_template,
+    single_code_template_prompt_suffix,
+)
 import jax
 import jax.numpy as jnp
 import flax
@@ -2272,17 +2276,15 @@ def generate_gridworld_initial_candidates(
     code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "gridworld", "non_strict", "single_code_template.txt")
     try:
         base_prompt = open(prompt_path).read()
-        code_template = open(code_template_path).read()
+        code_template = load_single_code_template(code_template_path)
     except FileNotFoundError:
         base_prompt = "You are a robot viewing agents acting in an object-centric environment. Model the agent's behavior as FSM code. Experiences (state, action):"
-        code_template = "Implement the FSM code. Actions: [0,1,2,3,4,5] = stay, right, left, down, up, interact."
+        code_template = ""
     full_prompt = f"""{base_prompt}
 
 Observed trajectory (first 20 steps) for this episode:
 {prefix_text}
-
-{code_template}
-
+{single_code_template_prompt_suffix(code_template)}
 Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Generate the variant now:"""
     candidates = []
     for _ in range(n_candidates):
@@ -2632,7 +2634,7 @@ def generate_gridworld_program_variants(
     
     try:
         base_prompt_template = open(prompt_path).read()
-        code_template = open(code_template_path).read()
+        code_template = load_single_code_template(code_template_path)
     except FileNotFoundError as e:
         print(f"Warning: Could not load prompt files: {e}")
         print("Falling back to hardcoded prompts.")
@@ -2648,7 +2650,7 @@ Each agent receives detailed information about the environment's state, includin
 You need to implement the python code to model the logic of the agent's behavior, as seen in the provided experiences. Please follow the template to implement the code. The code needs to be directly runnable on the state and return the action in python as provided in the experiences. Try to keep your code as concise as possible.
 
 You need to implement python code to model the logic of the world as seen in the following experiences:"""
-        code_template = """Please implement code to model the logic of the agent's behavior as demonstrated by the experiences. Here is the template for the agent's FSM class. Please implement the FSM code for an agent following the template. The code needs to be directly runnable on the inputs of state and return an action based on an observation. Make sure the agent always returns an action in the list [0, 1, 2, 3, 4, 5] corresponding to "stay", "right", "left", "down", "up", "interact"."""
+        code_template = ""
     
     # Format multiple parent programs
     num_parents = len(parent_codes)
@@ -2686,9 +2688,7 @@ Your task: Generate an improved program variant. The variant should:
 - Improve the decision-making logic
 - Handle edge cases better
 - Be more efficient or accurate
-
-{code_template}
-
+{single_code_template_prompt_suffix(code_template)}
 Output format: Provide ONLY runnable Python code (no explanations, no markdown fences, no preamble).
 The variant must be a complete, runnable program.
 
@@ -2797,7 +2797,7 @@ def generate_program_variants(
     
     try:
         base_prompt = open(prompt_path).read()
-        code_template = open(code_template_path).read()
+        code_template = load_single_code_template(code_template_path)
     except FileNotFoundError as e:
         print(f"Warning: Could not load prompt files: {e}")
         print("Falling back to hardcoded prompts.")
@@ -2833,19 +2833,7 @@ Constraints:
 
 Provide only the code for choose(...) as a complete function body.
 """
-            code_template = """
-def choose(problem, history):
-    \"\"\"
-    problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
-    history: list of dicts with keys action (int) and feedback (float or None)
-    return: float, probability of choosing option 1 (Option B)
-    \"\"\"
-    # Write your decision logic here.
-    # You can use probabilities, rewards, and history.
-    # Must return a single float in [0, 1].
-    # The returned value is the probability of choosing Option B (action 1).
-    return 0.5
-"""
+            code_template = ""
         else:
             base_prompt = """You are given observations of human choices in risky-gamble problems.
 Each problem presents two gambles: Option A and Option B. A gamble has outcomes and their probabilities (percent).
@@ -2873,18 +2861,7 @@ Constraints:
 
 Provide only the code for choose(...) as a complete function body.
 """
-            code_template = """
-def choose(problem, history):
-    \"\"\"
-    problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
-    history: list of dicts with keys action (int) and feedback (float or None)
-    return: int index (0 for Option A, 1 for Option B)
-    \"\"\"
-    # Write your decision logic here.
-    # You can use probabilities, rewards, and history.
-    # Must return 0 or 1.
-    return 0
-"""
+            code_template = ""
     
     # Format training trials for context (evaluation elsewhere still uses full train_trials).
     state_text = ""
@@ -2983,8 +2960,8 @@ def choose(problem, history):
         f"{state_text}\n"
         f"{diagnostic_trials_text}\n"
         f"{base_context}\n"
-        f"{parent_context}\n"
-        f"{code_template}"
+        f"{parent_context}"
+        f"{single_code_template_prompt_suffix(code_template)}"
     )
     
     programs = []

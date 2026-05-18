@@ -36,15 +36,6 @@ BASE_LOGlik_PROMPT = (
     / "loglik"
     / "infer_single_choice.txt"
 )
-BASE_CODE_TEMPLATE = (
-    REPO_ROOT
-    / "prompts"
-    / "Template_evo"
-    / "choice13k"
-    / "non_strict"
-    / "loglik"
-    / "single_code_template.txt"
-)
 BASE_REFINE_PROMPT = (
     REPO_ROOT / "prompts" / "Template_evo" / "choice13k" / "refine" / "infer_single_choice.txt"
 )
@@ -252,7 +243,6 @@ def setup_teh_run_prompts(
         )
         print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
 
-    shutil.copy2(BASE_CODE_TEMPLATE, prompts_dir / "single_code_template.txt")
     shutil.copy2(BASE_REFINE_PROMPT, prompts_dir / "refine.txt")
     seed_src = seed_program_path.expanduser().resolve()
     if not seed_src.is_file():

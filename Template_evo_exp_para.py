@@ -25,6 +25,10 @@ from datetime import datetime
 import numpy as np
 from openai import OpenAI
 from tqdm import tqdm
+from utils.prompt_flags import (
+    load_single_code_template,
+    single_code_template_prompt_suffix,
+)
 import jax
 import jax.numpy as jnp
 import flax
@@ -690,7 +694,7 @@ def generate_gridworld_program_variants(
     
     try:
         base_prompt_template = open(prompt_path).read()
-        code_template = open(code_template_path).read()
+        code_template = load_single_code_template(code_template_path)
     except FileNotFoundError as e:
         print(f"Warning: Could not load prompt files: {e}")
         print("Falling back to hardcoded prompts.")
@@ -706,7 +710,7 @@ Each agent receives detailed information about the environment's state, includin
 You need to implement the python code to model the logic of the agent's behavior, as seen in the provided experiences. Please follow the template to implement the code. The code needs to be directly runnable on the state and return the action in python as provided in the experiences. Try to keep your code as concise as possible.
 
 You need to implement python code to model the logic of the world as seen in the following experiences:"""
-        code_template = """Please implement code to model the logic of the agent's behavior as demonstrated by the experiences. Here is the template for the agent's FSM class. Please implement the FSM code for an agent following the template. The code needs to be directly runnable on the inputs of state and return an action based on an observation. Make sure the agent always returns an action in the list [0, 1, 2, 3, 4, 5] corresponding to "stay", "right", "left", "down", "up", "interact"."""
+        code_template = ""
     
     # Format multiple parent programs
     num_parents = len(parent_codes)
@@ -762,9 +766,7 @@ Your task: Generate an improved program variant. The variant should:
 - Improve the decision-making logic (everything except parameters)
 - Handle edge cases better
 - Be more efficient or accurate
-
-{code_template}
-
+{single_code_template_prompt_suffix(code_template)}
 Output format: Provide the variant as a code block marked with ```python and ```.
 The variant should be a complete, runnable program with the exact parameter values preserved.
 
@@ -835,7 +837,7 @@ def generate_program_variants(
     
     try:
         base_prompt = open(prompt_path).read()
-        code_template = open(code_template_path).read()
+        code_template = load_single_code_template(code_template_path)
     except FileNotFoundError as e:
         print(f"Warning: Could not load prompt files: {e}")
         print("Falling back to hardcoded prompts.")
@@ -866,19 +868,7 @@ Constraints:
 
 Provide only the code for choose(...) as a complete function body.
 """
-        code_template = """```python
-def choose(problem, history):
-    \"\"\"
-    problem: dict with gamble_A/gamble_B (probs, rewards), option_keys, has_feedback
-    history: list of dicts with keys action (int) and feedback (float or None)
-    return: int index (0 for Option A, 1 for Option B)
-    \"\"\"
-    # Write your decision logic here.
-    # You can use probabilities, rewards, and history.
-    # Must return 0 or 1.
-    return 0
-```
-"""
+        code_template = ""
     
     # Format training trials for context
     state_text = format_trials_to_text(train_trials)
@@ -907,7 +897,10 @@ These parameters and their values must appear exactly as shown above. You can ch
 (program logic, functions, control flow, etc.), but these parameter assignments must remain unchanged.
 """
     
-    prompt_text = f"{base_prompt}\n{state_text}\n{parent_context}\n{parameter_constraint}\n{code_template}"
+    prompt_text = (
+        f"{base_prompt}\n{state_text}\n{parent_context}\n{parameter_constraint}"
+        f"{single_code_template_prompt_suffix(code_template)}"
+    )
     
     programs = []
     for _ in tqdm(range(n_variants), desc="Generating candidate programs"):

@@ -1039,17 +1039,13 @@ def generate_parameter_variants(
     PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
     if dataset == "cpc18":
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "strict", "infer_single_choice.txt")
-        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "cpc18", "strict", "single_code_template.txt")
     elif dataset == "mixed_gambles":
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "strict", "infer_single_choice.txt")
-        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "mixed_gambles", "strict", "single_code_template.txt")
     else:
         prompt_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "strict", "infer_single_choice.txt")
-        code_template_path = os.path.join(PROJECT_ROOT, "prompts", "Template_evo", "choice13k", "strict", "single_code_template.txt")
     
     try:
         base_prompt_file = open(prompt_path).read()
-        code_template_file = open(code_template_path).read()
         # Use the file content as base, but we'll still format it with parameter-specific info
         base_prompt_template = base_prompt_file + """
 

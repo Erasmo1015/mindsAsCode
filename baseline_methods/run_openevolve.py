@@ -27,6 +27,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import yaml
 from tqdm import tqdm
+from utils.prompt_flags import (
+    load_single_code_template,
+    single_code_template_prompt_suffix,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -1483,13 +1487,12 @@ def _build_openevolve_config_dict(args: argparse.Namespace) -> Dict[str, Any]:
         template_path = prompt_root / "single_code_template.txt"
         try:
             infer_text = infer_path.read_text(encoding="utf-8").strip()
-            template_text = template_path.read_text(encoding="utf-8").strip()
+            template_text = load_single_code_template(template_path).strip()
             system_message = (
                 f"{system_message}\n\n"
                 "# Dataset-specific prompt guidance\n"
-                f"{infer_text}\n\n"
-                "# Dataset-specific code template\n"
-                f"{template_text}"
+                f"{infer_text}"
+                f"{single_code_template_prompt_suffix(template_text)}"
             )
         except OSError as e:
             print(

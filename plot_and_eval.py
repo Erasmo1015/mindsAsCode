@@ -28,6 +28,10 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+from utils.prompt_flags import (
+    load_single_code_template,
+    single_code_template_prompt_suffix,
+)
 from environment import state_to_image_jit, AutomaticityEnv, State
 import optax
 from flax.training import train_state
@@ -2865,7 +2869,7 @@ def run_choice13k_mindascode(args, log_fn=None, participant_id=None):
     refinement_2_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_2.txt")
     refinement_3_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_3.txt")
     base_prompt = open(prompt_path).read()
-    code_template = open(code_template_path).read()
+    code_template = load_single_code_template(code_template_path)
     refinement_1 = open(refinement_1_path).read()
     refinement_2 = open(refinement_2_path).read()
     refinement_3 = open(refinement_3_path).read()
@@ -2907,7 +2911,7 @@ def run_choice13k_mindascode(args, log_fn=None, participant_id=None):
 
             n_programs = args.n_hypothesis
             state_text = format_trials_to_text(train_trials)
-            prompt_text = f"{base_prompt}\n{state_text}\n{code_template}"
+            prompt_text = f"{base_prompt}\n{state_text}{single_code_template_prompt_suffix(code_template)}"
             (prompt_dir / "prompt.txt").write_text(prompt_text)
             program_codes = generator.generate_programs(prompt_text, n_programs)
 

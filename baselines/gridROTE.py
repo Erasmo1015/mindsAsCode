@@ -9,6 +9,8 @@ from rich.progress import track
 import jax
 import numpy as np
 from tqdm import tqdm
+
+from utils.prompt_flags import read_code_template_for_prompt
 from agent import AgentExecutionFramework
 # Import vLLM
 from vllm import LLM, SamplingParams
@@ -83,7 +85,7 @@ class ROTEReasoner:
         refinement_3_path = os.path.join(PROJECT_ROOT, "prompts", "refinement_3.txt")
 
         self.base_prompt = open(prompt_path).read()
-        self.code_template = open(code_template_path).read()
+        self.code_template = read_code_template_for_prompt(code_template_path)
         self.refinement_1 = open(refinement_1_path).read()
         self.refinement_2 = open(refinement_2_path).read()
         self.refinement_3 = open(refinement_3_path).read()
