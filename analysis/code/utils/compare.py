@@ -4,8 +4,17 @@ Compare per-participant test log-likelihood from one or more runs against a Cent
 
 Writes a wide table under analysis/data/utils/ with footer rows Avg, Better, Similar, Worse.
 
-Usage:
-python analysis/code/utils/compare.py --experiment_paths generated_outputs/choice13k/te_dr/run_260514_231815 generated_outputs/choice13k/te_dr/run_260514_235016 generated_outputs/choice13k/te_dr/run_260515_001425 generated_outputs/choice13k/te_dr/run_260515_013558
+Usage (choice13k; default dataset):
+  python analysis/code/utils/compare.py \\
+    --experiment_paths generated_outputs/choice13k/te_dr/run_260514_231815 ...
+
+Usage (cpc18; Centaur + output defaults for that dataset):
+  python analysis/code/utils/compare.py --dataset cpc18 \\
+    --experiment_paths generated_outputs/cpc18/non_strict/run_260517_211601
+
+Usage (mixed_gambles):
+  python analysis/code/utils/compare.py --dataset mixed_gambles \\
+    --experiment_paths generated_outputs/mixed_gambles/non_strict/run_260518_100539
 """
 
 from __future__ import annotations
@@ -14,12 +23,62 @@ import argparse
 import csv
 import math
 import statistics
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+_DATASETS = ("choice13k", "cpc18", "mixed_gambles")
+
+
+@dataclass(frozen=True)
+class _DatasetDefaults:
+    centaur_csv: Path
+    output_csv: Path
+    bir_csv: Optional[Path]
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _dataset_defaults(repo: Path, dataset: str) -> _DatasetDefaults:
+    if dataset not in _DATASETS:
+        raise ValueError(f"dataset must be one of {_DATASETS}, got {dataset!r}")
+    gen = repo / "generated_outputs"
+    if dataset == "choice13k":
+        return _DatasetDefaults(
+            centaur_csv=gen
+            / "choice13k"
+            / "centaur"
+            / "run_260517_190700"
+            / "participant_details_loglik.csv",
+            output_csv=repo / "analysis" / "data" / "utils" / "loglik_compare_choice13k.csv",
+            bir_csv=gen
+            / "choice13k"
+            / "te_aggregate"
+            / "run_260513_234734"
+            / "analysis"
+            / "behavioral_inconsistency_rate.csv",
+        )
+    if dataset == "cpc18":
+        return _DatasetDefaults(
+            centaur_csv=gen
+            / "cpc18"
+            / "centaur"
+            / "run_260517_190927"
+            / "participant_details_loglik.csv",
+            output_csv=repo / "analysis" / "data" / "utils" / "loglik_compare_cpc18.csv",
+            bir_csv=None,
+        )
+    return _DatasetDefaults(
+        centaur_csv=gen
+        / "mixed_gambles"
+        / "centaur"
+        / "run_260517_190705"
+        / "participant_details_loglik.csv",
+        output_csv=repo / "analysis" / "data" / "utils" / "loglik_compare_mixed_gambles.csv",
+        bir_csv=None,
+    )
 
 
 def _resolve_loglik_csv(path: Path) -> Path:
@@ -159,29 +218,19 @@ def _classify_vs_centaur(
             worse += 1
     return better, similar, worse
 
-
 def main() -> None:
     repo = _repo_root()
-    default_centaur = (
-        repo
-        / "generated_outputs"
-        / "choice13k"
-        / "centaur"
-        / "run_260517_013408"
-        / "participant_details_loglik.csv"
-    )
-    default_out = repo / "analysis" / "data" / "utils" / "loglik_compare.csv"
-    default_bir_csv = (
-        repo
-        / "generated_outputs"
-        / "choice13k"
-        / "te_aggregate"
-        / "run_260513_234734"
-        / "analysis"
-        / "behavioral_inconsistency_rate.csv"
-    )
 
     p = argparse.ArgumentParser(description="Compare experiment test_loglik to Centaur baseline.")
+    p.add_argument(
+        "--dataset",
+        choices=list(_DATASETS),
+        default="choice13k",
+        help=(
+            "Dataset family: sets default Centaur CSV and output path "
+            "(choice13k | cpc18 | mixed_gambles)."
+        ),
+    )
     p.add_argument(
         "--experiment_paths",
         nargs="+",
@@ -192,8 +241,11 @@ def main() -> None:
     p.add_argument(
         "--centaur_csv",
         type=Path,
-        default=default_centaur,
-        help="Centaur participant_details_loglik.csv",
+        default=None,
+        help=(
+            "Centaur participant_details_loglik.csv (default depends on --dataset: "
+            "choice13k run_260517_190700, cpc18 run_260517_190927, mixed_gambles run_260517_190705)."
+        ),
     )
     p.add_argument(
         "--similar_threshold",
@@ -204,21 +256,31 @@ def main() -> None:
     p.add_argument(
         "--output",
         type=Path,
-        default=default_out,
-        help="Output CSV path (default: analysis/data/utils/loglik_compare.csv under repo root).",
+        default=None,
+        help="Output CSV path (default: analysis/data/utils/loglik_compare_<dataset>.csv).",
     )
     p.add_argument(
         "--bir_csv",
         type=Path,
-        default=default_bir_csv,
+        default=None,
         help=(
             "behavioral_inconsistency_rate.csv (or its run directory). "
-            "Default: te_aggregate run_260513_234734. If missing, BIR is taken from experiment paths / summaries."
+            "Default for choice13k: te_aggregate run_260513_234734; cpc18/mixed_gambles: none. "
+            "If missing, BIR is taken from experiment paths / summaries when available."
         ),
     )
     args = p.parse_args()
 
-    centaur_path = _resolve_loglik_csv(Path(args.centaur_csv).expanduser())
+    ds_defaults = _dataset_defaults(repo, args.dataset)
+    centaur_arg = Path(args.centaur_csv).expanduser() if args.centaur_csv is not None else ds_defaults.centaur_csv
+    output_arg = Path(args.output).expanduser() if args.output is not None else ds_defaults.output_csv
+    bir_arg: Optional[Path]
+    if args.bir_csv is not None:
+        bir_arg = Path(args.bir_csv).expanduser()
+    else:
+        bir_arg = ds_defaults.bir_csv
+
+    centaur_path = _resolve_loglik_csv(centaur_arg)
     centaur = _read_test_loglik_csv(centaur_path)
 
     exp_resolved = [_resolve_loglik_csv(Path(ep).expanduser()) for ep in args.experiment_paths]
@@ -231,9 +293,10 @@ def main() -> None:
         experiments.append((label, _read_test_loglik_csv(csv_path)))
 
     bir: Dict[int, float] = {}
-    bir_path = _resolve_bir_csv(Path(args.bir_csv))
-    if bir_path.is_file():
-        bir = _read_bir_csv_file(bir_path)
+    if bir_arg is not None:
+        bir_path = _resolve_bir_csv(bir_arg)
+        if bir_path.is_file():
+            bir = _read_bir_csv_file(bir_path)
     if not bir:
         for ep in args.experiment_paths:
             bir = _read_bir_map(Path(ep).expanduser().resolve())
@@ -247,15 +310,15 @@ def main() -> None:
         pids |= set(m.keys())
     ordered = sorted(pids)
 
-    fieldnames = ["participant_ordinal", "BIR", "Centaur"] + run_labels
-    out_path = Path(args.output).expanduser()
+    fieldnames = ["participant_id", "BIR", "Centaur"] + run_labels
+    out_path = output_arg
     out_path = out_path.resolve() if out_path.is_absolute() else (repo / out_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows: List[Dict[str, str]] = []
     for pid in ordered:
         row: Dict[str, str] = {
-            "participant_ordinal": str(pid),
+            "participant_id": str(pid),
             "BIR": f"{bir[pid]:.2f}" if pid in bir else "",
             "Centaur": f"{centaur[pid]:.2f}" if pid in centaur else "",
         }
@@ -264,7 +327,7 @@ def main() -> None:
         rows.append(row)
 
     # Footer: Avg
-    avg_row: Dict[str, str] = {"participant_ordinal": "Avg", "BIR": "", "Centaur": ""}
+    avg_row: Dict[str, str] = {"participant_id": "Avg", "BIR": "", "Centaur": ""}
     if bir:
         avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir])
     avg_row["Centaur"] = _finite_mean([centaur[pid] for pid in ordered if pid in centaur])
@@ -276,7 +339,7 @@ def main() -> None:
     counts_by_label = {label: _classify_vs_centaur(centaur, m, th) for label, m in experiments}
     for footer, idx in (("Better", 0), ("Similar", 1), ("Worse", 2)):
         r = {fn: "" for fn in fieldnames}
-        r["participant_ordinal"] = footer
+        r["participant_id"] = footer
         r["BIR"] = ""
         r["Centaur"] = ""
         for label, _ in experiments:
@@ -288,7 +351,10 @@ def main() -> None:
         w.writeheader()
         w.writerows(rows)
 
-    print(f"Wrote {out_path} ({len(ordered)} participants, {len(experiments)} experiments).")
+    print(
+        f"Wrote {out_path} (dataset={args.dataset}, {len(ordered)} participants, "
+        f"{len(experiments)} experiments, centaur={centaur_path})."
+    )
 
 
 if __name__ == "__main__":

@@ -190,6 +190,52 @@ def _choice13k_val_loglik_below_refinement_threshold(
     return _val_loglik_below_refinement_threshold(val_loglik, refinement_val_threshold)
 
 
+def _gated_loglik_for_participant_summary(participant_summary: Dict[str, Any]) -> Any:
+    """CSV/report gated column: refinement output when present, else evolution test loglik."""
+    gated = participant_summary.get("gated_test_loglik")
+    if gated is not None:
+        return gated
+    return participant_summary.get("test_loglik")
+
+
+def _apply_test_loglik_as_gated_when_no_refinement(
+    *,
+    gated_test_loglik: Optional[float],
+    overall_best_train: Dict[str, Any],
+    overall_best_test: Dict[str, Any],
+    dataset: str,
+    fitness_metric: str,
+    run_phase: str,
+    refinement_phase: bool,
+    val_trials: List[Dict[str, Any]],
+    test_trials: List[Dict[str, Any]],
+    cpc18_official_mse: bool = False,
+) -> Optional[float]:
+    """
+    When refinement did not set gated_test_loglik, copy evolution test loglik for reporting.
+
+    Applies to choice13k / cpc18 loglik / mixed_gambles loglik (--refinement_phase on, --phase all).
+    """
+    if gated_test_loglik is not None:
+        return gated_test_loglik
+    if run_phase != "all" or not refinement_phase or fitness_metric != "loglik":
+        return None
+    if not _supports_loglik_refinement(
+        dataset,
+        fitness_metric,
+        val_trials,
+        test_trials,
+        cpc18_official_mse=cpc18_official_mse,
+    ):
+        return None
+    test_ll = _safe_float(overall_best_test.get("test_loglik"))
+    if test_ll is None:
+        return None
+    overall_best_train["gated_test_loglik"] = test_ll
+    overall_best_test["gated_test_loglik"] = test_ll
+    return test_ll
+
+
 def _evaluate_loglik_for_dataset(
     dataset: str,
     choose_fn: Callable,
@@ -4731,6 +4777,10 @@ def run_evolution(
             "test_loglik": baseline_test_eval['avg_loglik'],
             "program_id": "baseline"
         }
+        if fitness_metric == "loglik" and baseline_val_eval is not None:
+            _baseline_val_ll = baseline_val_eval["avg_loglik"]
+            overall_best_train["val_loglik"] = _baseline_val_ll
+            overall_best_test["val_loglik"] = _baseline_val_ll
     else:
         overall_best_train = {
             "train_accuracy": baseline_train_eval['accuracy'],
@@ -5583,6 +5633,8 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
+                    if val_trials and fitness_metric == "loglik":
+                        overall_best_train["val_loglik"] = iter_best_val_loglik
                 if fitness_metric == "loglik":
                     _test_better2 = (
                         iter_best_test_loglik is not None
@@ -5598,6 +5650,8 @@ def run_evolution(
                         "test_loglik": iter_best_test_loglik,
                         "program_id": iter_best_program_id,
                     }
+                    if val_trials and fitness_metric == "loglik":
+                        overall_best_test["val_loglik"] = iter_best_val_loglik
             elif dataset in {"choice13k", "mixed_gambles"}:
                 if fitness_metric == "loglik":
                     _train_better = (
@@ -5787,6 +5841,8 @@ def run_evolution(
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
+            if val_trials:
+                summary["best_val_loglik"] = iter_best_val_loglik if selected_results else None
         elif dataset in {"choice13k", "mixed_gambles"}:
             summary = {
                 "iteration": iteration_step,
@@ -6028,7 +6084,7 @@ def run_evolution(
         }
         # Keep paired train/test metrics from the same best-train program.
         overall_best_test = dict(overall_best_train)
-    elif is_cpc18_split:
+    elif is_cpc18_split and fitness_metric != "loglik":
         final_train_eval = evaluate_cpc18_split_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
         final_test_eval = evaluate_cpc18_split_program(final_best_fn, test_trials, n_seeds=n_eval_seeds)
         overall_best_train = {
@@ -6177,6 +6233,22 @@ def run_evolution(
             f"\nRefinement skipped: val_loglik={float(final_val_loglik):.6f} "
             f">= threshold={float(refinement_val_threshold):.6f}"
         )
+    elif (
+        run_phase == "all"
+        and refinement_phase
+        and _supports_loglik_refinement(
+            dataset,
+            fitness_metric,
+            val_trials,
+            test_trials,
+            cpc18_official_mse=is_cpc18_mse,
+        )
+        and final_val_loglik is None
+    ):
+        print(
+            "\nRefinement skipped: val_loglik unavailable "
+            f"(val_trials={len(val_trials)}, test_trials={len(test_trials)})"
+        )
 
     if (
         gate_phase
@@ -6206,6 +6278,19 @@ def run_evolution(
                     _wandb_log_participant_metrics(
                         wandb, gate_log, int(participant_id), int(n_iterations) + 1
                     )
+
+    gated_test_loglik = _apply_test_loglik_as_gated_when_no_refinement(
+        gated_test_loglik=gated_test_loglik,
+        overall_best_train=overall_best_train,
+        overall_best_test=overall_best_test,
+        dataset=dataset,
+        fitness_metric=fitness_metric,
+        run_phase=run_phase,
+        refinement_phase=refinement_phase,
+        val_trials=val_trials,
+        test_trials=test_trials,
+        cpc18_official_mse=is_cpc18_mse,
+    )
 
     if is_cpc18_mse or is_cpc18_split:
         results = {
@@ -6626,6 +6711,20 @@ def _write_command_line_log(run_dir: Path) -> Path:
     return path
 
 
+def _csv_fieldnames_from_rows(rows: List[Dict[str, Any]]) -> List[str]:
+    """Union of dict keys across rows, preserving order from the first row then appending extras."""
+    if not rows:
+        return []
+    fieldnames = list(rows[0].keys())
+    seen = set(fieldnames)
+    for row in rows[1:]:
+        for key in row.keys():
+            if key not in seen:
+                fieldnames.append(key)
+                seen.add(key)
+    return fieldnames
+
+
 def _round_floats_for_csv_row(row: Dict[str, Any], ndigits: int = 4) -> Dict[str, Any]:
     """Round finite floats for CSV output; keep ints, None, bools, and other types unchanged."""
     out: Dict[str, Any] = {}
@@ -6948,8 +7047,9 @@ def main():
         default=True,
         help=(
             "After evolution on choice13k / cpc18 loglik / mixed_gambles loglik: if val_loglik < "
-            "--refinement_val_threshold, run refinement with validation trials in the prompt; "
-            "report test loglik as gated_test_loglik (default: True)."
+            "--refinement_val_threshold, run refinement with validation trials in the prompt and "
+            "report refinement test loglik as gated_test_loglik; otherwise copy evolution "
+            "test_loglik into gated_test_loglik for experiment CSVs (default: True)."
         ),
     )
     parser.add_argument(
@@ -7510,8 +7610,9 @@ def main():
                 if participant_summary.get("val_loglik") is not None:
                     loglik_row["val_loglik"] = participant_summary.get("val_loglik")
                 loglik_row["test_loglik"] = participant_summary.get("test_loglik")
-                if participant_summary.get("gated_test_loglik") is not None:
-                    loglik_row["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+                _gated_ll = _gated_loglik_for_participant_summary(participant_summary)
+                if _gated_ll is not None:
+                    loglik_row["gated_test_loglik"] = _gated_ll
             else:
                 loglik_row["test_loglik"] = participant_summary.get("test_loglik")
             return {
@@ -7928,8 +8029,9 @@ def main():
                 if participant_summary.get("val_loglik") is not None:
                     _ps_log["val_loglik"] = participant_summary.get("val_loglik")
                 _ps_log["test_loglik"] = participant_summary.get("test_loglik")
-                if participant_summary.get("gated_test_loglik") is not None:
-                    _ps_log["gated_test_loglik"] = participant_summary.get("gated_test_loglik")
+                _gated_ll = _gated_loglik_for_participant_summary(participant_summary)
+                if _gated_ll is not None:
+                    _ps_log["gated_test_loglik"] = _gated_ll
             else:
                 _ps_log["test_loglik"] = participant_summary.get("test_loglik")
             return _ps_log
@@ -7938,7 +8040,7 @@ def main():
             """Rewrite experiment-level CSVs from participants_summary / participants_loglik_summary."""
             if summary_file is None or not participants_summary:
                 return
-            fieldnames = list(participants_summary[0].keys())
+            fieldnames = _csv_fieldnames_from_rows(participants_summary)
             with open(summary_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
