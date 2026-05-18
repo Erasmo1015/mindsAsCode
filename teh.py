@@ -45,10 +45,13 @@ from data_modules.mixed_gambles import (
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PSYCH101_BINARY_DATASETS,
+    experiment_to_trial_dicts,
+    format_trials_for_prompt,
     get_psych101_binary_experiments,
     hf_id_for_psych_dataset_split,
     is_psych101_dataset,
     normalize_psych_dataset_split,
+    split_psych_experiment,
 )
 from utils.teh.teh_datasets import (
     IMPLEMENTED_PSYCH101_ALIASES,
@@ -1961,7 +1964,7 @@ def _psych101_trials_for_participant(
         raise ValueError(
             f"participant_id={participant_id} out of range (only {len(experiments)} experiments loaded)."
         )
-    train_trials, val_trials, test_trials, _options = split_trials(
+    train_trials, val_trials, test_trials, _options = split_psych_experiment(
         experiments[participant_id], split_ratio=split_ratio, split_seed=split_seed
     )
     return train_trials, val_trials, test_trials
@@ -2368,18 +2371,17 @@ def run_choice13k_refine_from_prev_experiment(**kwargs: Any) -> None:
 
 
 def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13k") -> str:
-    """Convert trials to numbered text for prompt.
-    
-    Supports both Choice13k and CPC18 formats.
-    
-    Args:
-        trials: List of trial dictionaries
-        dataset: "choice13k" or "cpc18"
-    """
+    """Convert trials to numbered text for prompt (Psych-101 schemas + legacy CPC18)."""
+    if trials:
+        prob0 = trials[0].get("problem", {})
+        psych_alias = prob0.get("dataset_alias")
+        if is_psych101_dataset(dataset) or (
+            psych_alias and is_psych101_dataset(str(psych_alias))
+        ) or prob0.get("schema_type") in ("A", "B", "C", "D"):
+            return format_trials_for_prompt(trials, max_trials=len(trials))
     lines = []
     for idx, t in enumerate(trials):
         if dataset == "cpc18":
-            # CPC18 format: problem has Ha, pHa, La, LotShapeA, LotNumA, Hb, pHb, Lb, LotShapeB, LotNumB, Amb, Corr
             prob = t["problem"]
             action = t["action"]
             lines.append(
@@ -2390,18 +2392,21 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
                 f"Amb={prob['Amb']}, Corr={prob['Corr']}; Observed action: {action}"
             )
         else:
-            # Choice13k format
-            prob_a = t["problem"]["gamble_A"]["probs"]
-            rew_a = t["problem"]["gamble_A"]["rewards"]
-            prob_b = t["problem"]["gamble_B"]["probs"]
-            rew_b = t["problem"]["gamble_B"]["rewards"]
-            has_fb = t["problem"].get("has_feedback", False)
-            action = t["action"]
-            lines.append(
-                f"{idx+1}. Problem: Option A probs {prob_a} rewards {rew_a}; "
-                f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}; "
-                f"Observed action: {action}"
-            )
+            prob = t["problem"]
+            if "gamble_A" in prob and "gamble_B" in prob:
+                prob_a = prob["gamble_A"]["probs"]
+                rew_a = prob["gamble_A"]["rewards"]
+                prob_b = prob["gamble_B"]["probs"]
+                rew_b = prob["gamble_B"]["rewards"]
+                has_fb = prob.get("has_feedback", False)
+                action = t["action"]
+                lines.append(
+                    f"{idx+1}. Problem: Option A probs {prob_a} rewards {rew_a}; "
+                    f"Option B probs {prob_b} rewards {rew_b}; has_feedback={has_fb}; "
+                    f"Observed action: {action}"
+                )
+            else:
+                lines.append(format_trials_for_prompt([t], max_trials=1))
     return "\n".join(lines)
 
 
@@ -4253,15 +4258,15 @@ Provide only the code for choose(...) as a complete function body.
             subsample_seed=prompt_train_trials_seed,
             label=obs_label,
         )
-    # Note: dataset parameter not available here, but this function is only called for Choice13k/CPC18
-    # We'll detect format from trial structure
     if trials_for_prompt and "problem" in trials_for_prompt[0]:
-        if "gamble_A" in trials_for_prompt[0]["problem"]:
+        prob0 = trials_for_prompt[0]["problem"]
+        dataset_type = str(prob0.get("dataset_alias") or dataset or "choice13k")
+        if "gamble_A" in prob0 and dataset_type not in PSYCH101_BINARY_DATASETS:
             dataset_type = "choice13k"
-        else:
+        elif "Ha" in prob0:
             dataset_type = "cpc18"
     else:
-        dataset_type = "choice13k"
+        dataset_type = dataset or "choice13k"
     state_text = format_trials_to_text(trials_for_prompt, dataset=dataset_type)
 
     extra_state_text = ""
@@ -4506,7 +4511,7 @@ def run_evolution(
                 local_dataset=local_dataset,
             )
             exp = experiments[participant_id]
-        train_trials, val_trials, test_trials, options = split_trials(
+        train_trials, val_trials, test_trials, options = split_psych_experiment(
             exp, split_ratio=split_ratio, split_seed=split_seed
         )
         print(
@@ -7431,11 +7436,9 @@ def main():
         train_trials: List[Dict[str, Any]] = []
         test_trials: List[Dict[str, Any]] = []
         for pid in train_participants:
-            p_trials, _ = experiment_to_trials(experiments[pid])
-            train_trials.extend(p_trials)
+            train_trials.extend(experiment_to_trial_dicts(experiments[pid]))
         for pid in test_participants:
-            p_trials, _ = experiment_to_trials(experiments[pid])
-            test_trials.extend(p_trials)
+            test_trials.extend(experiment_to_trial_dicts(experiments[pid]))
         print(f"Across-participants trial counts: train={len(train_trials)}, test={len(test_trials)}")
 
         try:

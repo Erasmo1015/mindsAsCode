@@ -15,6 +15,7 @@ from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
     experiment_id_for_alias,
     experiment_to_trial_dicts,
+    format_trials_for_prompt,
     get_psych101_binary_experiments,
 )
 from utils.teh.teh_datasets import (
@@ -93,18 +94,7 @@ def teh_wandb_run_name(
 
 
 def _format_trials_for_prompt(trials: List[Dict[str, Any]], max_trials: int = 8) -> str:
-    lines: List[str] = []
-    for idx, t in enumerate(trials[:max_trials]):
-        p = t["problem"]
-        ga = p.get("gamble_A", {})
-        gb = p.get("gamble_B", {})
-        lines.append(
-            f"{idx + 1}. gamble_A probs={ga.get('probs')} rewards={ga.get('rewards')}; "
-            f"gamble_B probs={gb.get('probs')} rewards={gb.get('rewards')}; "
-            f"option_keys={p.get('option_keys')}; has_feedback={p.get('has_feedback')}; "
-            f"action={t['action']}; history_len={len(t.get('history', []))}"
-        )
-    return "\n".join(lines)
+    return format_trials_for_prompt(trials, max_trials=max_trials)
 
 
 def _merge_prompt_fallback(

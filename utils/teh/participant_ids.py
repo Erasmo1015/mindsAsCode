@@ -79,7 +79,7 @@ def collect_psych101_valid_participants(
         raise ValueError(f"Parser not implemented for {dataset_alias!r}")
 
     split = normalize_psych_dataset_split(psych_dataset_split)
-    from teh import split_trials
+    from data_modules.psych101_binary import split_psych_experiment
 
     records: List[Psych101ParticipantStats] = []
     n = 0
@@ -97,7 +97,7 @@ def collect_psych101_valid_participants(
             break
         try:
             exp = experiments[n]
-            train_trials, val_trials, test_trials, _ = split_trials(
+            train_trials, val_trials, test_trials, _ = split_psych_experiment(
                 exp, split_ratio=split_ratio, split_seed=split_seed
             )
             if train_trials and test_trials:

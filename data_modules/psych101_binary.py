@@ -2,29 +2,19 @@
 Psych-101 binary cognitive datasets for TEH (Template Evolution HuggingFace).
 
 Loads marcelbinz/Psych-101 or Psych-101-test rows and parses NL transcripts into
-Experiment objects compatible with Template_evo split_trials / experiment_to_trials.
+PsychExperiment objects with schema-specific structured trial dicts.
 """
 from __future__ import annotations
 
-import math
-import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+import numpy as np
 from datasets import load_dataset, load_from_disk
 
-# Reuse choice13k structured types (same as legacy choice13k pipeline).
-from data_modules.choice13k import (
-    Block,
-    Experiment,
-    Gamble,
-    Trial,
-    _convert_to_experiment as _choice13k_convert_to_experiment,
-    _extract_gamble_info,
-    _extract_has_feedback,
-    _hf_token_for_datasets,
-)
+from data_modules.choice13k import _hf_token_for_datasets
 
 TEST_HF_ID = "marcelbinz/Psych-101-test"
 TRAIN_HF_ID = "marcelbinz/Psych-101"
@@ -33,8 +23,27 @@ PSYCH_DATASET_SPLITS = frozenset({"train", "test"})
 DEFAULT_PSYCH_DATASET_SPLIT = "train"
 
 
+class ParsedTrial(NamedTuple):
+    action: int
+    feedback: Optional[Any]
+    problem_fields: Dict[str, Any]
+
+
+class PsychBlock(NamedTuple):
+    trials: List[ParsedTrial]
+    option_keys: List[str]
+    problem_static: Dict[str, Any]
+    schema_type: str
+
+
+class PsychExperiment(NamedTuple):
+    instruction: str
+    blocks: List[PsychBlock]
+    dataset_alias: str
+    schema_type: str
+
+
 def normalize_psych_dataset_split(split: str) -> str:
-    """Validate Psych-101 HF corpus selector (train vs held-out test hub)."""
     s = str(split).strip().lower()
     if s not in PSYCH_DATASET_SPLITS:
         raise ValueError(
@@ -44,80 +53,8 @@ def normalize_psych_dataset_split(split: str) -> str:
 
 
 def hf_id_for_psych_dataset_split(split: str) -> str:
-    """Map split name to Hugging Face dataset id."""
     s = normalize_psych_dataset_split(split)
     return TRAIN_HF_ID if s == "train" else TEST_HF_ID
-
-# choice13k-style press + CPC18 feedback lines (`and gain` / `and lose`)
-_RE_TRIAL_PRESS = re.compile(
-    r"(You press <<([A-Z])>>"
-    r"(?:\.(?:\s*You receive (-?\d+\.?\d*) points.*?)?"
-    r"| and (?:gain|lose) (-?\d+\.?\d*) points.*?))"
-    r"(?:\n|$)",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _extract_trials_extended(
-    trials_str: str, gamble_info: str, option_keys: List[str]
-) -> List[Trial]:
-    trials: List[Trial] = []
-    history_prefix = gamble_info.strip() + "\n"
-    for match in _RE_TRIAL_PRESS.finditer(trials_str):
-        full_trial_str = match.group(1).strip()
-        key = match.group(2).upper()
-        if key not in option_keys:
-            continue
-        action = option_keys.index(key)
-        fb_dot = match.group(3)
-        fb_gain = match.group(4)
-        feedback = None
-        if fb_dot:
-            feedback = float(fb_dot)
-        elif fb_gain:
-            feedback = float(fb_gain)
-        trials.append(
-            Trial(
-                action=action,
-                feedback=feedback,
-                history=history_prefix.strip(),
-            )
-        )
-        history_prefix += "You press <<" + key + ">>.\n" + full_trial_str + "\n"
-    return trials
-
-
-def _convert_to_block_extended(block_str: str) -> Block:
-    gamble_info = block_str.split("\nYou press")[0]
-    trials_str = block_str[len(gamble_info) :].lstrip()
-    gamble_A, gamble_B, option_keys = _extract_gamble_info(gamble_info)
-    trials = _extract_trials_extended(trials_str, gamble_info, option_keys)
-    return Block(
-        trials=trials,
-        gamble_A=gamble_A,
-        gamble_B=gamble_B,
-        has_feedback=_extract_has_feedback(block_str),
-        option_keys=option_keys,
-        gamble_info_text=gamble_info.strip(),
-    )
-
-
-def _convert_to_experiment_extended(row: Dict[str, Any]) -> Experiment:
-    data = dict(row)
-    data["text"] = data["text"].replace("\n\n\n\nOption", "\n\nOption")
-    data["text"] = data["text"].replace("\n\n\nOption", "\n\nOption")
-    instruction = data["text"].split("\n\nOption")[0]
-    trials_str = data["text"][len(instruction) :].lstrip()
-    blocks: List[Block] = []
-    for block_str in trials_str.split("\n\n"):
-        if not block_str.strip():
-            continue
-        if "Option " not in block_str and not blocks:
-            continue
-        if "Option " not in block_str:
-            continue
-        blocks.append(_convert_to_block_extended(block_str))
-    return Experiment(instruction=instruction, blocks=blocks)
 
 
 PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
@@ -147,7 +84,7 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
         "display_name": "Wulff description",
         "schema_type": "A",
         "parser": "lottery_offers",
-        "implemented": False,
+        "implemented": True,
         "task_description": "Decisions from description; Lottery W/H offers format.",
     },
     "speekenbrink2008learning": {
@@ -155,39 +92,39 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
         "display_name": "Speekenbrink learning",
         "schema_type": "B",
         "parser": "weather_cards",
-        "implemented": False,
-        "task_description": "Weather prediction from tarot cards; binary E/J.",
+        "implemented": True,
+        "task_description": "Weather prediction from tarot cards; binary press keys per participant.",
     },
     "sadeghiyeh2020temporal": {
         "experiment_id": "sadeghiyeh2020temporal/exp1.csv",
         "display_name": "Sadeghiyeh temporal/bandit",
         "schema_type": "C",
         "parser": "slot_machine_bandit",
-        "implemented": False,
-        "task_description": "Two-arm bandit slot machines (Psych-101 text).",
+        "implemented": True,
+        "task_description": "Two-arm bandit slot machines by game (instructed then free trials).",
     },
     "hilbig2014generalized": {
         "experiment_id": "hilbig2014generalized/exp1.csv",
         "display_name": "Hilbig generalized",
         "schema_type": "B",
         "parser": "product_ratings",
-        "implemented": False,
+        "implemented": True,
         "task_description": "Product choice with expert rating vectors.",
     },
     "frey2017cct": {
         "experiment_id": "frey2017cct/exp1.csv",
         "display_name": "Frey CCT",
-        "schema_type": "C",
+        "schema_type": "D",
         "parser": "columbia_card_task",
-        "implemented": False,
-        "task_description": "Columbia Card Task (flip vs stop).",
+        "implemented": True,
+        "task_description": "Columbia Card Task (flip E vs stop C) per round.",
     },
     "flesch2018comparing": {
         "experiment_id": "flesch2018comparing/exp1.csv",
         "display_name": "Flesch comparing",
         "schema_type": "B",
         "parser": "tree_accept_reject",
-        "implemented": False,
+        "implemented": True,
         "task_description": "Tree accept/reject in North/South gardens.",
     },
 }
@@ -203,19 +140,24 @@ def experiment_id_for_alias(dataset_alias: str) -> str:
     return PSYCH101_BINARY_DATASETS[dataset_alias]["experiment_id"]
 
 
-def _parse_row(row: Dict[str, Any], dataset_alias: str) -> Experiment:
+def schema_type_for_alias(dataset_alias: str) -> str:
+    return PSYCH101_BINARY_DATASETS[dataset_alias]["schema_type"]
+
+
+def _parse_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
     spec = PSYCH101_BINARY_DATASETS[dataset_alias]
     if not spec.get("implemented"):
         raise NotImplementedError(
             f"Parser for dataset alias {dataset_alias!r} is not implemented yet "
-            f"(expected parser type: {spec.get('parser')!r}, schema_type={spec.get('schema_type')!r})."
+            f"(expected parser type: {spec.get('parser')!r})."
         )
-    parser = spec["parser"]
-    if parser == "choice13k":
-        return _choice13k_convert_to_experiment(row)
-    if parser == "option_delivers_extended":
-        return _convert_to_experiment_extended(row)
-    raise NotImplementedError(f"Unknown parser id {parser!r} for {dataset_alias!r}")
+    from data_modules.psych101_parsers import PARSER_DISPATCH
+
+    parser_id = spec["parser"]
+    fn = PARSER_DISPATCH.get(parser_id)
+    if fn is None:
+        raise NotImplementedError(f"Unknown parser id {parser_id!r} for {dataset_alias!r}")
+    return fn(row, dataset_alias)
 
 
 def _load_hf_split(
@@ -245,12 +187,7 @@ def get_psych101_binary_experiments(
     n_participants: int = 10,
     split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
-) -> List[Experiment]:
-    """
-    Load and parse Psych-101 participant rows for a registered binary dataset alias.
-
-    Participant index i is the i-th row in the filtered HF split (same as legacy choice13k).
-    """
+) -> List[PsychExperiment]:
     if dataset_alias not in PSYCH101_BINARY_DATASETS:
         raise KeyError(
             f"Unknown dataset alias {dataset_alias!r}. "
@@ -260,61 +197,247 @@ def get_psych101_binary_experiments(
     split_ds = _load_hf_split(split, local_dataset=local_dataset)
     filtered = split_ds.filter(lambda ex, e=exp_id: ex["experiment"] == e)
     n = min(n_participants, len(filtered))
-    experiments: List[Experiment] = []
+    experiments: List[PsychExperiment] = []
     for i in range(n):
         row = dict(filtered[i])
         experiments.append(_parse_row(row, dataset_alias))
     return experiments
 
 
-def experiment_to_trial_dicts(
-    exp: Experiment,
+def _merge_problem(
+    block: PsychBlock,
+    trial: ParsedTrial,
     *,
     dataset_alias: str,
     experiment_id: str,
+) -> Dict[str, Any]:
+    problem = dict(block.problem_static)
+    problem.update(trial.problem_fields)
+    problem.setdefault("option_keys", list(block.option_keys))
+    problem.setdefault("schema_type", block.schema_type)
+    problem["dataset_alias"] = dataset_alias
+    problem["experiment_id"] = experiment_id
+    return problem
+
+
+def experiment_to_trial_dicts(
+    exp: PsychExperiment,
+    *,
+    dataset_alias: Optional[str] = None,
+    experiment_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Convert Experiment to evaluator trial dicts (gamble schema A)."""
-    if not exp.blocks:
-        return []
-    options = exp.blocks[0].option_keys
+    """Convert PsychExperiment to evaluator trial dicts (schema-specific problem fields)."""
+    alias = dataset_alias or exp.dataset_alias
+    exp_id = experiment_id or experiment_id_for_alias(alias)
     all_trials: List[Dict[str, Any]] = []
     history_accum: List[Dict[str, Any]] = []
     for block in exp.blocks:
+        block_history: List[Dict[str, Any]] = []
         for trial in block.trials:
-            problem: Dict[str, Any] = {
-                "gamble_A": {
-                    "probs": block.gamble_A.probs,
-                    "rewards": block.gamble_A.rewards,
-                },
-                "gamble_B": {
-                    "probs": block.gamble_B.probs,
-                    "rewards": block.gamble_B.rewards,
-                },
-                "option_keys": list(options),
-                "has_feedback": block.has_feedback,
-                "dataset_alias": dataset_alias,
-                "experiment_id": experiment_id,
-            }
+            problem = _merge_problem(
+                block, trial, dataset_alias=alias, experiment_id=exp_id
+            )
             all_trials.append(
                 {
                     "problem": problem,
-                    "history": list(history_accum),
-                    "options": list(options),
+                    "history": list(block_history),
+                    "options": list(block.option_keys),
                     "action": trial.action,
                 }
             )
-            history_accum.append(
-                {"action": trial.action, "feedback": trial.feedback}
-            )
+            entry: Dict[str, Any] = {"action": trial.action}
+            if trial.feedback is not None:
+                entry["feedback"] = trial.feedback
+            for k, v in trial.problem_fields.items():
+                if k not in entry:
+                    entry[k] = v
+            block_history.append(entry)
     return all_trials
 
 
-def parse_coverage_stats(text: str, exp: Experiment) -> Dict[str, Any]:
-    """Press recovery rate for smoke tests."""
+def trials_from_blocks(
+    exp: PsychExperiment,
+    block_indices: set,
+    *,
+    dataset_alias: Optional[str] = None,
+    experiment_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Trials from selected blocks; history resets per block."""
+    alias = dataset_alias or exp.dataset_alias
+    exp_id = experiment_id or experiment_id_for_alias(alias)
+    out: List[Dict[str, Any]] = []
+    for bi, block in enumerate(exp.blocks):
+        if bi not in block_indices:
+            continue
+        block_history: List[Dict[str, Any]] = []
+        for trial in block.trials:
+            problem = _merge_problem(
+                block, trial, dataset_alias=alias, experiment_id=exp_id
+            )
+            out.append(
+                {
+                    "problem": problem,
+                    "history": list(block_history),
+                    "options": list(block.option_keys),
+                    "action": trial.action,
+                }
+            )
+            entry: Dict[str, Any] = {"action": trial.action}
+            if trial.feedback is not None:
+                entry["feedback"] = trial.feedback
+            for k, v in trial.problem_fields.items():
+                if k not in entry:
+                    entry[k] = v
+            block_history.append(entry)
+    return out
+
+
+def _expand_single_block_to_pseudo_blocks(exp: PsychExperiment) -> PsychExperiment:
+    """When one global block holds all trials, chunk into pseudo-blocks for TEH split."""
+    if len(exp.blocks) != 1:
+        return exp
+    block = exp.blocks[0]
+    n = len(block.trials)
+    if n < 3:
+        return exp
+    target_blocks = max(3, min(30, n // 15))
+    chunk_size = max(1, (n + target_blocks - 1) // target_blocks)
+    new_blocks: List[PsychBlock] = []
+    for i in range(0, n, chunk_size):
+        chunk = block.trials[i : i + chunk_size]
+        if not chunk:
+            continue
+        new_blocks.append(
+            PsychBlock(
+                trials=chunk,
+                option_keys=list(block.option_keys),
+                problem_static=dict(block.problem_static),
+                schema_type=block.schema_type,
+            )
+        )
+    if len(new_blocks) < 3:
+        return exp
+    return PsychExperiment(
+        instruction=exp.instruction,
+        blocks=new_blocks,
+        dataset_alias=exp.dataset_alias,
+        schema_type=exp.schema_type,
+    )
+
+
+def split_psych_experiment(
+    exp: PsychExperiment,
+    split_ratio: float = 0.8,
+    split_seed: int = 42,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], list]:
+    """Split by block (problem/game/round); history does not cross blocks."""
+    exp = _expand_single_block_to_pseudo_blocks(exp)
+    n_blocks = len(exp.blocks)
+    if n_blocks < 3:
+        raise ValueError(
+            f"Psych-101 train/val/test split requires at least 3 problems (blocks); got {n_blocks}."
+        )
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+
+    rng = np.random.default_rng(split_seed)
+    perm = np.arange(n_blocks)
+    rng.shuffle(perm)
+
+    n_train = int(n_blocks * split_ratio)
+    n_train = max(1, min(n_train, n_blocks - 2))
+    n_rem = n_blocks - n_train
+    n_val = (n_rem + 1) // 2
+    n_test = n_rem - n_val
+    if n_val < 1:
+        n_val = 1
+        n_test = max(1, n_rem - 1)
+        n_train = n_blocks - n_val - n_test
+        n_train = max(1, n_train)
+        n_rem = n_blocks - n_train
+        n_val = n_rem // 2
+        n_test = n_rem - n_val
+    if n_test < 1:
+        n_test = 1
+        n_val = max(1, n_rem - 1)
+        n_train = n_blocks - n_val - n_test
+        n_train = max(1, n_train)
+
+    train_blocks = set(perm[:n_train].tolist())
+    val_blocks = set(perm[n_train : n_train + n_val].tolist())
+    test_blocks = set(perm[n_train + n_val :].tolist())
+
+    train_trials = trials_from_blocks(exp, train_blocks)
+    val_trials = trials_from_blocks(exp, val_blocks)
+    test_trials = trials_from_blocks(exp, test_blocks)
+    options = exp.blocks[0].option_keys
+    return train_trials, val_trials, test_trials, options
+
+
+def parse_coverage_stats(text: str, exp: PsychExperiment) -> Dict[str, Any]:
     n_press = len(re.findall(r"You press <<", text))
+    n_instructed = len(re.findall(r"You are instructed to press", text, re.I))
+    n_actions = n_press + n_instructed
     n_trials = sum(len(b.trials) for b in exp.blocks)
+    denom = n_actions if n_instructed else n_press
     return {
         "n_presses_in_text": n_press,
+        "n_instructed_actions": n_instructed,
         "n_trials_parsed": n_trials,
-        "parse_coverage": round(n_trials / n_press, 4) if n_press else 0.0,
+        "parse_coverage": round(n_trials / denom, 4) if denom else 0.0,
     }
+
+
+def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
+    """One-line summary of a parsed trial for infer_single_choice prompt generation."""
+    p = trial["problem"]
+    schema = p.get("schema_type", "?")
+    action = trial["action"]
+    keys = p.get("option_keys", [])
+    hist_len = len(trial.get("history", []))
+    if schema == "A":
+        ga = p.get("gamble_A", {})
+        gb = p.get("gamble_B", {})
+        return (
+            f"{index}. [gamble] gamble_A probs={ga.get('probs')} rewards={ga.get('rewards')}; "
+            f"gamble_B probs={gb.get('probs')} rewards={gb.get('rewards')}; "
+            f"option_keys={keys}; has_feedback={p.get('has_feedback')}; "
+            f"action={action} (key={keys[action] if action < len(keys) else '?'}); history_len={hist_len}"
+        )
+    if schema == "B":
+        if "cards" in p or "cards" in trial.get("history", [{}])[0] if trial.get("history") else False:
+            return (
+                f"{index}. [weather] cards={p.get('cards')}; option_keys={keys}; "
+                f"weather_outcome={p.get('weather_outcome')}; action={action}; history_len={hist_len}"
+            )
+        if "tree_features" in p:
+            return (
+                f"{index}. [tree] features={p.get('tree_features')}; garden={p.get('garden')}; "
+                f"phase={p.get('phase')}; option_keys={keys}; action={action}; history_len={hist_len}"
+            )
+        return (
+            f"{index}. [product] ratings_A={p.get('ratings_A')}; ratings_B={p.get('ratings_B')}; "
+            f"option_keys={keys}; action={action}; history_len={hist_len}"
+        )
+    if schema == "C":
+        return (
+            f"{index}. [bandit] game_id={p.get('game_id')}; phase={p.get('phase')}; "
+            f"trial_index={p.get('trial_index')}; machine_options={p.get('machine_options')}; "
+            f"option_keys={keys}; action={action}; history_len={hist_len}"
+        )
+    if schema == "D":
+        return (
+            f"{index}. [cct] round={p.get('round_id')}; score={p.get('current_score')}; "
+            f"flipped={p.get('cards_flipped')}; remaining={p.get('n_cards_remaining')}; "
+            f"gain={p.get('gain_amount')}; loss={p.get('loss_amount')}; n_loss={p.get('n_loss_cards')}; "
+            f"option_keys={keys}; action={action} (E=flip,C=stop); history_len={hist_len}"
+        )
+    return f"{index}. problem_keys={list(p.keys())}; action={action}; history_len={hist_len}"
+
+
+def format_trials_for_prompt(trials: List[Dict[str, Any]], max_trials: int = 8) -> str:
+    lines = [
+        format_trial_for_prompt(t, i + 1)
+        for i, t in enumerate(trials[:max_trials])
+    ]
+    return "\n".join(lines)
