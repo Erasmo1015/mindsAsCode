@@ -126,8 +126,10 @@ def collect_mixed_gambles(
     valid: List[int] = []
     for participant_id in sorted(unique_subjects):
         try:
-            train_trials, test_trials, _ = load_mixed_gambles_data_fn(
-                str(csv_path), participant_id, filter_gain_loss_only=filter_gain_loss_only
+            train_trials, _, test_trials, _ = load_mixed_gambles_data_fn(
+                participant_id,
+                csv_path=str(csv_path),
+                filter_gain_loss_only=filter_gain_loss_only,
             )
             if len(train_trials) > 0 and len(test_trials) > 0:
                 valid.append(participant_id)
@@ -278,13 +280,13 @@ def main() -> None:
             "valid_participant_ids": valid_ids,
         }
     else:
-        from baseline_methods.prospect_theory import load_mixed_gambles_data
+        from data_modules.mixed_gambles import load_mixed_gambles_trials
 
         csv_path = (_REPO_ROOT / args.mixed_gambles_csv).resolve() if not Path(args.mixed_gambles_csv).is_absolute() else Path(args.mixed_gambles_csv).resolve()
         if not csv_path.is_file():
             raise FileNotFoundError(f"Mixed gambles CSV not found: {csv_path}")
         filter_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
-        valid_ids = collect_mixed_gambles(csv_path, filter_gain_loss_only, load_mixed_gambles_data)
+        valid_ids = collect_mixed_gambles(csv_path, filter_gain_loss_only, load_mixed_gambles_trials)
         suffix = "_gain_loss" if filter_gain_loss_only else ""
         default_name = f"valid_participant_ids{suffix}.json"
         out_path = Path(args.output) if args.output else csv_path.parent / default_name
