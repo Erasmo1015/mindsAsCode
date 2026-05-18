@@ -43,9 +43,12 @@ from data_modules.mixed_gambles import (
     load_mixed_gambles_trials,
 )
 from data_modules.psych101_binary import (
+    DEFAULT_PSYCH_DATASET_SPLIT,
     PSYCH101_BINARY_DATASETS,
     get_psych101_binary_experiments,
+    hf_id_for_psych_dataset_split,
     is_psych101_dataset,
+    normalize_psych_dataset_split,
 )
 from utils.teh.teh_datasets import (
     IMPLEMENTED_PSYCH101_ALIASES,
@@ -77,6 +80,13 @@ BEST_PROGRAM_FILENAME = "best_program.py"
 # when --parallel_participants is enabled. Per-participant dirs are not locked (isolated paths).
 _SHARED_EXPERIMENT_CSV_LOCK = threading.Lock()
 _RUN_PHASES = frozenset({"all", "evolution", "refine"})
+
+
+def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
+    """Psych-101 HF corpus selector; mixed_gambles ignores the argument."""
+    if is_mixed_gambles_dataset(dataset):
+        return DEFAULT_PSYCH_DATASET_SPLIT
+    return normalize_psych_dataset_split(psych_dataset_split)
 
 
 def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> int:
@@ -291,6 +301,7 @@ def load_valid_participant_ids_from_json(
     *,
     split_ratio: float = 0.8,
     split_seed: int = 42,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     auto_prepare: bool = True,
@@ -306,6 +317,7 @@ def load_valid_participant_ids_from_json(
         filter_mixed_gambles=filter_mixed_gambles,
         split_ratio=split_ratio,
         split_seed=split_seed,
+        psych_dataset_split=_effective_psych_dataset_split(dataset, psych_dataset_split),
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         auto_prepare=auto_prepare,
@@ -325,6 +337,7 @@ def resolve_participants_for_scope(
     filter_mixed_gambles: bool,
     split_ratio: float = 0.8,
     split_seed: int = 42,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> List[int]:
@@ -342,6 +355,7 @@ def resolve_participants_for_scope(
         filter_mixed_gambles,
         split_ratio=split_ratio,
         split_seed=split_seed,
+        psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
     )
@@ -349,7 +363,7 @@ def resolve_participants_for_scope(
         if single_participant_id not in valid:
             raise ValueError(
                 f"--single_participant_id={single_participant_id} is not in the precomputed valid list "
-                f"({len(valid)} ids). Check datasets/*/valid_participant_ids.json or your id."
+                f"({len(valid)} ids). Check datasets/psych101_<train|test>/<dataset>/valid_participant_ids.json."
             )
         return [single_participant_id]
     if participant_scope == "range":
@@ -754,6 +768,7 @@ def _collect_pooled_train_trials_for_participants(
     split_seed: int,
     data_path: str = "data",
     filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> List[Dict[str, Any]]:
@@ -767,6 +782,7 @@ def _collect_pooled_train_trials_for_participants(
             split_seed=split_seed,
             data_path=data_path,
             filter_mixed_gambles=filter_mixed_gambles,
+            psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
         )
@@ -887,6 +903,7 @@ def run_global_evolution_phase(
     save_artifacts: bool = True,
     wandb_module: Optional[Any] = None,
     run_prompts_dir: Optional[str] = None,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> List[Tuple[Any, ...]]:
@@ -903,6 +920,7 @@ def run_global_evolution_phase(
         split_seed=split_seed,
         data_path=data_path,
         filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
     )
@@ -1087,6 +1105,7 @@ def run_global_evolution_phase(
             data_path=data_path,
             filter_mixed_gambles=filter_mixed_gambles,
             n_eval_seeds=n_eval_seeds,
+            psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
         )
@@ -1795,6 +1814,7 @@ def _write_global_phase_summary_loglik_csv(
     data_path: str = "data",
     filter_mixed_gambles: bool = False,
     n_eval_seeds: int = 3,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> None:
@@ -1818,6 +1838,7 @@ def _write_global_phase_summary_loglik_csv(
             split_seed=split_seed,
             data_path=data_path,
             filter_mixed_gambles=filter_mixed_gambles,
+            psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
         )
@@ -1927,12 +1948,13 @@ def _psych101_trials_for_participant(
     *,
     split_ratio: float,
     split_seed: int,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     experiments = get_psych101_binary_experiments(
         dataset_alias,
         n_participants=int(participant_id) + 1,
-        split="test",
+        split=psych_dataset_split,
         local_dataset=local_dataset,
     )
     if participant_id >= len(experiments):
@@ -1953,6 +1975,7 @@ def _trials_for_loglik_participant(
     split_seed: int,
     data_path: str = "data",
     filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -1972,6 +1995,7 @@ def _trials_for_loglik_participant(
         participant_id,
         split_ratio=split_ratio,
         split_seed=split_seed,
+        psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
     )
 
@@ -2003,6 +2027,7 @@ def run_loglik_refine_participant_from_checkpoint(
     wandb_module: Optional[Any] = None,
     refinement_val_threshold: float = -1.0,
     run_prompts_dir: Optional[str] = None,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> Dict[str, Any]:
@@ -2024,6 +2049,7 @@ def run_loglik_refine_participant_from_checkpoint(
         split_seed=split_seed,
         data_path=data_path,
         filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
     )
@@ -2206,6 +2232,7 @@ def run_loglik_refine_from_prev_experiment(
     fitness_metric: str = "loglik",
     cpc18_official_mse: bool = False,
     run_prompts_dir: Optional[str] = None,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> None:
@@ -2314,6 +2341,7 @@ def run_loglik_refine_from_prev_experiment(
             wandb_module=wandb_module,
             refinement_val_threshold=refinement_val_threshold,
             run_prompts_dir=run_prompts_dir,
+            psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
         )
@@ -4397,6 +4425,7 @@ def run_evolution(
     global_elite_parents: Optional[List[Tuple[Any, ...]]] = None,
     global_pool_handoff: bool = False,
     run_prompts_dir: Optional[str] = None,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ):
@@ -4473,7 +4502,7 @@ def run_evolution(
             experiments = get_psych101_binary_experiments(
                 dataset,
                 n_participants=participant_id + 1,
-                split="test",
+                split=psych_dataset_split,
                 local_dataset=local_dataset,
             )
             exp = experiments[participant_id]
@@ -4489,7 +4518,8 @@ def run_evolution(
     if output_dir is None:
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
         output_dir = (
-            f"{teh_output_base_dir(dataset, timestamp)}/participant_{participant_id}"
+            f"{teh_output_base_dir(dataset, timestamp, psych_dataset_split=psych_dataset_split)}"
+            f"/participant_{participant_id}"
         )
     output_path = Path(output_dir)
     if save_artifacts:
@@ -6641,6 +6671,16 @@ def main():
         help="CSV path for --dataset mixed_gambles (default: datasets/mixed_gambles/data_all_2021-01-08.csv).",
     )
     parser.add_argument(
+        "--psych_dataset_split",
+        type=str,
+        default=DEFAULT_PSYCH_DATASET_SPLIT,
+        choices=sorted({"train", "test"}),
+        help=(
+            "Psych-101 HF participant corpus: train=marcelbinz/Psych-101, "
+            "test=marcelbinz/Psych-101-test (default: train). Ignored for mixed_gambles."
+        ),
+    )
+    parser.add_argument(
         "--local_dataset",
         type=str,
         default=None,
@@ -7078,6 +7118,9 @@ def main():
         print("Error: --elite_pool_size must be >= 1 when set.")
         return
     mixed_gambles_gain_loss_only = bool(getattr(args, "filter_mixed_gambles", False))
+    psych_dataset_split = _effective_psych_dataset_split(
+        args.dataset, args.psych_dataset_split
+    )
 
     if args.dataset not in PARTICIPANT_DATASETS:
         print(f"Error: unknown TEH dataset {args.dataset!r}")
@@ -7125,6 +7168,7 @@ def main():
                 args.dataset,
                 timestamp,
                 args.participant_scope,
+                psych_dataset_split=psych_dataset_split,
                 range_start=args.range_start_ordinal,
                 range_end=args.range_end_ordinal,
                 ordinals=args.ordinals,
@@ -7165,6 +7209,7 @@ def main():
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 split_ratio=args.split_ratio,
                 split_seed=args.split_seed,
+                psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
             )
@@ -7194,12 +7239,14 @@ def main():
         elif args.participant_scope == "range":
             print(
                 "Participant scope: range -> using inclusive ordinal slice "
-                f"[{args.range_start_ordinal}, {args.range_end_ordinal}] from valid_participant_ids.json."
+                f"[{args.range_start_ordinal}, {args.range_end_ordinal}] from "
+                f"datasets/psych101_{psych_dataset_split}/{args.dataset}/valid_participant_ids.json."
             )
         elif args.participant_scope == "ordinals":
             print(
                 "Participant scope: ordinals -> using raw participant ids at 0-based ordinals "
-                f"{list(args.ordinals)} from valid_participant_ids.json "
+                f"{list(args.ordinals)} from "
+                f"datasets/psych101_{psych_dataset_split}/{args.dataset}/valid_participant_ids.json "
                 "(duplicate ordinals collapse to one id; order follows first occurrence)."
             )
         else:
@@ -7209,8 +7256,13 @@ def main():
                 else "all valid ids"
             )
             print(
-                f"Participant scope: all -> using {cap_text} from valid_participant_ids.json."
+                f"Participant scope: all -> using {cap_text} from "
+                f"datasets/psych101_{psych_dataset_split}/{args.dataset}/valid_participant_ids.json."
             )
+    if is_psych101_dataset(args.dataset):
+        print(
+            f"Psych-101 HF corpus: {psych_dataset_split} -> {hf_id_for_psych_dataset_split(psych_dataset_split)}"
+        )
     print(
         f"TEH split settings: dataset={args.dataset}, split_mode={args.split_mode}, "
         f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}"
@@ -7218,7 +7270,9 @@ def main():
 
     base_run_dir = None
     if args.output_dir is None:
-        base_run_dir = teh_output_base_dir(args.dataset, timestamp)
+        base_run_dir = teh_output_base_dir(
+            args.dataset, timestamp, psych_dataset_split=psych_dataset_split
+        )
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
     elif len(participants_to_process) > 1:
         # Multiple participants with custom output_dir: use that as base directory
@@ -7252,6 +7306,7 @@ def main():
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
         filter_mixed_gambles=mixed_gambles_gain_loss_only,
+        psych_dataset_split=psych_dataset_split,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")
@@ -7290,6 +7345,7 @@ def main():
             save_artifacts=True,
             wandb_module=wandb,
             run_prompts_dir=str(run_prompts_dir),
+            psych_dataset_split=psych_dataset_split,
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
         )
@@ -7334,13 +7390,14 @@ def main():
                 fitness_metric=args.fitness_metric,
                 cpc18_official_mse=args.cpc18_official_mse,
                 run_prompts_dir=str(run_prompts_dir),
+                psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
             )
         finally:
             if wandb is not None:
                 wandb.finish()
-        return
+            return
 
     if (
         is_binary_loglik_dataset(args.dataset)
@@ -7368,7 +7425,7 @@ def main():
         experiments = get_psych101_binary_experiments(
             args.dataset,
             n_participants=max_pid + 1,
-            split="test",
+            split=psych_dataset_split,
             local_dataset=args.local_dataset,
         )
         train_trials: List[Dict[str, Any]] = []
@@ -7420,6 +7477,7 @@ def main():
                 refinement_val_threshold=args.refinement_val_threshold,
                 max_workers=args.max_workers,
                 run_prompts_dir=str(run_prompts_dir),
+                psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
             )
@@ -7492,6 +7550,7 @@ def main():
                 max_workers=candidate_workers_per_participant,
                 global_elite_parents=global_elite_for_handoff,
                 run_prompts_dir=str(run_prompts_dir),
+                psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
             )
@@ -8130,6 +8189,7 @@ def main():
                 max_workers=candidate_workers_per_participant,
                 global_elite_parents=global_elite_for_handoff,
                 run_prompts_dir=str(run_prompts_dir),
+                psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
             )

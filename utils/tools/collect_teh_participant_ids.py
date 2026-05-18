@@ -2,12 +2,13 @@
 """
 Collect valid participant IDs for TEH-supported datasets.
 
-Writes JSON next to the dataset (same paths as utils.teh.teh_datasets.valid_participant_ids_path).
+Writes JSON under datasets/psych101_train/<dataset>/ or datasets/psych101_test/<dataset>/
+(see utils.teh.teh_datasets). mixed_gambles stays under datasets/mixed_gambles/.
 teh.py also auto-creates this file on first run when it is missing.
 
 Examples (from repo root):
   python utils/tools/collect_teh_participant_ids.py --dataset peterson2021using
-  python utils/tools/collect_teh_participant_ids.py --dataset plonsky2018when
+  python utils/tools/collect_teh_participant_ids.py --dataset plonsky2018when --psych_dataset_split test
   python utils/tools/collect_teh_participant_ids.py --dataset mixed_gambles
   python utils/tools/collect_teh_participant_ids.py --dataset mixed_gambles --filter_mixed_gambles
 """
@@ -22,7 +23,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from utils.teh.teh_datasets import IMPLEMENTED_PSYCH101_ALIASES, MIXED_GAMBLES
+from data_modules.psych101_binary import DEFAULT_PSYCH_DATASET_SPLIT
+from utils.teh.teh_datasets import IMPLEMENTED_PSYCH101_ALIASES, MIXED_GAMBLES, is_mixed_gambles_dataset
 from utils.teh.participant_ids import (
     collect_and_write_valid_participant_ids,
     ensure_valid_participant_ids_prepared,
@@ -33,6 +35,16 @@ def main() -> None:
     choices = sorted(IMPLEMENTED_PSYCH101_ALIASES | {MIXED_GAMBLES})
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=choices)
+    parser.add_argument(
+        "--psych_dataset_split",
+        type=str,
+        default=DEFAULT_PSYCH_DATASET_SPLIT,
+        choices=["train", "test"],
+        help=(
+            "Psych-101 HF corpus for id collection (default: train). "
+            "Ignored for mixed_gambles."
+        ),
+    )
     parser.add_argument(
         "--local_dataset",
         default=None,
@@ -54,9 +66,13 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing valid_participant_ids.json if present.",
+        help="Overwrite existing split-specific valid participant ids JSON if present.",
     )
     args = parser.parse_args()
+
+    psych_split = args.psych_dataset_split
+    if is_mixed_gambles_dataset(args.dataset):
+        psych_split = DEFAULT_PSYCH_DATASET_SPLIT
 
     if args.output:
         out_path = collect_and_write_valid_participant_ids(
@@ -64,6 +80,7 @@ def main() -> None:
             _REPO_ROOT,
             split_ratio=float(args.split_ratio),
             split_seed=int(args.split_seed),
+            psych_dataset_split=psych_split,
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
             filter_mixed_gambles=bool(args.filter_mixed_gambles),
@@ -75,6 +92,7 @@ def main() -> None:
             _REPO_ROOT,
             split_ratio=float(args.split_ratio),
             split_seed=int(args.split_seed),
+            psych_dataset_split=psych_split,
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
             filter_mixed_gambles=bool(args.filter_mixed_gambles),
@@ -86,6 +104,8 @@ def main() -> None:
     print(f"Wrote {len(valid_ids)} valid participant ids -> {out_path}")
     if valid_ids:
         print(f"  id range: {min(valid_ids)} .. {max(valid_ids)}")
+    if args.dataset in IMPLEMENTED_PSYCH101_ALIASES:
+        print(f"  psych_dataset_split: {psych_split}")
 
 
 if __name__ == "__main__":

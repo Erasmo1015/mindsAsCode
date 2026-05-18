@@ -47,15 +47,26 @@ def valid_participant_ids_path(
     repo_root: Optional[Path] = None,
     *,
     filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = "train",
 ) -> Path:
     root = repo_root or REPO_ROOT
     return valid_participant_ids_path_with_filter(
-        dataset_alias, root, filter_mixed_gambles=filter_mixed_gambles
+        dataset_alias,
+        root,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
     )
 
 
-def teh_output_base_dir(dataset_alias: str, timestamp: str) -> str:
-    return _teh_output_base_dir(dataset_alias, timestamp)
+def teh_output_base_dir(
+    dataset_alias: str,
+    timestamp: str,
+    *,
+    psych_dataset_split: str = "train",
+) -> str:
+    return _teh_output_base_dir(
+        dataset_alias, timestamp, psych_dataset_split=psych_dataset_split
+    )
 
 
 def teh_wandb_run_name(
@@ -63,11 +74,12 @@ def teh_wandb_run_name(
     timestamp: str,
     participant_scope: str,
     *,
+    psych_dataset_split: str = "train",
     range_start: Optional[int] = None,
     range_end: Optional[int] = None,
     ordinals: Optional[Sequence[int]] = None,
 ) -> str:
-    base = f"{dataset_alias}_teh_{timestamp}"
+    base = f"{dataset_alias}_teh_{psych_dataset_split}_{timestamp}"
     if participant_scope == "range" and range_start is not None and range_end is not None:
         return f"{base}_ordinals_{range_start}_to_{range_end}"
     if participant_scope == "ordinals" and ordinals:
@@ -173,6 +185,7 @@ def setup_teh_run_prompts(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = "train",
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
@@ -192,7 +205,7 @@ def setup_teh_run_prompts(
             mixed_gambles_csv=mixed_gambles_csv,
         )
         if not valid_ids:
-            raise ValueError(f"No valid participant ids in {ids_path}")
+            raise ValueError(f"No valid participant ids for mixed_gambles dataset {dataset_alias!r}")
         sample_pid = int(valid_ids[0])
         train_trials, _, _, _ = load_mixed_gambles_trials(
             sample_pid,
@@ -208,7 +221,7 @@ def setup_teh_run_prompts(
         experiments = get_psych101_binary_experiments(
             dataset_alias,
             n_participants=max(1, n_sample_participants),
-            split="test",
+            split=psych_dataset_split,
             local_dataset=local_dataset,
         )
         exp = experiments[0]

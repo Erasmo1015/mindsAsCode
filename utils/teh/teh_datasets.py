@@ -8,12 +8,16 @@ from typing import FrozenSet
 
 from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
+    DEFAULT_PSYCH_DATASET_SPLIT,
+    normalize_psych_dataset_split,
     is_psych101_dataset,
     experiment_id_for_alias,
 )
 from data_modules import mixed_gambles as mixed_gambles_module
 
 MIXED_GAMBLES = mixed_gambles_module.DATASET_NAME
+
+VALID_PARTICIPANT_IDS_JSON = "valid_participant_ids.json"
 
 IMPLEMENTED_PSYCH101_ALIASES: FrozenSet[str] = frozenset(
     k for k, v in PSYCH101_BINARY_DATASETS.items() if v.get("implemented")
@@ -45,32 +49,50 @@ def uses_train_val_test_loglik_split(
     return is_binary_loglik_dataset(dataset)
 
 
-def valid_participant_ids_path(dataset: str, repo_root: Path) -> Path:
-    if is_mixed_gambles_dataset(dataset):
-        return repo_root / "datasets" / "mixed_gambles" / "valid_participant_ids.json"
-    if dataset == "peterson2021using":
-        return repo_root / "datasets" / "choice13k" / "valid_participant_ids.json"
-    path = repo_root / "datasets" / "psych101" / dataset / "valid_participant_ids.json"
-    return path
+def psych101_metadata_root(repo_root: Path, psych_dataset_split: str) -> Path:
+    """Root for TEH metadata JSON per HF corpus: datasets/psych101_train or psych101_test."""
+    split = normalize_psych_dataset_split(psych_dataset_split)
+    return repo_root / "datasets" / f"psych101_{split}"
+
+
+def valid_participant_ids_path(
+    dataset: str,
+    repo_root: Path,
+    *,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+) -> Path:
+    return valid_participant_ids_path_with_filter(
+        dataset, repo_root, psych_dataset_split=psych_dataset_split
+    )
 
 
 def valid_participant_ids_path_with_filter(
-    dataset: str, repo_root: Path, *, filter_mixed_gambles: bool = False
+    dataset: str,
+    repo_root: Path,
+    *,
+    filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
 ) -> Path:
     if is_mixed_gambles_dataset(dataset):
         name = (
             "valid_participant_ids_gain_loss.json"
             if filter_mixed_gambles
-            else "valid_participant_ids.json"
+            else VALID_PARTICIPANT_IDS_JSON
         )
         return repo_root / "datasets" / "mixed_gambles" / name
-    return valid_participant_ids_path(dataset, repo_root)
+    return psych101_metadata_root(repo_root, psych_dataset_split) / dataset / VALID_PARTICIPANT_IDS_JSON
 
 
-def teh_output_base_dir(dataset: str, timestamp: str) -> str:
+def teh_output_base_dir(
+    dataset: str,
+    timestamp: str,
+    *,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+) -> str:
     if is_mixed_gambles_dataset(dataset):
         return f"generated_outputs/mixed_gambles/teh/run_{timestamp}"
-    return f"generated_outputs/psych101/teh/{dataset}/run_{timestamp}"
+    split = normalize_psych_dataset_split(psych_dataset_split)
+    return f"generated_outputs/psych101_{split}/teh/{dataset}/run_{timestamp}"
 
 
 def dataset_display_name(dataset: str) -> str:

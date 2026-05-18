@@ -29,6 +29,25 @@ from data_modules.choice13k import (
 TEST_HF_ID = "marcelbinz/Psych-101-test"
 TRAIN_HF_ID = "marcelbinz/Psych-101"
 
+PSYCH_DATASET_SPLITS = frozenset({"train", "test"})
+DEFAULT_PSYCH_DATASET_SPLIT = "train"
+
+
+def normalize_psych_dataset_split(split: str) -> str:
+    """Validate Psych-101 HF corpus selector (train vs held-out test hub)."""
+    s = str(split).strip().lower()
+    if s not in PSYCH_DATASET_SPLITS:
+        raise ValueError(
+            f"psych_dataset_split must be one of {sorted(PSYCH_DATASET_SPLITS)}, got {split!r}"
+        )
+    return s
+
+
+def hf_id_for_psych_dataset_split(split: str) -> str:
+    """Map split name to Hugging Face dataset id."""
+    s = normalize_psych_dataset_split(split)
+    return TRAIN_HF_ID if s == "train" else TEST_HF_ID
+
 # choice13k-style press + CPC18 feedback lines (`and gain` / `and lose`)
 _RE_TRIAL_PRESS = re.compile(
     r"(You press <<([A-Z])>>"
@@ -224,7 +243,7 @@ def _load_hf_split(
 def get_psych101_binary_experiments(
     dataset_alias: str,
     n_participants: int = 10,
-    split: str = "test",
+    split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
 ) -> List[Experiment]:
     """

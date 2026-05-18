@@ -200,4 +200,5 @@ analysis/figures/
 datasets/downloaded/
 analysis_plot/
 
-datasets/psych101/
+datasets/psych101_test
+datasets/psych101_train
