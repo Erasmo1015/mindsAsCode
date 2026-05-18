@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
-Compare per-participant test log-likelihood from one or more runs against a Centaur baseline CSV.
+Compare per-participant log-likelihood from experiment runs against a Centaur baseline CSV.
 
-Writes a wide table under analysis/data/utils/ with footer rows Avg, Better, Similar, Worse.
+Participant rows follow the Centaur ``participant_details_loglik.csv`` (every
+``participant_id`` in that file, in file order). Experiment columns are blank when
+a run has no score for that id.
+
+Always writes a table for test_loglik. If gated_test_loglik appears in any
+experiment participant_details_loglik.csv, also writes a separate *_gated.csv
+with the same layout (Avg / Better / Similar / Worse footers). In that gated
+table, experiment columns use gated_test_loglik; the Centaur column uses
+gated_test_loglik when present, otherwise test_loglik (Centaur runs typically
+have no gated scores).
 
 Usage (choice13k; default dataset):
-  python analysis/code/utils/compare.py \\
-    --experiment_paths generated_outputs/choice13k/te_dr/run_260514_231815 ...
+  python analysis/code/utils/compare.py --experiment_paths generated_outputs/choice13k/te_dr/run_260514_231815 ...
 
-Usage (cpc18; Centaur + output defaults for that dataset):
+Usage (cpc18):
   python analysis/code/utils/compare.py --dataset cpc18 \\
     --experiment_paths generated_outputs/cpc18/non_strict/run_260517_211601
 
@@ -28,6 +36,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 _DATASETS = ("choice13k", "cpc18", "mixed_gambles")
+_TEST_LOGLIK = "test_loglik"
+_GATED_LOGLIK = "gated_test_loglik"
 
 
 @dataclass(frozen=True)
@@ -100,26 +110,65 @@ def _run_column_name(path: Path) -> str:
     return path.name
 
 
-def _read_test_loglik_csv(csv_path: Path) -> Dict[int, float]:
+def _csv_fieldnames(csv_path: Path) -> Optional[List[str]]:
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return list(reader.fieldnames) if reader.fieldnames else None
+
+
+def _csv_has_column(csv_path: Path, column: str) -> bool:
+    fields = _csv_fieldnames(csv_path)
+    return fields is not None and column in fields
+
+
+def _read_centaur_participant_ids(centaur_path: Path) -> List[int]:
+    """All participant_id values from the Centaur CSV, in file order (deduped)."""
+    ids: List[int] = []
+    seen: set[int] = set()
+    with open(centaur_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            raise ValueError(f"{centaur_path}: empty CSV")
+        if "participant_id" not in reader.fieldnames:
+            raise ValueError(
+                f"{centaur_path}: missing participant_id column (got {reader.fieldnames})"
+            )
+        for row in reader:
+            raw = row.get("participant_id")
+            if raw is None or str(raw).strip() == "":
+                continue
+            pid = int(float(raw))
+            if pid in seen:
+                continue
+            seen.add(pid)
+            ids.append(pid)
+    if not ids:
+        raise ValueError(f"{centaur_path}: no participant_id rows found")
+    return ids
+
+
+def _read_loglik_csv(csv_path: Path, column: str, *, required: bool) -> Dict[int, float]:
+    """Read one log-likelihood column keyed by participant_id."""
     out: Dict[int, float] = {}
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             return out
-        id_key = "participant_id" if "participant_id" in reader.fieldnames else None
-        if id_key is None:
+        if "participant_id" not in reader.fieldnames:
             raise ValueError(f"{csv_path}: missing participant_id column (got {reader.fieldnames})")
-        if "test_loglik" not in reader.fieldnames:
-            raise ValueError(f"{csv_path}: missing test_loglik column (got {reader.fieldnames})")
+        if column not in reader.fieldnames:
+            if required:
+                raise ValueError(f"{csv_path}: missing {column} column (got {reader.fieldnames})")
+            return out
         for row in reader:
-            raw = row.get(id_key)
+            raw = row.get("participant_id")
             if raw is None or str(raw).strip() == "":
                 continue
             pid = int(float(raw))
-            tl = row.get("test_loglik")
-            if tl is None or str(tl).strip() == "":
+            val = row.get(column)
+            if val is None or str(val).strip() == "":
                 continue
-            out[pid] = float(tl)
+            out[pid] = float(val)
     return out
 
 
@@ -155,8 +204,7 @@ def _resolve_bir_csv(path: Path) -> Path:
     path = path.expanduser().resolve()
     if path.is_file():
         return path
-    candidate = path / "analysis" / "behavioral_inconsistency_rate.csv"
-    return candidate
+    return path / "analysis" / "behavioral_inconsistency_rate.csv"
 
 
 def _read_bir_map(run_or_csv: Path) -> Dict[int, float]:
@@ -218,10 +266,89 @@ def _classify_vs_centaur(
             worse += 1
     return better, similar, worse
 
+
+def _gated_output_path(test_output: Path) -> Path:
+    """Derive gated comparison path from test output (e.g. loglik_compare_cpc18_gated.csv)."""
+    if test_output.suffix:
+        return test_output.with_name(f"{test_output.stem}_gated{test_output.suffix}")
+    return test_output.parent / f"{test_output.name}_gated"
+
+
+def _any_csv_has_gated(centaur_path: Path, experiment_csvs: Sequence[Path]) -> bool:
+    if _csv_has_column(centaur_path, _GATED_LOGLIK):
+        return True
+    return any(_csv_has_column(p, _GATED_LOGLIK) for p in experiment_csvs)
+
+
+def _centaur_scores_for_gated_table(
+    centaur_test: Dict[int, float],
+    centaur_gated: Dict[int, float],
+) -> Dict[int, float]:
+    """Centaur baseline for gated comparison: gated when available, else test_loglik."""
+    merged = dict(centaur_test)
+    merged.update(centaur_gated)
+    return merged
+
+
+def _write_comparison_csv(
+    *,
+    out_path: Path,
+    participant_ids: Sequence[int],
+    centaur: Dict[int, float],
+    experiments: Sequence[Tuple[str, Dict[int, float]]],
+    bir: Dict[int, float],
+    similar_threshold: float,
+) -> int:
+    """Write comparison table; return number of participant rows."""
+    ordered = list(participant_ids)
+
+    fieldnames = ["participant_id", "BIR", "Centaur"] + [label for label, _ in experiments]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows: List[Dict[str, str]] = []
+    for pid in ordered:
+        row: Dict[str, str] = {
+            "participant_id": str(pid),
+            "BIR": f"{bir[pid]:.2f}" if pid in bir else "",
+            "Centaur": f"{centaur[pid]:.2f}" if pid in centaur else "",
+        }
+        for label, m in experiments:
+            row[label] = f"{m[pid]:.2f}" if pid in m else ""
+        rows.append(row)
+
+    avg_row: Dict[str, str] = {"participant_id": "Avg", "BIR": "", "Centaur": ""}
+    if bir:
+        avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir])
+    avg_row["Centaur"] = _finite_mean([centaur[pid] for pid in ordered if pid in centaur])
+    for label, m in experiments:
+        avg_row[label] = _finite_mean([m[pid] for pid in ordered if pid in m])
+    rows.append(avg_row)
+
+    th = float(similar_threshold)
+    counts_by_label = {label: _classify_vs_centaur(centaur, m, th) for label, m in experiments}
+    for footer, idx in (("Better", 0), ("Similar", 1), ("Worse", 2)):
+        r = {fn: "" for fn in fieldnames}
+        r["participant_id"] = footer
+        r["BIR"] = ""
+        r["Centaur"] = ""
+        for label, _ in experiments:
+            r[label] = str(counts_by_label[label][idx])
+        rows.append(r)
+
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+    return len(ordered)
+
+
 def main() -> None:
     repo = _repo_root()
 
-    p = argparse.ArgumentParser(description="Compare experiment test_loglik to Centaur baseline.")
+    p = argparse.ArgumentParser(
+        description="Compare experiment log-likelihood to Centaur (test_loglik; optional gated file)."
+    )
     p.add_argument(
         "--dataset",
         choices=list(_DATASETS),
@@ -243,8 +370,9 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Centaur participant_details_loglik.csv (default depends on --dataset: "
-            "choice13k run_260517_190700, cpc18 run_260517_190927, mixed_gambles run_260517_190705)."
+            "Centaur participant_details_loglik.csv; defines which participant_id rows "
+            "appear in the output (default depends on --dataset: choice13k run_260517_190700, "
+            "cpc18 run_260517_190927, mixed_gambles run_260517_190705)."
         ),
     )
     p.add_argument(
@@ -257,7 +385,16 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="Output CSV path (default: analysis/data/utils/loglik_compare_<dataset>.csv).",
+        help="Output CSV for test_loglik (default: analysis/data/utils/loglik_compare_<dataset>.csv).",
+    )
+    p.add_argument(
+        "--output_gated",
+        type=Path,
+        default=None,
+        help=(
+            "Output CSV for gated_test_loglik (default: <test output stem>_gated.csv). "
+            "Written only if gated_test_loglik column exists in Centaur or any experiment CSV."
+        ),
     )
     p.add_argument(
         "--bir_csv",
@@ -274,6 +411,7 @@ def main() -> None:
     ds_defaults = _dataset_defaults(repo, args.dataset)
     centaur_arg = Path(args.centaur_csv).expanduser() if args.centaur_csv is not None else ds_defaults.centaur_csv
     output_arg = Path(args.output).expanduser() if args.output is not None else ds_defaults.output_csv
+    output_arg = output_arg.resolve() if output_arg.is_absolute() else (repo / output_arg).resolve()
     bir_arg: Optional[Path]
     if args.bir_csv is not None:
         bir_arg = Path(args.bir_csv).expanduser()
@@ -281,16 +419,11 @@ def main() -> None:
         bir_arg = ds_defaults.bir_csv
 
     centaur_path = _resolve_loglik_csv(centaur_arg)
-    centaur = _read_test_loglik_csv(centaur_path)
-
+    centaur_participant_ids = _read_centaur_participant_ids(centaur_path)
     exp_resolved = [_resolve_loglik_csv(Path(ep).expanduser()) for ep in args.experiment_paths]
     run_labels = [_run_column_name(p) for p in exp_resolved]
     if len(set(run_labels)) != len(run_labels):
         raise ValueError(f"Duplicate run column names after resolution: {run_labels}")
-
-    experiments: List[Tuple[str, Dict[int, float]]] = []
-    for label, csv_path in zip(run_labels, exp_resolved):
-        experiments.append((label, _read_test_loglik_csv(csv_path)))
 
     bir: Dict[int, float] = {}
     if bir_arg is not None:
@@ -305,55 +438,65 @@ def main() -> None:
     if not bir:
         bir = _merge_bir_from_summaries([p.parent if p.is_file() else p for p in exp_resolved])
 
-    pids = set(centaur.keys())
-    for _, m in experiments:
-        pids |= set(m.keys())
-    ordered = sorted(pids)
-
-    fieldnames = ["participant_id", "BIR", "Centaur"] + run_labels
-    out_path = output_arg
-    out_path = out_path.resolve() if out_path.is_absolute() else (repo / out_path).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    rows: List[Dict[str, str]] = []
-    for pid in ordered:
-        row: Dict[str, str] = {
-            "participant_id": str(pid),
-            "BIR": f"{bir[pid]:.2f}" if pid in bir else "",
-            "Centaur": f"{centaur[pid]:.2f}" if pid in centaur else "",
-        }
-        for label, m in experiments:
-            row[label] = f"{m[pid]:.2f}" if pid in m else ""
-        rows.append(row)
-
-    # Footer: Avg
-    avg_row: Dict[str, str] = {"participant_id": "Avg", "BIR": "", "Centaur": ""}
-    if bir:
-        avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir])
-    avg_row["Centaur"] = _finite_mean([centaur[pid] for pid in ordered if pid in centaur])
-    for label, m in experiments:
-        avg_row[label] = _finite_mean([m[pid] for pid in ordered if pid in m])
-    rows.append(avg_row)
-
     th = float(args.similar_threshold)
-    counts_by_label = {label: _classify_vs_centaur(centaur, m, th) for label, m in experiments}
-    for footer, idx in (("Better", 0), ("Similar", 1), ("Worse", 2)):
-        r = {fn: "" for fn in fieldnames}
-        r["participant_id"] = footer
-        r["BIR"] = ""
-        r["Centaur"] = ""
-        for label, _ in experiments:
-            r[label] = str(counts_by_label[label][idx])
-        rows.append(r)
 
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        w.writerows(rows)
+    centaur_test = _read_loglik_csv(centaur_path, _TEST_LOGLIK, required=True)
+    experiments_test: List[Tuple[str, Dict[int, float]]] = []
+    for label, csv_path in zip(run_labels, exp_resolved):
+        experiments_test.append(
+            (label, _read_loglik_csv(csv_path, _TEST_LOGLIK, required=True))
+        )
 
+    n_test = _write_comparison_csv(
+        out_path=output_arg,
+        participant_ids=centaur_participant_ids,
+        centaur=centaur_test,
+        experiments=experiments_test,
+        bir=bir,
+        similar_threshold=th,
+    )
     print(
-        f"Wrote {out_path} (dataset={args.dataset}, {len(ordered)} participants, "
-        f"{len(experiments)} experiments, centaur={centaur_path})."
+        f"Wrote {output_arg} ({_TEST_LOGLIK}, dataset={args.dataset}, "
+        f"{n_test} participants (from Centaur CSV), {len(experiments_test)} experiments, "
+        f"centaur={centaur_path})."
+    )
+
+    if not _any_csv_has_gated(centaur_path, exp_resolved):
+        return
+
+    gated_out = (
+        Path(args.output_gated).expanduser()
+        if args.output_gated is not None
+        else _gated_output_path(output_arg)
+    )
+    gated_out = gated_out.resolve() if gated_out.is_absolute() else (repo / gated_out).resolve()
+
+    centaur_gated = _read_loglik_csv(centaur_path, _GATED_LOGLIK, required=False)
+    centaur_for_gated = _centaur_scores_for_gated_table(centaur_test, centaur_gated)
+    experiments_gated: List[Tuple[str, Dict[int, float]]] = []
+    for label, csv_path in zip(run_labels, exp_resolved):
+        experiments_gated.append(
+            (label, _read_loglik_csv(csv_path, _GATED_LOGLIK, required=False))
+        )
+
+    # Same participant roster as test_loglik table (all Centaur CSV ids, not union of
+    # experiment rows that happen to have non-empty gated_test_loglik).
+    n_gated = _write_comparison_csv(
+        out_path=gated_out,
+        participant_ids=centaur_participant_ids,
+        centaur=centaur_for_gated,
+        experiments=experiments_gated,
+        bir=bir,
+        similar_threshold=th,
+    )
+    if centaur_gated:
+        centaur_note = f"centaur uses {_GATED_LOGLIK} where present, else {_TEST_LOGLIK}"
+    else:
+        centaur_note = f"centaur uses {_TEST_LOGLIK} (no {_GATED_LOGLIK} in Centaur CSV)"
+    print(
+        f"Wrote {gated_out} ({_GATED_LOGLIK}, dataset={args.dataset}, "
+        f"{n_gated} participants (from Centaur CSV), {len(experiments_gated)} experiments; "
+        f"{centaur_note})."
     )
 
 
