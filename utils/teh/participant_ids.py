@@ -14,13 +14,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
+from tqdm import tqdm
+
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PSYCH101_BINARY_DATASETS,
     experiment_id_for_alias,
-    get_psych101_binary_experiments,
+    get_filtered_psych101_split,
     hf_id_for_psych_dataset_split,
     normalize_psych_dataset_split,
+    parse_psych101_binary_row,
 )
 from utils.teh.teh_datasets import (
     MIXED_GAMBLES,
@@ -81,22 +84,18 @@ def collect_psych101_valid_participants(
     split = normalize_psych_dataset_split(psych_dataset_split)
     from data_modules.psych101_binary import split_psych_experiment
 
+    filtered = get_filtered_psych101_split(
+        dataset_alias, split=split, local_dataset=local_dataset
+    )
+    n_rows = len(filtered)
+    print(
+        f"[TEH] Validating {n_rows} filtered participant rows "
+        f"(split_ratio={split_ratio}, split_seed={split_seed})..."
+    )
     records: List[Psych101ParticipantStats] = []
-    n = 0
-    while True:
+    for n in tqdm(range(n_rows), desc="Validate participants", unit="row"):
         try:
-            experiments = get_psych101_binary_experiments(
-                dataset_alias,
-                n_participants=n + 1,
-                split=split,
-                local_dataset=local_dataset,
-            )
-        except Exception:
-            break
-        if len(experiments) <= n:
-            break
-        try:
-            exp = experiments[n]
+            exp = parse_psych101_binary_row(dict(filtered[n]), dataset_alias)
             train_trials, val_trials, test_trials, _ = split_psych_experiment(
                 exp, split_ratio=split_ratio, split_seed=split_seed
             )
@@ -115,9 +114,6 @@ def collect_psych101_valid_participants(
                 )
         except Exception:
             pass
-        n += 1
-        if n > 5000:
-            break
     return records
 
 

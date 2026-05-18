@@ -228,12 +228,42 @@ This section is a **short orientation** for anyone (human or agent) touching Min
 
 - **Other datasets:** `te_dr.py` still supports **gridworld**, **gridworld_ensemble**, **cpc18**, and **mixed_gambles** entry points similar to other TE runners; the **data-driven block-split Choice13k** behavior above is the distinguishing feature.
 
-### Latest updates (`Template_evo_non_strict.py`, May 2026)
+### Latest updates (`Template_evo_non_strict.py`, May 2026 — prior commits summary)
 
-- **`--parallel_participants`** (default **True**; disable with **`--no-parallel_participants`**): nested parallelism — `participant_workers = max(1, max_workers // n_candidates)`, each participant still uses **`n_candidates`** candidate LLM workers. Applies to **`--phase all`**, **`--phase evolution`**, **`--phase refine`**, and **`--participant_scope all`**. Not used for **`across_participants`** or gridworld paths. Experiment-level CSVs (`participants_summary.csv`, `participant_details_loglik.csv`, `summary_loglik.csv`) are written on the **main thread only** (lock-protected); workers write only under **`participant_<id>/`**.
+Short changelog of committed non-strict work (choice13k / cpc18 / mixed_gambles).
 
-- **`--phase {all,evolution,refine}`** (default **`all`**): **`evolution`** skips post-evolution refinement; **`refine`** runs refinement-only from **`--prev_exp_path`** (each **`participant_<id>/best_program.py`** required). Refine copies prior loglik CSV, **clears `gated_test_loglik`**, then updates it per participant after refinement.
+- **Parallel runs:** **`--parallel_participants`** (default **True**; **`--no-parallel_participants`** to disable) — nested pool: `participant_workers = max(1, max_workers // n_candidates)`; each participant still runs **`n_candidates`** candidate LLM workers. Experiment-level CSVs are written on the main thread only (lock); per-participant trees stay under **`participant_<id>/`**. Applies to **`--phase all|evolution|refine`** and **`--participant_scope all`** (not gridworld / **`across_participants`**).
 
-- **Refinement (choice13k, loglik):** **`--refinement_phase`** (default on for **`all`**), **`--refinement_iters`**, **`--refinement_val_threshold`** (default **-1.0**). Refinement runs only when **`val_loglik < threshold`** (same gate for **`all`** and **`refine`**). Refinement uses **val trials only** in the LLM prompt (not train+val). **`gated_test_loglik`** in CSVs is the refinement **test** loglik (external val gate unchanged unless **`--gate_phase`**). Artifacts: **`participant_<id>/refinement/iteration_*/metrics.json`**, **`participant_<id>/refinement/results.json`**, final **`participant_<id>/best_program.py`**.
+- **Phased CLI:** **`--phase {all,evolution,refine}`** (default **`all`**). **`evolution`** = evolution only; **`refine`** = refinement-only from **`--prev_exp_path`** (requires each **`participant_<id>/best_program.py`**). Refine path copies prior loglik CSV, clears **`gated_test_loglik`**, then fills it from refinement test eval.
 
-- **Best program filename:** per-participant checkpoint is always **`best_program.py`** (not `best_program_fr_iter*_cand*.py`).
+- **Loglik refinement:** **`--refinement_phase`** (on for **`all`**), **`--refinement_iters`**, **`--refinement_val_threshold`** (default **-1.0**). Runs when **`val_loglik < threshold`**. Refinement LLM prompts use **validation trials only** (not train+val). **`gated_test_loglik`** in run CSVs = refinement test loglik when refinement ran; else evolution test loglik. Artifacts under **`participant_<id>/refinement/`**.
+
+- **Parent / elite pool:** **`--sample_parents`** default **True** (uniform random **`sample_size`** parents from elite, without replacement). **`--no-sample_parents`** = top **`sample_size`** programs by fitness after sort — **not** a single parent; once elite has ≥10 programs, up to **10 full `choose()` sources** are pasted into each candidate-generation prompt. Optional **`--elite_pool_size`** caps retained elites (default **`max(2 * sample_size, 20)`**).
+
+- **Prompt token controls:** **`--max_prompt_train_trials`**, **`--max_prompt_trials_per_problem`** (block-aware subsample for LLM only; evaluation still uses full splits). Dataset-specific loglik prompts under **`prompts/Template_evo/<dataset>/non_strict/loglik/`** (choice13k, cpc18, mixed_gambles).
+
+- **Reporting:** Pool-best program after last elite update; paired train/test loglik in CSVs; per-participant artifact **`best_program.py`** (replaces **`best_program_fr_iter*_cand*.py`**).
+
+- **LLM context (operational):** With **`--sample_size 10`**, **`--no-sample_parents`**, and vLLM **`--max-model-len 10240`**, candidate generation often fails from ~iteration 4 onward (~9217 input tokens + 1024 output). Production choice13k non-strict runs that completed reliably used **`--max-model-len 12288`**; same prompt assembly, higher ceiling (~11265 input at limit). Mitigations: raise context, **`--sample_size 1`**, or **`--sample_parents`** (still up to 10 parents unless **`sample_size`** is reduced).
+
+### Latest updates (`teh.py` — TEH, May 2026)
+
+**TEH** (Template Evolution HuggingFace) is a Psych-101–focused fork of `Template_evo_non_strict.py`. WandB project: **`teh`**. Main script: **`teh.py`**.
+
+- **Datasets (CLI `--dataset`):** Eight implemented Psych-101 binary aliases — `peterson2021using`, `plonsky2018when`, `wulff2018description`, `speekenbrink2008learning`, `sadeghiyeh2020temporal`, `hilbig2014generalized`, `frey2017cct`, `flesch2018comparing` — loaded via **`data_modules/psych101_binary.py`** and schema parsers in **`data_modules/psych101_parsers.py`**. HF corpus selector **`--psych_dataset_split {train,test}`** maps to `marcelbinz/Psych-101` or `Psych-101-test`. Optional **`--local_dataset`** for `load_from_disk`. **`mixed_gambles`** remains supported as a **local CSV** dataset in **`data_modules/mixed_gambles.py`** (not routed through psych101_binary).
+
+- **Trial API:** Evolved code implements **`choose(problem, history) -> float`** = **P(action=1)** where action=1 is the **second** option in **`option_keys`**. NL transcripts are parsed once per participant into structured trial dicts; evolution/eval use those dicts (not raw text). Prompt trial lines use **`format_trials_for_prompt()`** (schema-aware one-liners).
+
+- **Metadata paths:** Valid participant lists live under **`datasets/psych101_{train|test}/<alias>/valid_participant_ids.json`**. On startup, **`utils/teh/participant_ids.py`** auto-scans and writes this file when missing (`ensure_valid_participant_ids_prepared`). Manual refresh: **`python utils/tools/collect_teh_participant_ids.py --dataset <alias> --psych_dataset_split train|test`**.
+
+- **Run layout & prompts:** Outputs under **`generated_outputs/psych101_{train|test}/teh/<alias>/run_TIMESTAMP/`** (or **`generated_outputs/mixed_gambles/teh/...`**). **`utils/teh/teh_runtime.setup_teh_run_prompts()`** creates **`run_*/prompts/`** (`infer_single_choice.txt`, **`refine.txt`**, templates, seed copy). Refinement and candidate generation read **`run_prompts_dir`** when set (not repo-default choice13k paths). **`--no_llm_prompt`** merges base loglik text + dataset description without an extra LLM call.
+
+- **Evolution CLI (inherited from non_strict):** **`--parallel_participants`**, **`--phase {all,evolution,refine}`**, loglik refinement (**`--refinement_iters`**, **`--refinement_val_threshold`**), **`--sample_parents` / `--no-sample_parents`**, **`--elite_pool_size`**, **`--max_prompt_train_trials`**, **`--max_prompt_trials_per_problem`**, optional **`--global_phase`** (pooled evolution; **`peterson2021using`** + **`within_participant`** only for **`across_participants`**). Default **`--fitness_metric loglik`**; accuracy mode is rejected for TEH participant datasets.
+
+- **Removed / legacy:** CLI no longer exposes **`choice13k`**, **`cpc18`**, or **gridworld** as `--dataset` values (use Psych-101 aliases, e.g. **`peterson2021using`** for Choice13k-style gambles). Gridworld/JAX imports are **lazy** so **`python teh.py --help`** does not require JAX.
+
+- **Package layout:** **`utils/teh/teh_datasets.py`** (registry, path helpers), **`utils/teh/teh_runtime.py`**, **`utils/teh/participant_ids.py`**, **`utils/teh/__init__.py`**.
+
+- **Validation & cluster:** **`analysis/code/psych-101/validate_teh_all_datasets.py`**, **`validate_teh_peterson.py`**. Slurm examples: **`cluster/teh/1choices13k.sh`** (peterson train), **`2cpc18.sh`** (plonsky), **`3mixed_gambles.sh`**.
+
+- **LLM context (same as non_strict):** **`--no-sample_parents`** with **`--sample_size 10`** embeds up to **10 elite programs** per candidate prompt once the pool is full; with vLLM **`--max-model-len 10240`** this typically overflows (~9217 input tokens) from iteration 4+. Prefer **`--max-model-len 12288`** (as in completed choice13k non-strict runs) or **`--sample_size 1`** for prompt parents. This is not psych-101–specific parser bloat; it is shared multi-parent prompt assembly.

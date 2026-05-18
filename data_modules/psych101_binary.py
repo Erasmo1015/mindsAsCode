@@ -182,12 +182,12 @@ def _load_hf_split(
     return dataset[split]
 
 
-def get_psych101_binary_experiments(
+def get_filtered_psych101_split(
     dataset_alias: str,
-    n_participants: int = 10,
     split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
-) -> List[PsychExperiment]:
+):
+    """HF rows for one Psych-101 experiment id (shows datasets `Filter` progress once)."""
     if dataset_alias not in PSYCH101_BINARY_DATASETS:
         raise KeyError(
             f"Unknown dataset alias {dataset_alias!r}. "
@@ -195,12 +195,28 @@ def get_psych101_binary_experiments(
         )
     exp_id = experiment_id_for_alias(dataset_alias)
     split_ds = _load_hf_split(split, local_dataset=local_dataset)
-    filtered = split_ds.filter(lambda ex, e=exp_id: ex["experiment"] == e)
+    return split_ds.filter(lambda ex, e=exp_id: ex["experiment"] == e)
+
+
+def parse_psych101_binary_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
+    """Parse one HF row into a PsychExperiment."""
+    return _parse_row(row, dataset_alias)
+
+
+def get_psych101_binary_experiments(
+    dataset_alias: str,
+    n_participants: int = 10,
+    split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    local_dataset: Optional[str] = None,
+) -> List[PsychExperiment]:
+    filtered = get_filtered_psych101_split(
+        dataset_alias, split=split, local_dataset=local_dataset
+    )
     n = min(n_participants, len(filtered))
     experiments: List[PsychExperiment] = []
     for i in range(n):
         row = dict(filtered[i])
-        experiments.append(_parse_row(row, dataset_alias))
+        experiments.append(parse_psych101_binary_row(row, dataset_alias))
     return experiments
 
 
