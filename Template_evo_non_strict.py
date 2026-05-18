@@ -39,7 +39,7 @@ import sys
 import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any, Callable, Optional, Tuple
+from typing import List, Dict, Any, Callable, Optional, Tuple, Set
 from datetime import datetime
 import numpy as np
 from openai import OpenAI
@@ -1132,6 +1132,43 @@ def _load_refinement_prompt_suffix(dataset: str) -> str:
         return f.read().strip()
 
 
+def _prompt_block_key(trial: Dict[str, Any]) -> Any:
+    """Stable key for a prompt 'block' (problem / CPC18 block / gamble signature)."""
+    if "block_id" in trial and "problem_id" in trial:
+        return ("block", trial["problem_id"], trial["block_id"])
+    if "problem_id" in trial:
+        return ("problem_id", trial["problem_id"])
+    if "problem_signature" in trial:
+        return ("problem_signature", trial["problem_signature"])
+    p = trial.get("problem", {})
+    ga = p.get("gamble_A", {})
+    gb = p.get("gamble_B", {})
+    ga_probs = ga.get("probs", []) or []
+    gb_probs = gb.get("probs", []) or []
+    return (
+        "problem_sig",
+        tuple(ga.get("rewards", [])),
+        tuple(ga_probs),
+        tuple(gb.get("rewards", [])),
+        tuple(gb_probs),
+    )
+
+
+def _group_trials_by_prompt_block(
+    trials: List[Dict[str, Any]],
+) -> Tuple[List[Any], Dict[Any, List[Dict[str, Any]]]]:
+    """Group trials by block key, preserving first-seen block order."""
+    grouped: Dict[Any, List[Dict[str, Any]]] = {}
+    order: List[Any] = []
+    for t in trials:
+        key = _prompt_block_key(t)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(t)
+    return order, grouped
+
+
 def _cap_and_subsample_prompt_trials(
     trials: List[Dict[str, Any]],
     *,
@@ -1140,17 +1177,82 @@ def _cap_and_subsample_prompt_trials(
     subsample_seed: int,
     label: str,
 ) -> List[Dict[str, Any]]:
-    """Apply per-problem cap and optional subsample (same limits as train prompt trials)."""
-    out = _cap_prompt_trials_per_problem(list(trials), max_trials_per_problem)
-    if max_trials > 0 and len(out) > max_trials:
-        rng = np.random.default_rng(subsample_seed)
-        perm = rng.permutation(len(out))
-        sel = perm[:max_trials]
-        out = [out[int(i)] for i in sel]
+    """Select trials for LLM prompts: sample blocks then optional extra singles.
+
+    When ``max_trials_per_problem`` > 0, sample ``max_trials // max_trials_per_problem`` blocks
+    (up to ``max_trials_per_problem`` trials each), then ``max_trials % max_trials_per_problem``
+    additional trials from the remainder pool. When ``max_trials_per_problem`` is 0, sample up to
+    ``max_trials`` trials with no block structure. ``max_trials`` <= 0 disables capping.
+    """
+    trials = list(trials)
+    if max_trials <= 0:
+        return trials
+    if not trials:
+        return []
+
+    rng = np.random.default_rng(subsample_seed)
+    orig_index = {id(t): i for i, t in enumerate(trials)}
+
+    def _sort_chronological(selected: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(selected, key=lambda t: orig_index[id(t)])
+
+    if max_trials_per_problem <= 0:
+        if len(trials) <= max_trials:
+            return trials
+        idx = rng.choice(len(trials), size=max_trials, replace=False)
+        out = [trials[int(i)] for i in sorted(idx)]
         print(
             f"[LLM prompt] Using {len(out)} of {len(trials)} {label} trials "
-            f"(max={max_trials}, seed={subsample_seed})."
+            f"(flat subsample, max={max_trials}, seed={subsample_seed})."
         )
+        return out
+
+    per_block = int(max_trials_per_problem)
+    n_blocks_target = max_trials // per_block
+    n_extra = max_trials % per_block
+
+    block_order, grouped = _group_trials_by_prompt_block(trials)
+    n_blocks = len(block_order)
+    if n_blocks == 0:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    used_ids: Set[int] = set()
+    n_blocks_sampled = 0
+
+    if n_blocks_target > 0 and n_blocks > 0:
+        n_blocks_sample = min(n_blocks_target, n_blocks)
+        block_idxs = rng.choice(n_blocks, size=n_blocks_sample, replace=False)
+        for bi in sorted(int(i) for i in block_idxs):
+            block_trials = grouped[block_order[bi]]
+            if len(block_trials) <= per_block:
+                picked = block_trials
+            else:
+                tidx = rng.choice(len(block_trials), size=per_block, replace=False)
+                picked = [block_trials[int(j)] for j in sorted(tidx)]
+            for t in picked:
+                if id(t) not in used_ids:
+                    out.append(t)
+                    used_ids.add(id(t))
+            n_blocks_sampled += 1
+
+    if n_extra > 0:
+        remaining = [t for t in trials if id(t) not in used_ids]
+        if remaining:
+            n_pick = min(n_extra, len(remaining))
+            ridx = rng.choice(len(remaining), size=n_pick, replace=False)
+            for j in sorted(int(i) for i in ridx):
+                t = remaining[j]
+                out.append(t)
+                used_ids.add(id(t))
+
+    out = _sort_chronological(out)
+    extra_note = f", +{n_extra} extra trial(s)" if n_extra else ""
+    print(
+        f"[LLM prompt] Using {len(out)} of {len(trials)} {label} trials "
+        f"({n_blocks_sampled} sampled block(s) x up to {per_block}{extra_note}, "
+        f"max={max_trials}, seed={subsample_seed})."
+    )
     return out
 
 
@@ -2203,44 +2305,6 @@ def format_trials_to_text(trials: List[Dict[str, Any]], dataset: str = "choice13
                 f"Observed action: {action}"
             )
     return "\n".join(lines)
-
-
-def _cap_prompt_trials_per_problem(
-    trials: List[Dict[str, Any]], max_trials_per_problem: int
-) -> List[Dict[str, Any]]:
-    """Cap prompt trials per problem (prompt-only; evaluation still uses full train split)."""
-    if max_trials_per_problem <= 0:
-        return list(trials)
-    grouped: Dict[Any, List[Dict[str, Any]]] = {}
-    order: List[Any] = []
-    for t in trials:
-        if "problem_id" in t:
-            key = ("problem_id", t["problem_id"])
-        else:
-            p = t.get("problem", {})
-            ga = p.get("gamble_A", {})
-            gb = p.get("gamble_B", {})
-            ga_probs = ga.get("probs", [])
-            gb_probs = gb.get("probs", [])
-            if ga_probs is None:
-                ga_probs = []
-            if gb_probs is None:
-                gb_probs = []
-            key = (
-                "problem_sig",
-                tuple(ga.get("rewards", [])),
-                tuple(ga_probs),
-                tuple(gb.get("rewards", [])),
-                tuple(gb_probs),
-            )
-        if key not in grouped:
-            grouped[key] = []
-            order.append(key)
-        grouped[key].append(t)
-    capped: List[Dict[str, Any]] = []
-    for key in order:
-        capped.extend(grouped[key][:max_trials_per_problem])
-    return capped
 
 
 def load_mixed_gambles_data(
@@ -4175,17 +4239,18 @@ def choose(problem, history):
     
     # Trials serialized into the prompt (evaluation still uses full train_trials elsewhere).
     # Refinement passes prompt_observation_trials=val only; evolution uses train_trials.
-    observation_source = (
-        prompt_observation_trials if prompt_observation_trials is not None else train_trials
-    )
     obs_label = "validation" if prompt_observation_trials is not None else "train"
-    trials_for_prompt = _cap_and_subsample_prompt_trials(
-        observation_source,
-        max_trials=max_prompt_train_trials,
-        max_trials_per_problem=max_prompt_trials_per_problem,
-        subsample_seed=prompt_train_trials_seed,
-        label=obs_label,
-    )
+    if prompt_observation_trials is not None:
+        # Refinement pre-samples val trials once for the whole phase; do not resample here.
+        trials_for_prompt = list(prompt_observation_trials)
+    else:
+        trials_for_prompt = _cap_and_subsample_prompt_trials(
+            train_trials,
+            max_trials=max_prompt_train_trials,
+            max_trials_per_problem=max_prompt_trials_per_problem,
+            subsample_seed=prompt_train_trials_seed,
+            label=obs_label,
+        )
     # Note: dataset parameter not available here, but this function is only called for Choice13k/CPC18
     # We'll detect format from trial structure
     if trials_for_prompt and "problem" in trials_for_prompt[0]:
@@ -6997,16 +7062,20 @@ def main():
         type=int,
         default=1_000_000,
         help=(
-            "Cap on train trials serialized into each LLM generation prompt (random subsample without replacement). "
-            "If len(train_trials) <= this value, all train trials are used. Default 1000000. "
-            "Use 0 to disable capping (always use full train set in the prompt; may exceed context limits)."
+            "Max trials serialized into each LLM prompt. With --max_prompt_trials_per_problem > 0, "
+            "sample (max // per_problem) blocks at up to per_problem trials each, plus "
+            "(max %% per_problem) extra trials. With per_problem=0, flat-random sample of max trials. "
+            "0 = no cap (full split in prompt). Default 1000000."
         ),
     )
     parser.add_argument(
         "--max_prompt_trials_per_problem",
         type=int,
         default=0,
-        help="Cap serialized train trials per problem in LLM prompts (0 = no per-problem cap).",
+        help=(
+            "Trials per sampled block in LLM prompts (0 = flat sample of --max_prompt_train_trials only). "
+            "Block = Choice13k/mixed_gambles gamble signature, CPC18 (problem_id, block_id), or problem_id."
+        ),
     )
     parser.add_argument(
         "--llm_max_tokens",
