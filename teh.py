@@ -86,6 +86,8 @@ BEST_PROGRAM_FILENAME = "best_program.py"
 # Serializes writes to experiment-level CSVs (participant_details_loglik, summary_loglik, etc.)
 # when --parallel_participants is enabled. Per-participant dirs are not locked (isolated paths).
 _SHARED_EXPERIMENT_CSV_LOCK = threading.Lock()
+# Serializes wandb.log for participant metrics (parallel workers share one run).
+_WANDB_PARTICIPANT_LOG_LOCK = threading.Lock()
 _RUN_PHASES = frozenset({"all", "evolution", "refine"})
 
 
@@ -158,8 +160,15 @@ def _wandb_log_participant_metrics(
     participant_id: int,
     step: int,
 ) -> None:
-    """Log participant metrics to W&B with te_aggregate-style slash chart grouping."""
-    wandb_module.log(_wandb_participant_chart_dict(log_dict, participant_id, step), step=step)
+    """
+    Log participant metrics to W&B with te_aggregate-style slash chart grouping.
+
+    Uses per-participant step via p{pid}_step (see wandb.define_metric); do not pass a global
+    wandb.log(step=...) — parallel participants would race on the shared run step axis.
+    """
+    payload = _wandb_participant_chart_dict(log_dict, participant_id, step)
+    with _WANDB_PARTICIPANT_LOG_LOCK:
+        wandb_module.log(payload)
 
 
 def _parallel_participant_pool_sizes(
@@ -6112,7 +6121,9 @@ def run_evolution(
             overall_best_train["gated_test_loglik"] = gated_test_loglik
             overall_best_test["gated_test_loglik"] = gated_test_loglik
             if wandb is not None and participant_id is not None:
-                refine_step = int(n_iterations) + int(refinement_iters)
+                # Align gated_test_loglik with the last evolution test_loglik step (not
+                # n_iterations + refinement_iters, which used the global config size).
+                final_evolution_step = int(n_iterations)
                 refine_log = {
                     f"p{participant_id}_gated_test_loglik": gated_test_loglik,
                     f"p{participant_id}_train_loglik": overall_best_train.get("train_loglik"),
@@ -6121,7 +6132,9 @@ def run_evolution(
                     f"p{participant_id}_train_fitness": overall_best_train.get("train_loglik"),
                     f"p{participant_id}_test_fitness": overall_best_test.get("test_loglik"),
                 }
-                _wandb_log_participant_metrics(wandb, refine_log, int(participant_id), refine_step)
+                _wandb_log_participant_metrics(
+                    wandb, refine_log, int(participant_id), final_evolution_step
+                )
     elif (
         run_phase == "all"
         and refinement_phase
@@ -6184,7 +6197,7 @@ def run_evolution(
                         f"p{participant_id}_test_loglik": overall_best_test.get("test_loglik"),
                     }
                     _wandb_log_participant_metrics(
-                        wandb, gate_log, int(participant_id), int(n_iterations) + 1
+                        wandb, gate_log, int(participant_id), int(n_iterations)
                     )
 
     gated_test_loglik = _apply_test_loglik_as_gated_when_no_refinement(
