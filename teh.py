@@ -71,6 +71,7 @@ from utils.prompt_flags import (
     single_code_template_prompt_suffix,
 )
 from utils.teh.teh_runtime import (
+    CONCISE_PROGRAM_GUIDANCE,
     DEFAULT_SEED_PROGRAM,
     TEH_WANDB_PROJECT,
     setup_teh_run_prompts,
@@ -922,6 +923,8 @@ def run_global_evolution_phase(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_parent_chars: int = 6000,
+    warn_parent_truncation_ratio: float = 0.5,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -1007,6 +1010,9 @@ def run_global_evolution_phase(
         parent_codes = [p[0] for p in selected_parents]
         parent_train_lls = [_train_loglik_from_elite_tuple(p) for p in selected_parents]
 
+        prompt_stats_path = (
+            iter_dir / "prompt_stats.json" if iter_dir is not None else None
+        )
         candidate_codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -1022,6 +1028,10 @@ def run_global_evolution_phase(
             fitness_metric="loglik",
             max_workers=max_workers,
             run_prompts_dir=run_prompts_dir,
+            max_parent_chars=max_parent_chars,
+            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+            sample_size_for_warning=sample_size,
+            prompt_stats_path=prompt_stats_path,
         )
 
         selected_results: List[Dict[str, Any]] = []
@@ -1370,6 +1380,8 @@ def run_loglik_refinement_phase(
     initial_train_loglik: Optional[float] = None,
     initial_val_loglik: Optional[float] = None,
     run_prompts_dir: Optional[str] = None,
+    max_parent_chars: int = 6000,
+    warn_parent_truncation_ratio: float = 0.5,
 ) -> Optional[float]:
     """
     Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
@@ -1505,6 +1517,9 @@ def run_loglik_refinement_phase(
             f"[LLM prompt] Refinement uses {len(val_for_prompt)} validation trials only "
             f"(not train+val; cap via max_prompt_train_trials={max_prompt_train_trials})."
         )
+        prompt_stats_path = (
+            iter_dir / "prompt_stats.json" if iter_dir is not None else None
+        )
         candidate_codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -1523,6 +1538,10 @@ def run_loglik_refinement_phase(
             prompt_suffix=refine_suffix,
             prompt_observation_trials=val_for_prompt,
             run_prompts_dir=run_prompts_dir,
+            max_parent_chars=max_parent_chars,
+            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+            sample_size_for_warning=sample_size,
+            prompt_stats_path=prompt_stats_path,
         )
 
         candidate_results: List[Dict[str, Any]] = []
@@ -2042,6 +2061,8 @@ def run_loglik_refine_participant_from_checkpoint(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_parent_chars: int = 6000,
+    warn_parent_truncation_ratio: float = 0.5,
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -2169,6 +2190,8 @@ def run_loglik_refine_participant_from_checkpoint(
         "wandb_module": wandb_module,
         "wandb_step_offset": 0,
         "run_prompts_dir": run_prompts_dir,
+        "max_parent_chars": max_parent_chars,
+        "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
         ref_parents, ref_vals = _load_evolution_elite_pool(evolution_pool_dir)
@@ -2247,6 +2270,8 @@ def run_loglik_refine_from_prev_experiment(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_parent_chars: int = 6000,
+    warn_parent_truncation_ratio: float = 0.5,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -2356,6 +2381,8 @@ def run_loglik_refine_from_prev_experiment(
             psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
+            max_parent_chars=max_parent_chars,
+            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
         )
         return int(participant_id), metrics
 
@@ -4136,6 +4163,27 @@ Generate the variant now:"""
     )[:n_variants]
 
 
+_PARENT_TRUNCATION_MARKER = "# [TRUNCATED PARENT PROGRAM DUE TO PROMPT BUDGET]\n"
+
+
+def _truncate_parent_program_for_prompt(code: str, max_parent_chars: int) -> Tuple[str, bool]:
+    """Truncate parent code for LLM prompts only; evaluation uses full code."""
+    if max_parent_chars <= 0 or len(code) <= max_parent_chars:
+        return code, False
+    marker = _PARENT_TRUNCATION_MARKER
+    join_newline = "\n"
+    budget = max_parent_chars - len(marker) - len(join_newline)
+    if budget < 2:
+        return code[:max_parent_chars], True
+    first_len = int(budget * 0.7)
+    last_len = budget - first_len
+    if first_len + last_len >= len(code):
+        return code[:max_parent_chars], True
+    head = code[:first_len]
+    tail = code[-last_len:] if last_len > 0 else ""
+    return f"{head}{join_newline}{marker}{tail}", True
+
+
 def generate_program_variants(
     client: OpenAI,
     model_name: str,
@@ -4158,6 +4206,10 @@ def generate_program_variants(
     extra_prompt_trials: Optional[List[Dict[str, Any]]] = None,
     extra_prompt_trials_label: str = "Validation observations",
     run_prompts_dir: Optional[str] = None,
+    max_parent_chars: int = 6000,
+    warn_parent_truncation_ratio: float = 0.5,
+    sample_size_for_warning: int = 10,
+    prompt_stats_path: Optional[Path] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -4222,6 +4274,8 @@ Constraints:
 - Do not sample or use randomness.
 
 Provide only the code for choose(...) as a complete function body.
+
+""" + CONCISE_PROGRAM_GUIDANCE + """
 """
             code_template = ""
         else:
@@ -4250,6 +4304,8 @@ Constraints:
 - Do not call external APIs.
 
 Provide only the code for choose(...) as a complete function body.
+
+""" + CONCISE_PROGRAM_GUIDANCE + """
 """
             code_template = ""
     
@@ -4295,10 +4351,37 @@ Provide only the code for choose(...) as a complete function body.
     if prompt_suffix:
         base_prompt = f"{base_prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
 
-    # Include parent programs as reference
     num_parents = len(parent_programs)
+    parent_lengths_before = [len(p) for p in parent_programs]
+    prompt_parent_programs: List[str] = []
+    parent_truncated_flags: List[bool] = []
+    truncated_count = 0
+    for parent_code in parent_programs:
+        truncated_code, was_truncated = _truncate_parent_program_for_prompt(
+            parent_code, max_parent_chars
+        )
+        prompt_parent_programs.append(truncated_code)
+        parent_truncated_flags.append(was_truncated)
+        if was_truncated:
+            truncated_count += 1
+    parent_lengths_after = [len(p) for p in prompt_parent_programs]
+
+    if (
+        max_parent_chars > 0
+        and sample_size_for_warning > 0
+        and truncated_count / sample_size_for_warning >= warn_parent_truncation_ratio
+    ):
+        print(
+            f"Warning: truncated {truncated_count}/{num_parents} parent program(s) for LLM prompt "
+            f"(>= {warn_parent_truncation_ratio:.0%} of sample_size={sample_size_for_warning}); "
+            f"max_parent_chars={max_parent_chars}."
+        )
+
+    # Include parent programs as reference (truncated copies only; evaluation uses full code).
     if num_parents == 1:
-        parent_context = f"\n\nReference program (parent):\n```python\n{parent_programs[0]}\n```\n\n"
+        parent_context = (
+            f"\n\nReference program (parent):\n```python\n{prompt_parent_programs[0]}\n```\n\n"
+        )
         if (
             parent_train_accuracies
             and len(parent_train_accuracies) > 0
@@ -4317,7 +4400,7 @@ Provide only the code for choose(...) as a complete function body.
         parent_context += "Generate a variant that improves upon or explores alternatives to the parent program.\n"
     else:
         parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
-        for i, parent_program in enumerate(parent_programs):
+        for i, parent_program in enumerate(prompt_parent_programs):
             if dataset == "cpc18" and cpc18_official_mse:
                 mse = parent_train_mses[i] if (parent_train_mses and i < len(parent_train_mses)) else None
                 mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
@@ -4374,6 +4457,20 @@ Provide only the code for choose(...) as a complete function body.
         f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{single_code_template_prompt_suffix(code_template)}"
     )
+
+    if prompt_stats_path is not None:
+        prompt_stats: Dict[str, Any] = {
+            "n_parents": num_parents,
+            "parent_char_lengths_before": parent_lengths_before,
+            "parent_char_lengths_after": parent_lengths_after,
+            "parent_truncated": parent_truncated_flags,
+            "truncated_parent_count": truncated_count,
+            "final_prompt_char_length": len(prompt_text),
+            "max_parent_chars": max_parent_chars,
+        }
+        prompt_stats_path = Path(prompt_stats_path)
+        prompt_stats_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_stats_path.write_text(json.dumps(prompt_stats, indent=2) + "\n", encoding="utf-8")
 
     def _generate_one() -> str:
         try:
@@ -4442,6 +4539,8 @@ def run_evolution(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_parent_chars: int = 6000,
+    warn_parent_truncation_ratio: float = 0.5,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -4961,6 +5060,14 @@ def run_evolution(
         
         # Generate candidate programs (full code, not just parameters)
         print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
+        prompt_stats_path: Optional[Path] = None
+        if save_artifacts:
+            if iter_dir is not None:
+                prompt_stats_path = iter_dir / "prompt_stats.json"
+            elif simple_iterations_dir is not None:
+                prompt_stats_path = (
+                    simple_iterations_dir / f"iteration_{iteration_step}" / "prompt_stats.json"
+                )
         candidate_codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -4977,6 +5084,10 @@ def run_evolution(
             cpc18_official_mse=False,
             max_workers=max_workers,
             run_prompts_dir=run_prompts_dir,
+            max_parent_chars=max_parent_chars,
+            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+            sample_size_for_warning=sample_size,
+            prompt_stats_path=prompt_stats_path,
         )
         
         # Evaluate candidates
@@ -6115,6 +6226,8 @@ def run_evolution(
             evolution_elite_parents=ref_parents,
             evolution_elite_val_logliks=ref_vals,
             run_prompts_dir=run_prompts_dir,
+            max_parent_chars=max_parent_chars,
+            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -6973,6 +7086,24 @@ def main():
         help="Max output tokens per candidate generation request (reduces context-overflow failures).",
     )
     parser.add_argument(
+        "--max_parent_chars",
+        type=int,
+        default=6000,
+        help=(
+            "Max characters per parent program inserted into LLM prompts (0 = no truncation). "
+            "Candidate code is never truncated for evaluation. Default: 6000."
+        ),
+    )
+    parser.add_argument(
+        "--warn_parent_truncation_ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Print a warning when truncated_parents / sample_size >= this ratio "
+            "(default: 0.5)."
+        ),
+    )
+    parser.add_argument(
         "--max_workers",
         type=int,
         default=5,
@@ -7090,6 +7221,12 @@ def main():
         return
     if args.llm_max_tokens < 64:
         print("Error: --llm_max_tokens must be >= 64.")
+        return
+    if args.max_parent_chars < 0:
+        print("Error: --max_parent_chars must be >= 0 (0 = no truncation).")
+        return
+    if not (0.0 <= args.warn_parent_truncation_ratio <= 1.0):
+        print("Error: --warn_parent_truncation_ratio must be in [0, 1].")
         return
     if args.max_workers < 1:
         print("Error: --max_workers must be >= 1.")
@@ -7373,6 +7510,8 @@ def main():
             psych_dataset_split=psych_dataset_split,
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
+            max_parent_chars=args.max_parent_chars,
+            warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
         )
 
     if args.phase == "refine":
@@ -7418,6 +7557,8 @@ def main():
                 psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
+                max_parent_chars=args.max_parent_chars,
+                warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
             )
         finally:
             if wandb is not None:
@@ -7517,6 +7658,8 @@ def main():
                 psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
+                max_parent_chars=args.max_parent_chars,
+                warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
             )
         finally:
             if wandb is not None:
@@ -7590,6 +7733,8 @@ def main():
                 psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
+                max_parent_chars=args.max_parent_chars,
+                warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -7960,6 +8105,8 @@ def main():
                         max_prompt_train_trials=args.max_prompt_train_trials,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
+                        max_parent_chars=args.max_parent_chars,
+                        warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                         gate_phase=args.gate_phase,
                         run_phase=evolution_run_phase,
                         refinement_phase=args.refinement_phase,
@@ -8229,6 +8376,8 @@ def main():
                 psych_dataset_split=psych_dataset_split,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
+                max_parent_chars=args.max_parent_chars,
+                warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
             )
 
         try:

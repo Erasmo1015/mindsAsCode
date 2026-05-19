@@ -45,6 +45,7 @@ Behavioral requirements:
 - The program should behave sensibly across different problems and histories.
 
 Generation requirements:
+- Prefer concise programs. Avoid long repetitive helper code. Keep choose() compact, ideally under ~150 lines unless necessary.
 - Produce a valid program that is meaningfully different from the parent.
 - Avoid making only superficial changes without changing behavior.
 

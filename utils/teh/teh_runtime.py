@@ -44,6 +44,11 @@ BASE_REFINE_PROMPT = (
 )
 DEFAULT_SEED_PROGRAM = REPO_ROOT / "persona_code_example" / "te_vanilla" / "choices13k.py"
 
+CONCISE_PROGRAM_GUIDANCE = (
+    "Prefer concise programs. Avoid long repetitive helper code. "
+    "Keep choose() compact, ideally under ~150 lines unless necessary."
+)
+
 
 def valid_participant_ids_path(
     dataset_alias: str,
@@ -174,6 +179,7 @@ def _generate_prompt_via_llm(
         "summary and examples (participant-specific press keys), not generic 'Option B' labels.\n"
         "- Document `problem` keys using the exact names from the examples (e.g. round_id, "
         "current_score, cards_flipped for CCT — not renamed aliases).\n"
+        f"- {CONCISE_PROGRAM_GUIDANCE}\n"
         "- Output ONLY the full prompt text (no markdown code fence).\n\n"
         f"## Runtime schema summary\n\n{schema_summary}\n\n"
         f"## Base prompt (shared template — adapt, do not copy gamble bias blindly)\n\n"
