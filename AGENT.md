@@ -250,13 +250,26 @@ Short changelog of committed non-strict work (choice13k / cpc18 / mixed_gambles)
 
 **TEH** (Template Evolution HuggingFace) is a Psych-101–focused fork of `Template_evo_non_strict.py`. WandB project: **`teh`**. Main script: **`teh.py`**.
 
-- **Datasets (CLI `--dataset`):** Eight implemented Psych-101 binary aliases — `peterson2021using`, `plonsky2018when`, `wulff2018description`, `speekenbrink2008learning`, `sadeghiyeh2020temporal`, `hilbig2014generalized`, `frey2017cct`, `flesch2018comparing` — loaded via **`data_modules/psych101_binary.py`** and schema parsers in **`data_modules/psych101_parsers.py`**. HF corpus selector **`--psych_dataset_split {train,test}`** maps to `marcelbinz/Psych-101` or `Psych-101-test`. Optional **`--local_dataset`** for `load_from_disk`. **`mixed_gambles`** remains supported as a **local CSV** dataset in **`data_modules/mixed_gambles.py`** (not routed through psych101_binary).
+- **Datasets (CLI `--dataset`):** Eight implemented Psych-101 binary aliases use a **numeric prefix** for output folders and WandB run names (HF `experiment_id` strings are unchanged):
+
+  | ID | CLI alias | HF `experiment_id` |
+  |----|-----------|-------------------|
+  | 1 | `1peterson2021using` | `peterson2021using/exp1.csv` |
+  | 2 | `2plonsky2018when` | `plonsky2018when/exp1.csv` |
+  | 3 | `3frey2017cct` | `frey2017cct/exp1.csv` |
+  | 4 | `4wulff2018description` | `wulff2018description/exp1.csv` |
+  | 5 | `5speekenbrink2008learning` | `speekenbrink2008learning/exp1.csv` |
+  | 6 | `6sadeghiyeh2020temporal` | `sadeghiyeh2020temporal/exp1.csv` |
+  | 7 | `7hilbig2014generalized` | `hilbig2014generalized/exp1.csv` |
+  | 8 | `8flesch2018comparing` | `flesch2018comparing/exp1.csv` |
+
+  Unprefixed legacy names (e.g. `peterson2021using`) are accepted and normalized via **`normalize_psych101_dataset_alias()`**. Loaders: **`data_modules/psych101_binary.py`**, parsers **`data_modules/psych101_parsers.py`**. **`--psych_dataset_split {train,test}`** → `marcelbinz/Psych-101` or `Psych-101-test`. **`mixed_gambles`** stays a local CSV dataset (no numeric prefix).
 
 - **Trial API:** Evolved code implements **`choose(problem, history) -> float`** = **P(action=1)** where action=1 is the **second** option in **`option_keys`**. NL transcripts are parsed once per participant into structured trial dicts; evolution/eval use those dicts (not raw text). Prompt trial lines use **`format_trials_for_prompt()`** (schema-aware one-liners).
 
-- **Metadata paths:** Valid participant lists live under **`datasets/psych101_{train|test}/<alias>/valid_participant_ids.json`**. On startup, **`utils/teh/participant_ids.py`** auto-scans and writes this file when missing (`ensure_valid_participant_ids_prepared`). Manual refresh: **`python utils/tools/collect_teh_participant_ids.py --dataset <alias> --psych_dataset_split train|test`**.
+- **Metadata paths:** Valid participant lists live under **`datasets/psych101_{train|test}/<numbered-alias>/valid_participant_ids.json`** (e.g. `datasets/psych101_train/1peterson2021using/`). On startup, **`utils/teh/participant_ids.py`** auto-scans, writes when missing, and **renames** legacy unprefixed metadata folders when found. Manual refresh: **`python utils/tools/collect_teh_participant_ids.py --dataset 1peterson2021using --psych_dataset_split train|test`**.
 
-- **Run layout & prompts:** Outputs under **`generated_outputs/psych101_{train|test}/teh/<alias>/run_TIMESTAMP/`** (or **`generated_outputs/mixed_gambles/teh/...`**). **`utils/teh/teh_runtime.setup_teh_run_prompts()`** creates **`run_*/prompts/`** (`infer_single_choice.txt`, **`refine.txt`**, templates, seed copy). Refinement and candidate generation read **`run_prompts_dir`** when set (not repo-default choice13k paths). **`--no_llm_prompt`** merges base loglik text + dataset description without an extra LLM call.
+- **Run layout & prompts:** Outputs under **`generated_outputs/psych101_{train|test}/teh/<numbered-alias>/run_TIMESTAMP/`** (e.g. `.../teh/1peterson2021using/run_YYMMDD_HHMMSS/`); WandB names follow the same prefix (`1peterson2021using_teh_train_...`). **`utils/teh/teh_runtime.setup_teh_run_prompts()`** creates **`run_*/prompts/`** (`infer_single_choice.txt`, **`refine.txt`**, templates, seed copy). Refinement and candidate generation read **`run_prompts_dir`** when set (not repo-default choice13k paths). **`--no_llm_prompt`** merges base loglik text + dataset description without an extra LLM call.
 
 - **Evolution CLI (inherited from non_strict):** **`--parallel_participants`**, **`--phase {all,evolution,refine}`**, loglik refinement (**`--refinement_iters`**, **`--refinement_val_threshold`**), **`--sample_parents` / `--no-sample_parents`**, **`--elite_pool_size`**, **`--max_prompt_train_trials`**, **`--max_prompt_trials_per_problem`**, optional **`--global_phase`** (pooled evolution; **`peterson2021using`** + **`within_participant`** only for **`across_participants`**). Default **`--fitness_metric loglik`**; accuracy mode is rejected for TEH participant datasets.
 

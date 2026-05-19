@@ -47,7 +47,7 @@ def main():
     for pid in args.participant:
         legacy = get_choice13k_experiments(n_participants=pid + 1)[pid]
         teh_exp = get_psych101_binary_experiments(
-            "peterson2021using",
+            "1peterson2021using",
             n_participants=pid + 1,
             split=args.psych_dataset_split,
         )[pid]

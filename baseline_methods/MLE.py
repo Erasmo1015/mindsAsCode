@@ -33,10 +33,12 @@ if str(_REPO_ROOT) not in sys.path:
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
+    PETERSON2021USING_ALIAS,
     experiment_to_trial_dicts,
     get_psych101_binary_experiments,
     hf_id_for_psych_dataset_split,
     is_psych101_dataset,
+    normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
     split_psych_experiment,
 )
@@ -48,7 +50,7 @@ from utils.teh.teh_datasets import (
 )
 
 _PARTICIPANT_DATASETS = PARTICIPANT_DATASETS
-_PETERSON_ALIAS = "peterson2021using"
+_PETERSON_ALIAS = PETERSON2021USING_ALIAS
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
@@ -735,6 +737,7 @@ def main() -> None:
     )
     _add_te_compat_args(parser)
     args = parser.parse_args()
+    args.dataset = normalize_psych101_dataset_alias(args.dataset)
     mixed_gambles_gain_loss_only = bool(args.filter_mixed_gambles)
     psych_dataset_split = _effective_psych_dataset_split(args.dataset, args.psych_dataset_split)
 

@@ -19,9 +19,11 @@ from tqdm import tqdm
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PSYCH101_BINARY_DATASETS,
+    PSYCH101_LEGACY_ALIASES,
     experiment_id_for_alias,
     get_filtered_psych101_split,
     hf_id_for_psych_dataset_split,
+    normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
     parse_psych101_binary_row,
 )
@@ -322,6 +324,30 @@ def collect_and_write_valid_participant_ids(
     return out_path
 
 
+def _migrate_psych101_metadata_dir_if_needed(
+    repo_root: Path,
+    dataset: str,
+    psych_dataset_split: str,
+) -> None:
+    """Rename legacy unprefixed metadata folder to numbered alias when present."""
+    if is_mixed_gambles_dataset(dataset):
+        return
+    canonical = normalize_psych101_dataset_alias(dataset)
+    legacy = None
+    for old_name, new_name in PSYCH101_LEGACY_ALIASES.items():
+        if new_name == canonical:
+            legacy = old_name
+            break
+    if legacy is None or legacy == canonical:
+        return
+    root = psych101_metadata_root(repo_root, psych_dataset_split)
+    old_path = root / legacy
+    new_path = root / canonical
+    if old_path.is_dir() and not new_path.exists():
+        old_path.rename(new_path)
+        print(f"[TEH] Renamed metadata folder {legacy} -> {canonical}")
+
+
 def ensure_valid_participant_ids_prepared(
     dataset: str,
     repo_root: Path,
@@ -339,6 +365,8 @@ def ensure_valid_participant_ids_prepared(
 
     Uses the same split settings as the TEH run so participant scope matches evolution splits.
     """
+    dataset = normalize_psych101_dataset_alias(dataset)
+    _migrate_psych101_metadata_dir_if_needed(repo_root, dataset, psych_dataset_split)
     path = valid_participant_ids_path_with_filter(
         dataset,
         repo_root,

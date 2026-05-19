@@ -44,12 +44,15 @@ from data_modules.mixed_gambles import (
 )
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
+    PETERSON2021USING_ALIAS,
     PSYCH101_BINARY_DATASETS,
+    PSYCH101_LEGACY_ALIASES,
     experiment_to_trial_dicts,
     format_trials_for_prompt,
     get_psych101_binary_experiments,
     hf_id_for_psych_dataset_split,
     is_psych101_dataset,
+    normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
     split_psych_experiment,
 )
@@ -6656,17 +6659,18 @@ def main():
     """Main entry point."""
     import argparse
     
-    _teh_dataset_choices = sorted(PARTICIPANT_DATASETS)
+    _teh_dataset_choices = sorted(PARTICIPANT_DATASETS | set(PSYCH101_LEGACY_ALIASES))
     parser = argparse.ArgumentParser(
         description="TEH: Template Evolution on Psych-101 binary cognitive datasets (structured trials)."
     )
     parser.add_argument(
         "--dataset",
         type=str,
-        default="peterson2021using",
+        default=PETERSON2021USING_ALIAS,
         choices=_teh_dataset_choices,
         help=(
-            "Psych-101 binary alias (peterson2021using, plonsky2018when, ...) or mixed_gambles (local CSV)."
+            "Psych-101 binary alias (1peterson2021using, 2plonsky2018when, ...) or mixed_gambles (local CSV). "
+            "Unprefixed legacy names (e.g. peterson2021using) are accepted and normalized."
         ),
     )
     parser.add_argument(
@@ -6918,7 +6922,7 @@ def main():
         choices=["within_participant", "across_participants"],
         help=(
             "within_participant (default): train/val/test per participant. "
-            "across_participants: pool train across participants (peterson2021using only)."
+            f"across_participants: pool train across participants ({PETERSON2021USING_ALIAS} only)."
         ),
     )
     parser.add_argument(
@@ -7048,6 +7052,7 @@ def main():
     )
 
     args = parser.parse_args()
+    args.dataset = normalize_psych101_dataset_alias(args.dataset)
     if args.fitness_metric == "loglik" and not is_binary_loglik_dataset(args.dataset) and not (
         args.dataset == "cpc18" and not args.cpc18_official_mse
     ):
@@ -7059,8 +7064,14 @@ def main():
     if not (0.0 < args.split_ratio < 1.0):
         print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
         return
-    if args.split_mode == "across_participants" and args.dataset != "peterson2021using":
-        print("Error: --split_mode across_participants is only supported with --dataset peterson2021using.")
+    if (
+        args.split_mode == "across_participants"
+        and args.dataset != PETERSON2021USING_ALIAS
+    ):
+        print(
+            f"Error: --split_mode across_participants is only supported with "
+            f"--dataset {PETERSON2021USING_ALIAS}."
+        )
         return
     if args.max_prompt_train_trials < 0:
         print("Error: --max_prompt_train_trials must be >= 0 (0 = no cap).")

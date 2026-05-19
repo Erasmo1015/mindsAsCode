@@ -57,8 +57,9 @@ def hf_id_for_psych_dataset_split(split: str) -> str:
     return TRAIN_HF_ID if s == "train" else TEST_HF_ID
 
 
+# CLI / output-folder aliases (numbered); HF experiment_id strings are unchanged.
 PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
-    "peterson2021using": {
+    "1peterson2021using": {
         "experiment_id": "peterson2021using/exp1.csv",
         "display_name": "Choice13k",
         "schema_type": "A",
@@ -68,7 +69,7 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
             "Risky two-option gambles with explicit outcome probabilities (Choice13k / peterson2021using)."
         ),
     },
-    "plonsky2018when": {
+    "2plonsky2018when": {
         "experiment_id": "plonsky2018when/exp1.csv",
         "display_name": "CPC18 Psych-101",
         "schema_type": "A",
@@ -79,39 +80,7 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
             "'You press <<X>> and gain/lose ...' lines."
         ),
     },
-    "wulff2018description": {
-        "experiment_id": "wulff2018description/exp1.csv",
-        "display_name": "Wulff description",
-        "schema_type": "A",
-        "parser": "lottery_offers",
-        "implemented": True,
-        "task_description": "Decisions from description; Lottery W/H offers format.",
-    },
-    "speekenbrink2008learning": {
-        "experiment_id": "speekenbrink2008learning/exp1.csv",
-        "display_name": "Speekenbrink learning",
-        "schema_type": "B",
-        "parser": "weather_cards",
-        "implemented": True,
-        "task_description": "Weather prediction from tarot cards; binary press keys per participant.",
-    },
-    "sadeghiyeh2020temporal": {
-        "experiment_id": "sadeghiyeh2020temporal/exp1.csv",
-        "display_name": "Sadeghiyeh temporal/bandit",
-        "schema_type": "C",
-        "parser": "slot_machine_bandit",
-        "implemented": True,
-        "task_description": "Two-arm bandit slot machines by game (instructed then free trials).",
-    },
-    "hilbig2014generalized": {
-        "experiment_id": "hilbig2014generalized/exp1.csv",
-        "display_name": "Hilbig generalized",
-        "schema_type": "B",
-        "parser": "product_ratings",
-        "implemented": True,
-        "task_description": "Product choice with expert rating vectors.",
-    },
-    "frey2017cct": {
+    "3frey2017cct": {
         "experiment_id": "frey2017cct/exp1.csv",
         "display_name": "Frey CCT",
         "schema_type": "D",
@@ -119,7 +88,39 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
         "implemented": True,
         "task_description": "Columbia Card Task (flip E vs stop C) per round.",
     },
-    "flesch2018comparing": {
+    "4wulff2018description": {
+        "experiment_id": "wulff2018description/exp1.csv",
+        "display_name": "Wulff description",
+        "schema_type": "A",
+        "parser": "lottery_offers",
+        "implemented": True,
+        "task_description": "Decisions from description; Lottery W/H offers format.",
+    },
+    "5speekenbrink2008learning": {
+        "experiment_id": "speekenbrink2008learning/exp1.csv",
+        "display_name": "Speekenbrink learning",
+        "schema_type": "B",
+        "parser": "weather_cards",
+        "implemented": True,
+        "task_description": "Weather prediction from tarot cards; binary press keys per participant.",
+    },
+    "6sadeghiyeh2020temporal": {
+        "experiment_id": "sadeghiyeh2020temporal/exp1.csv",
+        "display_name": "Sadeghiyeh temporal/bandit",
+        "schema_type": "C",
+        "parser": "slot_machine_bandit",
+        "implemented": True,
+        "task_description": "Two-arm bandit slot machines by game (instructed then free trials).",
+    },
+    "7hilbig2014generalized": {
+        "experiment_id": "hilbig2014generalized/exp1.csv",
+        "display_name": "Hilbig generalized",
+        "schema_type": "B",
+        "parser": "product_ratings",
+        "implemented": True,
+        "task_description": "Product choice with expert rating vectors.",
+    },
+    "8flesch2018comparing": {
         "experiment_id": "flesch2018comparing/exp1.csv",
         "display_name": "Flesch comparing",
         "schema_type": "B",
@@ -129,23 +130,43 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Unprefixed aliases accepted on CLI for backward compatibility.
+PSYCH101_LEGACY_ALIASES: Dict[str, str] = {
+    legacy: numbered
+    for numbered, spec in PSYCH101_BINARY_DATASETS.items()
+    if (legacy := str(spec["experiment_id"]).split("/")[0]) != numbered
+}
+
+PETERSON2021USING_ALIAS = "1peterson2021using"
+
+
+def normalize_psych101_dataset_alias(dataset_alias: str) -> str:
+    """Map legacy unprefixed alias to numbered CLI alias (e.g. peterson2021using -> 1peterson2021using)."""
+    alias = str(dataset_alias).strip()
+    if alias in PSYCH101_BINARY_DATASETS:
+        return alias
+    return PSYCH101_LEGACY_ALIASES.get(alias, alias)
+
 
 def is_psych101_dataset(dataset_alias: str) -> bool:
-    return dataset_alias in PSYCH101_BINARY_DATASETS
+    return normalize_psych101_dataset_alias(dataset_alias) in PSYCH101_BINARY_DATASETS
 
 
 def experiment_id_for_alias(dataset_alias: str) -> str:
-    if dataset_alias not in PSYCH101_BINARY_DATASETS:
+    alias = normalize_psych101_dataset_alias(dataset_alias)
+    if alias not in PSYCH101_BINARY_DATASETS:
         raise KeyError(f"Unknown Psych-101 dataset alias: {dataset_alias!r}")
-    return PSYCH101_BINARY_DATASETS[dataset_alias]["experiment_id"]
+    return PSYCH101_BINARY_DATASETS[alias]["experiment_id"]
 
 
 def schema_type_for_alias(dataset_alias: str) -> str:
-    return PSYCH101_BINARY_DATASETS[dataset_alias]["schema_type"]
+    alias = normalize_psych101_dataset_alias(dataset_alias)
+    return PSYCH101_BINARY_DATASETS[alias]["schema_type"]
 
 
 def _parse_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
-    spec = PSYCH101_BINARY_DATASETS[dataset_alias]
+    alias = normalize_psych101_dataset_alias(dataset_alias)
+    spec = PSYCH101_BINARY_DATASETS[alias]
     if not spec.get("implemented"):
         raise NotImplementedError(
             f"Parser for dataset alias {dataset_alias!r} is not implemented yet "
@@ -157,7 +178,7 @@ def _parse_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
     fn = PARSER_DISPATCH.get(parser_id)
     if fn is None:
         raise NotImplementedError(f"Unknown parser id {parser_id!r} for {dataset_alias!r}")
-    return fn(row, dataset_alias)
+    return fn(row, alias)
 
 
 def _load_hf_split(
@@ -188,12 +209,13 @@ def get_filtered_psych101_split(
     local_dataset: Optional[str] = None,
 ):
     """HF rows for one Psych-101 experiment id (shows datasets `Filter` progress once)."""
-    if dataset_alias not in PSYCH101_BINARY_DATASETS:
+    alias = normalize_psych101_dataset_alias(dataset_alias)
+    if alias not in PSYCH101_BINARY_DATASETS:
         raise KeyError(
             f"Unknown dataset alias {dataset_alias!r}. "
             f"Known: {sorted(PSYCH101_BINARY_DATASETS)}"
         )
-    exp_id = experiment_id_for_alias(dataset_alias)
+    exp_id = experiment_id_for_alias(alias)
     split_ds = _load_hf_split(split, local_dataset=local_dataset)
     return split_ds.filter(lambda ex, e=exp_id: ex["experiment"] == e)
 
@@ -209,14 +231,15 @@ def get_psych101_binary_experiments(
     split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
 ) -> List[PsychExperiment]:
+    alias = normalize_psych101_dataset_alias(dataset_alias)
     filtered = get_filtered_psych101_split(
-        dataset_alias, split=split, local_dataset=local_dataset
+        alias, split=split, local_dataset=local_dataset
     )
     n = min(n_participants, len(filtered))
     experiments: List[PsychExperiment] = []
     for i in range(n):
         row = dict(filtered[i])
-        experiments.append(parse_psych101_binary_row(row, dataset_alias))
+        experiments.append(parse_psych101_binary_row(row, alias))
     return experiments
 
 

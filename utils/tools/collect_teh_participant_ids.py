@@ -7,7 +7,7 @@ Writes JSON under datasets/psych101_train/<dataset>/ or datasets/psych101_test/<
 teh.py also auto-creates this file on first run when it is missing.
 
 Examples (from repo root):
-  python utils/tools/collect_teh_participant_ids.py --dataset peterson2021using
+  python utils/tools/collect_teh_participant_ids.py --dataset 1peterson2021using
   python utils/tools/collect_teh_participant_ids.py --dataset plonsky2018when --psych_dataset_split test
   python utils/tools/collect_teh_participant_ids.py --dataset mixed_gambles
   python utils/tools/collect_teh_participant_ids.py --dataset mixed_gambles --filter_mixed_gambles
@@ -23,7 +23,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from data_modules.psych101_binary import DEFAULT_PSYCH_DATASET_SPLIT
+from data_modules.psych101_binary import DEFAULT_PSYCH_DATASET_SPLIT, PSYCH101_LEGACY_ALIASES
 from utils.teh.teh_datasets import IMPLEMENTED_PSYCH101_ALIASES, MIXED_GAMBLES, is_mixed_gambles_dataset
 from utils.teh.participant_ids import (
     collect_and_write_valid_participant_ids,
@@ -32,7 +32,7 @@ from utils.teh.participant_ids import (
 
 
 def main() -> None:
-    choices = sorted(IMPLEMENTED_PSYCH101_ALIASES | {MIXED_GAMBLES})
+    choices = sorted(IMPLEMENTED_PSYCH101_ALIASES | set(PSYCH101_LEGACY_ALIASES) | {MIXED_GAMBLES})
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=choices)
     parser.add_argument(

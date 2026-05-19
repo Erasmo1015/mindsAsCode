@@ -10,6 +10,7 @@ from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
     DEFAULT_PSYCH_DATASET_SPLIT,
     normalize_psych_dataset_split,
+    normalize_psych101_dataset_alias,
     is_psych101_dataset,
     experiment_id_for_alias,
 )
@@ -36,7 +37,7 @@ def is_binary_loglik_dataset(dataset: str) -> bool:
     """True for TEH Psych-101 binary aliases (implemented) and mixed_gambles."""
     if is_mixed_gambles_dataset(dataset):
         return True
-    return dataset in IMPLEMENTED_PSYCH101_ALIASES
+    return normalize_psych101_dataset_alias(dataset) in IMPLEMENTED_PSYCH101_ALIASES
 
 
 def uses_train_val_test_loglik_split(
@@ -80,7 +81,8 @@ def valid_participant_ids_path_with_filter(
             else VALID_PARTICIPANT_IDS_JSON
         )
         return repo_root / "datasets" / "mixed_gambles" / name
-    return psych101_metadata_root(repo_root, psych_dataset_split) / dataset / VALID_PARTICIPANT_IDS_JSON
+    alias = normalize_psych101_dataset_alias(dataset)
+    return psych101_metadata_root(repo_root, psych_dataset_split) / alias / VALID_PARTICIPANT_IDS_JSON
 
 
 def teh_output_base_dir(
@@ -92,10 +94,12 @@ def teh_output_base_dir(
     if is_mixed_gambles_dataset(dataset):
         return f"generated_outputs/mixed_gambles/teh/run_{timestamp}"
     split = normalize_psych_dataset_split(psych_dataset_split)
-    return f"generated_outputs/psych101_{split}/teh/{dataset}/run_{timestamp}"
+    alias = normalize_psych101_dataset_alias(dataset)
+    return f"generated_outputs/psych101_{split}/teh/{alias}/run_{timestamp}"
 
 
 def dataset_display_name(dataset: str) -> str:
     if is_mixed_gambles_dataset(dataset):
         return "Mixed gambles (local CSV)"
-    return PSYCH101_BINARY_DATASETS[dataset]["display_name"]
+    alias = normalize_psych101_dataset_alias(dataset)
+    return PSYCH101_BINARY_DATASETS[alias]["display_name"]
