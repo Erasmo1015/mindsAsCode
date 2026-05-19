@@ -269,6 +269,7 @@ def collect_and_write_valid_participant_ids(
     output_path: Optional[Path] = None,
 ) -> Path:
     """Scan data, write valid_participant_ids.json; return output path."""
+    dataset = normalize_psych101_dataset_alias(dataset)
     out_path = output_path or valid_participant_ids_path_with_filter(
         dataset,
         repo_root,
@@ -321,7 +322,39 @@ def collect_and_write_valid_participant_ids(
         psych101_participants=psych_records,
     )
     write_valid_participant_ids_json(out_path, payload)
+    _write_frey_compat_valid_ids_copy(
+        repo_root, dataset, psych_dataset_split, payload
+    )
     return out_path
+
+
+def frey_compat_valid_ids_path(
+    repo_root: Path,
+    psych_dataset_split: str,
+) -> Path:
+    """Legacy-compat path: datasets/psych101/frey2017cct/{train|test}_valid_participant_ids.json."""
+    split = normalize_psych_dataset_split(psych_dataset_split)
+    return (
+        repo_root
+        / "datasets"
+        / "psych101"
+        / "frey2017cct"
+        / f"{split}_valid_participant_ids.json"
+    )
+
+
+def _write_frey_compat_valid_ids_copy(
+    repo_root: Path,
+    dataset: str,
+    psych_dataset_split: str,
+    payload: Dict[str, Any],
+) -> None:
+    alias = normalize_psych101_dataset_alias(dataset)
+    if alias != "3frey2017cct":
+        return
+    compat_path = frey_compat_valid_ids_path(repo_root, psych_dataset_split)
+    write_valid_participant_ids_json(compat_path, payload)
+    print(f"[TEH] Wrote frey compat valid ids -> {compat_path}")
 
 
 def _migrate_psych101_metadata_dir_if_needed(

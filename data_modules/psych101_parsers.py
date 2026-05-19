@@ -59,8 +59,13 @@ _RE_ROUND_LOSS = re.compile(
     r"You will lose\s+(-?\d+)\s+points for turning over a loss card", re.I
 )
 _RE_ROUND_NLOSS = re.compile(r"There are\s+(\d+)\s+loss cards in this round", re.I)
+_RE_FREY_CCT_KEYS = re.compile(
+    r"Press\s+([A-Z])\s+to turn a card over,\s+or\s+([A-Z])\s+to stop the round",
+    re.I,
+)
 _RE_CCT_PRESS = re.compile(
-    r"You press <<([EC])>> and (?:turn over a (gain|loss) card|(?:stop the round and )?claim your payout)",
+    r"You press <<([A-Z])>>\s+and\s+"
+    r"(?:turn over a (gain|loss) card|(?:stop the round and )?claim your payout)",
     re.I,
 )
 _RE_CCT_SCORE = re.compile(r"Your current score is\s+(-?\d+)", re.I)
@@ -424,12 +429,42 @@ def parse_sadeghiyeh_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperi
     )
 
 
+def _infer_frey_cct_option_keys(instruction: str, text: str) -> List[str]:
+    """Return [flip_key, stop_key] from instruction or press-line semantics."""
+    m = _RE_FREY_CCT_KEYS.search(instruction)
+    if m:
+        return [m.group(1).upper(), m.group(2).upper()]
+    flip_key: Optional[str] = None
+    stop_key: Optional[str] = None
+    for pm in _RE_CCT_PRESS.finditer(text):
+        key = pm.group(1).upper()
+        if pm.group(2):
+            flip_key = key
+        else:
+            stop_key = key
+    if flip_key and stop_key:
+        return [flip_key, stop_key]
+    seen = sorted({k.upper() for k in re.findall(r"You press <<([A-Z])>>", text)})
+    if len(seen) >= 2:
+        return [seen[0], seen[1]]
+    if len(seen) == 1:
+        return [seen[0], seen[0]]
+    return ["E", "C"]
+
+
+def _frey_cct_press_is_stop(pm: re.Match[str], stop_key: str) -> bool:
+    if pm.group(1).upper() == stop_key:
+        return True
+    return pm.group(2) is None
+
+
 def parse_frey_cct_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
     text = row["text"]
     m0 = re.search(r"Round\s+\d+:", text, re.I)
     instruction = text[: m0.start()].strip() if m0 else text.split("\n\n")[0]
     blocks: List[PsychBlock] = []
-    option_keys = ["E", "C"]
+    option_keys = _infer_frey_cct_option_keys(instruction, text)
+    flip_key, stop_key = option_keys[0], option_keys[1]
     round_chunks = re.split(r"(?=Round\s+\d+:\s*)", text[m0.start() :] if m0 else text)
     for chunk in round_chunks:
         if not re.match(r"Round\s+\d+", chunk, re.I):
@@ -472,7 +507,9 @@ def parse_frey_cct_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperime
                     problem_fields=dict(static_trial),
                 )
             )
-            if key == "C":
+            if _frey_cct_press_is_stop(pm, stop_key):
+                break
+            if key != flip_key:
                 break
             cards_flipped += 1
             sm = _RE_CCT_SCORE.search(chunk, pm.end())

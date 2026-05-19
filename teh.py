@@ -49,6 +49,7 @@ from data_modules.psych101_binary import (
     PSYCH101_LEGACY_ALIASES,
     experiment_to_trial_dicts,
     format_trials_for_prompt,
+    get_psych101_binary_experiment,
     get_psych101_binary_experiments,
     hf_id_for_psych_dataset_split,
     is_psych101_dataset,
@@ -1957,18 +1958,14 @@ def _psych101_trials_for_participant(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    experiments = get_psych101_binary_experiments(
+    exp = get_psych101_binary_experiment(
         dataset_alias,
-        n_participants=int(participant_id) + 1,
+        int(participant_id),
         split=psych_dataset_split,
         local_dataset=local_dataset,
     )
-    if participant_id >= len(experiments):
-        raise ValueError(
-            f"participant_id={participant_id} out of range (only {len(experiments)} experiments loaded)."
-        )
     train_trials, val_trials, test_trials, _options = split_psych_experiment(
-        experiments[participant_id], split_ratio=split_ratio, split_seed=split_seed
+        exp, split_ratio=split_ratio, split_seed=split_seed
     )
     return train_trials, val_trials, test_trials
 
@@ -4507,13 +4504,12 @@ def run_evolution(
         if choice13k_experiment is not None:
             exp = choice13k_experiment
         else:
-            experiments = get_psych101_binary_experiments(
+            exp = get_psych101_binary_experiment(
                 dataset,
-                n_participants=participant_id + 1,
+                participant_id,
                 split=psych_dataset_split,
                 local_dataset=local_dataset,
             )
-            exp = experiments[participant_id]
         train_trials, val_trials, test_trials, options = split_psych_experiment(
             exp, split_ratio=split_ratio, split_seed=split_seed
         )
@@ -7437,19 +7433,33 @@ def main():
             f"train_participants={len(train_participants)}, test_participants={len(test_participants)}"
         )
 
-        max_pid = max(selected_participants)
-        experiments = get_psych101_binary_experiments(
+        from data_modules.psych101_binary import get_filtered_psych101_split
+
+        filtered_psych = get_filtered_psych101_split(
             args.dataset,
-            n_participants=max_pid + 1,
             split=psych_dataset_split,
             local_dataset=args.local_dataset,
         )
         train_trials: List[Dict[str, Any]] = []
         test_trials: List[Dict[str, Any]] = []
         for pid in train_participants:
-            train_trials.extend(experiment_to_trial_dicts(experiments[pid]))
+            exp = get_psych101_binary_experiment(
+                args.dataset,
+                pid,
+                split=psych_dataset_split,
+                local_dataset=args.local_dataset,
+                filtered_split=filtered_psych,
+            )
+            train_trials.extend(experiment_to_trial_dicts(exp))
         for pid in test_participants:
-            test_trials.extend(experiment_to_trial_dicts(experiments[pid]))
+            exp = get_psych101_binary_experiment(
+                args.dataset,
+                pid,
+                split=psych_dataset_split,
+                local_dataset=args.local_dataset,
+                filtered_split=filtered_psych,
+            )
+            test_trials.extend(experiment_to_trial_dicts(exp))
         print(f"Across-participants trial counts: train={len(train_trials)}, test={len(test_trials)}")
 
         try:

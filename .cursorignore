@@ -2,3 +2,4 @@ generated_outputs/
 wandb/
 *.tar.gz
 *.tar
+cluster/x_log

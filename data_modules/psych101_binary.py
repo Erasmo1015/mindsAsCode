@@ -225,6 +225,33 @@ def parse_psych101_binary_row(row: Dict[str, Any], dataset_alias: str) -> PsychE
     return _parse_row(row, dataset_alias)
 
 
+def get_psych101_binary_experiment(
+    dataset_alias: str,
+    participant_row_index: int,
+    split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    local_dataset: Optional[str] = None,
+    *,
+    filtered_split: Optional[Any] = None,
+) -> PsychExperiment:
+    """Load one participant by 0-based index in the filtered HF split (no sequential re-parse)."""
+    alias = normalize_psych101_dataset_alias(dataset_alias)
+    filtered = (
+        filtered_split
+        if filtered_split is not None
+        else get_filtered_psych101_split(
+            alias, split=split, local_dataset=local_dataset
+        )
+    )
+    n_rows = len(filtered)
+    if participant_row_index < 0 or participant_row_index >= n_rows:
+        raise IndexError(
+            f"participant_row_index={participant_row_index} out of range for "
+            f"{alias!r} split={split!r} (filtered rows={n_rows})"
+        )
+    row = dict(filtered[participant_row_index])
+    return parse_psych101_binary_row(row, alias)
+
+
 def get_psych101_binary_experiments(
     dataset_alias: str,
     n_participants: int = 10,
@@ -236,11 +263,16 @@ def get_psych101_binary_experiments(
         alias, split=split, local_dataset=local_dataset
     )
     n = min(n_participants, len(filtered))
-    experiments: List[PsychExperiment] = []
-    for i in range(n):
-        row = dict(filtered[i])
-        experiments.append(parse_psych101_binary_row(row, alias))
-    return experiments
+    return [
+        get_psych101_binary_experiment(
+            alias,
+            i,
+            split=split,
+            local_dataset=local_dataset,
+            filtered_split=filtered,
+        )
+        for i in range(n)
+    ]
 
 
 def _merge_problem(
@@ -427,51 +459,204 @@ def parse_coverage_stats(text: str, exp: PsychExperiment) -> Dict[str, Any]:
     }
 
 
+def _action_key_label(keys: List[str], action: int) -> str:
+    if 0 <= action < len(keys):
+        return keys[action]
+    return "?"
+
+
+def _schema_b_subtype(problem: Dict[str, Any]) -> str:
+    if "tree_features" in problem:
+        return "tree"
+    if "cards" in problem or problem.get("features", {}).get("task") == "weather_prediction":
+        return "weather"
+    if "ratings_A" in problem or "option_A_features" in problem:
+        return "product"
+    return "binary"
+
+
+def _action_semantics_for_schema(
+    keys: List[str], schema: str, problem: Dict[str, Any], *, is_gamble: bool
+) -> str:
+    if len(keys) < 2:
+        return "action=0 is first option; action=1 is second; return P(action=1)."
+    k0, k1 = keys[0], keys[1]
+    if schema == "A" and is_gamble:
+        return (
+            f"action=0 -> option_keys[0] ({k0}, first gamble); "
+            f"action=1 -> option_keys[1] ({k1}, second gamble); return P(action=1)."
+        )
+    if schema == "D":
+        return (
+            f"action=0 -> flip/turn card (key {k0}); "
+            f"action=1 -> stop/claim payout (key {k1}); return P(action=1)=P(stop)."
+        )
+    if schema == "B":
+        subtype = _schema_b_subtype(problem)
+        if subtype == "weather":
+            return (
+                f"action=0 -> rainy prediction (key {k0}); "
+                f"action=1 -> fine prediction (key {k1}); return P(action=1)."
+            )
+        if subtype == "tree":
+            return (
+                f"action=0 -> reject tree (key {k0}); "
+                f"action=1 -> accept/plant tree (key {k1}); return P(action=1)."
+            )
+        if subtype == "product":
+            return (
+                f"action=0 -> product {k0}; action=1 -> product {k1}; return P(action=1)."
+            )
+    if schema == "C":
+        return (
+            f"action=0 -> machine {k0}; action=1 -> machine {k1}; return P(action=1)."
+        )
+    return (
+        f"action=0 -> option_keys[0] ({k0}); "
+        f"action=1 -> option_keys[1] ({k1}); return P(action=1)."
+    )
+
+
+def summarize_runtime_schema_for_prompt(trials: List[Dict[str, Any]]) -> str:
+    """Markdown-friendly summary of problem/history schema from parsed trial examples."""
+    if not trials:
+        return "- (no parsed trial examples provided)"
+
+    schemas: set = set()
+    problem_keys: set = set()
+    history_keys: set = set()
+    option_keys_samples: List[List[str]] = []
+    has_gamble = False
+
+    for trial in trials:
+        p = trial["problem"]
+        schemas.add(str(p.get("schema_type", "?")))
+        for key in p:
+            if key in ("dataset_alias", "experiment_id"):
+                continue
+            problem_keys.add(key)
+            if key in ("gamble_A", "gamble_B"):
+                has_gamble = True
+        keys = p.get("option_keys")
+        if isinstance(keys, list) and keys and keys not in option_keys_samples:
+            option_keys_samples.append(list(keys))
+        for entry in trial.get("history", []):
+            if isinstance(entry, dict):
+                history_keys.update(entry.keys())
+
+    lines = [
+        f"- schema_type(s): {', '.join(sorted(schemas))}",
+        f"- is_gamble_A/B_task: {has_gamble}",
+        f"- problem keys observed: {sorted(problem_keys)}",
+    ]
+    if option_keys_samples:
+        lines.append(f"- option_keys example(s): {option_keys_samples[:3]}")
+    if history_keys:
+        core_hist = sorted(k for k in history_keys if k in ("action", "feedback"))
+        extra_hist = sorted(k for k in history_keys if k not in ("action", "feedback"))
+        if core_hist:
+            lines.append(f"- history core keys: {core_hist}")
+        if extra_hist:
+            lines.append(
+                f"- history may also carry prior-trial context fields: {extra_hist}"
+            )
+
+    for trial in trials:
+        keys = trial["problem"].get("option_keys", [])
+        if isinstance(keys, list) and len(keys) >= 2:
+            schema = str(trial["problem"].get("schema_type", "?"))
+            sem = _action_semantics_for_schema(
+                keys, schema, trial["problem"], is_gamble=has_gamble
+            )
+            lines.append(f"- action semantics: {sem}")
+            break
+
+    if has_gamble:
+        lines.append(
+            "- gamble tasks: problem includes gamble_A/gamble_B dicts with probs/rewards; "
+            "probs may be None for unknown probabilities."
+        )
+    else:
+        lines.append(
+            "- not a gamble task: do NOT document gamble_A/gamble_B (absent from examples)."
+        )
+
+    return "\n".join(lines)
+
+
 def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
     """One-line summary of a parsed trial for infer_single_choice prompt generation."""
     p = trial["problem"]
     schema = p.get("schema_type", "?")
     action = trial["action"]
     keys = p.get("option_keys", [])
-    hist_len = len(trial.get("history", []))
+    key_lbl = _action_key_label(keys, action)
+    hist = trial.get("history", [])
+    hist_len = len(hist)
+    hist_fb = hist[-1].get("feedback") if hist else None
+
     if schema == "A":
         ga = p.get("gamble_A", {})
         gb = p.get("gamble_B", {})
+        if "gamble_A" in p or "gamble_B" in p:
+            return (
+                f"{index}. [gamble/A] gamble_A probs={ga.get('probs')} rewards={ga.get('rewards')}; "
+                f"gamble_B probs={gb.get('probs')} rewards={gb.get('rewards')}; "
+                f"option_keys={keys}; has_feedback={p.get('has_feedback')}; "
+                f"action={action} (key={key_lbl}); history_len={hist_len}"
+                + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
+            )
         return (
-            f"{index}. [gamble] gamble_A probs={ga.get('probs')} rewards={ga.get('rewards')}; "
-            f"gamble_B probs={gb.get('probs')} rewards={gb.get('rewards')}; "
-            f"option_keys={keys}; has_feedback={p.get('has_feedback')}; "
-            f"action={action} (key={keys[action] if action < len(keys) else '?'}); history_len={hist_len}"
+            f"{index}. [binary/A] option_keys={keys}; problem_keys={sorted(k for k in p if k not in ('dataset_alias', 'experiment_id'))}; "
+            f"action={action} (key={key_lbl}); history_len={hist_len}"
         )
+
     if schema == "B":
-        if "cards" in p or "cards" in trial.get("history", [{}])[0] if trial.get("history") else False:
+        subtype = _schema_b_subtype(p)
+        if subtype == "weather":
             return (
-                f"{index}. [weather] cards={p.get('cards')}; option_keys={keys}; "
-                f"weather_outcome={p.get('weather_outcome')}; action={action}; history_len={hist_len}"
+                f"{index}. [weather/B] cards={p.get('cards')}; weather_outcome={p.get('weather_outcome')}; "
+                f"was_correct={p.get('was_correct')}; option_keys={keys}; "
+                f"action={action} (key={key_lbl}); history_len={hist_len}"
+                + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
             )
-        if "tree_features" in p:
+        if subtype == "tree":
             return (
-                f"{index}. [tree] features={p.get('tree_features')}; garden={p.get('garden')}; "
-                f"phase={p.get('phase')}; option_keys={keys}; action={action}; history_len={hist_len}"
+                f"{index}. [tree/B] tree_features={p.get('tree_features')}; garden={p.get('garden')}; "
+                f"phase={p.get('phase')}; option_keys={keys}; "
+                f"action={action} (key={key_lbl}); history_len={hist_len}"
+                + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
             )
         return (
-            f"{index}. [product] ratings_A={p.get('ratings_A')}; ratings_B={p.get('ratings_B')}; "
-            f"option_keys={keys}; action={action}; history_len={hist_len}"
+            f"{index}. [product/B] ratings_A={p.get('ratings_A')}; ratings_B={p.get('ratings_B')}; "
+            f"option_keys={keys}; action={action} (key={key_lbl}); history_len={hist_len}"
         )
+
     if schema == "C":
         return (
-            f"{index}. [bandit] game_id={p.get('game_id')}; phase={p.get('phase')}; "
-            f"trial_index={p.get('trial_index')}; machine_options={p.get('machine_options')}; "
-            f"option_keys={keys}; action={action}; history_len={hist_len}"
+            f"{index}. [bandit/C] game_id={p.get('game_id')}; n_trials_game={p.get('n_trials_game')}; "
+            f"phase={p.get('phase')}; trial_index={p.get('trial_index')}; payoff={p.get('payoff')}; "
+            f"machine_options={p.get('machine_options')}; option_keys={keys}; "
+            f"action={action} (key={key_lbl}); history_len={hist_len}"
+            + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
         )
+
     if schema == "D":
+        k0, k1 = (keys[0], keys[1]) if len(keys) >= 2 else ("?", "?")
         return (
-            f"{index}. [cct] round={p.get('round_id')}; score={p.get('current_score')}; "
-            f"flipped={p.get('cards_flipped')}; remaining={p.get('n_cards_remaining')}; "
-            f"gain={p.get('gain_amount')}; loss={p.get('loss_amount')}; n_loss={p.get('n_loss_cards')}; "
-            f"option_keys={keys}; action={action} (E=flip,C=stop); history_len={hist_len}"
+            f"{index}. [cct/D] round_id={p.get('round_id')}; current_score={p.get('current_score')}; "
+            f"cards_flipped={p.get('cards_flipped')}; n_cards_remaining={p.get('n_cards_remaining')}; "
+            f"gain_amount={p.get('gain_amount')}; loss_amount={p.get('loss_amount')}; "
+            f"n_loss_cards={p.get('n_loss_cards')}; option_keys={keys} "
+            f"(action=0 flip {k0}, action=1 stop {k1}); "
+            f"action={action} (key={key_lbl}); history_len={hist_len}"
         )
-    return f"{index}. problem_keys={list(p.keys())}; action={action}; history_len={hist_len}"
+
+    meta_keys = sorted(k for k in p if k not in ("dataset_alias", "experiment_id"))
+    return (
+        f"{index}. [schema={schema}] option_keys={keys}; problem_keys={meta_keys}; "
+        f"action={action} (key={key_lbl}); history_len={hist_len}"
+    )
 
 
 def format_trials_for_prompt(trials: List[Dict[str, Any]], max_trials: int = 8) -> str:

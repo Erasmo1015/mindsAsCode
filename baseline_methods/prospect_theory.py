@@ -35,7 +35,8 @@ from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
     experiment_to_trial_dicts,
-    get_psych101_binary_experiments,
+    get_psych101_binary_experiment,
+    get_filtered_psych101_split,
     hf_id_for_psych_dataset_split,
     is_psych101_dataset,
     normalize_psych101_dataset_alias,
@@ -194,18 +195,14 @@ def trials_for_participant(
         return train_trials, val_trials, test_trials
     if not is_psych101_dataset(dataset):
         raise ValueError(f"Unsupported dataset: {dataset!r}")
-    experiments = get_psych101_binary_experiments(
+    exp = get_psych101_binary_experiment(
         dataset,
-        n_participants=int(participant_id) + 1,
+        int(participant_id),
         split=psych_dataset_split,
         local_dataset=local_dataset,
     )
-    if participant_id >= len(experiments):
-        raise ValueError(
-            f"participant_id={participant_id} out of range (only {len(experiments)} experiments loaded)."
-        )
     train_trials, val_trials, test_trials, _ = split_psych_experiment(
-        experiments[participant_id], split_ratio=split_ratio, split_seed=split_seed
+        exp, split_ratio=split_ratio, split_seed=split_seed
     )
     return train_trials, val_trials, test_trials
 
@@ -228,19 +225,29 @@ def psych_across_participants_train_test(
     split_idx = max(1, min(split_idx, len(shuffled) - 1))
     train_participants = shuffled[:split_idx]
     test_participants = shuffled[split_idx:]
-    max_pid = max(selected_participants)
-    experiments = get_psych101_binary_experiments(
-        dataset,
-        n_participants=max_pid + 1,
-        split=psych_dataset_split,
-        local_dataset=local_dataset,
+    filtered = get_filtered_psych101_split(
+        dataset, split=psych_dataset_split, local_dataset=local_dataset
     )
     train_trials: List[Dict[str, Any]] = []
     test_trials: List[Dict[str, Any]] = []
     for pid in train_participants:
-        train_trials.extend(experiment_to_trial_dicts(experiments[pid]))
+        exp = get_psych101_binary_experiment(
+            dataset,
+            pid,
+            split=psych_dataset_split,
+            local_dataset=local_dataset,
+            filtered_split=filtered,
+        )
+        train_trials.extend(experiment_to_trial_dicts(exp))
     for pid in test_participants:
-        test_trials.extend(experiment_to_trial_dicts(experiments[pid]))
+        exp = get_psych101_binary_experiment(
+            dataset,
+            pid,
+            split=psych_dataset_split,
+            local_dataset=local_dataset,
+            filtered_split=filtered,
+        )
+        test_trials.extend(experiment_to_trial_dicts(exp))
     return train_participants, test_participants, train_trials, test_trials
 
 

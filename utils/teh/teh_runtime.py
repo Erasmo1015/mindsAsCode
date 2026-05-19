@@ -16,7 +16,9 @@ from data_modules.psych101_binary import (
     experiment_id_for_alias,
     experiment_to_trial_dicts,
     format_trials_for_prompt,
-    get_psych101_binary_experiments,
+    get_psych101_binary_experiment,
+    normalize_psych101_dataset_alias,
+    summarize_runtime_schema_for_prompt,
 )
 from utils.teh.teh_datasets import (
     dataset_display_name,
@@ -94,7 +96,12 @@ def teh_wandb_run_name(
 
 
 def _format_trials_for_prompt(trials: List[Dict[str, Any]], max_trials: int = 8) -> str:
+    """Schema-aware one-line summaries (gamble, CCT, weather, product, tree, bandit, …)."""
     return format_trials_for_prompt(trials, max_trials=max_trials)
+
+
+def _runtime_schema_summary_for_prompt(trials: List[Dict[str, Any]]) -> str:
+    return summarize_runtime_schema_for_prompt(trials)
 
 
 def _merge_prompt_fallback(
@@ -107,12 +114,15 @@ def _merge_prompt_fallback(
         display = dataset_display_name(dataset_alias)
         task_desc = instruction
     else:
-        spec = PSYCH101_BINARY_DATASETS[dataset_alias]
+        alias = normalize_psych101_dataset_alias(dataset_alias)
+        spec = PSYCH101_BINARY_DATASETS[alias]
         display = spec["display_name"]
         task_desc = spec["task_description"]
+    schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     extra = (
         f"\n\n## Dataset: {display} (`{dataset_alias}`)\n\n"
         f"{task_desc}\n\n"
+        f"### Runtime schema summary (from parsed trials)\n\n{schema_summary}\n\n"
         f"### Task instructions (from Psych-101 transcript)\n\n{instruction[:1500]}\n\n"
         f"### Example parsed trials\n\n{_format_trials_for_prompt(sample_trials)}\n"
     )
@@ -130,20 +140,47 @@ def _generate_prompt_via_llm(
 ) -> str:
     base_prompt = BASE_LOGlik_PROMPT.read_text(encoding="utf-8")
     display = dataset_display_name(dataset_alias)
+    schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    trial_examples = _format_trials_for_prompt(sample_trials, max_trials=10)
+    if is_mixed_gambles_dataset(dataset_alias):
+        task_description = instruction
+    else:
+        task_description = PSYCH101_BINARY_DATASETS[
+            normalize_psych101_dataset_alias(dataset_alias)
+        ]["task_description"]
+
     user_content = (
         f"Adapt the following evolution system prompt for dataset `{dataset_alias}` "
         f"({display}).\n\n"
         "Requirements:\n"
-        "- Preserve the executable API: def choose(problem, history) returning a float "
-        "in (0,1) interpreted as P(action=1) where action=1 is the SECOND option in option_keys.\n"
-        "- Keep all safety/requirement bullets from the base prompt that still apply.\n"
-        "- Describe the problem dict fields accurately for this task.\n"
+        "- Use the **Runtime schema summary** and **Parsed trial examples** sections below "
+        "as the source of truth for the `problem` dict fields, `history` structure, and "
+        "action semantics. Do not invent fields that are absent from those sections.\n"
+        "- The base prompt is a shared template written for Choice13k (two-option gambles). "
+        "Adapt it for this dataset:\n"
+        "  - If this is NOT a gamble A/B task (runtime summary says is_gamble_A/B_task: False), "
+        "remove all gamble-specific wording (gamble_A, gamble_B, lottery probabilities, "
+        "'Option A/B' as gambles, etc.).\n"
+        "  - Do NOT mention gamble_A or gamble_B unless they appear in the runtime schema summary.\n"
+        "  - Preserve safety/API requirements from the base prompt that still apply: pure Python, "
+        "no imports, deterministic, return a single float in (0, 1), clip to [1e-6, 1-1e-6], "
+        "no randomness, no pow() (use **), helpers nested inside choose(), variables defined on "
+        "all branches, no division by zero.\n"
+        "  - Drop base-prompt task-specific Choice13k behavioral wording that does not apply "
+        "(e.g. unknown gamble probs) when the schema summary shows a different task.\n"
+        "- Executable API (required): `def choose(problem, history)` returning float in (0, 1) "
+        "as P(action=1), where action=1 means the SECOND entry in option_keys (index 1).\n"
+        "- Describe action=0 and action=1 using dataset-specific semantics from the schema "
+        "summary and examples (participant-specific press keys), not generic 'Option B' labels.\n"
+        "- Document `problem` keys using the exact names from the examples (e.g. round_id, "
+        "current_score, cards_flipped for CCT — not renamed aliases).\n"
         "- Output ONLY the full prompt text (no markdown code fence).\n\n"
-        f"## Base prompt\n\n{base_prompt}\n\n"
-        f"## Task description\n\n"
-        f"{PSYCH101_BINARY_DATASETS[dataset_alias]['task_description'] if not is_mixed_gambles_dataset(dataset_alias) else instruction}\n\n"
+        f"## Runtime schema summary\n\n{schema_summary}\n\n"
+        f"## Base prompt (shared template — adapt, do not copy gamble bias blindly)\n\n"
+        f"{base_prompt}\n\n"
+        f"## Task description (high-level)\n\n{task_description}\n\n"
         f"## Instruction excerpt from data\n\n{instruction[:2000]}\n\n"
-        f"## Parsed trial examples\n\n{_format_trials_for_prompt(sample_trials, max_trials=10)}\n"
+        f"## Parsed trial examples\n\n{trial_examples}\n"
     )
     resp = client.chat.completions.create(
         model=model_name,
@@ -208,13 +245,12 @@ def setup_teh_run_prompts(
             "action=0 gamble, action=1 certain; choose(problem, history) returns P(action=1)."
         )
     else:
-        experiments = get_psych101_binary_experiments(
+        exp = get_psych101_binary_experiment(
             dataset_alias,
-            n_participants=max(1, n_sample_participants),
+            0,
             split=psych_dataset_split,
             local_dataset=local_dataset,
         )
-        exp = experiments[0]
         sample_trial_list = experiment_to_trial_dicts(
             exp,
             dataset_alias=dataset_alias,
