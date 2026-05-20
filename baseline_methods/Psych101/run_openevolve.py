@@ -11,7 +11,8 @@ python baseline_methods/Psych101/run_openevolve.py \
   --range_end_ordinal 49 \
   --api_base http://localhost:8000/v1 \
   --n_iterations 600 \
-  --parallel_evaluations 4
+  --parallel_participants 10 \
+  --parallel_evaluations 10
 
 OpenEvolve baseline for Psych-101 binary datasets (vanilla prompt, full OpenEvolve machinery).
 
@@ -42,6 +43,7 @@ import shutil
 import sys
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +94,8 @@ DEFAULT_BASE_PROMPT = (
 
 _SHARED_CSV_LOCK = threading.Lock()
 _WANDB_LOG_LOCK = threading.Lock()
+_PARTICIPANT_THREAD_CTX = threading.local()
+_OE_CONTROLLER_HOOKED = False
 
 _ORIG_BUILD_PROMPT = None
 _ORIG_GENERATE_WITH_CONTEXT = None
@@ -118,6 +122,47 @@ class TruncationState:
     prompt_train_trials: int = 0
     prompt_val_trials: int = 0
     steps: List[str] = field(default_factory=list)
+
+
+def _set_thread_participant_ctx(ctx: Dict[str, Any]) -> None:
+    _PARTICIPANT_THREAD_CTX.data = ctx
+
+
+def _get_thread_participant_ctx() -> Dict[str, Any]:
+    ctx = getattr(_PARTICIPANT_THREAD_CTX, "data", None)
+    if ctx is None:
+        raise RuntimeError("participant context not set on this thread")
+    return ctx
+
+
+def _clear_thread_participant_ctx() -> None:
+    if hasattr(_PARTICIPANT_THREAD_CTX, "data"):
+        del _PARTICIPANT_THREAD_CTX.data
+
+
+def _run_openevolve(oe: OpenEvolve, iterations: int) -> Any:
+    """
+    Run OpenEvolve evolution in this thread.
+
+    OpenEvolve registers SIGINT/SIGTERM handlers in controller.run(), which raises
+    ValueError outside the main thread. With --parallel_participants > 1, skip signal
+    setup in worker threads (graceful shutdown via Ctrl+C still works on main thread).
+    """
+    import signal
+
+    if threading.current_thread() is threading.main_thread():
+        return asyncio.run(oe.run(iterations=iterations))
+
+    _orig_signal = signal.signal
+
+    def _noop_signal(signum: int, handler: Any) -> Any:
+        return None
+
+    signal.signal = _noop_signal
+    try:
+        return asyncio.run(oe.run(iterations=iterations))
+    finally:
+        signal.signal = _orig_signal
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
@@ -786,14 +831,22 @@ def _patch_process_parallel_worker() -> None:
     op._vanilla_worker_patched = True
 
 
-def _hook_openevolve_controller(participant_ctx: Dict[str, Any]) -> None:
-    """OpenEvolve.run() constructs ProcessParallelController internally; hook it here."""
+def _install_global_openevolve_controller_hook() -> None:
+    """
+    Install once before any participant runs.
+
+    OpenEvolve.run() constructs ProcessParallelController internally; the hooked class
+    reads per-thread participant context (safe for parallel_participants > 1).
+    """
+    global _OE_CONTROLLER_HOOKED
+    if _OE_CONTROLLER_HOOKED:
+        return
     import openevolve.controller as oc
 
     if not hasattr(oc, "_Orig_ProcessParallelController"):
         oc._Orig_ProcessParallelController = oc.ProcessParallelController
 
-    class _HookedController(VanillaProcessParallelController):
+    class _ThreadLocalVanillaController(VanillaProcessParallelController):
         def __init__(
             self,
             config: Config,
@@ -802,6 +855,7 @@ def _hook_openevolve_controller(participant_ctx: Dict[str, Any]) -> None:
             evolution_tracer=None,
             file_suffix: str = ".py",
         ):
+            participant_ctx = _get_thread_participant_ctx()
             VanillaProcessParallelController.__init__(
                 self,
                 config,
@@ -812,14 +866,8 @@ def _hook_openevolve_controller(participant_ctx: Dict[str, Any]) -> None:
                 participant_ctx,
             )
 
-    oc.ProcessParallelController = _HookedController
-
-
-def _unhook_openevolve_controller() -> None:
-    import openevolve.controller as oc
-
-    if hasattr(oc, "_Orig_ProcessParallelController"):
-        oc.ProcessParallelController = oc._Orig_ProcessParallelController
+    oc.ProcessParallelController = _ThreadLocalVanillaController
+    _OE_CONTROLLER_HOOKED = True
 
 
 class VanillaProcessParallelController(ProcessParallelController):
@@ -1006,7 +1054,7 @@ def evaluate(program_path: str) -> Dict[str, float]:
 def _build_config(args, iterations: int) -> Config:
     cfg = Config()
     cfg.max_iterations = iterations
-    cfg.checkpoint_interval = args.checkpoint_interval
+    cfg.checkpoint_interval = min(args.checkpoint_interval, args.n_iterations)
     cfg.log_level = args.log_level
     cfg.random_seed = args.random_seed
     cfg.diff_based_evolution = False
@@ -1106,9 +1154,6 @@ def run_participant(
     run_dir: Path,
     wandb_module: Any = None,
 ) -> Dict[str, Any]:
-    _patch_process_parallel_worker()
-    _install_runtime_patches()
-
     participant_dir = run_dir / f"participant_{participant_id}"
     exp_dir = participant_dir / "openevolve_experiment"
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -1165,9 +1210,6 @@ def run_participant(
         output_dir=str(oe_output),
     )
     oe.config.database.novelty_llm = oe.llm_ensemble
-    _patch_process_parallel_worker()
-    _install_runtime_patches()
-    _hook_openevolve_controller(participant_ctx)
     status = "ok"
     error_msg = ""
     n_completed = 0
@@ -1175,11 +1217,9 @@ def run_participant(
     train_ll = val_ll = test_ll = None
     best_train_ll: Optional[float] = None
 
+    _set_thread_participant_ctx(participant_ctx)
     try:
-        try:
-            best_program = asyncio.run(oe.run(iterations=args.n_iterations))
-        finally:
-            _unhook_openevolve_controller()
+        best_program = _run_openevolve(oe, args.n_iterations)
         n_completed = oe.database.last_iteration if oe.database.last_iteration else args.n_iterations
 
         ckpt_root = oe_output / "checkpoints"
@@ -1230,6 +1270,8 @@ def run_participant(
         status = "failed"
         error_msg = str(e)
         traceback.print_exc()
+    finally:
+        _clear_thread_participant_ctx()
 
     row = {
         "participant_id": participant_id,
@@ -1335,6 +1377,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--llm_timeout", type=int, default=300)
     p.add_argument("--llm_retries", type=int, default=3)
     p.add_argument("--parallel_evaluations", type=int, default=4)
+    p.add_argument(
+        "--parallel_participants",
+        type=int,
+        default=1,
+        help="Number of participants to evolve concurrently (thread pool). Default 1 (sequential).",
+    )
     p.add_argument("--evaluator_timeout", type=int, default=120)
     p.add_argument("--evaluator_max_retries", type=int, default=2)
     p.add_argument("--random_seed", type=int, default=0)
@@ -1378,6 +1426,22 @@ def main() -> None:
         raise ValueError("OpenEvolve baseline requires --split_mode within_participant")
     if args.api_base is None:
         args.api_base = args.vllm_url
+    if args.parallel_participants < 1:
+        raise ValueError(f"--parallel_participants must be >= 1, got {args.parallel_participants}")
+    if args.parallel_evaluations < 1:
+        raise ValueError(f"--parallel_evaluations must be >= 1, got {args.parallel_evaluations}")
+
+    parallel_participants = int(args.parallel_participants)
+    parallel_evaluations = int(args.parallel_evaluations)
+    approx_concurrency = parallel_participants * parallel_evaluations
+    print(f"parallel_participants={parallel_participants}")
+    print(f"parallel_evaluations={parallel_evaluations}")
+    print(f"approx_total_concurrency={approx_concurrency}")
+    if approx_concurrency > 100:
+        print(
+            f"WARNING: approx_total_concurrency={approx_concurrency} > 100; "
+            "consider lowering --parallel_participants or --parallel_evaluations."
+        )
 
     psych_dataset_split = _effective_psych_dataset_split(args.dataset, args.psych_dataset_split)
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
@@ -1451,12 +1515,19 @@ def main() -> None:
         "top/diverse/history/artifacts are NOT included in LLM prompts."
     )
 
+    _patch_process_parallel_worker()
+    _install_runtime_patches()
+    _install_global_openevolve_controller_hook()
+
     detail_rows: List[Dict[str, Any]] = []
-    for pid in tqdm(participants, desc="participants"):
+    detail_rows_lock = threading.Lock()
+
+    def _participant_row(pid: int) -> Dict[str, Any]:
         try:
-            row = run_participant(args, pid, pid_to_ordinal.get(pid, -1), run_dir, wandb_module)
+            return run_participant(args, pid, pid_to_ordinal.get(pid, -1), run_dir, wandb_module)
         except Exception as e:
-            row = {
+            traceback.print_exc()
+            return {
                 "participant_id": pid,
                 "participant_ordinal": pid_to_ordinal.get(pid, -1),
                 "status": "failed",
@@ -1464,11 +1535,22 @@ def main() -> None:
                 "n_iterations_requested": args.n_iterations,
                 "n_iterations_completed": 0,
             }
-            traceback.print_exc()
-        detail_rows.append(row)
 
-    with _SHARED_CSV_LOCK:
-        _write_experiment_csvs(run_dir, detail_rows)
+    def _record_participant_row(row: Dict[str, Any]) -> None:
+        with detail_rows_lock:
+            detail_rows.append(row)
+            sorted_rows = sorted(detail_rows, key=lambda r: int(r.get("participant_id", 0)))
+            with _SHARED_CSV_LOCK:
+                _write_experiment_csvs(run_dir, sorted_rows)
+
+    if parallel_participants > 1:
+        with ThreadPoolExecutor(max_workers=parallel_participants) as pool:
+            futures = {pool.submit(_participant_row, pid): pid for pid in participants}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="participants"):
+                _record_participant_row(fut.result())
+    else:
+        for pid in tqdm(participants, desc="participants"):
+            _record_participant_row(_participant_row(pid))
 
     if wandb_module is not None:
         wandb_module.finish()
