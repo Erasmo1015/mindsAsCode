@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+Before running, set up the baseline methods config file:
+analysis/data/baseline_methods/config.yaml
+
 Usage:
   python analysis/code/utils/compare.py --dataset 1peterson2021using --psych_dataset_split train --experiment_paths 
    \\ generated_outputs/choice13k/te_dr/run_260514_231815
