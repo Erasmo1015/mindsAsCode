@@ -989,6 +989,9 @@ def run_global_evolution_phase(
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     early_stop_iters: Optional[int] = None,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -1104,6 +1107,13 @@ def run_global_evolution_phase(
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
             sample_size_for_warning=sample_size,
             prompt_stats_path=prompt_stats_path,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            strict_prompt_budget=strict_prompt_budget,
+            prompt_token_estimator=prompt_token_estimator,
+            prompt_diagnostics_dir=output_dir,
+            phase="global_evolution",
+            participant_id=None,
+            iteration=iteration_step,
         )
 
         selected_results: List[Dict[str, Any]] = []
@@ -1436,6 +1446,455 @@ def _cap_and_subsample_prompt_trials(
     return out
 
 
+_PROMPT_DIAGNOSTICS_LOCK = threading.Lock()
+_TRAIN_TRIAL_CAP_STEPS = (40, 30, 20, 10, 5)
+_VAL_TRIAL_CAP_STEPS = (40, 30, 20, 10, 5)
+_PER_PROBLEM_CAP_STEPS = (10, 5, 3, 1)
+_MIN_VAL_TRIALS_REFINEMENT = 3
+_MIN_TRAIN_TRIALS_FINAL = 5
+_MIN_VAL_TRIALS_FINAL = 3
+
+
+class PromptBudgetExceededError(RuntimeError):
+    """Prompt still exceeds hard_prompt_token_cap after structured truncation."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tokens: int,
+        cap: int,
+        overflow_components: Dict[str, int],
+        truncation_steps: List[str],
+    ):
+        super().__init__(message)
+        self.tokens = tokens
+        self.cap = cap
+        self.overflow_components = overflow_components
+        self.truncation_steps = truncation_steps
+
+
+def estimate_tokens(text: str, *, estimator: str = "char4") -> int:
+    """Fast token estimate; char4 avoids heavy tokenizer dependencies."""
+    if not text:
+        return 0
+    if estimator == "char4":
+        return math.ceil(len(text) / 4)
+    return math.ceil(len(text) / 4)
+
+
+def _compress_prompt_whitespace(text: str) -> str:
+    if not text:
+        return ""
+    lines: List[str] = []
+    prev_blank = False
+    for ln in text.splitlines():
+        stripped = ln.rstrip()
+        blank = not stripped
+        if blank and prev_blank:
+            continue
+        lines.append(stripped)
+        prev_blank = blank
+    out = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def _append_prompt_diagnostic(record: Dict[str, Any], diagnostics_dir: Optional[Path]) -> None:
+    if diagnostics_dir is None:
+        return
+    path = Path(diagnostics_dir) / "prompt_diagnostics.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = dict(record)
+    record.setdefault("timestamp", datetime.now().isoformat())
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    with _PROMPT_DIAGNOSTICS_LOCK:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+def _strip_parent_code_for_prompt(code: str) -> str:
+    from utils.teh.prompt_sanitize import _strip_python_comments
+
+    return _strip_python_comments(code)
+
+
+def format_trials_to_text_compact(
+    trials: List[Dict[str, Any]], dataset: str = "choice13k"
+) -> str:
+    """Compact trial serialization preserving gamble fields, action, feedback, split."""
+    if not trials:
+        return ""
+    lines: List[str] = []
+    for idx, t in enumerate(trials):
+        prob = t.get("problem", {})
+        action = t.get("action")
+        split_lbl = t.get("split") or t.get("split_label")
+        parts = [str(idx + 1)]
+        if "gamble_A" in prob and "gamble_B" in prob:
+            ga, gb = prob["gamble_A"], prob["gamble_B"]
+            parts.append(f"A:p={ga.get('probs')},r={ga.get('rewards')}")
+            parts.append(f"B:p={gb.get('probs')},r={gb.get('rewards')}")
+            if prob.get("has_feedback") is not None:
+                parts.append(f"fb={prob.get('has_feedback')}")
+        elif dataset == "cpc18" or "Ha" in prob:
+            parts.append(
+                f"A:Ha={prob.get('Ha')},pHa={prob.get('pHa')},La={prob.get('La')};"
+                f"B:Hb={prob.get('Hb')},pHb={prob.get('pHb')},Lb={prob.get('Lb')};"
+                f"Amb={prob.get('Amb')},Corr={prob.get('Corr')}"
+            )
+        else:
+            psych_alias = prob.get("dataset_alias")
+            if is_psych101_dataset(dataset) or (
+                psych_alias and is_psych101_dataset(str(psych_alias))
+            ) or prob.get("schema_type") in ("A", "B", "C", "D"):
+                from data_modules.psych101_binary import format_trial_for_prompt
+
+                line = format_trial_for_prompt(t, idx + 1)
+                line = re.sub(r"\s+", " ", line).strip()
+                lines.append(line)
+                continue
+        if action is not None:
+            parts.append(f"act={action}")
+        hist = t.get("history") or []
+        if hist:
+            last = hist[-1]
+            if last.get("feedback") is not None:
+                parts.append(f"last_fb={last.get('feedback')}")
+        if split_lbl is not None:
+            parts.append(f"split={split_lbl}")
+        lines.append("|".join(parts))
+    return "\n".join(lines)
+
+
+def _serialize_trials_for_prompt(
+    trials: List[Dict[str, Any]],
+    *,
+    dataset: str,
+    compact: bool,
+) -> str:
+    if compact:
+        return format_trials_to_text_compact(trials, dataset=dataset)
+    return format_trials_to_text(trials, dataset=dataset)
+
+
+def _component_token_breakdown(
+    parts: Dict[str, str], *, estimator: str
+) -> Dict[str, int]:
+    return {k: estimate_tokens(v, estimator=estimator) for k, v in parts.items()}
+
+
+def _enforce_prompt_budget(
+    prompt_text: str,
+    *,
+    hard_prompt_token_cap: int,
+    strict_prompt_budget: bool,
+    prompt_token_estimator: str,
+    overflow_components: Dict[str, int],
+    truncation_steps: List[str],
+    phase: str,
+    participant_id: Optional[int],
+    iteration: Optional[int],
+    candidate_index: Optional[int],
+    diagnostics_dir: Optional[Path],
+    diagnostics_base: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """Return prompt if within cap; otherwise skip LLM or raise."""
+    tokens_after = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
+    diag = dict(diagnostics_base)
+    diag.update(
+        {
+            "prompt_tokens_after_truncation": tokens_after,
+            "hard_prompt_token_cap": hard_prompt_token_cap,
+            "truncation_steps": list(truncation_steps),
+        }
+    )
+    if tokens_after <= hard_prompt_token_cap:
+        diag["status"] = "ok"
+        _append_prompt_diagnostic(diag, diagnostics_dir)
+        return prompt_text, diag
+
+    diag["status"] = "overflow_after_truncation"
+    diag["overflow_components"] = overflow_components
+    _append_prompt_diagnostic(diag, diagnostics_dir)
+    pid = participant_id if participant_id is not None else "?"
+    iter_s = iteration if iteration is not None else "?"
+    cand_s = candidate_index if candidate_index is not None else "?"
+    msg = (
+        f"Prompt budget exceeded after truncation: {tokens_after} tokens > cap "
+        f"{hard_prompt_token_cap} (phase={phase}, participant={pid}, iteration={iter_s}, "
+        f"candidate={cand_s}). Largest components: "
+        + ", ".join(
+            f"{k}={v}"
+            for k, v in sorted(overflow_components.items(), key=lambda x: -x[1])[:6]
+        )
+    )
+    if strict_prompt_budget:
+        raise PromptBudgetExceededError(
+            msg,
+            tokens=tokens_after,
+            cap=hard_prompt_token_cap,
+            overflow_components=overflow_components,
+            truncation_steps=truncation_steps,
+        )
+    print(f"Warning: {msg}; skipping LLM call.")
+    return "", diag
+
+
+def _warn_prompt_truncation(diag: Dict[str, Any]) -> None:
+    if diag.get("truncated"):
+        print(
+            f"Warning: LLM prompt truncated "
+            f"({diag.get('prompt_tokens_before_truncation')} -> "
+            f"{diag.get('prompt_tokens_after_truncation')} tokens, "
+            f"cap={diag.get('hard_prompt_token_cap')})."
+        )
+    if diag.get("prompt_tokens_after_truncation", 0) > diag.get("hard_prompt_token_cap", 0):
+        print(
+            "Warning: prompt still exceeds hard_prompt_token_cap after truncation "
+            f"({diag.get('prompt_tokens_after_truncation')} > {diag.get('hard_prompt_token_cap')})."
+        )
+    if diag.get("train_trials_after", 999) < 10:
+        print(
+            f"Warning: train/obs trials in prompt reduced to {diag.get('train_trials_after')} (<10)."
+        )
+    if diag.get("parents_after") == 1 and diag.get("parents_before", 1) > 1:
+        print("Warning: parent programs reduced to 1 for LLM prompt.")
+    if diag.get("compact_serialization"):
+        print("Warning: compact trial serialization used for LLM prompt.")
+
+
+def _build_psych_prompt_text(
+    *,
+    base_prompt: str,
+    state_text: str,
+    extra_state_text: str,
+    parent_context: str,
+    code_template_suffix: str,
+    candidate_output_rules: str,
+) -> str:
+    return (
+        f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}"
+        f"{code_template_suffix}\n{candidate_output_rules}\n"
+    )
+
+
+def _truncate_psych_prompt_to_budget(
+    *,
+    base_prompt: str,
+    train_trials: List[Dict[str, Any]],
+    train_trials_source: List[Dict[str, Any]],
+    val_trials: Optional[List[Dict[str, Any]]],
+    val_trials_source: Optional[List[Dict[str, Any]]],
+    extra_prompt_trials_label: str,
+    parent_programs: List[str],
+    parent_context_builder: Callable[..., str],
+    parent_context_kwargs: Dict[str, Any],
+    code_template_suffix: str,
+    candidate_output_rules: str,
+    dataset: str,
+    dataset_type: str,
+    hard_prompt_token_cap: int,
+    prompt_token_estimator: str,
+    max_prompt_train_trials: int,
+    max_prompt_trials_per_problem: int,
+    prompt_train_trials_seed: int,
+    max_parent_chars: int,
+    refinement_val_observations: bool,
+    pre_capped_train: bool,
+    pre_capped_val: bool,
+) -> Tuple[str, Dict[str, Any], List[str]]:
+    """
+    Structured truncation for Psych/TEH prompts. Returns (prompt, diagnostics, steps).
+    """
+    steps: List[str] = []
+    compact = False
+    effective_max_train = max_prompt_train_trials
+    effective_max_val = max_prompt_train_trials
+    effective_per_problem = max_prompt_trials_per_problem
+
+    base = base_prompt
+    parents = list(parent_programs)
+    n_parents_before = len(parents)
+
+    def _cap_train() -> List[Dict[str, Any]]:
+        if pre_capped_train:
+            return list(train_trials)
+        return _cap_and_subsample_prompt_trials(
+            train_trials_source,
+            max_trials=effective_max_train,
+            max_trials_per_problem=effective_per_problem,
+            subsample_seed=prompt_train_trials_seed,
+            label="train" if not refinement_val_observations else "validation",
+        )
+
+    def _cap_val() -> List[Dict[str, Any]]:
+        if val_trials_source is None:
+            return []
+        if pre_capped_val:
+            return list(val_trials or [])
+        return _cap_and_subsample_prompt_trials(
+            val_trials_source,
+            max_trials=effective_max_val,
+            max_trials_per_problem=effective_per_problem,
+            subsample_seed=int(prompt_train_trials_seed) + 424_242,
+            label="validation",
+        )
+
+    def _assemble() -> Tuple[str, str, str, int, int, int]:
+        tr = _cap_train()
+        st = _serialize_trials_for_prompt(tr, dataset=dataset_type, compact=compact)
+        state_text = st if st else ""
+        extra_state_text = ""
+        n_val = 0
+        if val_trials_source is not None:
+            vr = _cap_val()
+            n_val = len(vr)
+            if vr:
+                extra_state_text = (
+                    f"\n\n{extra_prompt_trials_label}:\n"
+                    f"{_serialize_trials_for_prompt(vr, dataset=dataset_type, compact=compact)}\n"
+                )
+        pctx = parent_context_builder(
+            prompt_parent_programs=parents,
+            **parent_context_kwargs,
+        )
+        prompt = _build_psych_prompt_text(
+            base_prompt=base,
+            state_text=state_text,
+            extra_state_text=extra_state_text,
+            parent_context=pctx,
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=candidate_output_rules,
+        )
+        return prompt, state_text, extra_state_text, len(tr), n_val, len(parents)
+
+    prompt, _, _, n_train, n_val, n_parents = _assemble()
+    tokens_before = estimate_tokens(prompt, estimator=prompt_token_estimator)
+
+    def _parts_dict(p: str, st: str, ex: str, pc: str) -> Dict[str, str]:
+        return {
+            "instruction": base,
+            "train_observations": st,
+            "val_observations": ex,
+            "parents": parent_context_builder(
+                prompt_parent_programs=parents, **parent_context_kwargs
+            ),
+            "template_and_output_rules": code_template_suffix + candidate_output_rules,
+        }
+
+    if tokens_before <= hard_prompt_token_cap:
+        return prompt, {
+            "truncated": False,
+            "prompt_tokens_before_truncation": tokens_before,
+            "prompt_tokens_after_truncation": tokens_before,
+            "train_trials_before": len(train_trials_source),
+            "train_trials_after": n_train,
+            "val_trials_before": len(val_trials_source) if val_trials_source is not None else 0,
+            "val_trials_after": n_val,
+            "parents_before": n_parents_before,
+            "parents_after": n_parents,
+            "compact_serialization": compact,
+        }, steps
+
+    # 1) compress whitespace in instruction
+    base = _compress_prompt_whitespace(base)
+    steps.append("compress_instruction_whitespace")
+    prompt, _, _, n_train, n_val, n_parents = _assemble()
+
+    # 2) strip parent comments
+    parents = [_strip_parent_code_for_prompt(p) for p in parents]
+    steps.append("strip_parent_comments")
+    prompt, _, _, n_train, n_val, n_parents = _assemble()
+
+    # 3) drop extra parents (keep >=1)
+    while len(parents) > 1 and estimate_tokens(prompt, estimator=prompt_token_estimator) > hard_prompt_token_cap:
+        parents = parents[:-1]
+        steps.append("drop_extra_parent")
+        prompt, _, _, n_train, n_val, n_parents = _assemble()
+
+    # 4) train trial caps (monotone 40 -> 30 -> 20 -> 10 -> 5)
+    for cap in _TRAIN_TRIAL_CAP_STEPS:
+        effective_max_train = min(effective_max_train, cap) if effective_max_train > 0 else cap
+        steps.append(f"train_trials_cap_{cap}")
+        prompt, _, _, n_train, n_val, n_parents = _assemble()
+        if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+            break
+
+    # 5) per-problem caps (when flat sampling was used, enable block caps under budget pressure)
+    if max_prompt_trials_per_problem <= 0:
+        for cap in _PER_PROBLEM_CAP_STEPS:
+            effective_per_problem = cap
+            steps.append(f"per_problem_cap_{cap}")
+            prompt, _, _, n_train, n_val, n_parents = _assemble()
+            if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+                break
+
+    # 6) compact serialization
+    if not compact:
+        compact = True
+        steps.append("compact_trial_serialization")
+        prompt, _, _, n_train, n_val, n_parents = _assemble()
+
+    # 7) val trial caps (keep minimum for refinement)
+    min_val = _MIN_VAL_TRIALS_REFINEMENT if refinement_val_observations else 1
+    for cap in _VAL_TRIAL_CAP_STEPS:
+        if val_trials_source is None:
+            break
+        next_cap = max(cap, min_val) if refinement_val_observations else cap
+        effective_max_val = min(effective_max_val, next_cap) if effective_max_val > 0 else next_cap
+        steps.append(f"val_trials_cap_{effective_max_val}")
+        prompt, _, _, n_train, n_val, n_parents = _assemble()
+        if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+            break
+
+    # 8) parent char truncation (comments already stripped)
+    if max_parent_chars > 0:
+        new_parents: List[str] = []
+        changed = False
+        for p in parents:
+            tc, was = _truncate_parent_program_for_prompt(p, max_parent_chars)
+            new_parents.append(tc)
+            changed = changed or was
+        if changed:
+            parents = new_parents
+            steps.append("parent_char_truncation")
+            prompt, _, _, n_train, n_val, n_parents = _assemble()
+
+    tokens_after = estimate_tokens(prompt, estimator=prompt_token_estimator)
+    if tokens_after > hard_prompt_token_cap:
+        # 9) final fallback
+        effective_max_train = _MIN_TRAIN_TRIALS_FINAL
+        if val_trials_source is not None:
+            effective_max_val = (
+                _MIN_VAL_TRIALS_FINAL if refinement_val_observations else _MIN_TRAIN_TRIALS_FINAL
+            )
+        effective_per_problem = 1
+        compact = True
+        if len(parents) > 1:
+            parents = [parents[0]]
+        steps.append("final_fallback_minimal")
+        prompt, _, _, n_train, n_val, n_parents = _assemble()
+        tokens_after = estimate_tokens(prompt, estimator=prompt_token_estimator)
+
+    overflow = _component_token_breakdown(
+        _parts_dict(prompt, "", "", ""),
+        estimator=prompt_token_estimator,
+    )
+    return prompt, {
+        "truncated": True,
+        "prompt_tokens_before_truncation": tokens_before,
+        "prompt_tokens_after_truncation": tokens_after,
+        "train_trials_before": len(train_trials_source),
+        "train_trials_after": n_train,
+        "val_trials_before": len(val_trials_source) if val_trials_source is not None else 0,
+        "val_trials_after": n_val,
+        "parents_before": n_parents_before,
+        "parents_after": n_parents,
+        "compact_serialization": compact,
+        "overflow_components": overflow,
+    }, steps
+
+
 def run_loglik_refinement_phase(
     *,
     dataset: str,
@@ -1470,6 +1929,9 @@ def run_loglik_refinement_phase(
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     early_stop_iters: Optional[int] = None,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
 ) -> Optional[float]:
     """
     Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
@@ -1639,6 +2101,13 @@ def run_loglik_refinement_phase(
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
             sample_size_for_warning=sample_size,
             prompt_stats_path=prompt_stats_path,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            strict_prompt_budget=strict_prompt_budget,
+            prompt_token_estimator=prompt_token_estimator,
+            prompt_diagnostics_dir=output_path,
+            phase="refinement",
+            participant_id=participant_id,
+            iteration=iteration_step,
         )
 
         candidate_results: List[Dict[str, Any]] = []
@@ -2185,6 +2654,9 @@ def run_loglik_refine_participant_from_checkpoint(
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     early_stop_iters: Optional[int] = None,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -2315,6 +2787,9 @@ def run_loglik_refine_participant_from_checkpoint(
         "max_parent_chars": max_parent_chars,
         "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
         "early_stop_iters": early_stop_iters,
+        "hard_prompt_token_cap": hard_prompt_token_cap,
+        "strict_prompt_budget": strict_prompt_budget,
+        "prompt_token_estimator": prompt_token_estimator,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
         ref_parents, ref_vals = _load_evolution_elite_pool(evolution_pool_dir)
@@ -2396,6 +2871,9 @@ def run_loglik_refine_from_prev_experiment(
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     early_stop_iters: Optional[int] = None,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -2508,6 +2986,9 @@ def run_loglik_refine_from_prev_experiment(
             max_parent_chars=max_parent_chars,
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
             early_stop_iters=early_stop_iters,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            strict_prompt_budget=strict_prompt_budget,
+            prompt_token_estimator=prompt_token_estimator,
         )
         return int(participant_id), metrics
 
@@ -3808,6 +4289,53 @@ def evaluate_gridworld_ensemble_on_future(
     return {"accuracy": acc, "total": seed_total, "correct": seed_correct}
 
 
+def _finalize_gridworld_llm_prompt(
+    prompt_text: str,
+    *,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
+    phase: str = "gridworld",
+    diagnostics_dir: Optional[Path] = None,
+    participant_id: Optional[int] = None,
+    iteration: Optional[int] = None,
+    candidate_index: Optional[int] = None,
+) -> str:
+    """Compress whitespace and block over-budget gridworld prompts from reaching the LLM."""
+    prompt_text = _compress_prompt_whitespace(prompt_text)
+    tokens = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
+    diag: Dict[str, Any] = {
+        "participant_id": participant_id,
+        "phase": phase,
+        "iteration": iteration,
+        "candidate_index": candidate_index,
+        "prompt_tokens_before_truncation": tokens,
+        "prompt_tokens_after_truncation": tokens,
+        "hard_prompt_token_cap": hard_prompt_token_cap,
+        "truncated": False,
+        "truncation_steps": ["compress_instruction_whitespace"],
+    }
+    if tokens <= hard_prompt_token_cap:
+        diag["status"] = "ok"
+        _append_prompt_diagnostic(diag, diagnostics_dir)
+        return prompt_text
+    overflow = {"full_prompt": tokens}
+    return _enforce_prompt_budget(
+        prompt_text,
+        hard_prompt_token_cap=hard_prompt_token_cap,
+        strict_prompt_budget=strict_prompt_budget,
+        prompt_token_estimator=prompt_token_estimator,
+        overflow_components=overflow,
+        truncation_steps=["gridworld_whitespace_only"],
+        phase=phase,
+        participant_id=participant_id,
+        iteration=iteration,
+        candidate_index=candidate_index,
+        diagnostics_dir=diagnostics_dir,
+        diagnostics_base=diag,
+    )[0]
+
+
 def generate_gridworld_initial_candidates(
     client: OpenAI,
     model_name: str,
@@ -3816,6 +4344,13 @@ def generate_gridworld_initial_candidates(
     n_candidates: int,
     max_tokens: int = 2000,
     max_workers: int = 5,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
+    prompt_diagnostics_dir: Optional[Path] = None,
+    phase: str = "gridworld_initial",
+    participant_id: Optional[int] = None,
+    iteration: Optional[int] = None,
 ) -> List[str]:
     """Generate K initial candidate programs for one episode. Prompt injects episode prefix (ROTE-style).
     Used at episode start; no parent code, only environment description + prefix observations + template.
@@ -3836,11 +4371,28 @@ Observed trajectory (first 20 steps) for this episode:
 {single_code_template_prompt_suffix(code_template)}
 Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Generate the variant now:"""
 
+    _gw_call_idx = [0]
+
     def _generate_one() -> str:
+        cand_idx = _gw_call_idx[0]
+        _gw_call_idx[0] += 1
         try:
+            prompt = _finalize_gridworld_llm_prompt(
+                full_prompt,
+                hard_prompt_token_cap=hard_prompt_token_cap,
+                strict_prompt_budget=strict_prompt_budget,
+                prompt_token_estimator=prompt_token_estimator,
+                phase=phase,
+                diagnostics_dir=prompt_diagnostics_dir,
+                participant_id=participant_id,
+                iteration=iteration,
+                candidate_index=cand_idx,
+            )
+            if not prompt:
+                return template_code
             response = client.chat.completions.create(
                 model=model_name,
-                messages=[{"role": "user", "content": full_prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 top_p=0.95,
                 max_tokens=max_tokens,
@@ -3851,6 +4403,8 @@ Output ONLY runnable Python code (no explanations, no markdown fences, no preamb
             )
             if code and ("class FSMAgent" in code or "def act" in code):
                 return code
+        except PromptBudgetExceededError:
+            raise
         except Exception as e:
             print(f"Warning: Failed to generate gridworld initial candidate: {e}")
         return template_code
@@ -3874,6 +4428,13 @@ def generate_gridworld_evolution_variants(
     n_variants: int = 10,
     max_tokens: int = 2000,
     max_workers: int = 5,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
+    prompt_diagnostics_dir: Optional[Path] = None,
+    phase: str = "gridworld_evolution",
+    participant_id: Optional[int] = None,
+    iteration: Optional[int] = None,
 ) -> List[str]:
     """Generate evolution variants. Prompt MUST include: serialized prefix trajectory, parent code, prefix accuracy (X/20), optional mismatch summary.
     test_acc is NEVER included.
@@ -3902,12 +4463,28 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
 
 {obs_section}{parent_section}{mismatch_section}Generate an improved program variant. Output ONLY runnable Python code (no explanations, no markdown fences, no preamble). Actions: 0=stay, 1=right, 2=left, 3=down, 4=up, 5=interact. Generate now:"""
     fallback = parent_codes[0] if parent_codes else ""
+    _gw_call_idx = [0]
 
     def _generate_one() -> str:
+        cand_idx = _gw_call_idx[0]
+        _gw_call_idx[0] += 1
         try:
+            prompt = _finalize_gridworld_llm_prompt(
+                full_prompt,
+                hard_prompt_token_cap=hard_prompt_token_cap,
+                strict_prompt_budget=strict_prompt_budget,
+                prompt_token_estimator=prompt_token_estimator,
+                phase=phase,
+                diagnostics_dir=prompt_diagnostics_dir,
+                participant_id=participant_id,
+                iteration=iteration,
+                candidate_index=cand_idx,
+            )
+            if not prompt:
+                return fallback
             response = client.chat.completions.create(
                 model=model_name,
-                messages=[{"role": "user", "content": full_prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 top_p=0.95,
                 max_tokens=max_tokens,
@@ -3918,6 +4495,8 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
             )
             if code and ("class FSMAgent" in code or "def act" in code):
                 return code
+        except PromptBudgetExceededError:
+            raise
         except Exception as e:
             print(f"Warning: Failed to generate gridworld evolution variant: {e}")
         return fallback
@@ -4178,6 +4757,13 @@ def generate_gridworld_program_variants(
     max_tokens: int = 2000,
     parent_train_accuracies: Optional[List[float]] = None,
     max_workers: int = 5,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
+    prompt_diagnostics_dir: Optional[Path] = None,
+    phase: str = "gridworld_variants",
+    participant_id: Optional[int] = None,
+    iteration: Optional[int] = None,
 ) -> List[str]:
     """
     Generate full program code variants for gridworld (non-strict mode).
@@ -4260,12 +4846,28 @@ The variant must be a complete, runnable program.
 Generate the variant now:"""
 
     best_parent = parent_codes[0] if parent_codes else ""
+    _gw_call_idx = [0]
 
     def _generate_one() -> str:
+        cand_idx = _gw_call_idx[0]
+        _gw_call_idx[0] += 1
         try:
+            prompt = _finalize_gridworld_llm_prompt(
+                base_prompt_template_final,
+                hard_prompt_token_cap=hard_prompt_token_cap,
+                strict_prompt_budget=strict_prompt_budget,
+                prompt_token_estimator=prompt_token_estimator,
+                phase=phase,
+                diagnostics_dir=prompt_diagnostics_dir,
+                participant_id=participant_id,
+                iteration=iteration,
+                candidate_index=cand_idx,
+            )
+            if not prompt:
+                return best_parent
             response = client.chat.completions.create(
                 model=model_name,
-                messages=[{"role": "user", "content": base_prompt_template_final}],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 top_p=0.95,
                 max_tokens=max_tokens,
@@ -4276,6 +4878,8 @@ Generate the variant now:"""
             )
             if code and ("class FSMAgent" in code or "def act" in code):
                 return code
+        except PromptBudgetExceededError:
+            raise
         except Exception as e:
             print(f"Warning: Failed to generate gridworld program variant: {e}")
         return best_parent
@@ -4289,6 +4893,99 @@ Generate the variant now:"""
 
 
 _PARENT_TRUNCATION_MARKER = "# truncated; keep concise\n"
+
+
+def _build_parent_context_for_prompt(
+    *,
+    prompt_parent_programs: List[str],
+    num_parents: int,
+    dataset: str,
+    fitness_metric: str,
+    parent_train_accuracies: Optional[List[float]],
+    parent_train_mses: Optional[List[float]],
+    parent_val_logliks: Optional[List[Optional[float]]],
+    cpc18_official_mse: bool,
+) -> str:
+    """Parent program section for LLM prompts (metrics + code blocks)."""
+    if num_parents == 1:
+        parent_context = (
+            f"\n\nReference program (parent):\n```python\n{prompt_parent_programs[0]}\n```\n\n"
+        )
+        if (
+            parent_train_accuracies
+            and len(parent_train_accuracies) > 0
+            and parent_train_accuracies[0] is not None
+            and fitness_metric == "loglik"
+            and is_binary_loglik_dataset(dataset)
+        ):
+            train_ll = parent_train_accuracies[0]
+            if parent_val_logliks and len(parent_val_logliks) > 0 and parent_val_logliks[0] is not None:
+                parent_context += (
+                    f"Parent performance: train_loglik={train_ll:.4f}, "
+                    f"val_loglik={parent_val_logliks[0]:.4f}\n\n"
+                )
+            else:
+                parent_context += f"Parent performance: train_loglik={train_ll:.4f}\n\n"
+        parent_context += (
+            "Generate a variant that improves upon or explores alternatives to the parent program.\n"
+        )
+        return parent_context
+
+    parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
+    for i, parent_program in enumerate(prompt_parent_programs):
+        if dataset == "cpc18" and cpc18_official_mse:
+            mse = parent_train_mses[i] if (parent_train_mses and i < len(parent_train_mses)) else None
+            mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
+            parent_context += f"\nParent {i+1}{mse_str}:\n```python\n{parent_program}\n```\n"
+        else:
+            parent_metric = (
+                parent_train_accuracies[i]
+                if parent_train_accuracies and i < len(parent_train_accuracies)
+                else None
+            )
+            if parent_metric is not None:
+                if (
+                    fitness_metric == "loglik"
+                    and is_binary_loglik_dataset(dataset)
+                    and parent_val_logliks
+                    and i < len(parent_val_logliks)
+                    and parent_val_logliks[i] is not None
+                ):
+                    metric_str = (
+                        f" (train_loglik: {parent_metric:.4f}, "
+                        f"val_loglik: {parent_val_logliks[i]:.4f})"
+                    )
+                else:
+                    metric_label = (
+                        "train_loglik"
+                        if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset)
+                        else "train_acc"
+                    )
+                    metric_str = f" ({metric_label}: {parent_metric:.4f})"
+            else:
+                metric_str = ""
+            parent_context += f"\nParent {i+1}{metric_str}:\n```python\n{parent_program}\n```\n"
+
+    if dataset == "cpc18" and cpc18_official_mse and parent_train_mses:
+        avg_mse = sum(parent_train_mses) / len(parent_train_mses)
+        min_mse = min(parent_train_mses)
+        parent_context += "\nParent performance on training data:\n"
+        parent_context += f"- Average train block-MSE: {avg_mse:.2f}\n"
+        parent_context += f"- Best train block-MSE: {min_mse:.2f}\n"
+        parent_context += "\nIMPORTANT for CPC18:\n"
+        parent_context += "The official CPC18 metric is block-level MSE (lower is better).\n"
+        parent_context += "Your goal is to reduce block-level MSE.\n"
+        parent_context += f"Current best: train_block-MSE={min_mse:.2f}\n"
+        if min_mse > 50:
+            parent_context += "\nNOTE: Current MSE is HIGH (>50). Focus on reducing MSE significantly.\n"
+        elif min_mse > 30:
+            parent_context += "\nNOTE: Current MSE is MODERATE (30-50). Try to reduce MSE further.\n"
+        else:
+            parent_context += "\nNOTE: Current MSE is LOW (<30). Fine-tune to improve further.\n"
+
+    parent_context += "\nGenerate a variant that combines the best ideas from these parent programs.\n"
+    return parent_context
+
 
 def _truncate_parent_program_for_prompt(code: str, max_parent_chars: int) -> Tuple[str, bool]:
     """Truncate parent code for LLM prompts only; evaluation uses full code."""
@@ -4334,6 +5031,13 @@ def generate_program_variants(
     warn_parent_truncation_ratio: float = 0.5,
     sample_size_for_warning: int = 10,
     prompt_stats_path: Optional[Path] = None,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
+    prompt_diagnostics_dir: Optional[Path] = None,
+    phase: str = "evolution",
+    participant_id: Optional[int] = None,
+    iteration: Optional[int] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -4434,19 +5138,20 @@ Provide only the code for choose(...) as a complete function body.
             code_template = ""
     
     # Trials serialized into the prompt (evaluation still uses full train_trials elsewhere).
-    # Refinement passes prompt_observation_trials=val only; evolution uses train_trials.
-    obs_label = "validation" if prompt_observation_trials is not None else "train"
-    if prompt_observation_trials is not None:
-        # Refinement pre-samples val trials once for the whole phase; do not resample here.
+    refinement_val_observations = prompt_observation_trials is not None
+    if refinement_val_observations:
+        observation_trials_source = list(prompt_observation_trials)
         trials_for_prompt = list(prompt_observation_trials)
     else:
+        observation_trials_source = train_trials
         trials_for_prompt = _cap_and_subsample_prompt_trials(
             train_trials,
             max_trials=max_prompt_train_trials,
             max_trials_per_problem=max_prompt_trials_per_problem,
             subsample_seed=prompt_train_trials_seed,
-            label=obs_label,
+            label="train",
         )
+
     if trials_for_prompt and "problem" in trials_for_prompt[0]:
         prob0 = trials_for_prompt[0]["problem"]
         dataset_type = str(prob0.get("dataset_alias") or dataset or "choice13k")
@@ -4456,40 +5161,75 @@ Provide only the code for choose(...) as a complete function body.
             dataset_type = "cpc18"
     else:
         dataset_type = dataset or "choice13k"
-    state_text = format_trials_to_text(trials_for_prompt, dataset=dataset_type)
 
-    extra_state_text = ""
-    if extra_prompt_trials is not None and prompt_observation_trials is None:
-        extra_for_prompt = _cap_and_subsample_prompt_trials(
+    if prompt_suffix:
+        base_prompt = f"{base_prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
+
+    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
+
+    code_template_suffix = single_code_template_prompt_suffix(code_template)
+    candidate_output_rules = f"\n{CANDIDATE_OUTPUT_RULES}\n"
+    num_parents = len(parent_programs)
+    parent_lengths_before = [len(p) for p in parent_programs]
+    prompt_parent_programs = list(parent_programs)
+
+    parent_ctx_kwargs = {
+        "dataset": dataset,
+        "fitness_metric": fitness_metric,
+        "parent_train_accuracies": parent_train_accuracies,
+        "parent_train_mses": parent_train_mses,
+        "parent_val_logliks": parent_val_logliks,
+        "cpc18_official_mse": cpc18_official_mse,
+    }
+
+    def _parent_ctx_builder(*, prompt_parent_programs: List[str], **_kwargs: Any) -> str:
+        return _build_parent_context_for_prompt(
+            prompt_parent_programs=prompt_parent_programs,
+            num_parents=len(prompt_parent_programs),
+            **parent_ctx_kwargs,
+        )
+
+    val_trials_for_budget: Optional[List[Dict[str, Any]]] = None
+    val_source: Optional[List[Dict[str, Any]]] = None
+    if extra_prompt_trials is not None and not refinement_val_observations:
+        val_source = extra_prompt_trials
+        val_trials_for_budget = _cap_and_subsample_prompt_trials(
             extra_prompt_trials,
             max_trials=max_prompt_train_trials,
             max_trials_per_problem=max_prompt_trials_per_problem,
             subsample_seed=int(prompt_train_trials_seed) + 424_242,
             label="validation",
         )
-        extra_state_text = (
-            f"\n\n{extra_prompt_trials_label}:\n"
-            f"{format_trials_to_text(extra_for_prompt, dataset=dataset_type)}\n"
-        )
 
-    if prompt_suffix:
-        base_prompt = f"{base_prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
+    prompt_text, trunc_diag, trunc_steps = _truncate_psych_prompt_to_budget(
+        base_prompt=base_prompt,
+        train_trials=trials_for_prompt,
+        train_trials_source=observation_trials_source,
+        val_trials=val_trials_for_budget,
+        val_trials_source=val_source,
+        extra_prompt_trials_label=extra_prompt_trials_label,
+        parent_programs=prompt_parent_programs,
+        parent_context_builder=_parent_ctx_builder,
+        parent_context_kwargs={},
+        code_template_suffix=code_template_suffix,
+        candidate_output_rules=candidate_output_rules,
+        dataset=dataset,
+        dataset_type=dataset_type,
+        hard_prompt_token_cap=hard_prompt_token_cap,
+        prompt_token_estimator=prompt_token_estimator,
+        max_prompt_train_trials=max_prompt_train_trials,
+        max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+        prompt_train_trials_seed=prompt_train_trials_seed,
+        max_parent_chars=max_parent_chars,
+        refinement_val_observations=refinement_val_observations,
+        pre_capped_train=False,
+        pre_capped_val=False,
+    )
 
-    num_parents = len(parent_programs)
-    parent_lengths_before = [len(p) for p in parent_programs]
-    prompt_parent_programs: List[str] = []
-    parent_truncated_flags: List[bool] = []
-    truncated_count = 0
-    for parent_code in parent_programs:
-        truncated_code, was_truncated = _truncate_parent_program_for_prompt(
-            parent_code, max_parent_chars
-        )
-        prompt_parent_programs.append(truncated_code)
-        parent_truncated_flags.append(was_truncated)
-        if was_truncated:
-            truncated_count += 1
     parent_lengths_after = [len(p) for p in prompt_parent_programs]
-
+    truncated_count = sum(
+        1 for a, b in zip(parent_lengths_before, parent_lengths_after) if a != b
+    )
     if (
         max_parent_chars > 0
         and sample_size_for_warning > 0
@@ -4501,105 +5241,96 @@ Provide only the code for choose(...) as a complete function body.
             f"max_parent_chars={max_parent_chars}."
         )
 
-    # Include parent programs as reference (truncated copies only; evaluation uses full code).
-    if num_parents == 1:
-        parent_context = (
-            f"\n\nReference program (parent):\n```python\n{prompt_parent_programs[0]}\n```\n\n"
-        )
-        if (
-            parent_train_accuracies
-            and len(parent_train_accuracies) > 0
-            and parent_train_accuracies[0] is not None
-            and fitness_metric == "loglik"
-            and is_binary_loglik_dataset(dataset)
-        ):
-            train_ll = parent_train_accuracies[0]
-            if parent_val_logliks and len(parent_val_logliks) > 0 and parent_val_logliks[0] is not None:
-                parent_context += (
-                    f"Parent performance: train_loglik={train_ll:.4f}, "
-                    f"val_loglik={parent_val_logliks[0]:.4f}\n\n"
-                )
-            else:
-                parent_context += f"Parent performance: train_loglik={train_ll:.4f}\n\n"
-        parent_context += "Generate a variant that improves upon or explores alternatives to the parent program.\n"
-    else:
-        parent_context = f"\n\nReference parent programs ({num_parents} elite programs):\n"
-        for i, parent_program in enumerate(prompt_parent_programs):
-            if dataset == "cpc18" and cpc18_official_mse:
-                mse = parent_train_mses[i] if (parent_train_mses and i < len(parent_train_mses)) else None
-                mse_str = f" (train_block-MSE: {mse:.2f})" if mse is not None else ""
-                parent_context += f"\nParent {i+1}{mse_str}:\n```python\n{parent_program}\n```\n"
-            else:
-                parent_metric = (
-                    parent_train_accuracies[i]
-                    if parent_train_accuracies and i < len(parent_train_accuracies)
-                    else None
-                )
-                if parent_metric is not None:
-                    if (
-                        fitness_metric == "loglik"
-                        and is_binary_loglik_dataset(dataset)
-                        and parent_val_logliks
-                        and i < len(parent_val_logliks)
-                        and parent_val_logliks[i] is not None
-                    ):
-                        metric_str = (
-                            f" (train_loglik: {parent_metric:.4f}, "
-                            f"val_loglik: {parent_val_logliks[i]:.4f})"
-                        )
-                    else:
-                        metric_label = (
-                            "train_loglik"
-                            if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset)
-                            else "train_acc"
-                        )
-                        metric_str = f" ({metric_label}: {parent_metric:.4f})"
-                else:
-                    metric_str = ""
-                parent_context += f"\nParent {i+1}{metric_str}:\n```python\n{parent_program}\n```\n"
-        
-        if dataset == "cpc18" and cpc18_official_mse and parent_train_mses:
-            avg_mse = sum(parent_train_mses) / len(parent_train_mses)
-            min_mse = min(parent_train_mses)
-            parent_context += f"\nParent performance on training data:\n"
-            parent_context += f"- Average train block-MSE: {avg_mse:.2f}\n"
-            parent_context += f"- Best train block-MSE: {min_mse:.2f}\n"
-            parent_context += f"\nIMPORTANT for CPC18:\n"
-            parent_context += f"The official CPC18 metric is block-level MSE (lower is better).\n"
-            parent_context += f"Your goal is to reduce block-level MSE.\n"
-            parent_context += f"Current best: train_block-MSE={min_mse:.2f}\n"
-            if min_mse > 50:
-                parent_context += f"\nNOTE: Current MSE is HIGH (>50). Focus on reducing MSE significantly.\n"
-            elif min_mse > 30:
-                parent_context += f"\nNOTE: Current MSE is MODERATE (30-50). Try to reduce MSE further.\n"
-            else:
-                parent_context += f"\nNOTE: Current MSE is LOW (<30). Fine-tune to improve further.\n"
-        
-        parent_context += "\nGenerate a variant that combines the best ideas from these parent programs.\n"
-    
-    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
-
-    prompt_text = (
-        f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}"
-        f"{single_code_template_prompt_suffix(code_template)}"
-        f"\n{CANDIDATE_OUTPUT_RULES}\n"
-    )
+    diag_base: Dict[str, Any] = {
+        "participant_id": participant_id,
+        "phase": phase,
+        "iteration": iteration,
+        "hard_prompt_token_cap": hard_prompt_token_cap,
+        "prompt_token_estimator": prompt_token_estimator,
+        "truncation_steps": trunc_steps,
+        **trunc_diag,
+    }
+    _warn_prompt_truncation(diag_base)
 
     if prompt_stats_path is not None:
         prompt_stats: Dict[str, Any] = {
             "n_parents": num_parents,
             "parent_char_lengths_before": parent_lengths_before,
             "parent_char_lengths_after": parent_lengths_after,
-            "parent_truncated": parent_truncated_flags,
             "truncated_parent_count": truncated_count,
             "final_prompt_char_length": len(prompt_text),
             "max_parent_chars": max_parent_chars,
+            "prompt_tokens_before_truncation": trunc_diag.get("prompt_tokens_before_truncation"),
+            "prompt_tokens_after_truncation": trunc_diag.get("prompt_tokens_after_truncation"),
+            "truncation_steps": trunc_steps,
         }
         prompt_stats_path = Path(prompt_stats_path)
         prompt_stats_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_stats_path.write_text(json.dumps(prompt_stats, indent=2) + "\n", encoding="utf-8")
 
+    diagnostics_dir = prompt_diagnostics_dir
+    if diagnostics_dir is None and prompt_stats_path is not None:
+        diagnostics_dir = prompt_stats_path.parent.parent
+
+    tokens_final = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
+    if tokens_final > hard_prompt_token_cap:
+        try:
+            prompt_text, _ = _enforce_prompt_budget(
+                prompt_text,
+                hard_prompt_token_cap=hard_prompt_token_cap,
+                strict_prompt_budget=strict_prompt_budget,
+                prompt_token_estimator=prompt_token_estimator,
+                overflow_components=trunc_diag.get("overflow_components") or {},
+                truncation_steps=trunc_steps,
+                phase=phase,
+                participant_id=participant_id,
+                iteration=iteration,
+                candidate_index=None,
+                diagnostics_dir=diagnostics_dir,
+                diagnostics_base=diag_base,
+            )
+        except PromptBudgetExceededError:
+            raise
+
+    _llm_call_counter = [0]
+
     def _generate_one() -> str:
+        if not prompt_text:
+            return ""
+        cand_idx = _llm_call_counter[0]
+        _llm_call_counter[0] += 1
+        call_diag = {**diag_base, "candidate_index": cand_idx}
+        tokens = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
+        if tokens > hard_prompt_token_cap:
+            try:
+                _enforce_prompt_budget(
+                    prompt_text,
+                    hard_prompt_token_cap=hard_prompt_token_cap,
+                    strict_prompt_budget=strict_prompt_budget,
+                    prompt_token_estimator=prompt_token_estimator,
+                    overflow_components=trunc_diag.get("overflow_components") or {},
+                    truncation_steps=trunc_steps,
+                    phase=phase,
+                    participant_id=participant_id,
+                    iteration=iteration,
+                    candidate_index=cand_idx,
+                    diagnostics_dir=diagnostics_dir,
+                    diagnostics_base=call_diag,
+                )
+            except PromptBudgetExceededError:
+                return ""
+            return ""
+        _append_prompt_diagnostic(
+            {
+                **call_diag,
+                "status": "ok",
+                "prompt_tokens_before_truncation": trunc_diag.get(
+                    "prompt_tokens_before_truncation"
+                ),
+                "prompt_tokens_after_truncation": tokens,
+            },
+            diagnostics_dir,
+        )
         try:
             resp = client.chat.completions.create(
                 model=model_name,
@@ -4669,6 +5400,9 @@ def run_evolution(
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     early_stop_iters: Optional[int] = None,
+    hard_prompt_token_cap: int = 14000,
+    strict_prompt_budget: bool = True,
+    prompt_token_estimator: str = "char4",
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -5206,6 +5940,11 @@ def run_evolution(
                 prompt_stats_path = (
                     simple_iterations_dir / f"iteration_{iteration_step}" / "prompt_stats.json"
                 )
+        prompt_diag_dir: Optional[Path] = None
+        if output_path is not None:
+            prompt_diag_dir = Path(output_path)
+        elif output_dir is not None:
+            prompt_diag_dir = Path(output_dir)
         candidate_codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -5226,6 +5965,13 @@ def run_evolution(
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
             sample_size_for_warning=sample_size,
             prompt_stats_path=prompt_stats_path,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            strict_prompt_budget=strict_prompt_budget,
+            prompt_token_estimator=prompt_token_estimator,
+            prompt_diagnostics_dir=prompt_diag_dir,
+            phase="evolution",
+            participant_id=int(participant_id) if participant_id is not None else None,
+            iteration=iteration_step,
         )
         
         # Evaluate candidates
@@ -6409,6 +7155,9 @@ def run_evolution(
             max_parent_chars=max_parent_chars,
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
             early_stop_iters=early_stop_iters,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            strict_prompt_budget=strict_prompt_budget,
+            prompt_token_estimator=prompt_token_estimator,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -7279,6 +8028,32 @@ def main():
         help="Max output tokens per candidate generation request (reduces context-overflow failures).",
     )
     parser.add_argument(
+        "--hard_prompt_token_cap",
+        type=int,
+        default=14000,
+        help=(
+            "Hard input-token budget for each LLM prompt (estimated via --prompt_token_estimator). "
+            "Prompts are structurally truncated before calling vLLM; never sent if still over cap "
+            "(default: 14000, aligned with vLLM --max-model-len 16384 minus --llm_max_tokens)."
+        ),
+    )
+    parser.add_argument(
+        "--strict_prompt_budget",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When a prompt remains over --hard_prompt_token_cap after truncation, raise a clear error "
+            "instead of calling the LLM (default: True)."
+        ),
+    )
+    parser.add_argument(
+        "--prompt_token_estimator",
+        type=str,
+        default="char4",
+        choices=("char4",),
+        help="Token estimator for prompt budgeting: char4 = ceil(len/4) (default: char4).",
+    )
+    parser.add_argument(
         "--max_parent_chars",
         type=int,
         default=4500,
@@ -7414,6 +8189,9 @@ def main():
         return
     if args.llm_max_tokens < 64:
         print("Error: --llm_max_tokens must be >= 64.")
+        return
+    if args.hard_prompt_token_cap < 256:
+        print("Error: --hard_prompt_token_cap must be >= 256.")
         return
     if args.max_parent_chars < 0:
         print("Error: --max_parent_chars must be >= 0 (0 = no truncation).")
@@ -7709,6 +8487,9 @@ def main():
             max_parent_chars=args.max_parent_chars,
             warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
             early_stop_iters=args.early_stop_iters,
+            hard_prompt_token_cap=args.hard_prompt_token_cap,
+            strict_prompt_budget=args.strict_prompt_budget,
+            prompt_token_estimator=args.prompt_token_estimator,
         )
 
     if args.phase == "refine":
@@ -7757,6 +8538,9 @@ def main():
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                 early_stop_iters=args.early_stop_iters,
+                hard_prompt_token_cap=args.hard_prompt_token_cap,
+                strict_prompt_budget=args.strict_prompt_budget,
+                prompt_token_estimator=args.prompt_token_estimator,
             )
         finally:
             if wandb is not None:
@@ -7859,6 +8643,9 @@ def main():
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                 early_stop_iters=args.early_stop_iters,
+                hard_prompt_token_cap=args.hard_prompt_token_cap,
+                strict_prompt_budget=args.strict_prompt_budget,
+                prompt_token_estimator=args.prompt_token_estimator,
             )
         finally:
             if wandb is not None:
@@ -7935,6 +8722,9 @@ def main():
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                 early_stop_iters=args.early_stop_iters,
+                hard_prompt_token_cap=args.hard_prompt_token_cap,
+                strict_prompt_budget=args.strict_prompt_budget,
+                prompt_token_estimator=args.prompt_token_estimator,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -8314,6 +9104,9 @@ def main():
                         refinement_val_threshold=args.refinement_val_threshold,
                         max_workers=args.max_workers,
                         early_stop_iters=args.early_stop_iters,
+                        hard_prompt_token_cap=args.hard_prompt_token_cap,
+                        strict_prompt_budget=args.strict_prompt_budget,
+                        prompt_token_estimator=args.prompt_token_estimator,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -8580,6 +9373,9 @@ def main():
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                 early_stop_iters=args.early_stop_iters,
+                hard_prompt_token_cap=args.hard_prompt_token_cap,
+                strict_prompt_budget=args.strict_prompt_budget,
+                prompt_token_estimator=args.prompt_token_estimator,
             )
 
         try:
