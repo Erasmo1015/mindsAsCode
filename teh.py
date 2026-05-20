@@ -90,6 +90,7 @@ _SHARED_EXPERIMENT_CSV_LOCK = threading.Lock()
 # Serializes wandb.log for participant metrics (parallel workers share one run).
 _WANDB_PARTICIPANT_LOG_LOCK = threading.Lock()
 _RUN_PHASES = frozenset({"all", "evolution", "refine"})
+_EARLY_STOP_MIN_IMPROVEMENT = 0.005
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
@@ -116,6 +117,13 @@ def _safe_float(x: Any) -> Optional[float]:
     if math.isfinite(v):
         return v
     return None
+
+
+def _normalize_early_stop_iters(early_stop_iters: Optional[int]) -> Optional[int]:
+    """Normalize CLI/function value: <=0 disables early stopping."""
+    if early_stop_iters is None:
+        return None
+    return int(early_stop_iters) if int(early_stop_iters) > 0 else None
 
 
 def _participant_metric_id(participant_id: Optional[int]) -> Dict[str, Any]:
@@ -1014,6 +1022,7 @@ def run_global_evolution_phase(
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
+    early_stop_iters: Optional[int] = None,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -1063,6 +1072,14 @@ def run_global_evolution_phase(
         )
     ]
     print(f"Global baseline train loglik: {baseline_ll:.6f}")
+    early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
+    last_significant_best = baseline_ll
+    stagnant_iters = 0
+    if early_stop_patience is not None:
+        print(
+            f"Global early stop enabled: patience={early_stop_patience}, "
+            f"min_improvement={_EARLY_STOP_MIN_IMPROVEMENT:.3f}"
+        )
 
     for iteration in range(n_iterations):
         iteration_step = iteration + 1
@@ -1204,6 +1221,21 @@ def run_global_evolution_phase(
                 },
                 step=iteration_step,
             )
+
+        if early_stop_patience is not None:
+            improvement = float(pool_best_ll) - float(last_significant_best)
+            if improvement >= _EARLY_STOP_MIN_IMPROVEMENT:
+                last_significant_best = float(pool_best_ll)
+                stagnant_iters = 0
+            else:
+                stagnant_iters += 1
+                if stagnant_iters >= early_stop_patience:
+                    print(
+                        f"Early stopping global phase at iteration {iteration_step}: "
+                        f"pool best improved by < {_EARLY_STOP_MIN_IMPROVEMENT:.3f} for "
+                        f"{stagnant_iters} consecutive iteration(s)."
+                    )
+                    break
 
     if save_artifacts:
         pool_dir = _save_global_elite_pool(global_dir, elite_parents)
@@ -1471,6 +1503,7 @@ def run_loglik_refinement_phase(
     run_prompts_dir: Optional[str] = None,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
+    early_stop_iters: Optional[int] = None,
 ) -> Optional[float]:
     """
     Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
@@ -1557,6 +1590,15 @@ def run_loglik_refinement_phase(
             shutil.copytree(src_pool, dst_pool)
         elif initial_code is not None:
             (refinement_dir / "seed_program.py").write_text(initial_code or "")
+
+    early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
+    last_significant_best = float(elite_parents[0][1])
+    stagnant_iters = 0
+    if early_stop_patience is not None:
+        print(
+            f"Refinement early stop enabled: patience={early_stop_patience}, "
+            f"min_improvement={_EARLY_STOP_MIN_IMPROVEMENT:.3f}"
+        )
 
     for iteration in range(n_iterations):
         iteration_step = iteration + 1
@@ -1817,6 +1859,23 @@ def run_loglik_refinement_phase(
                 int(participant_id),
                 int(wandb_step_offset) + iteration_step,
             )
+
+        if early_stop_patience is not None:
+            pool_best_fitness = float(pool_metrics["pool_best_train_val_loglik"])
+            improvement = pool_best_fitness - float(last_significant_best)
+            if improvement >= _EARLY_STOP_MIN_IMPROVEMENT:
+                last_significant_best = pool_best_fitness
+                stagnant_iters = 0
+            else:
+                stagnant_iters += 1
+                if stagnant_iters >= early_stop_patience:
+                    print(
+                        f"Early stopping refinement at iteration {iteration_step}: "
+                        f"pool best train+val loglik improved by < "
+                        f"{_EARLY_STOP_MIN_IMPROVEMENT:.3f} for {stagnant_iters} "
+                        "consecutive iteration(s)."
+                    )
+                    break
 
     best_code = elite_parents[0][0]
     best_fn = compile_program(best_code)
@@ -2156,6 +2215,7 @@ def run_loglik_refine_participant_from_checkpoint(
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
+    early_stop_iters: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -2285,6 +2345,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "run_prompts_dir": run_prompts_dir,
         "max_parent_chars": max_parent_chars,
         "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
+        "early_stop_iters": early_stop_iters,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
         ref_parents, ref_vals = _load_evolution_elite_pool(evolution_pool_dir)
@@ -2365,6 +2426,7 @@ def run_loglik_refine_from_prev_experiment(
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
+    early_stop_iters: Optional[int] = None,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -2476,6 +2538,7 @@ def run_loglik_refine_from_prev_experiment(
             mixed_gambles_csv=mixed_gambles_csv,
             max_parent_chars=max_parent_chars,
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+            early_stop_iters=early_stop_iters,
         )
         return int(participant_id), metrics
 
@@ -4256,8 +4319,7 @@ Generate the variant now:"""
     )[:n_variants]
 
 
-_PARENT_TRUNCATION_MARKER = "# truncated\n"
-
+_PARENT_TRUNCATION_MARKER = "# truncated; keep concise\n"
 
 def _truncate_parent_program_for_prompt(code: str, max_parent_chars: int) -> Tuple[str, bool]:
     """Truncate parent code for LLM prompts only; evaluation uses full code."""
@@ -4634,6 +4696,7 @@ def run_evolution(
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
+    early_stop_iters: Optional[int] = None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -5084,6 +5147,14 @@ def run_evolution(
     if run_phase == "refine":
         raise ValueError(
             "run_phase='refine' must use run_loglik_refine_from_prev_experiment(), not run_evolution()."
+        )
+    early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
+    last_significant_best = float(best_fitness)
+    stagnant_iters = 0
+    if early_stop_patience is not None:
+        print(
+            f"Evolution early stop enabled: patience={early_stop_patience}, "
+            f"min_improvement={_EARLY_STOP_MIN_IMPROVEMENT:.3f}"
         )
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
@@ -6166,6 +6237,22 @@ def run_evolution(
                 )
                 with open(log_file_path, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
+
+        if early_stop_patience is not None:
+            pool_best_fitness = float(elite_parents[0][1])
+            improvement = pool_best_fitness - float(last_significant_best)
+            if improvement >= _EARLY_STOP_MIN_IMPROVEMENT:
+                last_significant_best = pool_best_fitness
+                stagnant_iters = 0
+            else:
+                stagnant_iters += 1
+                if stagnant_iters >= early_stop_patience:
+                    print(
+                        f"Early stopping evolution at iteration {iteration_step}: "
+                        f"pool best fitness improved by < {_EARLY_STOP_MIN_IMPROVEMENT:.3f} "
+                        f"for {stagnant_iters} consecutive iteration(s)."
+                    )
+                    break
     
     # Final summary and save comprehensive results.json
     print(f"\n{'='*80}")
@@ -6349,6 +6436,7 @@ def run_evolution(
             run_prompts_dir=run_prompts_dir,
             max_parent_chars=max_parent_chars,
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+            early_stop_iters=early_stop_iters,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -7051,6 +7139,16 @@ def main():
         help="Number of evolution iterations",
     )
     parser.add_argument(
+        "--early_stop_iters",
+        type=int,
+        default=-1,
+        help=(
+            "Early stopping patience for evolution/refinement/global loops. "
+            "<=0 disables (default: -1). If >0, stop when pool-best fitness improves by "
+            f"< {_EARLY_STOP_MIN_IMPROVEMENT:.3f} for this many consecutive iterations."
+        ),
+    )
+    parser.add_argument(
         "--n_candidates",
         type=int,
         default=10,
@@ -7357,6 +7455,9 @@ def main():
     if args.n_candidates < 1:
         print("Error: --n_candidates must be >= 1.")
         return
+    if args.early_stop_iters is not None and int(args.early_stop_iters) < -1:
+        print("Error: --early_stop_iters must be -1 (disabled) or >= 0.")
+        return
     if args.refinement_iters < 1:
         print("Error: --refinement_iters must be >= 1.")
         return
@@ -7635,6 +7736,7 @@ def main():
             mixed_gambles_csv=args.mixed_gambles_csv,
             max_parent_chars=args.max_parent_chars,
             warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
+            early_stop_iters=args.early_stop_iters,
         )
 
     if args.phase == "refine":
@@ -7682,6 +7784,7 @@ def main():
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
+                early_stop_iters=args.early_stop_iters,
             )
         finally:
             if wandb is not None:
@@ -7783,6 +7886,7 @@ def main():
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
+                early_stop_iters=args.early_stop_iters,
             )
         finally:
             if wandb is not None:
@@ -7858,6 +7962,7 @@ def main():
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
+                early_stop_iters=args.early_stop_iters,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -8236,6 +8341,7 @@ def main():
                         refinement_iters=args.refinement_iters,
                         refinement_val_threshold=args.refinement_val_threshold,
                         max_workers=args.max_workers,
+                        early_stop_iters=args.early_stop_iters,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -8501,6 +8607,7 @@ def main():
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
+                early_stop_iters=args.early_stop_iters,
             )
 
         try:

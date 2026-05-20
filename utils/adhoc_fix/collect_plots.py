@@ -107,9 +107,12 @@ def _read_jsonl(path: Path) -> List[dict]:
 def _collect_from_wandb_jsonl(
     participant_dir: Path, pid: int, *, refinement: bool = False
 ) -> List[dict]:
-    candidates = [participant_dir / "wandb_metrics.jsonl"]
+    # Refinement must not fall back to participant-level wandb_metrics.jsonl: teh only
+    # appends evolution steps there; refinement metrics live under refinement/.
     if refinement:
-        candidates.insert(0, participant_dir / "refinement" / "wandb_metrics.jsonl")
+        candidates = [participant_dir / "refinement" / "wandb_metrics.jsonl"]
+    else:
+        candidates = [participant_dir / "wandb_metrics.jsonl"]
     rows: List[dict] = []
     for jsonl_path in candidates:
         rows = _read_jsonl(jsonl_path)

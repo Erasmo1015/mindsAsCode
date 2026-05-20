@@ -3,7 +3,7 @@
 Logistic MLE baseline for TEH participant datasets (Psych-101 binary aliases + mixed_gambles).
 
 CLI flags for dataset, participants, and splits match `teh.py` exactly. Fit logistic MLE on the
-train split; report accuracy and mean Bernoulli log-likelihood on train/val/test.
+combined train+val split; report accuracy and mean Bernoulli log-likelihood on train/val/test.
 
 python baseline_methods/MLE.py --dataset 1peterson2021using --psych_dataset_split train \\
   --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 \\
@@ -443,9 +443,10 @@ def _fit_and_evaluate_participant(
     val_trials: List[Dict[str, Any]],
     test_trials: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Fit MLE on train; report metrics on train/val/test."""
+    """Fit MLE on combined train+val; report metrics on train/val/test."""
+    fit_trials = train_trials + val_trials
     if is_mixed_gambles_dataset(dataset):
-        omega_hat, lam_hat = fit_logistic_mixed_gambles(train_trials)
+        omega_hat, lam_hat = fit_logistic_mixed_gambles(fit_trials)
 
         def predict_action(tr: Dict[str, Any]) -> int:
             r = tr["problem"]["gamble_A"]["rewards"]
@@ -458,7 +459,7 @@ def _fit_and_evaluate_participant(
         fitted = {"omega": omega_hat, "lambda": lam_hat}
         loglik_fn = lambda trials: eval_mean_loglik_mixed_gambles(trials, omega_hat, lam_hat)
     else:
-        beta_hat, bias_hat = fit_logistic_ev_diff(train_trials)
+        beta_hat, bias_hat = fit_logistic_ev_diff(fit_trials)
 
         def predict_action(tr: Dict[str, Any]) -> int:
             return predict_action_logistic(

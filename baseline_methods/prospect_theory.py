@@ -3,7 +3,8 @@
 Prospect Theory MLE baseline for TEH participant datasets (Psych-101 binary aliases + mixed_gambles).
 
 CLI flags for dataset, participants, and splits match `teh.py` and `baseline_methods/MLE.py`.
-Fit prospect theory by MLE on the train split; report accuracy and mean Bernoulli log-likelihood.
+Fit prospect theory by MLE on the combined train+val split; report accuracy and mean Bernoulli
+log-likelihood.
 
 python baseline_methods/prospect_theory.py --dataset 1peterson2021using --psych_dataset_split train \\
   --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 \\
@@ -523,12 +524,13 @@ def _fit_and_evaluate_participant(
     val_trials: List[Dict[str, Any]],
     test_trials: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    if not train_trials:
+    fit_trials = train_trials + val_trials
+    if not fit_trials:
         raise ValueError(f"No training trials for participant {participant_id}.")
-    sample_problem = train_trials[0]["problem"]
+    sample_problem = fit_trials[0]["problem"]
     ga, gb = prospect_gamble_getters(sample_problem)
     params = fit_prospect_theory_gamble_choice(
-        train_trials,
+        fit_trials,
         action_is_chooseA=lambda a: a == 0,
         gambleA_getter=ga,
         gambleB_getter=gb,

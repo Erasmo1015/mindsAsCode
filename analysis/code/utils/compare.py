@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+Usage:
+  python analysis/code/utils/compare.py --dataset 1peterson2021using --psych_dataset_split train --experiment_paths 
+   \\ generated_outputs/choice13k/te_dr/run_260514_231815
+
 Compare per-participant test_loglik across baseline methods, optional Centaur, and TEH runs.
 
 Baseline paths come from ``analysis/data/baseline_methods/config.yaml`` (see file
@@ -27,10 +31,7 @@ Footer rows: Avg (per-column mean), num_best (per-column count of tied-best test
 Without config entries, legacy layout is participant_id, BIR, Centaur, <teh_run>, ...
 with Avg and Better / Similar / Worse vs Centaur footers.
 
-Usage:
-  python analysis/code/utils/compare.py \\
-    --dataset 1peterson2021using --psych_dataset_split train \\
-    --experiment_paths generated_outputs/choice13k/te_dr/run_260514_231815
+
 """
 
 from __future__ import annotations
