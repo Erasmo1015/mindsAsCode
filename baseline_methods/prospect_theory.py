@@ -5,7 +5,7 @@ Prospect Theory MLE baseline for TEH participant datasets (Psych-101 binary alia
 CLI flags for dataset, participants, and splits match `teh.py` and `baseline_methods/MLE.py`.
 Fit prospect theory by MLE on the train split; report accuracy and mean Bernoulli log-likelihood.
 
-python baseline_methods/prospect_theory.py --dataset peterson2021using --psych_dataset_split train \\
+python baseline_methods/prospect_theory.py --dataset 1peterson2021using --psych_dataset_split train \\
   --participant_scope range --range_start_ordinal 0 --range_end_ordinal 9 \\
   --split_mode within_participant --split_ratio 0.6 --split_seed 0 --fitness_metric loglik
 """
@@ -31,9 +31,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
+from baseline_methods.psych101_features import prospect_gamble_getters
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
+    PSYCH101_LEGACY_ALIASES,
     experiment_to_trial_dicts,
     get_psych101_binary_experiment,
     get_filtered_psych101_split,
@@ -321,8 +323,14 @@ def nll_prospect_theory_choiceA(
 def fit_prospect_theory_gamble_choice(
     train_trials: List[Dict[str, Any]],
     action_is_chooseA: Callable[[int], bool],
-    gambleA_getter: Callable[[Dict[str, Any]], Tuple[List[float], Optional[List[float]]]],
-    gambleB_getter: Callable[[Dict[str, Any]], Tuple[List[float], Optional[List[float]]]],
+    gambleA_getter: Callable[
+        [Dict[str, Any], Optional[List[Dict[str, Any]]]],
+        Tuple[List[float], Optional[List[float]]],
+    ],
+    gambleB_getter: Callable[
+        [Dict[str, Any], Optional[List[Dict[str, Any]]]],
+        Tuple[List[float], Optional[List[float]]],
+    ],
     *,
     dataset: Optional[str] = None,
     participant_id: Optional[int] = None,
@@ -351,8 +359,9 @@ def fit_prospect_theory_gamble_choice(
         VB = []
         for tr in train_trials:
             p = tr["problem"]
-            rA, prA = gambleA_getter(p)
-            rB, prB = gambleB_getter(p)
+            hist = tr.get("history")
+            rA, prA = gambleA_getter(p, hist)
+            rB, prB = gambleB_getter(p, hist)
             VA.append(subjective_value_gamble(rA, prA, alpha, lam, gamma))
             VB.append(subjective_value_gamble(rB, prB, alpha, lam, gamma))
         VA_arr = np.asarray(VA, dtype=np.float64)
@@ -377,43 +386,6 @@ def fit_prospect_theory_gamble_choice(
         )
     alpha_hat, lam_hat, gamma_hat, beta_hat = (float(res.x[0]), float(res.x[1]), float(res.x[2]), float(res.x[3]))
     return {"alpha": alpha_hat, "lambda": lam_hat, "gamma": gamma_hat, "beta": beta_hat}
-
-
-def _prospect_gamble_getters(
-    problem: Dict[str, Any],
-) -> Tuple[
-    Callable[[Dict[str, Any]], Tuple[List[float], Optional[List[float]]]],
-    Callable[[Dict[str, Any]], Tuple[List[float], Optional[List[float]]]],
-]:
-    """Return (gambleA_getter, gambleB_getter) for gamble_A/B or CPC18-style pHa fields."""
-    if "gamble_A" in problem and "gamble_B" in problem:
-
-        def gamble_a(p: Dict[str, Any]) -> Tuple[List[float], Optional[List[float]]]:
-            return (p["gamble_A"]["rewards"], p["gamble_A"].get("probs"))
-
-        def gamble_b(p: Dict[str, Any]) -> Tuple[List[float], Optional[List[float]]]:
-            return (p["gamble_B"]["rewards"], p["gamble_B"].get("probs"))
-
-        return gamble_a, gamble_b
-    if "pHa" in problem:
-
-        def gamble_a(p: Dict[str, Any]) -> Tuple[List[float], Optional[List[float]]]:
-            return (
-                [float(p["Ha"]), float(p["La"])],
-                [float(p["pHa"]), float(1.0 - p["pHa"])],
-            )
-
-        def gamble_b(p: Dict[str, Any]) -> Tuple[List[float], Optional[List[float]]]:
-            return (
-                [float(p["Hb"]), float(p["Lb"])],
-                [float(p["pHb"]), float(1.0 - p["pHb"])],
-            )
-
-        return gamble_a, gamble_b
-    raise ValueError(
-        "Trial problem has neither gamble_A/gamble_B nor CPC18-style pHa fields; "
-        "cannot apply prospect-theory gamble-choice model."
-    )
 
 
 def eval_accuracy_from_predict_fn(
@@ -442,11 +414,12 @@ def eval_mean_loglik_choice13k_prospect(
     gamma = float(params["gamma"])
     beta = float(params["beta"])
     total = 0.0
+    ga, gb = prospect_gamble_getters(trials[0]["problem"])
     for tr in trials:
         p = tr["problem"]
-        ga, gb = _prospect_gamble_getters(p)
-        r_a, pr_a = ga(p)
-        r_b, pr_b = gb(p)
+        hist = tr.get("history")
+        r_a, pr_a = ga(p, hist)
+        r_b, pr_b = gb(p, hist)
         va = subjective_value_gamble(r_a, pr_a, alpha, lam, gamma)
         vb = subjective_value_gamble(r_b, pr_b, alpha, lam, gamma)
         p_choose_a = float(sigmoid(beta * (va - vb)))
@@ -519,12 +492,22 @@ def _write_experiment_loglik_csvs(
         writer.writerow(_round_floats_for_csv_row(summary_row))
 
 
-def _make_predict_action(params: Dict[str, float]) -> Callable[[Dict[str, Any]], int]:
+def _make_predict_action(
+    params: Dict[str, float],
+    gambleA_getter: Callable[
+        [Dict[str, Any], Optional[List[Dict[str, Any]]]],
+        Tuple[List[float], Optional[List[float]]],
+    ],
+    gambleB_getter: Callable[
+        [Dict[str, Any], Optional[List[Dict[str, Any]]]],
+        Tuple[List[float], Optional[List[float]]],
+    ],
+) -> Callable[[Dict[str, Any]], int]:
     def predict_action(tr: Dict[str, Any]) -> int:
         p = tr["problem"]
-        ga, gb = _prospect_gamble_getters(p)
-        rA, prA = ga(p)
-        rB, prB = gb(p)
+        hist = tr.get("history")
+        rA, prA = gambleA_getter(p, hist)
+        rB, prB = gambleB_getter(p, hist)
         va = subjective_value_gamble(rA, prA, params["alpha"], params["lambda"], params["gamma"])
         vb = subjective_value_gamble(rB, prB, params["alpha"], params["lambda"], params["gamma"])
         p_a = float(sigmoid(params["beta"] * (va - vb)))
@@ -543,7 +526,7 @@ def _fit_and_evaluate_participant(
     if not train_trials:
         raise ValueError(f"No training trials for participant {participant_id}.")
     sample_problem = train_trials[0]["problem"]
-    ga, gb = _prospect_gamble_getters(sample_problem)
+    ga, gb = prospect_gamble_getters(sample_problem)
     params = fit_prospect_theory_gamble_choice(
         train_trials,
         action_is_chooseA=lambda a: a == 0,
@@ -552,7 +535,7 @@ def _fit_and_evaluate_participant(
         dataset=dataset,
         participant_id=participant_id,
     )
-    predict_action = _make_predict_action(params)
+    predict_action = _make_predict_action(params, ga, gb)
     train_acc = eval_accuracy_from_predict_fn(train_trials, predict_action)
     val_acc = eval_accuracy_from_predict_fn(val_trials, predict_action)
     test_acc = eval_accuracy_from_predict_fn(test_trials, predict_action)
@@ -678,7 +661,7 @@ def _add_te_compat_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> None:
-    _teh_dataset_choices = sorted(_PARTICIPANT_DATASETS)
+    _teh_dataset_choices = sorted(_PARTICIPANT_DATASETS | set(PSYCH101_LEGACY_ALIASES))
     parser = argparse.ArgumentParser(
         description="Prospect Theory MLE baseline (TEH-compatible dataset / participant / split CLI)."
     )
@@ -688,7 +671,7 @@ def main() -> None:
         default=_PETERSON_ALIAS,
         choices=_teh_dataset_choices,
         help=(
-            "Psych-101 binary alias (peterson2021using, plonsky2018when, ...) or mixed_gambles (local CSV)."
+            "Psych-101 binary alias (1peterson2021using, 2plonsky2018when, ...) or mixed_gambles (local CSV)."
         ),
     )
     parser.add_argument(
@@ -776,7 +759,7 @@ def main() -> None:
         choices=["within_participant", "across_participants"],
         help=(
             "within_participant (default): train/val/test per participant. "
-            "across_participants: pool train across participants (peterson2021using only)."
+            "across_participants: pool train across participants (Psych-101 binary datasets)."
         ),
     )
     parser.add_argument(
@@ -806,8 +789,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--no_log",
-        action="store_true",
-        help="Disable wandb logging. Default is enabled.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Disable wandb logging (default: disabled). Pass --no-no-log to enable.",
     )
     _add_te_compat_args(parser)
     args = parser.parse_args()
@@ -821,8 +805,11 @@ def main() -> None:
     if not (0.0 < args.split_ratio < 1.0):
         print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
         sys.exit(1)
-    if args.split_mode == "across_participants" and args.dataset != _PETERSON_ALIAS:
-        print("Error: --split_mode across_participants is only supported with --dataset peterson2021using.")
+    if args.split_mode == "across_participants" and not is_psych101_dataset(args.dataset):
+        print(
+            "Error: --split_mode across_participants is only supported for Psych-101 binary datasets "
+            "(not mixed_gambles)."
+        )
         sys.exit(1)
 
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
@@ -865,7 +852,7 @@ def main() -> None:
             psych_dataset_split=psych_dataset_split,
             local_dataset=args.local_dataset,
         )
-        ga, gb = _prospect_gamble_getters(train_trials[0]["problem"])
+        ga, gb = prospect_gamble_getters(train_trials[0]["problem"])
         params = fit_prospect_theory_gamble_choice(
             train_trials,
             action_is_chooseA=lambda a: a == 0,
@@ -874,7 +861,7 @@ def main() -> None:
             dataset=args.dataset,
             participant_id=None,
         )
-        predict_action_ap = _make_predict_action(params)
+        predict_action_ap = _make_predict_action(params, ga, gb)
         train_acc_eval = eval_accuracy_from_predict_fn(train_trials, predict_action_ap)
         test_acc_eval = eval_accuracy_from_predict_fn(test_trials, predict_action_ap)
         train_ll = eval_mean_loglik_choice13k_prospect(train_trials, params)

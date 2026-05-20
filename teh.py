@@ -118,6 +118,95 @@ def _safe_float(x: Any) -> Optional[float]:
     return None
 
 
+def _participant_metric_id(participant_id: Optional[int]) -> Dict[str, Any]:
+    """Fields to include in per-iteration printed/logged metrics for one participant."""
+    if participant_id is None:
+        return {}
+    return {"participant_id": int(participant_id)}
+
+
+def _build_iteration_metrics_json(
+    *,
+    participant_id: Optional[int],
+    header: Dict[str, Any],
+    best: Dict[str, Any],
+    candidate_results: Any,
+) -> Dict[str, Any]:
+    """iteration metrics.json: metadata + pool-best fields, then candidate_results last."""
+    out: Dict[str, Any] = {}
+    out.update(_participant_metric_id(participant_id))
+    out.update(header)
+    out.update(best)
+    out["candidate_results"] = candidate_results
+    return out
+
+
+_WANDB_JSONL_PARTICIPANT_KEY_SUFFIXES = (
+    "train_loglik",
+    "val_loglik",
+    "test_loglik",
+    "gated_test_loglik",
+    "train_val_loglik",
+    "train_fitness",
+    "test_fitness",
+    "train_acc",
+    "test_acc",
+    "train_accuracy",
+    "test_accuracy",
+    "train_mse",
+    "test_mse",
+    "n_valid",
+    "is_baseline",
+    "avg_train_accuracy",
+    "avg_test_accuracy",
+    "avg_train_fitness",
+    "avg_train_mse",
+    "avg_test_mse",
+)
+
+
+def _wandb_jsonl_log_entry(
+    *,
+    step: int,
+    iteration: int,
+    log_dict: Dict[str, Any],
+    participant_id: Optional[int] = None,
+    agent_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """JSONL row: step/iteration first, then p{id}_* (or a/gw) metrics, then other keys."""
+    entry: Dict[str, Any] = {"step": step, "iteration": iteration}
+    entry.update(_participant_metric_id(participant_id))
+    used: set[str] = set()
+
+    def _add_prefixed_keys(prefix: str) -> None:
+        for suffix in _WANDB_JSONL_PARTICIPANT_KEY_SUFFIXES:
+            key = f"{prefix}{suffix}"
+            if key in log_dict:
+                entry[key] = log_dict[key]
+                used.add(key)
+        for key in sorted(log_dict):
+            if key.startswith(prefix) and key not in used:
+                entry[key] = log_dict[key]
+                used.add(key)
+
+    if participant_id is not None:
+        pid = int(participant_id)
+        _add_prefixed_keys(f"p{pid}_")
+        slash_prefix = f"p{pid}/"
+        for key in sorted(log_dict):
+            if key.startswith(slash_prefix) and key not in used:
+                entry[key] = log_dict[key]
+                used.add(key)
+    if agent_id is not None:
+        _add_prefixed_keys(f"a{int(agent_id)}_")
+    _add_prefixed_keys("gw_")
+
+    for key in sorted(log_dict):
+        if key not in used:
+            entry[key] = log_dict[key]
+    return entry
+
+
 _WANDB_PARTICIPANT_CHART_SUFFIXES = (
     "train_loglik",
     "val_loglik",
@@ -1670,11 +1759,28 @@ def run_loglik_refinement_phase(
             )
 
         if iter_dir is not None:
-            metrics: Dict[str, Any] = {
-                "iteration": iteration_step,
-                "n_candidates": n_candidates_per_iteration,
-                "n_runtime_valid": len(selected_results),
-                "candidate_results": [
+            best_fields: Dict[str, Any] = dict(pool_metrics)
+            if iter_best_result is not None:
+                best_fields["iter_best_program_id"] = (
+                    f"refinement_{iteration_step}_candidate_{iter_best_result['idx']}"
+                )
+                best_fields["iter_best_train_val_loglik"] = iter_best_result["train_val_loglik"]
+                best_fields["iter_best_train_loglik"] = iter_best_result["train_loglik"]
+                best_fields["iter_best_val_loglik"] = iter_best_result["val_loglik"]
+            else:
+                best_fields["iter_best_program_id"] = None
+                best_fields["iter_best_train_val_loglik"] = None
+                best_fields["iter_best_train_loglik"] = None
+                best_fields["iter_best_val_loglik"] = None
+            metrics = _build_iteration_metrics_json(
+                participant_id=participant_id,
+                header={
+                    "iteration": iteration_step,
+                    "n_candidates": n_candidates_per_iteration,
+                    "n_runtime_valid": len(selected_results),
+                },
+                best=best_fields,
+                candidate_results=[
                     {
                         "idx": r["idx"],
                         "train_loglik": r.get("train_loglik"),
@@ -1684,20 +1790,7 @@ def run_loglik_refinement_phase(
                     }
                     for r in candidate_results
                 ],
-                **pool_metrics,
-            }
-            if iter_best_result is not None:
-                metrics["iter_best_program_id"] = (
-                    f"refinement_{iteration_step}_candidate_{iter_best_result['idx']}"
-                )
-                metrics["iter_best_train_val_loglik"] = iter_best_result["train_val_loglik"]
-                metrics["iter_best_train_loglik"] = iter_best_result["train_loglik"]
-                metrics["iter_best_val_loglik"] = iter_best_result["val_loglik"]
-            else:
-                metrics["iter_best_program_id"] = None
-                metrics["iter_best_train_val_loglik"] = None
-                metrics["iter_best_train_loglik"] = None
-                metrics["iter_best_val_loglik"] = None
+            )
             (iter_dir / "metrics.json").write_text(
                 json.dumps(metrics, indent=2), encoding="utf-8"
             )
@@ -4163,7 +4256,7 @@ Generate the variant now:"""
     )[:n_variants]
 
 
-_PARENT_TRUNCATION_MARKER = "# [TRUNCATED PARENT PROGRAM DUE TO PROMPT BUDGET]\n"
+_PARENT_TRUNCATION_MARKER = "# truncated\n"
 
 
 def _truncate_parent_program_for_prompt(code: str, max_parent_chars: int) -> Tuple[str, bool]:
@@ -4811,11 +4904,13 @@ def run_evolution(
         
         # Also save baseline to local JSONL file
         if log_file_path is not None:
-            baseline_entry = {
-                "step": 0,
-                "iteration": -1,  # Baseline is before iteration 0
-                **baseline_log_dict
-            }
+            baseline_entry = _wandb_jsonl_log_entry(
+                step=0,
+                iteration=-1,  # Baseline is before iteration 0
+                log_dict=baseline_log_dict,
+                participant_id=participant_id,
+                agent_id=agent_id,
+            )
             with open(log_file_path, "a") as f:
                 f.write(json.dumps(baseline_entry) + "\n")
     
@@ -5606,6 +5701,7 @@ def run_evolution(
             if choice13k_simple_logging and is_binary_loglik_dataset(dataset) and save_artifacts and simple_iterations_dir is not None:
                 (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(iter_best_code or "")
                 _simp_row = {
+                    **_participant_metric_id(participant_id),
                     "iteration": iteration_step,
                     "train_fitness": iter_best_fitness,
                     "test_fitness": (
@@ -5741,13 +5837,21 @@ def run_evolution(
             best_program_id = iter_best_program_id
         
         if is_cpc18_mse:
-            metrics = {
-                "iteration": iteration_step,
-                "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(compile_valid_results),
-                "n_runtime_valid": len(selected_results),
-                "best_program_id": best_program_id,
-                "candidate_results": [
+            metrics = _build_iteration_metrics_json(
+                participant_id=participant_id,
+                header={
+                    "iteration": iteration_step,
+                    "n_candidates": n_candidates_per_iteration,
+                    "n_valid": len(compile_valid_results),
+                    "n_runtime_valid": len(selected_results),
+                    "best_program_id": best_program_id,
+                },
+                best={
+                    "best_train_fitness": best_fitness if selected_results else None,
+                    "best_train_mse": selected_results[0]["train_mse"] if selected_results else None,
+                    "best_test_mse": selected_results[0]["test_mse"] if selected_results else None,
+                },
+                candidate_results=[
                     {
                         "idx": r["idx"],
                         "train_mse": r.get("train_mse", None),
@@ -5758,10 +5862,7 @@ def run_evolution(
                     }
                     for r in candidate_results
                 ],
-                "best_train_fitness": best_fitness if selected_results else None,
-                "best_train_mse": selected_results[0]["train_mse"] if selected_results else None,
-                "best_test_mse": selected_results[0]["test_mse"] if selected_results else None,
-            }
+            )
         elif is_cpc18_split:
             _cpc_cand_rows = []
             for r in candidate_results:
@@ -5778,13 +5879,7 @@ def run_evolution(
                 if val_trials:
                     _cr["val_loglik"] = r.get("val_loglik")
                 _cpc_cand_rows.append(_cr)
-            metrics = {
-                "iteration": iteration_step,
-                "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(compile_valid_results),
-                "n_runtime_valid": len(selected_results),
-                "best_program_id": best_program_id,
-                "candidate_results": _cpc_cand_rows,
+            _cpc_best: Dict[str, Any] = {
                 "best_train_fitness": best_fitness if selected_results else None,
                 "best_train_acc": iter_best_train_acc if selected_results else None,
                 "best_test_acc": iter_best_test_acc if selected_results else None,
@@ -5792,7 +5887,19 @@ def run_evolution(
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
             if val_trials:
-                metrics["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+                _cpc_best["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            metrics = _build_iteration_metrics_json(
+                participant_id=participant_id,
+                header={
+                    "iteration": iteration_step,
+                    "n_candidates": n_candidates_per_iteration,
+                    "n_valid": len(compile_valid_results),
+                    "n_runtime_valid": len(selected_results),
+                    "best_program_id": best_program_id,
+                },
+                best=_cpc_best,
+                candidate_results=_cpc_cand_rows,
+            )
         elif is_binary_loglik_dataset(dataset):
             _cand_rows = []
             for r in candidate_results:
@@ -5809,13 +5916,7 @@ def run_evolution(
                 if val_trials:
                     _cr["val_loglik"] = r.get("val_loglik")
                 _cand_rows.append(_cr)
-            metrics = {
-                "iteration": iteration_step,
-                "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(compile_valid_results),
-                "n_runtime_valid": len(selected_results),
-                "best_program_id": best_program_id,
-                "candidate_results": _cand_rows,
+            _loglik_best: Dict[str, Any] = {
                 "best_train_fitness": best_fitness if selected_results else None,
                 "best_train_acc": iter_best_train_acc if selected_results else None,
                 "best_test_acc": iter_best_test_acc if selected_results else None,
@@ -5823,15 +5924,34 @@ def run_evolution(
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
             }
             if val_trials:
-                metrics["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+                _loglik_best["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            metrics = _build_iteration_metrics_json(
+                participant_id=participant_id,
+                header={
+                    "iteration": iteration_step,
+                    "n_candidates": n_candidates_per_iteration,
+                    "n_valid": len(compile_valid_results),
+                    "n_runtime_valid": len(selected_results),
+                    "best_program_id": best_program_id,
+                },
+                best=_loglik_best,
+                candidate_results=_cand_rows,
+            )
         else:
-            metrics = {
-                "iteration": iteration_step,
-                "n_candidates": n_candidates_per_iteration,
-                "n_valid": len(compile_valid_results),
-                "n_runtime_valid": len(selected_results),
-                "best_program_id": best_program_id,
-                "candidate_results": [
+            metrics = _build_iteration_metrics_json(
+                participant_id=participant_id,
+                header={
+                    "iteration": iteration_step,
+                    "n_candidates": n_candidates_per_iteration,
+                    "n_valid": len(compile_valid_results),
+                    "n_runtime_valid": len(selected_results),
+                    "best_program_id": best_program_id,
+                },
+                best={
+                    "best_train_acc": best_fitness if selected_results else None,
+                    "best_test_acc": selected_results[0]["test_acc"] if selected_results else None,
+                },
+                candidate_results=[
                     {
                         "idx": r["idx"],
                         "train_acc": r["train_acc"],
@@ -5841,9 +5961,7 @@ def run_evolution(
                     }
                     for r in candidate_results
                 ],
-                "best_train_acc": best_fitness if selected_results else None,
-                "best_test_acc": selected_results[0]["test_acc"] if selected_results else None,
-            }
+            )
         if save_artifacts and iter_dir is not None:
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         
@@ -5889,6 +6007,7 @@ def run_evolution(
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
             }
+        summary.update(_participant_metric_id(participant_id))
         print(f"\nSummary: {json.dumps(summary, indent=2)}")
         
         # Log to wandb (use dataset-specific metric names)
@@ -6038,11 +6157,13 @@ def run_evolution(
             
             # Also save to local JSONL file
             if save_artifacts and log_file_path is not None:
-                log_entry = {
-                    "step": iteration + 1,
-                    "iteration": iteration_step,
-                    **log_dict
-                }
+                log_entry = _wandb_jsonl_log_entry(
+                    step=iteration + 1,
+                    iteration=iteration_step,
+                    log_dict=log_dict,
+                    participant_id=participant_id,
+                    agent_id=agent_id,
+                )
                 with open(log_file_path, "a") as f:
                     f.write(json.dumps(log_entry) + "\n")
     
@@ -6344,6 +6465,7 @@ def run_evolution(
         if simple_iterations_rows:
             with open(output_path / "iterations.csv", "w", newline="") as f:
                 _iter_fields = [
+                    "participant_id",
                     "iteration",
                     "train_fitness",
                     "test_fitness",
@@ -6358,6 +6480,7 @@ def run_evolution(
                 writer.writeheader()
                 writer.writerows(simple_iterations_rows)
         summary_row = {
+            **_participant_metric_id(participant_id),
             "train_fitness": (
                 overall_best_train.get("train_loglik")
                 if fitness_metric == "loglik"
@@ -7088,7 +7211,7 @@ def main():
     parser.add_argument(
         "--max_parent_chars",
         type=int,
-        default=6000,
+        default=4500,
         help=(
             "Max characters per parent program inserted into LLM prompts (0 = no truncation). "
             "Candidate code is never truncated for evaluation. Default: 6000."
