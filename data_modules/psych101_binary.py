@@ -482,9 +482,12 @@ def _action_semantics_for_schema(
         return "action=0 is first option; action=1 is second; return P(action=1)."
     k0, k1 = keys[0], keys[1]
     if schema == "A" and is_gamble:
+        keys_note = f"option_keys={list(keys)!r}" if keys else "option_keys has two labels"
         return (
-            f"action=0 -> option_keys[0] ({k0}, first gamble); "
-            f"action=1 -> option_keys[1] ({k1}, second gamble); return P(action=1)."
+            "action=0 selects option_keys[0] (first gamble; problem['gamble_A']); "
+            "action=1 selects option_keys[1] (second gamble; problem['gamble_B']); "
+            f"return P(action=1). {keys_note} — use numeric action indices in code, "
+            "not letter matching between option_keys labels and gamble_A/gamble_B names."
         )
     if schema == "D":
         return (

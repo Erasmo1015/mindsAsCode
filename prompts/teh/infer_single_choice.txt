@@ -1,0 +1,60 @@
+You are given observations of human choices in binary decision problems.
+Each problem presents two options, stored in the input as `problem["gamble_A"]` and `problem["gamble_B"]`.
+These field names are part of the parsed dataset schema and do not necessarily mean the task is a gamble problem.
+Each option may contain rewards, outcomes, probabilities, or other task-specific values.
+You will see a short history of previous trials for the same participant and problem, including chosen action and feedback if available.
+
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - gamble_A: {"probs": List[float] or None, "rewards": List[float]}
+          This is action 0 / the first option in the parsed input.
+        - gamble_B: {"probs": List[float] or None, "rewards": List[float]}
+          This is action 1 / the second option in the parsed input.
+        - option_keys: optional display labels from the original dataset
+        - has_feedback: bool
+    history: list of dicts with keys
+        - action: int (0 for gamble_A, 1 for gamble_B)
+        - feedback: float or None
+    return: float, probability of choosing action 1, i.e. gamble_B
+    """
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing action 1.
+- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].
+- Higher returned values mean the participant is more likely to choose action 1 / gamble_B.
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Some trials may have unknown probabilities: `problem["gamble_A"]["probs"]` or `problem["gamble_B"]["probs"]` can be `None`.
+- Your code must handle this safely; do not iterate over `None` or assume probabilities are always present.
+- If probabilities are missing, use a deterministic fallback, such as equal weights over listed rewards, and continue returning a valid probability in (0, 1).
+- Do not use `pow(...)`; use `**` for exponentiation.
+- If using a logistic/sigmoid transform without imports, use:
+  1 / (1 + 2.718281828 ** (-x))
+  Do not use incorrect forms such as 1 / (1 + 1 / (1 + x)).
+- Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches.
+
+Behavioral requirements:
+- Do not return constant or near-constant probabilities, such as always close to 0.5.
+- Do not add small noise or artificial variation to a constant value.
+- The probability must depend meaningfully on the problem inputs.
+- History may be used when helpful, but do not rely only on copying or smoothing past actions.
+- The program should behave sensibly across different problems and histories.
+- Ignore dataset-specific display labels such as P/U, A/B, safe/risky, or accept/reject when deciding the return convention. Always use the canonical mapping: return P(action=1), where action 1 corresponds to `problem["gamble_B"]`.
+
+Generation requirements:
+- Prefer concise programs. Avoid long repetitive helper code. Keep choose() compact, ideally under ~150 lines unless necessary.
+- Produce a valid program that is meaningfully different from the parent.
+- Avoid making only superficial changes without changing behavior.
+
+Evolved programs must implement choose(problem, history) as documented above.

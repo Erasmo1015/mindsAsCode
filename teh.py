@@ -568,46 +568,11 @@ def _sanitize_llm_python_candidate(
     text: str,
     required_markers: Optional[Tuple[str, ...]] = None,
 ) -> str:
-    """Extract executable Python from LLM output, removing prose/markdown wrappers.
+    """Extract a single choose() implementation from LLM output (no imports/prose)."""
+    from utils.teh.prompt_sanitize import sanitize_evolution_candidate_code
 
-    Strategy:
-    1) Try python fenced blocks, then generic fenced blocks, then raw text.
-    2) Keep candidates that satisfy required markers (if provided).
-    3) If marker appears later in the text, also try trimming prefix prose.
-    4) Return first syntax-valid candidate.
-    """
-    if not text:
-        return ""
-
-    candidates: List[str] = []
-    candidates.extend(_extract_fenced_blocks(text))
-    candidates.append(text.strip())
-
-    expanded: List[str] = []
-    for c in candidates:
-        c = c.strip()
-        if not c:
-            continue
-        expanded.append(c)
-        if required_markers:
-            for marker in required_markers:
-                i = c.find(marker)
-                if i > 0:
-                    expanded.append(c[i:].strip())
-
-    seen = set()
-    ordered: List[str] = []
-    for c in expanded:
-        if c not in seen:
-            seen.add(c)
-            ordered.append(c)
-
-    for c in ordered:
-        if required_markers and not any(m in c for m in required_markers):
-            continue
-        if _passes_python_syntax(c):
-            return c
-    return ""
+    markers = required_markers if required_markers is not None else ("def choose(",)
+    return sanitize_evolution_candidate_code(text, required_markers=markers)
 
 
 def find_template_program_for_gridworld(num_blocks: int, num_walls: int, agent_id: int) -> Optional[str]:
@@ -665,6 +630,7 @@ def compile_program(code_str: str) -> Optional[Callable]:
         'len': len,
         'range': range,
         'enumerate': enumerate,
+        'reversed': reversed,
         'sum': sum,
         'abs': abs,
         'min': min,
@@ -1746,7 +1712,10 @@ def run_loglik_refinement_phase(
         selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
         iter_best_result: Optional[Dict[str, Any]] = None
         if not selected_results:
-            print("Warning: No runtime-valid refinement candidates; keeping elite pool.")
+            print(
+                f"Warning: No runtime-valid refinement candidates for participant "
+                f"{participant_id} at iteration {iteration_step}; keeping elite pool."
+            )
         else:
             selected_results.sort(key=lambda x: x["train_val_loglik"], reverse=True)
             iter_best_result = selected_results[0]
@@ -4608,9 +4577,12 @@ Provide only the code for choose(...) as a complete function body.
         
         parent_context += "\nGenerate a variant that combines the best ideas from these parent programs.\n"
     
+    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
+
     prompt_text = (
         f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{single_code_template_prompt_suffix(code_template)}"
+        f"\n{CANDIDATE_OUTPUT_RULES}\n"
     )
 
     if prompt_stats_path is not None:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# OpenEvolve intentionally keeps vanilla/original prompt behavior independent from TEH prompt-generation.
 """
 Usage: 
 
@@ -69,6 +70,7 @@ from data_modules.psych101_binary import (
     normalize_psych_dataset_split,
     split_psych_experiment,
 )
+# utils.teh.* here: dataset registry + participant-id paths only (not TEH prompts/runtime).
 from utils.teh.participant_ids import load_valid_participant_ids
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,

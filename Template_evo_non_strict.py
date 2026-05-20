@@ -1515,7 +1515,10 @@ def run_loglik_refinement_phase(
         selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
         iter_best_result: Optional[Dict[str, Any]] = None
         if not selected_results:
-            print("Warning: No runtime-valid refinement candidates; keeping elite pool.")
+            print(
+                f"Warning: No runtime-valid refinement candidates for participant "
+                f"{participant_id} at iteration {iteration_step}; keeping elite pool."
+            )
         else:
             selected_results.sort(key=lambda x: x["train_val_loglik"], reverse=True)
             iter_best_result = selected_results[0]

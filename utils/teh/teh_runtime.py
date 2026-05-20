@@ -4,6 +4,7 @@ TEH run setup: prompts, output paths, WandB naming, valid participant id paths.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -20,6 +21,7 @@ from data_modules.psych101_binary import (
     normalize_psych101_dataset_alias,
     summarize_runtime_schema_for_prompt,
 )
+from utils.teh.prompt_sanitize import strip_embedded_choose_from_evolution_prompt
 from utils.teh.teh_datasets import (
     dataset_display_name,
     is_mixed_gambles_dataset,
@@ -33,10 +35,7 @@ TEH_WANDB_PROJECT = "teh"
 BASE_LOGlik_PROMPT = (
     REPO_ROOT
     / "prompts"
-    / "Template_evo"
-    / "choice13k"
-    / "non_strict"
-    / "loglik"
+    / "teh"
     / "infer_single_choice.txt"
 )
 BASE_REFINE_PROMPT = (
@@ -48,6 +47,196 @@ CONCISE_PROGRAM_GUIDANCE = (
     "Prefer concise programs. Avoid long repetitive helper code. "
     "Keep choose() compact, ideally under ~150 lines unless necessary."
 )
+
+_GENERIC_PROMPT_REQUIREMENTS = """Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing action 1, i.e. P(action=1).
+- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].
+- Higher returned values mean a higher P(action=1) (more likely to choose action 1).
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- If using a logistic/sigmoid transform without imports, use:
+  1 / (1 + 2.718281828 ** (-x))
+  Do not use incorrect forms such as 1 / (1 + 1 / (1 + x)).
+- Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches."""
+
+_GAMBLE_LEAK_RE = re.compile(
+    r'problem\["gamble_[AB]"\]|problem\[\'gamble_[AB]\'\]|'
+    r"gamble_A:|gamble_B:|- gamble_A|gamble_A/|/gamble_B|"
+    r"unknown probabilit|\blottery\b|two gambles|two-option gamble",
+    re.IGNORECASE,
+)
+
+
+def _is_gamble_ab_task(trials: List[Dict[str, Any]]) -> bool:
+    """True when parsed trials include gamble_A/gamble_B problem fields."""
+    for trial in trials:
+        problem = trial.get("problem") or {}
+        if "gamble_A" in problem or "gamble_B" in problem:
+            return True
+    return False
+
+
+def _extract_action_semantics(schema_summary: str) -> str:
+    for line in schema_summary.splitlines():
+        if line.startswith("- action semantics:"):
+            return line.split(":", 1)[1].strip()
+    return "action=0 is first option; action=1 is second; return P(action=1)."
+
+
+def _problem_keys_from_trials(trials: List[Dict[str, Any]]) -> List[str]:
+    keys: set = set()
+    for trial in trials:
+        for key in (trial.get("problem") or {}):
+            if key not in ("dataset_alias", "experiment_id"):
+                keys.add(key)
+    return sorted(keys)
+
+
+def _build_schema_neutral_base_prompt(
+    schema_summary: str, trials: List[Dict[str, Any]]
+) -> str:
+    """Non-gamble base prompt: document observed problem/history keys only."""
+    problem_keys = _problem_keys_from_trials(trials)
+    action_sem = _extract_action_semantics(schema_summary)
+    history_note = "action, feedback"
+    for line in schema_summary.splitlines():
+        if line.startswith("- history core keys:"):
+            history_note = line.split(":", 1)[1].strip()
+            break
+    problem_doc = (
+        "\n".join(f"        - {key}: (type/structure per parsed examples)" for key in problem_keys)
+        or "        - (see parsed trial examples)"
+    )
+    return (
+        "You are given observations of human choices in binary decision problems.\n"
+        "Each trial provides a `problem` dict and a `history` list. Use only fields "
+        "present in the parsed data for this dataset.\n\n"
+        "Write Python code that reproduces the observed behavior. You must generate "
+        "a program implementing:\n\n"
+        "def choose(problem, history):\n"
+        '    """\n'
+        "    Evaluated by log-likelihood.\n"
+        "    Goal: maximize log-likelihood of the observed human choices.\n\n"
+        "    problem: dict with keys (observed for this dataset):\n"
+        f"{problem_doc}\n"
+        f"    history: list of dicts (keys observed: {history_note})\n"
+        f"    Action semantics: {action_sem}\n"
+        "    return: float, probability of choosing action 1, i.e. P(action=1)\n"
+        '    """\n\n'
+        f"{_GENERIC_PROMPT_REQUIREMENTS}\n\n"
+        "Behavioral requirements:\n"
+        "- Do not return constant or near-constant probabilities, such as always close to 0.5.\n"
+        "- The probability must depend meaningfully on the problem inputs.\n"
+        "- History may be used when helpful, but do not rely only on copying past actions.\n"
+        "- The program should behave sensibly across different problems and histories.\n\n"
+        "Generation requirements:\n"
+        f"- {CONCISE_PROGRAM_GUIDANCE}\n"
+        "- Programs must implement choose(problem, history) as documented above.\n"
+    )
+
+
+def _prompt_has_gamble_leakage(text: str) -> bool:
+    return bool(_GAMBLE_LEAK_RE.search(text))
+
+
+def _sanitize_schema_summary_for_prompt(
+    schema_summary: str, *, is_gamble: bool
+) -> str:
+    """Remove gamble_A/B wording from schema text embedded in non-gamble prompts."""
+    if is_gamble:
+        return schema_summary
+    replacements = [
+        ("- is_gamble_A/B_task: False", "- has_gamble_option_fields: False"),
+        ("- is_gamble_A/B_task: True", "- has_gamble_option_fields: True"),
+        (
+            "- not a gamble task: do NOT document gamble_A/gamble_B (absent from examples).",
+            "- task type: non-gamble; document only observed problem keys.",
+        ),
+        (
+            "- gamble tasks: problem includes gamble_A/gamble_B dicts with probs/rewards; "
+            "probs may be None for unknown probabilities.",
+            "- two-option task with per-option outcome fields in `problem`.",
+        ),
+    ]
+    out = schema_summary
+    for old, new in replacements:
+        out = out.replace(old, new)
+    return out
+
+
+def _base_prompt_for_trials(
+    trials: List[Dict[str, Any]], schema_summary: str, *, dataset_alias: str
+) -> str:
+    if _is_gamble_ab_task(trials):
+        return _choice13k_neutral_loglik_base()
+    return _build_schema_neutral_base_prompt(schema_summary, trials)
+
+
+def _apply_gamble_neutral_wording(text: str) -> str:
+    """
+    Use index-based option semantics in prompts (action 0/1).
+
+    Keeps problem['gamble_A'] / problem['gamble_B'] dict keys unchanged; avoids
+    Option A/B or Option P/U narrative that can be confused with gamble_A/gamble_B.
+    """
+    out = re.sub(
+        r"Each problem presents two gambles: Option [A-Z] and Option [A-Z]\.",
+        (
+            "Each problem presents two options (option index 0 and option index 1). "
+            "problem[\"gamble_A\"] stores option 0; problem[\"gamble_B\"] stores option 1. "
+            "These are parsed schema field names and do not necessarily mean the task is a gamble problem."
+        ),
+        text,
+        count=1,
+    )
+    out = re.sub(
+        r"- action: int \(0 for [A-Z], 1 for [A-Z]\)",
+        "- action: int (0 = first option / gamble_A; 1 = second option / gamble_B)",
+        out,
+        count=1,
+    )
+    out = re.sub(
+        r"return: float, probability of choosing option 1 \(Option [A-Z]\)",
+        (
+            "return: float, P(action=1) — probability of choosing action 1 "
+            "(option index 1; second gamble, gamble_B)"
+        ),
+        out,
+        count=1,
+    )
+    out = re.sub(
+        r"Return a single finite float probability of choosing Option [A-Z]\.",
+        "Return a single finite float P(action=1): probability of choosing action 1 (second option).",
+        out,
+        count=1,
+    )
+    out = re.sub(
+        r"Higher returned values mean the participant is more likely to choose Option [A-Z]\.",
+        "Higher returned values mean a higher P(action=1) (more likely to choose action 1).",
+        out,
+        count=1,
+    )
+    out = re.sub(
+        r'option_keys: e\.g\., \["[A-Z]"[,\s]*"[A-Z]"\]',
+        (
+            "option_keys: list of two press-key labels (e.g. [\"P\",\"U\"]); "
+            "index 0/1 selects first/second gamble — do not match letters to gamble_A/gamble_B"
+        ),
+        out,
+        count=1,
+    )
+    return out
+
+
+def _choice13k_neutral_loglik_base() -> str:
+    """Template loglik prompt with index-based gamble wording (matches evaluation)."""
+    return _apply_gamble_neutral_wording(BASE_LOGlik_PROMPT.read_text(encoding="utf-8"))
 
 
 def valid_participant_ids_path(
@@ -106,7 +295,10 @@ def _format_trials_for_prompt(trials: List[Dict[str, Any]], max_trials: int = 8)
 
 
 def _runtime_schema_summary_for_prompt(trials: List[Dict[str, Any]]) -> str:
-    return summarize_runtime_schema_for_prompt(trials)
+    raw = summarize_runtime_schema_for_prompt(trials)
+    return _sanitize_schema_summary_for_prompt(
+        raw, is_gamble=_is_gamble_ab_task(trials)
+    )
 
 
 def _merge_prompt_fallback(
@@ -114,7 +306,10 @@ def _merge_prompt_fallback(
     instruction: str,
     sample_trials: List[Dict[str, Any]],
 ) -> str:
-    base = BASE_LOGlik_PROMPT.read_text(encoding="utf-8")
+    schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    base = _base_prompt_for_trials(
+        sample_trials, schema_summary, dataset_alias=dataset_alias
+    )
     if is_mixed_gambles_dataset(dataset_alias):
         display = dataset_display_name(dataset_alias)
         task_desc = instruction
@@ -123,7 +318,6 @@ def _merge_prompt_fallback(
         spec = PSYCH101_BINARY_DATASETS[alias]
         display = spec["display_name"]
         task_desc = spec["task_description"]
-    schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     extra = (
         f"\n\n## Dataset: {display} (`{dataset_alias}`)\n\n"
         f"{task_desc}\n\n"
@@ -134,18 +328,18 @@ def _merge_prompt_fallback(
     return base + extra
 
 
-def _generate_prompt_via_llm(
-    client: OpenAI,
-    model_name: str,
+def build_prompt_generation_llm_user_content(
     dataset_alias: str,
     instruction: str,
     sample_trials: List[Dict[str, Any]],
-    *,
-    max_tokens: int = 2048,
 ) -> str:
-    base_prompt = BASE_LOGlik_PROMPT.read_text(encoding="utf-8")
+    """User message sent to the prompt-generation LLM (no API call)."""
     display = dataset_display_name(dataset_alias)
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    is_gamble = _is_gamble_ab_task(sample_trials)
+    base_prompt = _base_prompt_for_trials(
+        sample_trials, schema_summary, dataset_alias=dataset_alias
+    )
     trial_examples = _format_trials_for_prompt(sample_trials, max_trials=10)
     if is_mixed_gambles_dataset(dataset_alias):
         task_description = instruction
@@ -154,46 +348,70 @@ def _generate_prompt_via_llm(
             normalize_psych101_dataset_alias(dataset_alias)
         ]["task_description"]
 
-    user_content = (
-        f"Adapt the following evolution system prompt for dataset `{dataset_alias}` "
-        f"({display}).\n\n"
+    if is_gamble:
+        adapt_instructions = (
+            "- The base prompt is for gamble_A/gamble_B tasks. Adapt wording only as needed "
+            "for this dataset; keep gamble field names and P(action=1)=P(action on gamble_B).\n"
+        )
+        base_section_title = "## Base prompt (gamble_A/gamble_B task)\n\n"
+    else:
+        adapt_instructions = (
+            "- The base prompt skeleton is schema-specific (non-gamble). Expand it into a "
+            "complete evolution prompt using ONLY fields from the runtime schema summary.\n"
+            "- Do NOT mention gamble_A, gamble_B, unknown probabilities, lottery, or Choice13k.\n"
+            "- Document exact `problem` keys and action semantics from the schema summary.\n"
+        )
+        base_section_title = "## Base prompt skeleton (schema-specific)\n\n"
+
+    return (
+        f"Write the evolution system prompt for dataset `{dataset_alias}` ({display}).\n\n"
         "Requirements:\n"
         "- Use the **Runtime schema summary** and **Parsed trial examples** sections below "
-        "as the source of truth for the `problem` dict fields, `history` structure, and "
-        "action semantics. Do not invent fields that are absent from those sections.\n"
-        "- The base prompt is a shared template written for Choice13k (two-option gambles). "
-        "Adapt it for this dataset:\n"
-        "  - If this is NOT a gamble A/B task (runtime summary says is_gamble_A/B_task: False), "
-        "remove all gamble-specific wording (gamble_A, gamble_B, lottery probabilities, "
-        "'Option A/B' as gambles, etc.).\n"
-        "  - Do NOT mention gamble_A or gamble_B unless they appear in the runtime schema summary.\n"
-        "  - Preserve safety/API requirements from the base prompt that still apply: pure Python, "
-        "no imports, deterministic, return a single float in (0, 1), clip to [1e-6, 1-1e-6], "
-        "no randomness, no pow() (use **), helpers nested inside choose(), variables defined on "
-        "all branches, no division by zero.\n"
-        "  - Drop base-prompt task-specific Choice13k behavioral wording that does not apply "
-        "(e.g. unknown gamble probs) when the schema summary shows a different task.\n"
-        "- Executable API (required): `def choose(problem, history)` returning float in (0, 1) "
-        "as P(action=1), where action=1 means the SECOND entry in option_keys (index 1).\n"
-        "- Describe action=0 and action=1 using dataset-specific semantics from the schema "
-        "summary and examples (participant-specific press keys), not generic 'Option B' labels.\n"
-        "- Document `problem` keys using the exact names from the examples (e.g. round_id, "
-        "current_score, cards_flipped for CCT — not renamed aliases).\n"
+        "as the source of truth for `problem`, `history`, and action semantics.\n"
+        f"{adapt_instructions}"
+        "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
+        "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
+        "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
+        "variables defined on all branches.\n"
         f"- {CONCISE_PROGRAM_GUIDANCE}\n"
-        "- Output ONLY the full prompt text (no markdown code fence).\n\n"
+        "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
+        "- Do NOT append a sample, reference, or complete choose() implementation.\n"
+        "- You may document the choose() API in a short docstring block, but no executable code.\n\n"
         f"## Runtime schema summary\n\n{schema_summary}\n\n"
-        f"## Base prompt (shared template — adapt, do not copy gamble bias blindly)\n\n"
-        f"{base_prompt}\n\n"
+        f"{base_section_title}{base_prompt}\n\n"
         f"## Task description (high-level)\n\n{task_description}\n\n"
         f"## Instruction excerpt from data\n\n{instruction[:2000]}\n\n"
         f"## Parsed trial examples\n\n{trial_examples}\n"
     )
+
+
+def _generate_prompt_via_llm(
+    client: OpenAI,
+    model_name: str,
+    dataset_alias: str,
+    instruction: str,
+    sample_trials: List[Dict[str, Any]],
+    *,
+    max_tokens: int = 2048,
+    save_llm_input_to: Optional[Path] = None,
+) -> str:
+    user_content = build_prompt_generation_llm_user_content(
+        dataset_alias, instruction, sample_trials
+    )
+    schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    is_gamble = _is_gamble_ab_task(sample_trials)
+    if save_llm_input_to is not None:
+        save_llm_input_to.parent.mkdir(parents=True, exist_ok=True)
+        save_llm_input_to.write_text(user_content, encoding="utf-8")
     resp = client.chat.completions.create(
         model=model_name,
         messages=[
             {
                 "role": "system",
-                "content": "You write prompts for program-evolution systems. Be precise and preserve APIs.",
+                "content": (
+                    "You write evolution instruction prompts (not Python solutions). "
+                    "Be precise and preserve APIs."
+                ),
             },
             {"role": "user", "content": user_content},
         ],
@@ -201,8 +419,20 @@ def _generate_prompt_via_llm(
         temperature=0.2,
     )
     text = (resp.choices[0].message.content or "").strip()
-    if not text or "def choose" not in text:
-        raise ValueError("LLM prompt generation did not return a valid choose() prompt.")
+    if not text:
+        raise ValueError("LLM prompt generation returned empty text.")
+    text = strip_embedded_choose_from_evolution_prompt(text)
+    if is_gamble:
+        text = _apply_gamble_neutral_wording(text)
+    elif _prompt_has_gamble_leakage(text):
+        print(
+            "[TEH] LLM prompt contained gamble-specific text for a non-gamble schema; "
+            "using schema-neutral base prompt."
+        )
+        text = _build_schema_neutral_base_prompt(schema_summary, sample_trials)
+    text = strip_embedded_choose_from_evolution_prompt(text)
+    if not text:
+        raise ValueError("LLM prompt was empty after removing embedded choose() code.")
     return text
 
 
@@ -274,18 +504,22 @@ def setup_teh_run_prompts(
                 dataset_alias,
                 instruction,
                 sample_trial_list,
+                save_llm_input_to=prompts_dir / "llm_input_prompt.txt",
             )
-            infer_path.write_text(infer_text, encoding="utf-8")
+            infer_path.write_text(
+                strip_embedded_choose_from_evolution_prompt(infer_text), encoding="utf-8"
+            )
             generated = True
             print(f"[TEH] Wrote LLM-generated prompt -> {infer_path}")
         except Exception as e:
             print(f"[TEH] LLM prompt generation failed ({e}); using merge fallback.")
 
     if not generated:
-        infer_path.write_text(
-            _merge_prompt_fallback(dataset_alias, instruction, sample_trial_list),
-            encoding="utf-8",
-        )
+        merged = _merge_prompt_fallback(dataset_alias, instruction, sample_trial_list)
+        if _is_gamble_ab_task(sample_trial_list):
+            merged = _apply_gamble_neutral_wording(merged)
+        merged = strip_embedded_choose_from_evolution_prompt(merged)
+        infer_path.write_text(merged, encoding="utf-8")
         print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
 
     shutil.copy2(BASE_REFINE_PROMPT, prompts_dir / "refine.txt")
