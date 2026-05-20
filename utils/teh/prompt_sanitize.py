@@ -82,6 +82,25 @@ def _passes_python_syntax(candidate: str) -> bool:
         return False
 
 
+def _marker_present(code: str, marker: str) -> bool:
+    """Match required markers; ``def choose(`` allows optional whitespace before ``(``."""
+    if marker == "def choose(":
+        return _CHOOSE_DEF_RE.search(code) is not None
+    return marker in code
+
+
+def _slice_from_marker(code: str, marker: str) -> Optional[str]:
+    if marker == "def choose(":
+        match = _CHOOSE_DEF_RE.search(code)
+        if match is None:
+            return None
+        return code[match.start() :].strip()
+    idx = code.find(marker)
+    if idx < 0:
+        return None
+    return code[idx:].strip()
+
+
 def _extract_python_from_llm_reply(
     text: str,
     *,
@@ -103,9 +122,9 @@ def _extract_python_from_llm_reply(
         expanded.append(c)
         if required_markers:
             for marker in required_markers:
-                i = c.find(marker)
-                if i > 0:
-                    expanded.append(c[i:].strip())
+                sliced = _slice_from_marker(c, marker)
+                if sliced is not None and sliced != c:
+                    expanded.append(sliced)
 
     seen = set()
     ordered: List[str] = []
@@ -115,11 +134,41 @@ def _extract_python_from_llm_reply(
             ordered.append(c)
 
     for c in ordered:
-        if required_markers and not any(m in c for m in required_markers):
+        if required_markers and not any(_marker_present(c, m) for m in required_markers):
             continue
         if _passes_python_syntax(c):
             return c
     return ""
+
+
+def describe_sanitize_failure(
+    text: str,
+    *,
+    required_markers: Optional[Tuple[str, ...]] = ("def choose(",),
+) -> str:
+    """Human-readable reason ``sanitize_evolution_candidate_code`` would return empty."""
+    if not text or not text.strip():
+        return "empty_llm_content"
+    extracted = _extract_python_from_llm_reply(text, required_markers=required_markers)
+    if not extracted:
+        if required_markers and not any(
+            _marker_present(text, m) for m in required_markers
+        ):
+            return f"missing_markers:{required_markers}"
+        return "no_syntax_valid_block_with_markers"
+    if _IMPORT_LINE_RE.search(extracted):
+        return "import_statements_present"
+    n_choose = _count_choose_definitions(extracted)
+    if n_choose != 1:
+        return f"choose_definition_count={n_choose}"
+    cleaned = _strip_python_comments(extracted)
+    if not cleaned or _count_choose_definitions(cleaned) != 1:
+        return "comments_stripped_away_choose_or_empty"
+    if _has_fake_sigmoid(cleaned):
+        return "fake_sigmoid_pattern"
+    if not _passes_python_syntax(cleaned):
+        return "syntax_error_after_cleaning"
+    return "ok"
 
 
 def sanitize_evolution_candidate_code(

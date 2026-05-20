@@ -575,6 +575,75 @@ def _sanitize_llm_python_candidate(
     return sanitize_evolution_candidate_code(text, required_markers=markers)
 
 
+def _sanitize_llm_python_candidate_with_reason(
+    text: str,
+    required_markers: Optional[Tuple[str, ...]] = None,
+) -> Tuple[str, str]:
+    """Like ``_sanitize_llm_python_candidate`` but also returns a failure reason string."""
+    from utils.teh.prompt_sanitize import (
+        describe_sanitize_failure,
+        sanitize_evolution_candidate_code,
+    )
+
+    markers = required_markers if required_markers is not None else ("def choose(",)
+    cleaned = sanitize_evolution_candidate_code(text, required_markers=markers)
+    reason = describe_sanitize_failure(text, required_markers=markers)
+    if cleaned:
+        reason = "ok"
+    return cleaned, reason
+
+
+def _save_prompt_debug_bundle(
+    debug_dir: Path,
+    *,
+    phase: str,
+    participant_id: Optional[int],
+    iteration: Optional[int],
+    prompt_text: str,
+    trunc_diag: Dict[str, Any],
+    captures: List[Dict[str, Any]],
+    exit_after_save: bool = True,
+) -> None:
+    """Write full prompt + raw LLM replies when debugging empty/invalid candidates."""
+    pid = participant_id if participant_id is not None else "unknown"
+    iter_s = iteration if iteration is not None else "unknown"
+    out = debug_dir / f"participant_{pid}" / phase / f"iteration_{iter_s}"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "prompt.txt").write_text(prompt_text, encoding="utf-8")
+    (out / "truncation.json").write_text(
+        json.dumps(trunc_diag, indent=2) + "\n", encoding="utf-8"
+    )
+    for cap in captures:
+        idx = cap.get("candidate_index", 0)
+        raw = cap.get("raw_content") or ""
+        (out / f"raw_response_{idx}.txt").write_text(raw, encoding="utf-8")
+        meta = {k: v for k, v in cap.items() if k != "raw_content"}
+        (out / f"candidate_{idx}_meta.json").write_text(
+            json.dumps(meta, indent=2) + "\n", encoding="utf-8"
+        )
+    summary = {
+        "phase": phase,
+        "participant_id": participant_id,
+        "iteration": iteration,
+        "n_candidates": len(captures),
+        "n_nonempty_raw": sum(1 for c in captures if (c.get("raw_content") or "").strip()),
+        "n_sanitized_ok": sum(1 for c in captures if c.get("sanitize_reason") == "ok"),
+        "sanitize_reasons": [c.get("sanitize_reason") for c in captures],
+    }
+    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"[prompt_debug] Wrote debug bundle to {out} "
+        f"(raw_ok={summary['n_nonempty_raw']}/{summary['n_candidates']}, "
+        f"sanitize_ok={summary['n_sanitized_ok']}/{summary['n_candidates']})"
+    )
+    if exit_after_save:
+        raise SystemExit(
+            f"prompt_debug exit: no runtime-valid candidates "
+            f"(participant={pid}, phase={phase}, iteration={iter_s}). "
+            f"Inspect {out}"
+        )
+
+
 def find_template_program_for_gridworld(num_blocks: int, num_walls: int, agent_id: int) -> Optional[str]:
     """
     Auto-detect template program for gridworld based on problem config and agent_id.
@@ -5038,6 +5107,9 @@ def generate_program_variants(
     phase: str = "evolution",
     participant_id: Optional[int] = None,
     iteration: Optional[int] = None,
+    prompt_debug: bool = False,
+    prompt_debug_exit: bool = True,
+    generation_debug_out: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -5293,6 +5365,7 @@ Provide only the code for choose(...) as a complete function body.
             raise
 
     _llm_call_counter = [0]
+    debug_captures: List[Dict[str, Any]] = []
 
     def _generate_one() -> str:
         if not prompt_text:
@@ -5331,6 +5404,8 @@ Provide only the code for choose(...) as a complete function body.
             },
             diagnostics_dir,
         )
+        raw_content = ""
+        sanitize_reason = "llm_not_called"
         try:
             resp = client.chat.completions.create(
                 model=model_name,
@@ -5339,18 +5414,67 @@ Provide only the code for choose(...) as a complete function body.
                 top_p=0.95,
                 max_tokens=max_tokens,
             )
-            content = resp.choices[0].message.content
-            return _sanitize_llm_python_candidate(content, required_markers=("def choose(",))
+            raw_content = resp.choices[0].message.content or ""
+            cleaned, sanitize_reason = _sanitize_llm_python_candidate_with_reason(
+                raw_content, required_markers=("def choose(",)
+            )
+            if prompt_debug or generation_debug_out is not None:
+                debug_captures.append(
+                    {
+                        "candidate_index": cand_idx,
+                        "raw_content": raw_content,
+                        "sanitize_reason": sanitize_reason,
+                        "sanitized_char_length": len(cleaned),
+                    }
+                )
+            return cleaned
         except Exception as e:
             print(f"Warning: Failed to generate program variant: {e}")
+            if prompt_debug or generation_debug_out is not None:
+                debug_captures.append(
+                    {
+                        "candidate_index": cand_idx,
+                        "raw_content": raw_content,
+                        "sanitize_reason": f"llm_exception:{e}",
+                        "sanitized_char_length": 0,
+                    }
+                )
             return ""
 
-    return _parallel_generate_children(
+    codes = _parallel_generate_children(
         n_variants,
         _generate_one,
         max_workers=max_workers,
         desc="Generating candidate programs",
     )
+
+    if generation_debug_out is not None:
+        generation_debug_out.clear()
+        generation_debug_out.update(
+            {
+                "prompt_text": prompt_text,
+                "trunc_diag": trunc_diag,
+                "trunc_steps": trunc_steps,
+                "captures": list(debug_captures),
+                "phase": phase,
+                "participant_id": participant_id,
+                "iteration": iteration,
+            }
+        )
+
+    if prompt_debug and diagnostics_dir is not None and not any(c.strip() for c in codes):
+        _save_prompt_debug_bundle(
+            Path(diagnostics_dir) / "prompt_debug",
+            phase=phase,
+            participant_id=participant_id,
+            iteration=iteration,
+            prompt_text=prompt_text,
+            trunc_diag=trunc_diag,
+            captures=debug_captures,
+            exit_after_save=prompt_debug_exit,
+        )
+
+    return codes
 
 
 def run_evolution(
@@ -5403,6 +5527,9 @@ def run_evolution(
     hard_prompt_token_cap: int = 14000,
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
+    prompt_debug: bool = False,
+    prompt_debug_on_no_valid: bool = True,
+    prompt_debug_exit: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -5945,6 +6072,8 @@ def run_evolution(
             prompt_diag_dir = Path(output_path)
         elif output_dir is not None:
             prompt_diag_dir = Path(output_dir)
+        capture_gen_debug = bool(prompt_debug or prompt_debug_on_no_valid)
+        gen_debug: Dict[str, Any] = {}
         candidate_codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -5972,6 +6101,9 @@ def run_evolution(
             phase="evolution",
             participant_id=int(participant_id) if participant_id is not None else None,
             iteration=iteration_step,
+            prompt_debug=prompt_debug,
+            prompt_debug_exit=prompt_debug_exit,
+            generation_debug_out=gen_debug if capture_gen_debug else None,
         )
         
         # Evaluate candidates
@@ -6619,6 +6751,21 @@ def run_evolution(
             else:
                 print("\nWarning: No valid programs generated in this iteration!")
             print("Continuing with elite parents pool from previous iterations...")
+            if (
+                (prompt_debug or prompt_debug_on_no_valid)
+                and gen_debug.get("prompt_text")
+                and prompt_diag_dir is not None
+            ):
+                _save_prompt_debug_bundle(
+                    prompt_diag_dir / "prompt_debug",
+                    phase="evolution",
+                    participant_id=int(participant_id) if participant_id is not None else None,
+                    iteration=iteration_step,
+                    prompt_text=str(gen_debug["prompt_text"]),
+                    trunc_diag=dict(gen_debug.get("trunc_diag") or {}),
+                    captures=list(gen_debug.get("captures") or []),
+                    exit_after_save=bool(prompt_debug and prompt_debug_exit),
+                )
         
         # Save iteration results
         best_program_id = None
@@ -8054,6 +8201,33 @@ def main():
         help="Token estimator for prompt budgeting: char4 = ceil(len/4) (default: char4).",
     )
     parser.add_argument(
+        "--prompt_debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Save full LLM prompt + raw responses when all candidates sanitize to empty; "
+            "use with --prompt_debug_exit to stop the run after writing debug artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--prompt_debug_on_no_valid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "On 'No runtime-valid programs' in evolution, write prompt_debug/ artifacts "
+            "(default: True). Does not exit unless --prompt_debug_exit is also set."
+        ),
+    )
+    parser.add_argument(
+        "--prompt_debug_exit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "After saving prompt_debug/ on empty candidates or no runtime-valid iteration, "
+            "exit the process (default: False)."
+        ),
+    )
+    parser.add_argument(
         "--max_parent_chars",
         type=int,
         default=4500,
@@ -8490,6 +8664,9 @@ def main():
             hard_prompt_token_cap=args.hard_prompt_token_cap,
             strict_prompt_budget=args.strict_prompt_budget,
             prompt_token_estimator=args.prompt_token_estimator,
+            prompt_debug=args.prompt_debug,
+            prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
+            prompt_debug_exit=args.prompt_debug_exit,
         )
 
     if args.phase == "refine":
@@ -8646,6 +8823,9 @@ def main():
                 hard_prompt_token_cap=args.hard_prompt_token_cap,
                 strict_prompt_budget=args.strict_prompt_budget,
                 prompt_token_estimator=args.prompt_token_estimator,
+                prompt_debug=args.prompt_debug,
+                prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
+                prompt_debug_exit=args.prompt_debug_exit,
             )
         finally:
             if wandb is not None:
@@ -8725,6 +8905,9 @@ def main():
                 hard_prompt_token_cap=args.hard_prompt_token_cap,
                 strict_prompt_budget=args.strict_prompt_budget,
                 prompt_token_estimator=args.prompt_token_estimator,
+                prompt_debug=args.prompt_debug,
+                prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
+                prompt_debug_exit=args.prompt_debug_exit,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -9107,6 +9290,9 @@ def main():
                         hard_prompt_token_cap=args.hard_prompt_token_cap,
                         strict_prompt_budget=args.strict_prompt_budget,
                         prompt_token_estimator=args.prompt_token_estimator,
+                        prompt_debug=args.prompt_debug,
+                        prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
+                        prompt_debug_exit=args.prompt_debug_exit,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -9376,6 +9562,9 @@ def main():
                 hard_prompt_token_cap=args.hard_prompt_token_cap,
                 strict_prompt_budget=args.strict_prompt_budget,
                 prompt_token_estimator=args.prompt_token_estimator,
+                prompt_debug=args.prompt_debug,
+                prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
+                prompt_debug_exit=args.prompt_debug_exit,
             )
 
         try:

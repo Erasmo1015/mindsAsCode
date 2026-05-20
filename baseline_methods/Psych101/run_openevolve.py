@@ -71,6 +71,7 @@ from data_modules.psych101_binary import (
     split_psych_experiment,
 )
 # utils.teh.* here: dataset registry + participant-id paths only (not TEH prompts/runtime).
+from utils.psych101_openevolve_pool import WORKER_VANILLA as _WORKER_VANILLA
 from utils.teh.participant_ids import load_valid_participant_ids
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
@@ -92,8 +93,6 @@ DEFAULT_BASE_PROMPT = (
 _SHARED_CSV_LOCK = threading.Lock()
 _WANDB_LOG_LOCK = threading.Lock()
 
-# Worker-global context for vanilla prompt injection (set per iteration in subprocess).
-_WORKER_VANILLA: Dict[str, Any] = {}
 _ORIG_BUILD_PROMPT = None
 _ORIG_GENERATE_WITH_CONTEXT = None
 _TRUNCATION_WARN_COUNTS: Dict[int, int] = {}
@@ -265,7 +264,10 @@ def trials_for_participant(
         split=psych_dataset_split,
         local_dataset=local_dataset,
     )
-    return split_psych_experiment(exp, split_ratio=split_ratio, split_seed=split_seed)
+    train_trials, val_trials, test_trials, _ = split_psych_experiment(
+        exp, split_ratio=split_ratio, split_seed=split_seed
+    )
+    return train_trials, val_trials, test_trials
 
 
 def compile_program(code_str: str) -> Optional[Callable]:
@@ -750,27 +752,37 @@ def _install_runtime_patches() -> None:
         oe_openai.OpenAILLM.generate_with_context = _patched_generate_with_context
 
 
+_OE_VANILLA_WORKER_CODE = """
+def _oe_vanilla_worker_init(config_dict, evaluation_file, parent_env=None):
+    from utils.psych101_openevolve_pool import ensure_patches_installed
+
+    ensure_patches_installed()
+    return _oe_vanilla_saved_init(config_dict, evaluation_file, parent_env)
+
+
+def _oe_vanilla_run_iteration_worker(iteration, db_snapshot, parent_id, inspiration_ids):
+    from utils.psych101_openevolve_pool import ensure_patches_installed, set_worker_vanilla_ctx
+
+    ensure_patches_installed()
+    set_worker_vanilla_ctx(db_snapshot.get("_vanilla_ctx", {}))
+    return _oe_vanilla_saved_run_worker(iteration, db_snapshot, parent_id, inspiration_ids)
+"""
+
+
 def _patch_process_parallel_worker() -> None:
     import openevolve.process_parallel as op
 
     if getattr(op, "_vanilla_worker_patched", False):
         return
 
-    _real_worker = op._run_iteration_worker
-    _real_init = op._worker_init
+    if not hasattr(op, "_oe_vanilla_saved_run_worker"):
+        op._oe_vanilla_saved_run_worker = op._run_iteration_worker
+        op._oe_vanilla_saved_init = op._worker_init
 
-    def _vanilla_worker_init(config_dict, evaluation_file, parent_env=None):
-        _install_runtime_patches()
-        return _real_init(config_dict, evaluation_file, parent_env)
+    exec(_OE_VANILLA_WORKER_CODE, op.__dict__)
 
-    def _vanilla_worker(iteration, db_snapshot, parent_id, inspiration_ids):
-        _install_runtime_patches()
-        _WORKER_VANILLA.clear()
-        _WORKER_VANILLA.update(db_snapshot.get("_vanilla_ctx", {}))
-        return _real_worker(iteration, db_snapshot, parent_id, inspiration_ids)
-
-    op._worker_init = _vanilla_worker_init
-    op._run_iteration_worker = _vanilla_worker
+    op._worker_init = op._oe_vanilla_worker_init
+    op._run_iteration_worker = op._oe_vanilla_run_iteration_worker
     op._vanilla_worker_patched = True
 
 
@@ -868,25 +880,9 @@ def openevolve_output_base_dir(
     return f"generated_outputs/psych101_{split}/openevolve/{alias}/run_{timestamp}"
 
 
-def wandb_run_name(
-    dataset: str,
-    timestamp: str,
-    participant_scope: str,
-    *,
-    psych_dataset_split: str,
-    range_start: Optional[int] = None,
-    range_end: Optional[int] = None,
-    ordinals: Optional[Sequence[int]] = None,
-) -> str:
-    base = f"{dataset}_openevolve_{psych_dataset_split}_{timestamp}"
-    if participant_scope == "range" and range_start is not None and range_end is not None:
-        return f"{base}_ordinals_{range_start}_to_{range_end}"
-    if participant_scope == "ordinals" and ordinals:
-        tag = "_".join(str(x) for x in ordinals)
-        return f"{base}_ordinals_{tag[:120]}"
-    if participant_scope == "all":
-        return f"{base}_all_valid"
-    return base
+def wandb_run_name(dataset: str, timestamp: str) -> str:
+    """Short wandb run name: ``{dataset}_{timestamp}`` (e.g. ``1peterson2021using_260520_223805``)."""
+    return f"{dataset}_{timestamp}"
 
 
 def _json_default(obj: Any) -> Any:
@@ -1346,7 +1342,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--local_dataset", type=str, default=None)
     p.add_argument("--mixed_gambles_csv", type=str, default=DEFAULT_CSV_PATH)
-    p.add_argument("--no_log", action="store_true")
+    p.add_argument(
+        "--no_log",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable all wandb logging (default: log to wandb project openevolve).",
+    )
     p.add_argument("--population_size", type=int, default=1000)
     p.add_argument("--archive_size", type=int, default=100)
     p.add_argument("--num_islands", type=int, default=5)
@@ -1415,30 +1416,27 @@ def main() -> None:
     pid_to_ordinal = {pid: i for i, pid in enumerate(valid)}
 
     wandb_module = None
-    if not args.no_log:
+    if args.no_log:
+        os.environ["WANDB_DISABLED"] = "true"
+        print("wandb logging disabled (--no_log).")
+    else:
         try:
             import wandb as _wandb
 
             wandb_module = _wandb
+            run_name = wandb_run_name(args.dataset, timestamp)
             wandb_module.init(
                 project=WANDB_PROJECT,
-                name=wandb_run_name(
-                    args.dataset,
-                    timestamp,
-                    args.participant_scope,
-                    psych_dataset_split=psych_dataset_split,
-                    range_start=args.range_start_ordinal,
-                    range_end=args.range_end_ordinal,
-                    ordinals=args.ordinals,
-                ),
+                name=run_name,
                 config=vars(args),
                 reinit=False,
             )
+            print(f"wandb run: {WANDB_PROJECT}/{run_name}")
             for pid in participants:
                 wandb_module.define_metric(f"p{pid}_step")
                 wandb_module.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
         except Exception as e:
-            print(f"wandb disabled: {e}")
+            print(f"wandb disabled (init failed): {e}")
 
     print(f"OpenEvolve vanilla baseline | dataset={args.dataset} | psych_split={psych_dataset_split}")
     print(f"HF corpus: {hf_id_for_psych_dataset_split(psych_dataset_split)}")
@@ -1479,4 +1477,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # ``100 \ --no_log`` (backslash before space) makes bash pass ``' --no_log'``; strip that.
+    sys.argv = [a.strip() if a.startswith(" ") else a for a in sys.argv]
     main()
