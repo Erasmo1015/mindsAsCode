@@ -1428,6 +1428,113 @@ def _group_trials_by_prompt_block(
     return order, grouped
 
 
+def trace_prompt_trial_sampling(
+    trials: List[Dict[str, Any]],
+    *,
+    max_trials: int,
+    max_trials_per_problem: int,
+    subsample_seed: int,
+    label: str = "train",
+) -> Dict[str, Any]:
+    """Dry-run trace of block/group sampling (same logic as ``_cap_and_subsample_prompt_trials``)."""
+    trials = list(trials)
+    n_before = len(trials)
+    block_order, grouped = _group_trials_by_prompt_block(trials)
+    trace: Dict[str, Any] = {
+        "label": label,
+        "train_trials_before": n_before,
+        "max_trials": max_trials,
+        "max_trials_per_problem": max_trials_per_problem,
+        "subsample_seed": subsample_seed,
+        "n_prompt_groups": len(block_order),
+        "group_sizes": [len(grouped[k]) for k in block_order],
+        "selected_group_indices": [],
+        "trials_per_selected_group": [],
+        "trials_from_block_sample": 0,
+        "n_extra_from_remainder": 0,
+        "n_top_up": 0,
+        "final_count": n_before if max_trials <= 0 else min(n_before, max_trials),
+    }
+    if max_trials <= 0 or not trials:
+        return trace
+
+    if max_trials_per_problem <= 0:
+        trace["mode"] = "flat"
+        trace["final_count"] = min(n_before, max_trials)
+        return trace
+
+    per_block = int(max_trials_per_problem)
+    n_blocks_target = max_trials // per_block
+    n_extra = max_trials % per_block
+    trace.update(
+        {
+            "mode": "block_then_top_up",
+            "n_blocks_target": n_blocks_target,
+            "n_extra_slots": n_extra,
+        }
+    )
+
+    rng = np.random.default_rng(subsample_seed)
+    n_blocks = len(block_order)
+    used_ids: Set[int] = set()
+    out_n = 0
+
+    if n_blocks_target > 0 and n_blocks > 0:
+        n_blocks_sample = min(n_blocks_target, n_blocks)
+        block_idxs = rng.choice(n_blocks, size=n_blocks_sample, replace=False)
+        trace["selected_group_indices"] = [int(i) for i in sorted(block_idxs)]
+        for bi in sorted(int(i) for i in block_idxs):
+            block_trials = grouped[block_order[bi]]
+            if len(block_trials) <= per_block:
+                picked = block_trials
+            else:
+                tidx = rng.choice(len(block_trials), size=per_block, replace=False)
+                picked = [block_trials[int(j)] for j in sorted(tidx)]
+            trace["trials_per_selected_group"].append(len(picked))
+            for t in picked:
+                if id(t) not in used_ids:
+                    used_ids.add(id(t))
+                    out_n += 1
+    trace["trials_from_block_sample"] = out_n
+
+    if n_extra > 0:
+        remaining = [t for t in trials if id(t) not in used_ids]
+        if remaining:
+            n_pick = min(n_extra, len(remaining))
+            trace["n_extra_from_remainder"] = n_pick
+            out_n += n_pick
+
+    if out_n < max_trials:
+        remaining = [t for t in trials if id(t) not in used_ids]
+        trace["n_top_up"] = min(max_trials - out_n, len(remaining))
+        out_n += trace["n_top_up"]
+
+    trace["final_count"] = min(n_before, out_n)
+    return trace
+
+
+def _print_prompt_sampling_trace(trace: Dict[str, Any]) -> None:
+    print(f"[LLM prompt trace] {trace.get('label', 'train')}:")
+    print(f"  train_trials_before: {trace.get('train_trials_before')}")
+    print(f"  max_trials (CLI --max_prompt_train_trials): {trace.get('max_trials')}")
+    print(f"  max_trials_per_problem (CLI): {trace.get('max_trials_per_problem')}")
+    print(f"  subsample_seed: {trace.get('subsample_seed')}")
+    print(f"  n_prompt_groups (_prompt_block_key): {trace.get('n_prompt_groups')}")
+    if trace.get("group_sizes"):
+        print(f"  group_sizes: {trace.get('group_sizes')}")
+    if trace.get("mode") == "block_then_top_up":
+        print(
+            f"  block budget: n_blocks_target={trace.get('n_blocks_target')} "
+            f"(max_trials // per_problem), n_extra_slots={trace.get('n_extra_slots')}"
+        )
+        print(f"  selected_group_indices: {trace.get('selected_group_indices')}")
+        print(f"  trials_per_selected_group: {trace.get('trials_per_selected_group')}")
+        print(f"  trials_from_block_sample: {trace.get('trials_from_block_sample')}")
+        print(f"  n_extra_from_remainder: {trace.get('n_extra_from_remainder')}")
+        print(f"  n_top_up (fill to max_trials): {trace.get('n_top_up')}")
+    print(f"  final_count: {trace.get('final_count')}")
+
+
 def _cap_and_subsample_prompt_trials(
     trials: List[Dict[str, Any]],
     *,
@@ -1435,13 +1542,18 @@ def _cap_and_subsample_prompt_trials(
     max_trials_per_problem: int,
     subsample_seed: int,
     label: str,
+    debug_sampling: bool = False,
 ) -> List[Dict[str, Any]]:
     """Select trials for LLM prompts: sample blocks then optional extra singles.
 
-    When ``max_trials_per_problem`` > 0, sample ``max_trials // max_trials_per_problem`` blocks
-    (up to ``max_trials_per_problem`` trials each), then ``max_trials % max_trials_per_problem``
-    additional trials from the remainder pool. When ``max_trials_per_problem`` is 0, sample up to
-    ``max_trials`` trials with no block structure. ``max_trials`` <= 0 disables capping.
+    When ``max_trials_per_problem`` > 0, sample ``max_trials // max_trials_per_problem`` prompt
+    groups (``_prompt_block_key``), up to ``max_trials_per_problem`` trials each, then
+    ``max_trials % max_trials_per_problem`` extra trials from the remainder, then **top up**
+    from the remainder until ``max_trials`` is reached (if enough trials remain). Groups are
+    often smaller than ``max_trials_per_problem`` (e.g. Psych-101 gamble signatures with 5
+    trials each), so block-only sampling can under-fill the global cap without top-up.
+    When ``max_trials_per_problem`` is 0, sample up to ``max_trials`` trials with no block
+    structure. ``max_trials`` <= 0 disables capping.
     """
     trials = list(trials)
     if max_trials <= 0:
@@ -1505,13 +1617,36 @@ def _cap_and_subsample_prompt_trials(
                 out.append(t)
                 used_ids.add(id(t))
 
+    top_up_n = 0
+    if len(out) < max_trials:
+        remaining = [t for t in trials if id(t) not in used_ids]
+        if remaining:
+            n_pick = min(max_trials - len(out), len(remaining))
+            ridx = rng.choice(len(remaining), size=n_pick, replace=False)
+            for j in sorted(int(i) for i in ridx):
+                t = remaining[j]
+                out.append(t)
+                used_ids.add(id(t))
+            top_up_n = n_pick
+
     out = _sort_chronological(out)
     extra_note = f", +{n_extra} extra trial(s)" if n_extra else ""
+    top_note = f", +{top_up_n} top-up trial(s)" if top_up_n else ""
     print(
         f"[LLM prompt] Using {len(out)} of {len(trials)} {label} trials "
-        f"({n_blocks_sampled} sampled block(s) x up to {per_block}{extra_note}, "
-        f"max={max_trials}, seed={subsample_seed})."
+        f"({n_blocks} prompt group(s); {n_blocks_sampled} sampled x up to {per_block}"
+        f"{extra_note}{top_note}, max={max_trials}, seed={subsample_seed})."
     )
+    if debug_sampling or os.environ.get("TEH_DEBUG_PROMPT_SAMPLING"):
+        _print_prompt_sampling_trace(
+            trace_prompt_trial_sampling(
+                trials,
+                max_trials=max_trials,
+                max_trials_per_problem=max_trials_per_problem,
+                subsample_seed=subsample_seed,
+                label=label,
+            )
+        )
     return out
 
 

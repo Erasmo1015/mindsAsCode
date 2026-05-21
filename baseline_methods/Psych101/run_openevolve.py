@@ -422,7 +422,12 @@ def cap_and_subsample_prompt_trials(
     max_trials_per_problem: int,
     subsample_seed: int,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
-    """Sample from train+val union only (never test). Returns (trials, n_train, n_val)."""
+    """Sample from train+val union only (never test). Returns (trials, n_train, n_val).
+
+    When ``max_trials_per_problem`` > 0, sample ``max_trials // max_trials_per_problem``
+    prompt groups, up to ``max_trials_per_problem`` trials each, then remainder slots, then
+    top up from the pool until ``max_trials`` (groups are often smaller than per_problem).
+    """
     pool = list(train_trials) + list(val_trials)
     train_ids = {id(t) for t in train_trials}
     if max_trials <= 0 or not pool:
@@ -471,6 +476,16 @@ def cap_and_subsample_prompt_trials(
         remaining = [t for t in pool if id(t) not in used_ids]
         if remaining:
             n_pick = min(n_extra, len(remaining))
+            ridx = rng.choice(len(remaining), size=n_pick, replace=False)
+            for j in sorted(int(i) for i in ridx):
+                t = remaining[j]
+                out.append(t)
+                used_ids.add(id(t))
+
+    if len(out) < max_trials:
+        remaining = [t for t in pool if id(t) not in used_ids]
+        if remaining:
+            n_pick = min(max_trials - len(out), len(remaining))
             ridx = rng.choice(len(remaining), size=n_pick, replace=False)
             for j in sorted(int(i) for i in ridx):
                 t = remaining[j]
