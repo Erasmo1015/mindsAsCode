@@ -19,9 +19,9 @@ OpenEvolve baseline for Psych-101 binary datasets (vanilla prompt, full OpenEvol
 Uses reference_repos/openevolve as a library. Does NOT use TEH prompt engineering;
 task text comes from prompts/openevolve_vanilla/choices13k/infer_single_choice.txt only.
 
-Evolution optimizes train log-likelihood (combined_score = train_loglik). Validation
-log-likelihood is logged but not optimized. Test log-likelihood is computed only after
-evolution on the participant's best-by-train-loglik program.
+Evolution optimizes split-weighted train+validation log-likelihood (combined_score).
+Per-split train_loglik and val_loglik are logged separately. Test log-likelihood is
+computed only after evolution on the participant's best-by-train-loglik program.
 
 OpenEvolve still uses islands / MAP-Elites / archive for parent selection, but the
 LLM prompt is intentionally vanilla/minimal (not OpenEvolve's rich history prompt):
@@ -977,16 +977,31 @@ def _write_posthoc_test_json(path: Path, test_trials: List[Dict[str, Any]]) -> N
     path.write_text(json.dumps(payload, default=_json_default), encoding="utf-8")
 
 
-def _render_evaluator_py(evolution_split_path: Path) -> str:
+def _render_evaluator_py(evolution_split_path: Path, *, split_ratio: float) -> str:
     split_path = str(evolution_split_path.resolve())
-    return f'''"""Auto-generated OpenEvolve evaluator (train objective; no test access)."""
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+    return f'''"""Auto-generated OpenEvolve evaluator (train+val objective; no test access)."""
 import json
 import math
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 
 SPLIT_PATH = Path(r\"{split_path}\")
+SPLIT_RATIO = {float(split_ratio)}
 CHOICE13K_LOGLIK_EPS = {CHOICE13K_LOGLIK_EPS}
+
+
+def _train_val_ratios() -> Tuple[float, float]:
+    train_ratio = float(SPLIT_RATIO)
+    val_ratio = (1.0 - train_ratio) / 2.0
+    return train_ratio, val_ratio
+
+
+def _combined_train_val_loglik(train_ll: float, val_ll: float) -> float:
+    train_ratio, val_ratio = _train_val_ratios()
+    denom = train_ratio + val_ratio
+    return (train_ratio * float(train_ll) + val_ratio * float(val_ll)) / denom
 
 
 def _load_splits():
@@ -1058,8 +1073,9 @@ def evaluate(program_path: str) -> Dict[str, float]:
         }}
     train_ll = float(train_eval["avg_loglik"])
     val_ll = float(val_eval["avg_loglik"])
+    combined = _combined_train_val_loglik(train_ll, val_ll)
     return {{
-        "combined_score": train_ll,
+        "combined_score": combined,
         "train_loglik": train_ll,
         "val_loglik": val_ll,
     }}
@@ -1197,7 +1213,10 @@ def run_participant(
     shutil.copy2(initial_src, initial_dst)
 
     evaluator_path = exp_dir / "evaluator.py"
-    evaluator_path.write_text(_render_evaluator_py(evolution_split_path), encoding="utf-8")
+    evaluator_path.write_text(
+        _render_evaluator_py(evolution_split_path, split_ratio=args.split_ratio),
+        encoding="utf-8",
+    )
 
     cfg = _build_config(args, args.n_iterations)
     cfg.to_yaml(exp_dir / "config.yaml")
@@ -1522,7 +1541,8 @@ def main() -> None:
     print(f"Participants: {len(participants)} | n_iterations={args.n_iterations} | output={run_dir}")
     print(
         "Split: split_ratio=0.6 -> 60% train, remainder 50/50 val/test blocks; "
-        "evolution uses train_loglik only; prompt trials from train+val union; test post-hoc only."
+        "evolution combined_score = (0.6*train+0.2*val)/0.8 loglik; "
+        "prompt trials from train+val union; test post-hoc on best-by-train program."
     )
     print(
         "Prompt: vanilla/minimal (task + program + train/val trials + metrics). "

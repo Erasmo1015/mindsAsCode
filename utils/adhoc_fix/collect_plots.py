@@ -10,7 +10,7 @@ Expected input:
 Per participant, extracts trajectory for the elite pool-best program at each
 iteration (refinement) or best program in the pool (evolution):
 - train_loglik, val_loglik, test_loglik
-- train_val_loglik (refinement: 0.5*train + 0.5*val combined fitness)
+- train_val_loglik (refinement: split-ratio-weighted train+val combined fitness)
 
 Refinement iteration metrics (current format) use pool_best_* keys; older runs
 may only have best_* / iter_best_* fallbacks.

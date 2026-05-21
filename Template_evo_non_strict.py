@@ -619,9 +619,25 @@ def run_choice13k_gate_phase(
         return None
 
 
-def _refinement_combined_fitness(train_loglik: float, val_loglik: float) -> float:
-    """Refinement selection fitness: equal weight on train and validation log-likelihood."""
-    return 0.5 * float(train_loglik) + 0.5 * float(val_loglik)
+def _refinement_train_val_ratios(split_ratio: float) -> Tuple[float, float]:
+    """Train/val block fractions for within-participant three-way split (test is separate)."""
+    if not (0.0 < split_ratio < 1.0):
+        raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+    train_ratio = float(split_ratio)
+    val_ratio = (1.0 - train_ratio) / 2.0
+    return train_ratio, val_ratio
+
+
+def _refinement_combined_fitness(
+    train_loglik: float,
+    val_loglik: float,
+    *,
+    split_ratio: float,
+) -> float:
+    """Refinement selection fitness: size-weighted mean of train and validation log-likelihood."""
+    train_ratio, val_ratio = _refinement_train_val_ratios(split_ratio)
+    denom = train_ratio + val_ratio
+    return (train_ratio * float(train_loglik) + val_ratio * float(val_loglik)) / denom
 
 
 def _train_loglik_from_elite_tuple(parent_tuple: Tuple[Any, ...]) -> float:
@@ -637,6 +653,8 @@ def _train_loglik_from_elite_tuple(parent_tuple: Tuple[Any, ...]) -> float:
 def _evolution_elite_to_refinement_pool(
     elite_parents: List[Tuple[Any, ...]],
     elite_val_logliks: List[Optional[float]],
+    *,
+    split_ratio: float,
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Copy evolution elite pool into refinement format; preserve evolution order (no sort)."""
     refine_parents: List[Tuple[Any, ...]] = []
@@ -646,7 +664,7 @@ def _evolution_elite_to_refinement_pool(
         train_ll = _train_loglik_from_elite_tuple(parent)
         val_ll_f = _safe_float(val_ll)
         combined = (
-            _refinement_combined_fitness(train_ll, val_ll_f)
+            _refinement_combined_fitness(train_ll, val_ll_f, split_ratio=split_ratio)
             if val_ll_f is not None
             else train_ll
         )
@@ -661,6 +679,8 @@ def _save_evolution_elite_pool(
     output_path: Path,
     elite_parents: List[Tuple[Any, ...]],
     elite_val_logliks: List[Optional[float]],
+    *,
+    split_ratio: float,
 ) -> Path:
     """Persist evolution-phase elite pool programs and manifest (evolution sort order)."""
     pool_dir = output_path / "evolution_elite_pool"
@@ -671,7 +691,7 @@ def _save_evolution_elite_pool(
         train_ll = _train_loglik_from_elite_tuple(parent)
         val_ll_f = _safe_float(val_ll)
         combined = (
-            _refinement_combined_fitness(train_ll, val_ll_f)
+            _refinement_combined_fitness(train_ll, val_ll_f, split_ratio=split_ratio)
             if val_ll_f is not None
             else train_ll
         )
@@ -698,6 +718,8 @@ def _save_evolution_elite_pool(
 
 def _load_evolution_elite_pool(
     pool_dir: Path,
+    *,
+    split_ratio: float,
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Load evolution elite pool from saved manifest + program files."""
     manifest_path = pool_dir / "pool_manifest.json"
@@ -712,10 +734,11 @@ def _load_evolution_elite_pool(
         code = (pool_dir / filename).read_text(encoding="utf-8")
         train_ll = float(entry["train_loglik"])
         val_ll = _safe_float(entry.get("val_loglik"))
-        combined = _safe_float(entry.get("train_val_loglik"))
-        if combined is None and val_ll is not None:
-            combined = _refinement_combined_fitness(train_ll, val_ll)
-        elif combined is None:
+        if val_ll is not None:
+            combined = _refinement_combined_fitness(
+                train_ll, val_ll, split_ratio=split_ratio
+            )
+        else:
             combined = train_ll
         program_id = str(entry.get("program_id", filename))
         elite_parents.append(
@@ -1274,6 +1297,7 @@ def run_loglik_refinement_phase(
     sample_parents: bool,
     elite_pool_size: Optional[int],
     participant_id: int,
+    split_ratio: float,
     split_seed: int,
     max_prompt_train_trials: int,
     max_prompt_trials_per_problem: int,
@@ -1341,7 +1365,7 @@ def run_loglik_refinement_phase(
                 "Refinement requires evolution_elite_parents or initial_code with loglik metrics."
             )
         seed_combined_fitness = _refinement_combined_fitness(
-            initial_train_loglik, initial_val_loglik
+            initial_train_loglik, initial_val_loglik, split_ratio=split_ratio
         )
         elite_parents = [
             (
@@ -1497,7 +1521,9 @@ def run_loglik_refinement_phase(
             train_loglik = float(train_eval["avg_loglik"])
             val_loglik = float(val_eval["avg_loglik"])
             train_val_loglik = (
-                _refinement_combined_fitness(train_loglik, val_loglik)
+                _refinement_combined_fitness(
+                    train_loglik, val_loglik, split_ratio=split_ratio
+                )
                 if runtime_valid
                 else float("-inf")
             )
@@ -1522,10 +1548,12 @@ def run_loglik_refinement_phase(
         else:
             selected_results.sort(key=lambda x: x["train_val_loglik"], reverse=True)
             iter_best_result = selected_results[0]
+            _tr, _vr = _refinement_train_val_ratios(split_ratio)
             print(
                 f"  Best refinement candidate {iter_best_result['idx']}: "
                 f"train_val_loglik={iter_best_result['train_val_loglik']:.4f} "
-                f"(0.5*train+0.5*val), train_loglik={iter_best_result['train_loglik']:.4f}, "
+                f"(({_tr:.2f}*train+{_vr:.2f}*val)/{_tr + _vr:.2f}), "
+                f"train_loglik={iter_best_result['train_loglik']:.4f}, "
                 f"val_loglik={iter_best_result['val_loglik']:.4f}"
             )
             for result in selected_results:
@@ -1679,7 +1707,9 @@ def run_loglik_refinement_phase(
                 "val_loglik": float(initial_val_loglik),
                 "test_loglik": seed_test_loglik,
                 "train_val_loglik": _refinement_combined_fitness(
-                    float(initial_train_loglik), float(initial_val_loglik)
+                    float(initial_train_loglik),
+                    float(initial_val_loglik),
+                    split_ratio=split_ratio,
                 ),
             }
         _write_refinement_results_json(refinement_dir, refine_results)
@@ -2063,6 +2093,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "sample_parents": sample_parents,
         "elite_pool_size": elite_pool_size,
         "participant_id": int(participant_id),
+        "split_ratio": float(split_ratio),
         "split_seed": int(split_seed),
         "max_prompt_train_trials": max_prompt_train_trials,
         "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
@@ -2076,7 +2107,9 @@ def run_loglik_refine_participant_from_checkpoint(
         "wandb_step_offset": 0,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
-        ref_parents, ref_vals = _load_evolution_elite_pool(evolution_pool_dir)
+        ref_parents, ref_vals = _load_evolution_elite_pool(
+            evolution_pool_dir, split_ratio=split_ratio
+        )
         if save_artifacts:
             out_pool = output_dir / "evolution_elite_pool"
             if out_pool.exists():
@@ -6190,7 +6223,7 @@ def run_evolution(
 
     if save_artifacts and track_elite_val_loglik and output_path is not None:
         pool_dir = _save_evolution_elite_pool(
-            output_path, elite_parents, elite_val_logliks
+            output_path, elite_parents, elite_val_logliks, split_ratio=split_ratio
         )
         print(
             f"Saved evolution elite pool ({len(elite_parents)} programs) -> {pool_dir}"
@@ -6218,7 +6251,7 @@ def run_evolution(
             f"< threshold={float(refinement_val_threshold):.6f}"
         )
         ref_parents, ref_vals = _evolution_elite_to_refinement_pool(
-            elite_parents, elite_val_logliks
+            elite_parents, elite_val_logliks, split_ratio=split_ratio
         )
         gated_test_loglik = run_loglik_refinement_phase(
             dataset=dataset,
@@ -6233,6 +6266,7 @@ def run_evolution(
             sample_parents=sample_parents,
             elite_pool_size=elite_pool_size,
             participant_id=int(participant_id),
+            split_ratio=float(split_ratio),
             split_seed=int(split_seed),
             max_prompt_train_trials=max_prompt_train_trials,
             max_prompt_trials_per_problem=max_prompt_trials_per_problem,
