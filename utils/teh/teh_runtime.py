@@ -32,12 +32,20 @@ from utils.teh.teh_datasets import (
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TEH_WANDB_PROJECT = "teh"
 
-BASE_LOGlik_PROMPT = (
-    REPO_ROOT
-    / "prompts"
-    / "teh"
-    / "infer_single_choice.txt"
-)
+DEFAULT_BASE_LOGlik_PROMPT = REPO_ROOT / "prompts" / "teh" / "infer_single_choice.txt"
+BASE_LOGlik_PROMPT = DEFAULT_BASE_LOGlik_PROMPT
+
+
+def resolve_base_loglik_prompt_path(base_prompt_path: Optional[Path | str] = None) -> Path:
+    """Resolve base loglik prompt path (default: prompts/teh/infer_single_choice.txt)."""
+    if base_prompt_path is None:
+        return DEFAULT_BASE_LOGlik_PROMPT
+    p = Path(base_prompt_path).expanduser()
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return p.resolve()
+
+
 BASE_REFINE_PROMPT = (
     REPO_ROOT / "prompts" / "Template_evo" / "choice13k" / "refine" / "infer_single_choice.txt"
 )
@@ -171,10 +179,14 @@ def _sanitize_schema_summary_for_prompt(
 
 
 def _base_prompt_for_trials(
-    trials: List[Dict[str, Any]], schema_summary: str, *, dataset_alias: str
+    trials: List[Dict[str, Any]],
+    schema_summary: str,
+    *,
+    dataset_alias: str,
+    base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     if _is_gamble_ab_task(trials):
-        return _choice13k_neutral_loglik_base()
+        return _choice13k_neutral_loglik_base(base_prompt_path)
     return _build_schema_neutral_base_prompt(schema_summary, trials)
 
 
@@ -234,9 +246,12 @@ def _apply_gamble_neutral_wording(text: str) -> str:
     return out
 
 
-def _choice13k_neutral_loglik_base() -> str:
+def _choice13k_neutral_loglik_base(base_prompt_path: Optional[Path | str] = None) -> str:
     """Template loglik prompt with index-based gamble wording (matches evaluation)."""
-    return _apply_gamble_neutral_wording(BASE_LOGlik_PROMPT.read_text(encoding="utf-8"))
+    path = resolve_base_loglik_prompt_path(base_prompt_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Base prompt not found: {path}")
+    return _apply_gamble_neutral_wording(path.read_text(encoding="utf-8"))
 
 
 def valid_participant_ids_path(
@@ -305,10 +320,15 @@ def _merge_prompt_fallback(
     dataset_alias: str,
     instruction: str,
     sample_trials: List[Dict[str, Any]],
+    *,
+    base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     base = _base_prompt_for_trials(
-        sample_trials, schema_summary, dataset_alias=dataset_alias
+        sample_trials,
+        schema_summary,
+        dataset_alias=dataset_alias,
+        base_prompt_path=base_prompt_path,
     )
     if is_mixed_gambles_dataset(dataset_alias):
         display = dataset_display_name(dataset_alias)
@@ -332,13 +352,18 @@ def build_prompt_generation_llm_user_content(
     dataset_alias: str,
     instruction: str,
     sample_trials: List[Dict[str, Any]],
+    *,
+    base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     """User message sent to the prompt-generation LLM (no API call)."""
     display = dataset_display_name(dataset_alias)
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     is_gamble = _is_gamble_ab_task(sample_trials)
     base_prompt = _base_prompt_for_trials(
-        sample_trials, schema_summary, dataset_alias=dataset_alias
+        sample_trials,
+        schema_summary,
+        dataset_alias=dataset_alias,
+        base_prompt_path=base_prompt_path,
     )
     trial_examples = _format_trials_for_prompt(sample_trials, max_trials=10)
     if is_mixed_gambles_dataset(dataset_alias):
@@ -394,9 +419,13 @@ def _generate_prompt_via_llm(
     *,
     max_tokens: int = 2048,
     save_llm_input_to: Optional[Path] = None,
+    base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     user_content = build_prompt_generation_llm_user_content(
-        dataset_alias, instruction, sample_trials
+        dataset_alias,
+        instruction,
+        sample_trials,
+        base_prompt_path=base_prompt_path,
     )
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     is_gamble = _is_gamble_ab_task(sample_trials)
@@ -444,6 +473,7 @@ def setup_teh_run_prompts(
     client: Optional[OpenAI] = None,
     model_name: str = "gpt-4o-mini",
     use_llm: bool = True,
+    base_prompt_path: Optional[Path | str] = None,
     n_sample_participants: int = 1,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
@@ -457,6 +487,9 @@ def setup_teh_run_prompts(
     """
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
+    resolved_base_prompt = resolve_base_loglik_prompt_path(base_prompt_path)
+    if not resolved_base_prompt.is_file():
+        raise FileNotFoundError(f"Base prompt not found: {resolved_base_prompt}")
 
     if is_mixed_gambles_dataset(dataset_alias):
         from utils.teh.participant_ids import load_valid_participant_ids
@@ -505,6 +538,7 @@ def setup_teh_run_prompts(
                 instruction,
                 sample_trial_list,
                 save_llm_input_to=prompts_dir / "llm_input_prompt.txt",
+                base_prompt_path=resolved_base_prompt,
             )
             infer_path.write_text(
                 strip_embedded_choose_from_evolution_prompt(infer_text), encoding="utf-8"
@@ -515,7 +549,12 @@ def setup_teh_run_prompts(
             print(f"[TEH] LLM prompt generation failed ({e}); using merge fallback.")
 
     if not generated:
-        merged = _merge_prompt_fallback(dataset_alias, instruction, sample_trial_list)
+        merged = _merge_prompt_fallback(
+            dataset_alias,
+            instruction,
+            sample_trial_list,
+            base_prompt_path=resolved_base_prompt,
+        )
         if _is_gamble_ab_task(sample_trial_list):
             merged = _apply_gamble_neutral_wording(merged)
         merged = strip_embedded_choose_from_evolution_prompt(merged)
@@ -532,6 +571,7 @@ def setup_teh_run_prompts(
         "dataset_alias": dataset_alias,
         "llm_generated": generated,
         "seed_program_source": str(seed_src),
+        "base_prompt_path": str(resolved_base_prompt),
     }
     if is_mixed_gambles_dataset(dataset_alias):
         meta["mixed_gambles_csv"] = mixed_gambles_csv

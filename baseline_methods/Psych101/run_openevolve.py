@@ -1379,7 +1379,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--n_iterations", type=int, default=600)
     p.add_argument("--checkpoint_interval", type=int, default=50)
     p.add_argument("--max_prompt_train_trials", type=int, default=40)
-    p.add_argument("--max_prompt_trials_per_problem", type=int, default=10)
+    p.add_argument("--max_prompt_trials_per_problem", type=int, default=5)
     p.add_argument("--model", type=str, default="Qwen/Qwen2.5-Coder-32B-Instruct")
     p.add_argument("--api_base", type=str, default=None)
     p.add_argument("--vllm_url", type=str, default=os.environ.get("VLLM_LOCAL_URL", "http://localhost:8000/v1"))

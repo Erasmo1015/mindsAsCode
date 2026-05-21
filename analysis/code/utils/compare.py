@@ -763,6 +763,28 @@ def _write_legacy_comparison_csv(
     return len(ordered)
 
 
+def _print_num_best_counts(best_counts: Mapping[str, int]) -> None:
+    print("num_best (ties count toward each tied best):")
+    for k, v in best_counts.items():
+        print(f"  {k}: {v}")
+
+
+def _print_num_best_comparison_summary(
+    *,
+    test_csv: Path,
+    test_counts: Mapping[str, int],
+    gated_csv: Optional[Path] = None,
+    gated_counts: Optional[Mapping[str, int]] = None,
+) -> None:
+    """Compact side-by-side num_best for test and gated output CSVs."""
+    print("=== num_best summary ===")
+    print(f"{_TEST_LOGLIK} ({test_csv}):")
+    _print_num_best_counts(test_counts)
+    if gated_csv is not None and gated_counts is not None:
+        print(f"{_GATED_LOGLIK} ({gated_csv}):")
+        _print_num_best_counts(gated_counts)
+
+
 def _print_run_summary(
     *,
     dataset_label: str,
@@ -773,7 +795,6 @@ def _print_run_summary(
     teh_columns: Dict[str, str],
     n_participants: int,
     avg_row: Dict[str, str],
-    best_counts: Dict[str, int],
     out_path: Path,
     score_kind: str,
 ) -> None:
@@ -802,9 +823,6 @@ def _print_run_summary(
     for k, v in avg_row.items():
         if k not in ("participant_id", "BIR") and v != "":
             print(f"  {k}: {v}")
-    print("num_best (ties count toward each tied best):")
-    for k, v in best_counts.items():
-        print(f"  {k}: {v}")
     print(f"Wrote {out_path}")
 
 
@@ -905,6 +923,15 @@ def main() -> None:
         "--recompute_bir",
         action="store_true",
         help="Ignore cached BIR and recompute all participants in the comparison roster.",
+    )
+    p.add_argument(
+        "--verbose",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Print full comparison log (paths, averages). Default: compact output with "
+            "num_best summary only."
+        ),
     )
     args = p.parse_args()
 
@@ -1016,24 +1043,30 @@ def main() -> None:
             teh_runs=teh_test,
             bir=bir,
         )
-        _print_run_summary(
-            dataset_label=ds_label,
-            config_key=config_key,
-            baseline_paths=baseline_paths,
-            baseline_columns=baseline_columns,
-            teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
-            teh_columns=teh_columns_test,
-            n_participants=n_test,
-            avg_row=avg_row,
-            best_counts=best_counts,
-            out_path=output_arg,
-            score_kind=_TEST_LOGLIK,
-        )
+        if args.verbose:
+            _print_run_summary(
+                dataset_label=ds_label,
+                config_key=config_key,
+                baseline_paths=baseline_paths,
+                baseline_columns=baseline_columns,
+                teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
+                teh_columns=teh_columns_test,
+                n_participants=n_test,
+                avg_row=avg_row,
+                out_path=output_arg,
+                score_kind=_TEST_LOGLIK,
+            )
+        else:
+            print(f"Wrote {output_arg} ({n_test} participants)")
 
         gated_csvs = list(exp_resolved)
         if centaur_path is not None:
             gated_csvs.insert(0, centaur_path)
         if not _any_csv_has_gated(centaur_path, gated_csvs):
+            _print_num_best_comparison_summary(
+                test_csv=output_arg,
+                test_counts=best_counts,
+            )
             return
 
         gated_out = (
@@ -1093,19 +1126,27 @@ def main() -> None:
             teh_runs=teh_gated,
             bir=bir,
         )
-        print(f"--- gated ({_GATED_LOGLIK}) ---")
-        _print_run_summary(
-            dataset_label=ds_label,
-            config_key=config_key,
-            baseline_paths=baseline_paths,
-            baseline_columns=gated_baseline_columns,
-            teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
-            teh_columns=teh_columns_gated,
-            n_participants=n_gated,
-            avg_row=avg_g,
-            best_counts=best_g,
-            out_path=gated_out,
-            score_kind=_GATED_LOGLIK,
+        if args.verbose:
+            print(f"--- gated ({_GATED_LOGLIK}) ---")
+            _print_run_summary(
+                dataset_label=ds_label,
+                config_key=config_key,
+                baseline_paths=baseline_paths,
+                baseline_columns=gated_baseline_columns,
+                teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
+                teh_columns=teh_columns_gated,
+                n_participants=n_gated,
+                avg_row=avg_g,
+                out_path=gated_out,
+                score_kind=_GATED_LOGLIK,
+            )
+        else:
+            print(f"Wrote {gated_out} ({n_gated} participants)")
+        _print_num_best_comparison_summary(
+            test_csv=output_arg,
+            test_counts=best_counts,
+            gated_csv=gated_out,
+            gated_counts=best_g,
         )
         return
 
@@ -1161,7 +1202,12 @@ def main() -> None:
         bir=bir,
         similar_threshold=th,
     )
+    gated_score_columns: List[Tuple[str, Dict[int, float]]] = [("Centaur", centaur_for_gated)]
+    gated_score_columns.extend(experiments_gated)
+    best_gated = _num_best_counts(participant_ids, gated_score_columns)
     print(f"Wrote {gated_out} (legacy gated, {n_gated} participants).")
+    print(f"\n--- gated ({_GATED_LOGLIK}) ---")
+    _print_num_best_counts(best_gated)
 
 
 if __name__ == "__main__":

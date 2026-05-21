@@ -1034,6 +1034,7 @@ def run_global_evolution_phase(
     seed_program_path: str,
     n_iterations: int,
     n_candidates_per_iteration: int,
+    fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
     elite_pool_size: Optional[int],
@@ -1157,32 +1158,51 @@ def run_global_evolution_phase(
         prompt_stats_path = (
             iter_dir / "prompt_stats.json" if iter_dir is not None else None
         )
-        candidate_codes = generate_program_variants(
+        fresh_n = _decayed_fresh_n_for_iteration(
+            fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
+        )
+        n_normal = n_candidates_per_iteration - fresh_n
+        print(
+            f"Fresh candidate schedule (global): iter_idx={iteration}, "
+            f"total_iterations={n_iterations}, fresh_n={fresh_n} "
+            f"(max fresh_n_candidates={fresh_n_candidates})"
+        )
+        print(
+            f"\nGenerating {n_candidates_per_iteration} global candidates: "
+            f"{fresh_n} fresh (seed/baseline only), {n_normal} from sampled parents..."
+        )
+        variant_kwargs = {
+            "train_trials": pooled_train,
+            "max_tokens": llm_max_tokens,
+            "dataset": dataset,
+            "max_prompt_train_trials": max_prompt_train_trials,
+            "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
+            "prompt_train_trials_seed": int(split_seed) + 60_000 + iteration_step,
+            "fitness_metric": "loglik",
+            "max_workers": max_workers,
+            "run_prompts_dir": run_prompts_dir,
+            "max_parent_chars": max_parent_chars,
+            "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
+            "sample_size_for_warning": sample_size,
+            "prompt_stats_path": prompt_stats_path,
+            "hard_prompt_token_cap": hard_prompt_token_cap,
+            "strict_prompt_budget": strict_prompt_budget,
+            "prompt_token_estimator": prompt_token_estimator,
+            "prompt_diagnostics_dir": output_dir,
+            "phase": "global_evolution",
+            "participant_id": None,
+            "iteration": iteration_step,
+        }
+        candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
             model_name=model_name,
-            parent_programs=parent_codes,
-            train_trials=pooled_train,
-            n_variants=n_candidates_per_iteration,
-            max_tokens=llm_max_tokens,
-            dataset=dataset,
-            parent_train_accuracies=parent_train_lls,
-            max_prompt_train_trials=max_prompt_train_trials,
-            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
-            prompt_train_trials_seed=int(split_seed) + 60_000 + iteration_step,
-            fitness_metric="loglik",
-            max_workers=max_workers,
-            run_prompts_dir=run_prompts_dir,
-            max_parent_chars=max_parent_chars,
-            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
-            sample_size_for_warning=sample_size,
-            prompt_stats_path=prompt_stats_path,
-            hard_prompt_token_cap=hard_prompt_token_cap,
-            strict_prompt_budget=strict_prompt_budget,
-            prompt_token_estimator=prompt_token_estimator,
-            prompt_diagnostics_dir=output_dir,
-            phase="global_evolution",
-            participant_id=None,
-            iteration=iteration_step,
+            fresh_n_candidates=fresh_n,
+            n_candidates=n_candidates_per_iteration,
+            fresh_parent_programs=[seed_code],
+            normal_parent_programs=parent_codes,
+            variant_kwargs=variant_kwargs,
+            fresh_parent_train_accuracies=[baseline_ll],
+            normal_parent_train_accuracies=parent_train_lls,
         )
 
         selected_results: List[Dict[str, Any]] = []
@@ -1253,6 +1273,16 @@ def run_global_evolution_phase(
                 "pool_best_program_id": elite_parents[0][3],
                 "pool_best_global_train_loglik": pool_best_ll,
             }
+            metrics.update(
+                _iteration_candidate_source_header(
+                    fresh_n_candidates,
+                    fresh_n,
+                    n_candidates_per_iteration,
+                    candidate_sources,
+                    iter_idx=iteration,
+                    total_iters=n_iterations,
+                )
+            )
             (iter_dir / "metrics.json").write_text(
                 json.dumps(metrics, indent=2), encoding="utf-8"
             )
@@ -2109,6 +2139,7 @@ def run_loglik_refinement_phase(
     test_trials: List[Dict[str, Any]],
     n_iterations: int,
     n_candidates_per_iteration: int,
+    fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
     elite_pool_size: Optional[int],
@@ -2129,6 +2160,9 @@ def run_loglik_refinement_phase(
     initial_code: Optional[str] = None,
     initial_train_loglik: Optional[float] = None,
     initial_val_loglik: Optional[float] = None,
+    fresh_parent_code: Optional[str] = None,
+    fresh_parent_train_loglik: Optional[float] = None,
+    fresh_parent_val_loglik: Optional[float] = None,
     run_prompts_dir: Optional[str] = None,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
@@ -2283,35 +2317,65 @@ def run_loglik_refinement_phase(
         prompt_stats_path = (
             iter_dir / "prompt_stats.json" if iter_dir is not None else None
         )
-        candidate_codes = generate_program_variants(
+        fresh_n = _decayed_fresh_n_for_iteration(
+            fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
+        )
+        n_normal = n_candidates_per_iteration - fresh_n
+        print(
+            f"Fresh candidate schedule (refinement): iter_idx={iteration}, "
+            f"total_iterations={n_iterations}, fresh_n={fresh_n} "
+            f"(max fresh_n_candidates={fresh_n_candidates})"
+        )
+        print(
+            f"\nGenerating {n_candidates_per_iteration} refinement candidates: "
+            f"{fresh_n} fresh (seed/baseline only), {n_normal} from sampled parents..."
+        )
+        (
+            fresh_parent_codes,
+            fresh_parent_train_lls,
+            fresh_parent_val_lls,
+        ) = _resolve_fresh_parent_prompt_context(
+            fresh_parent_code=fresh_parent_code,
+            fresh_parent_train_loglik=fresh_parent_train_loglik,
+            fresh_parent_val_loglik=fresh_parent_val_loglik,
+            elite_parents=elite_parents,
+        )
+        variant_kwargs = {
+            "train_trials": train_trials,
+            "max_tokens": llm_max_tokens,
+            "dataset": dataset,
+            "max_prompt_train_trials": max_prompt_train_trials,
+            "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
+            "prompt_train_trials_seed": split_seed,
+            "fitness_metric": fitness_metric,
+            "max_workers": max_workers,
+            "prompt_suffix": refine_suffix,
+            "prompt_observation_trials": val_for_prompt,
+            "run_prompts_dir": run_prompts_dir,
+            "max_parent_chars": max_parent_chars,
+            "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
+            "sample_size_for_warning": sample_size,
+            "prompt_stats_path": prompt_stats_path,
+            "hard_prompt_token_cap": hard_prompt_token_cap,
+            "strict_prompt_budget": strict_prompt_budget,
+            "prompt_token_estimator": prompt_token_estimator,
+            "prompt_diagnostics_dir": output_path,
+            "phase": "refinement",
+            "participant_id": participant_id,
+            "iteration": iteration_step,
+        }
+        candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
             model_name=model_name,
-            parent_programs=parent_codes,
-            train_trials=train_trials,
-            n_variants=n_candidates_per_iteration,
-            max_tokens=llm_max_tokens,
-            dataset=dataset,
-            parent_train_accuracies=parent_train_lls,
-            parent_val_logliks=selected_val_lls,
-            max_prompt_train_trials=max_prompt_train_trials,
-            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
-            prompt_train_trials_seed=split_seed,
-            fitness_metric=fitness_metric,
-            max_workers=max_workers,
-            prompt_suffix=refine_suffix,
-            prompt_observation_trials=val_for_prompt,
-            run_prompts_dir=run_prompts_dir,
-            max_parent_chars=max_parent_chars,
-            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
-            sample_size_for_warning=sample_size,
-            prompt_stats_path=prompt_stats_path,
-            hard_prompt_token_cap=hard_prompt_token_cap,
-            strict_prompt_budget=strict_prompt_budget,
-            prompt_token_estimator=prompt_token_estimator,
-            prompt_diagnostics_dir=output_path,
-            phase="refinement",
-            participant_id=participant_id,
-            iteration=iteration_step,
+            fresh_n_candidates=fresh_n,
+            n_candidates=n_candidates_per_iteration,
+            fresh_parent_programs=fresh_parent_codes,
+            normal_parent_programs=parent_codes,
+            variant_kwargs=variant_kwargs,
+            fresh_parent_train_accuracies=fresh_parent_train_lls,
+            fresh_parent_val_logliks=fresh_parent_val_lls,
+            normal_parent_train_accuracies=parent_train_lls,
+            normal_parent_val_logliks=selected_val_lls,
         )
 
         candidate_results: List[Dict[str, Any]] = []
@@ -2456,24 +2520,38 @@ def run_loglik_refinement_phase(
                 best_fields["iter_best_train_val_loglik"] = None
                 best_fields["iter_best_train_loglik"] = None
                 best_fields["iter_best_val_loglik"] = None
+            refine_header = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_runtime_valid": len(selected_results),
+            }
+            refine_header.update(
+                _iteration_candidate_source_header(
+                    fresh_n_candidates,
+                    fresh_n,
+                    n_candidates_per_iteration,
+                    candidate_sources,
+                    iter_idx=iteration,
+                    total_iters=n_iterations,
+                )
+            )
             metrics = _build_iteration_metrics_json(
                 participant_id=participant_id,
-                header={
-                    "iteration": iteration_step,
-                    "n_candidates": n_candidates_per_iteration,
-                    "n_runtime_valid": len(selected_results),
-                },
+                header=refine_header,
                 best=best_fields,
-                candidate_results=[
-                    {
-                        "idx": r["idx"],
-                        "train_loglik": r.get("train_loglik"),
-                        "val_loglik": r.get("val_loglik"),
-                        "train_val_loglik": r.get("train_val_loglik"),
-                        "runtime_valid": r.get("runtime_valid", False),
-                    }
-                    for r in candidate_results
-                ],
+                candidate_results=_annotate_candidate_results_with_sources(
+                    [
+                        {
+                            "idx": r["idx"],
+                            "train_loglik": r.get("train_loglik"),
+                            "val_loglik": r.get("val_loglik"),
+                            "train_val_loglik": r.get("train_val_loglik"),
+                            "runtime_valid": r.get("runtime_valid", False),
+                        }
+                        for r in candidate_results
+                    ],
+                    candidate_sources,
+                ),
             )
             (iter_dir / "metrics.json").write_text(
                 json.dumps(metrics, indent=2), encoding="utf-8"
@@ -2840,6 +2918,7 @@ def run_loglik_refine_participant_from_checkpoint(
     filter_mixed_gambles: bool = False,
     n_iterations: int,
     n_candidates_per_iteration: int,
+    fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
     elite_pool_size: Optional[int],
@@ -2972,6 +3051,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "test_trials": test_trials,
         "n_iterations": n_iterations,
         "n_candidates_per_iteration": n_candidates_per_iteration,
+        "fresh_n_candidates": fresh_n_candidates,
         "sample_size": sample_size,
         "sample_parents": sample_parents,
         "elite_pool_size": elite_pool_size,
@@ -2987,6 +3067,9 @@ def run_loglik_refine_participant_from_checkpoint(
         "save_artifacts": save_artifacts,
         "wandb_module": wandb_module,
         "wandb_step_offset": 0,
+        "fresh_parent_code": initial_code,
+        "fresh_parent_train_loglik": train_loglik,
+        "fresh_parent_val_loglik": val_loglik,
         "run_prompts_dir": run_prompts_dir,
         "max_parent_chars": max_parent_chars,
         "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
@@ -3055,6 +3138,7 @@ def run_loglik_refine_from_prev_experiment(
     filter_mixed_gambles: bool = False,
     n_iterations: int,
     n_candidates_per_iteration: int,
+    fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
     elite_pool_size: Optional[int],
@@ -3172,6 +3256,7 @@ def run_loglik_refine_from_prev_experiment(
             filter_mixed_gambles=filter_mixed_gambles,
             n_iterations=n_iterations,
             n_candidates_per_iteration=n_candidates_per_iteration,
+            fresh_n_candidates=fresh_n_candidates,
             sample_size=sample_size,
             sample_parents=sample_parents,
             elite_pool_size=elite_pool_size,
@@ -5209,6 +5294,138 @@ def _truncate_parent_program_for_prompt(code: str, max_parent_chars: int) -> Tup
     return f"{head}{join_newline}{marker}{tail}", True
 
 
+def _decayed_fresh_n_for_iteration(
+    fresh_n_max: int,
+    iter_idx: int,
+    total_iters: int,
+    n_candidates: int,
+) -> int:
+    """Decay fresh count from max toward 1 over a phase's iteration window (0-based iter_idx)."""
+    fresh_n_max = int(fresh_n_max)
+    if fresh_n_max <= 0:
+        return 0
+    total = max(1, int(total_iters))
+    idx = max(0, int(iter_idx))
+    raw = math.floor(float(fresh_n_max) * (1.0 - idx / total))
+    fresh_n = max(1, int(raw))
+    return min(fresh_n, int(n_candidates))
+
+
+def _iteration_candidate_source_header(
+    fresh_n_max: int,
+    fresh_n: int,
+    n_candidates: int,
+    candidate_sources: List[str],
+    *,
+    iter_idx: int,
+    total_iters: int,
+) -> Dict[str, Any]:
+    return {
+        "fresh_n_candidates": int(fresh_n_max),
+        "fresh_n": int(fresh_n),
+        "iter_idx": int(iter_idx),
+        "total_iterations": int(total_iters),
+        "n_normal_candidates": int(n_candidates) - int(fresh_n),
+        "candidate_sources": list(candidate_sources),
+    }
+
+
+def _annotate_candidate_results_with_sources(
+    candidate_results: List[Dict[str, Any]],
+    candidate_sources: List[str],
+) -> List[Dict[str, Any]]:
+    annotated: List[Dict[str, Any]] = []
+    for row, source in zip(candidate_results, candidate_sources):
+        out = dict(row)
+        out["source"] = source
+        annotated.append(out)
+    return annotated
+
+
+def _resolve_fresh_parent_prompt_context(
+    *,
+    fresh_parent_code: Optional[str],
+    fresh_parent_train_loglik: Optional[float],
+    fresh_parent_val_loglik: Optional[float],
+    elite_parents: List[Tuple[Any, ...]],
+) -> Tuple[List[str], Optional[List[float]], Optional[List[Optional[float]]]]:
+    """Parent list for fresh exploration: explicit seed/baseline, else baseline-like pool entry."""
+    if fresh_parent_code:
+        codes = [fresh_parent_code]
+        train_accs = (
+            [float(fresh_parent_train_loglik)]
+            if fresh_parent_train_loglik is not None
+            else None
+        )
+        val_lls = (
+            [fresh_parent_val_loglik]
+            if fresh_parent_val_loglik is not None
+            else None
+        )
+        return codes, train_accs, val_lls
+    for parent in elite_parents:
+        prog_id = str(parent[3])
+        if prog_id in ("baseline", "global_baseline", "refinement_seed"):
+            train_acc = _train_loglik_from_elite_tuple(parent)
+            return [parent[0]], [train_acc], None
+    raise ValueError(
+        "fresh_n_candidates > 0 requires fresh_parent_code or a baseline-like parent in the pool"
+    )
+
+
+def _generate_iteration_candidate_codes(
+    *,
+    client: OpenAI,
+    model_name: str,
+    fresh_n_candidates: int,
+    n_candidates: int,
+    fresh_parent_programs: List[str],
+    normal_parent_programs: List[str],
+    variant_kwargs: Dict[str, Any],
+    fresh_parent_train_accuracies: Optional[List[float]] = None,
+    fresh_parent_val_logliks: Optional[List[Optional[float]]] = None,
+    normal_parent_train_accuracies: Optional[List[float]] = None,
+    normal_parent_val_logliks: Optional[List[Optional[float]]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Generate candidates: first fresh_n from seed/baseline only, rest from normal parents."""
+    fresh_n = int(fresh_n_candidates)
+    n_total = int(n_candidates)
+    n_normal = n_total - fresh_n
+    codes: List[str] = []
+    sources: List[str] = []
+    if fresh_n > 0:
+        fresh_kw = dict(variant_kwargs)
+        fresh_kw.update(
+            client=client,
+            model_name=model_name,
+            parent_programs=list(fresh_parent_programs),
+            n_variants=fresh_n,
+        )
+        if fresh_parent_train_accuracies is not None:
+            fresh_kw["parent_train_accuracies"] = fresh_parent_train_accuracies
+        if fresh_parent_val_logliks is not None:
+            fresh_kw["parent_val_logliks"] = fresh_parent_val_logliks
+        fresh_codes = generate_program_variants(**fresh_kw)
+        codes.extend(fresh_codes)
+        sources.extend(["fresh"] * len(fresh_codes))
+    if n_normal > 0:
+        normal_kw = dict(variant_kwargs)
+        normal_kw.update(
+            client=client,
+            model_name=model_name,
+            parent_programs=list(normal_parent_programs),
+            n_variants=n_normal,
+        )
+        if normal_parent_train_accuracies is not None:
+            normal_kw["parent_train_accuracies"] = normal_parent_train_accuracies
+        if normal_parent_val_logliks is not None:
+            normal_kw["parent_val_logliks"] = normal_parent_val_logliks
+        normal_codes = generate_program_variants(**normal_kw)
+        codes.extend(normal_codes)
+        sources.extend(["normal"] * len(normal_codes))
+    return codes, sources
+
+
 def generate_program_variants(
     client: OpenAI,
     model_name: str,
@@ -5612,6 +5829,252 @@ Provide only the code for choose(...) as a complete function body.
     return codes
 
 
+def _run_pre_evolution_explore_phase(
+    *,
+    explore_candidates: int,
+    client: OpenAI,
+    model_name: str,
+    seed_code: str,
+    dataset: str,
+    participant_id: int,
+    train_trials: List[Dict[str, Any]],
+    test_trials: List[Dict[str, Any]],
+    val_trials: List[Dict[str, Any]],
+    fitness_metric: str,
+    n_eval_seeds: int,
+    elite_parents: List[Tuple[Any, ...]],
+    elite_val_logliks: List[Optional[float]],
+    track_elite_val_loglik: bool,
+    sample_size: int,
+    elite_pool_size: Optional[int],
+    baseline_train_eval: Dict[str, Any],
+    output_path: Optional[Path],
+    save_artifacts: bool,
+    max_prompt_train_trials: int,
+    max_prompt_trials_per_problem: int,
+    llm_max_tokens: int,
+    max_workers: int,
+    split_seed: int,
+    run_prompts_dir: Optional[str],
+    max_parent_chars: int,
+    warn_parent_truncation_ratio: float,
+    sample_size_for_warning: int,
+    hard_prompt_token_cap: int,
+    strict_prompt_budget: bool,
+    prompt_token_estimator: str,
+) -> None:
+    """
+    One-shot seed-only candidate generation before the evolution loop.
+    Valid runtime candidates are merged into elite_parents (pool is sorted/capped after).
+    """
+    n_explore = int(explore_candidates)
+    if n_explore <= 0:
+        return
+
+    print(f"\n{'='*80}")
+    print("PRE-EVOLUTION EXPLORE PHASE")
+    print(f"{'='*80}")
+    print(f"Requested explore candidates: {n_explore}")
+
+    explore_dir: Optional[Path] = None
+    candidates_dir: Optional[Path] = None
+    if save_artifacts and output_path is not None:
+        explore_dir = output_path / "explore_phase"
+        explore_dir.mkdir(parents=True, exist_ok=True)
+        candidates_dir = explore_dir / "candidates"
+        candidates_dir.mkdir(parents=True, exist_ok=True)
+
+    if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
+        seed_parent_train_accs = [float(baseline_train_eval["avg_loglik"])]
+    else:
+        seed_parent_train_accs = [float(baseline_train_eval["accuracy"])]
+
+    prompt_stats_path = (
+        (explore_dir / "prompt_stats.json") if explore_dir is not None else None
+    )
+    candidate_codes = generate_program_variants(
+        client=client,
+        model_name=model_name,
+        parent_programs=[seed_code],
+        train_trials=train_trials,
+        n_variants=n_explore,
+        max_tokens=llm_max_tokens,
+        dataset=dataset,
+        parent_train_accuracies=seed_parent_train_accs,
+        max_prompt_train_trials=max_prompt_train_trials,
+        max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+        prompt_train_trials_seed=int(split_seed) + 70_000,
+        fitness_metric=fitness_metric,
+        cpc18_official_mse=False,
+        max_workers=max_workers,
+        run_prompts_dir=run_prompts_dir,
+        max_parent_chars=max_parent_chars,
+        warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+        sample_size_for_warning=sample_size_for_warning,
+        prompt_stats_path=prompt_stats_path,
+        hard_prompt_token_cap=hard_prompt_token_cap,
+        strict_prompt_budget=strict_prompt_budget,
+        prompt_token_estimator=prompt_token_estimator,
+        prompt_diagnostics_dir=output_path,
+        phase="explore",
+        participant_id=int(participant_id),
+        iteration=None,
+    )
+
+    candidate_results: List[Dict[str, Any]] = []
+    for idx, code in enumerate(candidate_codes):
+        if candidates_dir is not None:
+            (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
+        code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
+        if not code:
+            row: Dict[str, Any] = {
+                "idx": idx,
+                "train_loglik": float("-inf"),
+                "test_loglik": float("-inf"),
+                "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
+                "runtime_valid": False,
+            }
+            if val_trials:
+                row["val_loglik"] = float("-inf")
+            candidate_results.append(row)
+            continue
+        choose_fn = compile_program(code)
+        if choose_fn is None:
+            row = {
+                "idx": idx,
+                "train_loglik": float("-inf"),
+                "test_loglik": float("-inf"),
+                "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
+                "runtime_valid": False,
+            }
+            if val_trials:
+                row["val_loglik"] = float("-inf")
+            candidate_results.append(row)
+            continue
+        try:
+            train_eval = evaluate_choice13k_program(
+                choose_fn, train_trials, n_seeds=n_eval_seeds
+            )
+            test_eval = evaluate_choice13k_program(
+                choose_fn, test_trials, n_seeds=n_eval_seeds
+            )
+            val_eval = (
+                evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+                if val_trials
+                else None
+            )
+        except (AssertionError, TypeError, ValueError):
+            row = {
+                "idx": idx,
+                "train_loglik": float("-inf"),
+                "test_loglik": float("-inf"),
+                "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
+                "runtime_valid": False,
+            }
+            if val_trials:
+                row["val_loglik"] = float("-inf")
+            candidate_results.append(row)
+            continue
+        train_loglik = float(train_eval["avg_loglik"])
+        test_loglik = float(test_eval["avg_loglik"])
+        runtime_valid = train_eval.get("errors", 0) == 0 and test_eval.get("errors", 0) == 0
+        fitness = train_loglik if fitness_metric == "loglik" else float(train_eval["accuracy"])
+        if not runtime_valid:
+            fitness = float("-inf") if fitness_metric == "loglik" else 0.0
+        row = {
+            "idx": idx,
+            "code": code,
+            "train_acc": float(train_eval["accuracy"]),
+            "test_acc": float(test_eval["accuracy"]),
+            "train_loglik": train_loglik,
+            "test_loglik": test_loglik,
+            "fitness": fitness,
+            "runtime_valid": runtime_valid,
+        }
+        if val_eval is not None:
+            row["val_loglik"] = float(val_eval["avg_loglik"])
+        candidate_results.append(row)
+
+    selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
+    for result in selected_results:
+        program_id = f"explore_candidate_{result['idx']}"
+        elite_parents.append(
+            (
+                result["code"],
+                result["fitness"],
+                result["test_acc"],
+                program_id,
+                None,
+                None,
+                result["train_acc"],
+            )
+        )
+        if track_elite_val_loglik:
+            elite_val_logliks.append(_safe_float(result.get("val_loglik")))
+
+    if track_elite_val_loglik:
+        paired = list(zip(elite_parents, elite_val_logliks))
+        paired.sort(key=lambda x: x[0][1], reverse=True)
+        elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+        paired = paired[:elite_cap]
+        elite_parents[:] = [p[0] for p in paired]
+        elite_val_logliks[:] = [p[1] for p in paired]
+    else:
+        elite_parents.sort(key=lambda x: x[1], reverse=True)
+        elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+        elite_parents[:] = elite_parents[:elite_cap]
+
+    best_explore_score: Optional[float] = None
+    if selected_results:
+        best_explore_score = float(selected_results[0]["fitness"])
+        if fitness_metric == "loglik":
+            print(
+                f"Best exploration train log-likelihood: "
+                f"{float(selected_results[0]['train_loglik']):.6f}"
+            )
+        else:
+            print(
+                f"Best exploration train accuracy: "
+                f"{float(selected_results[0]['train_acc']):.4f}"
+            )
+
+    print(
+        f"Valid explore candidates added to pool: {len(selected_results)} / {n_explore}"
+    )
+    print(f"Elite pool size after explore phase: {len(elite_parents)} (cap={elite_cap})")
+
+    if explore_dir is not None:
+        metrics: Dict[str, Any] = {
+            **_participant_metric_id(participant_id),
+            "explore_candidates_requested": n_explore,
+            "n_runtime_valid": len(selected_results),
+            "n_added_to_pool": len(selected_results),
+            "elite_pool_size_after": len(elite_parents),
+            "best_explore_fitness": best_explore_score,
+            "candidate_results": [
+                {
+                    "idx": r["idx"],
+                    "train_acc": r.get("train_acc"),
+                    "test_acc": r.get("test_acc"),
+                    "train_loglik": r.get("train_loglik"),
+                    "test_loglik": r.get("test_loglik"),
+                    "val_loglik": r.get("val_loglik"),
+                    "fitness": r.get("fitness"),
+                    "runtime_valid": r.get("runtime_valid", False),
+                }
+                for r in candidate_results
+            ],
+        }
+        if best_explore_score is not None and selected_results:
+            if fitness_metric == "loglik":
+                metrics["best_explore_train_loglik"] = selected_results[0].get("train_loglik")
+            else:
+                metrics["best_explore_train_acc"] = selected_results[0].get("train_acc")
+        (explore_dir / "metrics.json").write_text(
+            json.dumps(metrics, indent=2), encoding="utf-8"
+        )
+
+
 def run_evolution(
     seed_program_path: str,
     dataset: str = "choice13k",
@@ -5622,6 +6085,8 @@ def run_evolution(
     agent_id: Optional[int] = None,
     n_iterations: int = 5,
     n_candidates_per_iteration: int = 10,
+    fresh_n_candidates: int = 0,
+    explore_candidates: int = 0,
     model_name: str = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
     client_kwargs: Optional[Dict[str, Any]] = None,
     output_dir: Optional[str] = None,
@@ -6125,6 +6590,46 @@ def run_evolution(
             f"min_improvement={_EARLY_STOP_MIN_IMPROVEMENT:.3f}"
         )
 
+    if (
+        int(explore_candidates) > 0
+        and not global_elite_parents
+        and run_phase in ("all", "evolution")
+    ):
+        _run_pre_evolution_explore_phase(
+            explore_candidates=int(explore_candidates),
+            client=client,
+            model_name=model_name,
+            seed_code=seed_code,
+            dataset=dataset,
+            participant_id=int(participant_id),
+            train_trials=train_trials,
+            test_trials=test_trials,
+            val_trials=val_trials,
+            fitness_metric=fitness_metric,
+            n_eval_seeds=n_eval_seeds,
+            elite_parents=elite_parents,
+            elite_val_logliks=elite_val_logliks,
+            track_elite_val_loglik=track_elite_val_loglik,
+            sample_size=sample_size,
+            elite_pool_size=elite_pool_size,
+            baseline_train_eval=baseline_train_eval,
+            output_path=output_path if save_artifacts else None,
+            save_artifacts=save_artifacts,
+            max_prompt_train_trials=max_prompt_train_trials,
+            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+            llm_max_tokens=llm_max_tokens,
+            max_workers=max_workers,
+            split_seed=int(split_seed),
+            run_prompts_dir=run_prompts_dir,
+            max_parent_chars=max_parent_chars,
+            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
+            sample_size_for_warning=sample_size,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            strict_prompt_budget=strict_prompt_budget,
+            prompt_token_estimator=prompt_token_estimator,
+        )
+        last_significant_best = float(elite_parents[0][1])
+
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
     simple_iterations_dir = None
@@ -6193,7 +6698,6 @@ def run_evolution(
                 parent_train_accs = [p[6] for p in selected_parents]
         
         # Generate candidate programs (full code, not just parameters)
-        print(f"\nGenerating {n_candidates_per_iteration} candidate programs...")
         prompt_stats_path: Optional[Path] = None
         if save_artifacts:
             if iter_dir is not None:
@@ -6209,36 +6713,64 @@ def run_evolution(
             prompt_diag_dir = Path(output_dir)
         capture_gen_debug = bool(prompt_debug or prompt_debug_on_no_valid)
         gen_debug: Dict[str, Any] = {}
-        candidate_codes = generate_program_variants(
+        fresh_n = _decayed_fresh_n_for_iteration(
+            fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
+        )
+        n_normal = n_candidates_per_iteration - fresh_n
+        print(
+            f"Fresh candidate schedule (evolution): iter_idx={iteration}, "
+            f"total_iterations={n_iterations}, fresh_n={fresh_n} "
+            f"(max fresh_n_candidates={fresh_n_candidates})"
+        )
+        print(
+            f"\nGenerating {n_candidates_per_iteration} candidate programs: "
+            f"{fresh_n} fresh (seed/baseline only), {n_normal} from sampled parents..."
+        )
+        fresh_parent_train_accs = None
+        if is_cpc18_mse:
+            fresh_parent_train_accs = [
+                p[4] for p in elite_parents if p[3] == "baseline" and p[4] is not None
+            ] or [baseline_train_mse_eval["mse"] if baseline_train_mse_eval else 0.0]
+        elif fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
+            fresh_parent_train_accs = [float(baseline_train_eval["avg_loglik"])]
+        else:
+            fresh_parent_train_accs = [baseline_train_eval["accuracy"]]
+        variant_kwargs = {
+            "train_trials": train_trials,
+            "max_tokens": llm_max_tokens,
+            "dataset": dataset,
+            "max_prompt_train_trials": max_prompt_train_trials,
+            "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
+            "prompt_train_trials_seed": split_seed,
+            "fitness_metric": fitness_metric,
+            "cpc18_official_mse": False,
+            "max_workers": max_workers,
+            "run_prompts_dir": run_prompts_dir,
+            "max_parent_chars": max_parent_chars,
+            "warn_parent_truncation_ratio": warn_parent_truncation_ratio,
+            "sample_size_for_warning": sample_size,
+            "prompt_stats_path": prompt_stats_path,
+            "hard_prompt_token_cap": hard_prompt_token_cap,
+            "strict_prompt_budget": strict_prompt_budget,
+            "prompt_token_estimator": prompt_token_estimator,
+            "prompt_diagnostics_dir": prompt_diag_dir,
+            "phase": "evolution",
+            "participant_id": int(participant_id) if participant_id is not None else None,
+            "iteration": iteration_step,
+            "prompt_debug": prompt_debug,
+            "prompt_debug_exit": prompt_debug_exit,
+            "generation_debug_out": gen_debug if capture_gen_debug else None,
+        }
+        candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
             model_name=model_name,
-            parent_programs=parent_codes,
-            train_trials=train_trials,
-            n_variants=n_candidates_per_iteration,
-            max_tokens=llm_max_tokens,
-            dataset=dataset,
-            parent_train_accuracies=parent_train_accs,
-            max_prompt_train_trials=max_prompt_train_trials,
-            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
-            prompt_train_trials_seed=split_seed,
-            fitness_metric=fitness_metric,
-            cpc18_official_mse=False,
-            max_workers=max_workers,
-            run_prompts_dir=run_prompts_dir,
-            max_parent_chars=max_parent_chars,
-            warn_parent_truncation_ratio=warn_parent_truncation_ratio,
-            sample_size_for_warning=sample_size,
-            prompt_stats_path=prompt_stats_path,
-            hard_prompt_token_cap=hard_prompt_token_cap,
-            strict_prompt_budget=strict_prompt_budget,
-            prompt_token_estimator=prompt_token_estimator,
-            prompt_diagnostics_dir=prompt_diag_dir,
-            phase="evolution",
-            participant_id=int(participant_id) if participant_id is not None else None,
-            iteration=iteration_step,
-            prompt_debug=prompt_debug,
-            prompt_debug_exit=prompt_debug_exit,
-            generation_debug_out=gen_debug if capture_gen_debug else None,
+            fresh_n_candidates=fresh_n,
+            n_candidates=n_candidates_per_iteration,
+            fresh_parent_programs=[seed_code],
+            normal_parent_programs=parent_codes,
+            variant_kwargs=variant_kwargs,
+            fresh_parent_train_accuracies=fresh_parent_train_accs,
+            normal_parent_train_accuracies=parent_train_accs,
         )
         
         # Evaluate candidates
@@ -6906,33 +7438,46 @@ def run_evolution(
         best_program_id = None
         if selected_results:
             best_program_id = iter_best_program_id
+        cand_source_header = _iteration_candidate_source_header(
+            fresh_n_candidates,
+            fresh_n,
+            n_candidates_per_iteration,
+            candidate_sources,
+            iter_idx=iteration,
+            total_iters=n_iterations,
+        )
         
         if is_cpc18_mse:
+            _mse_header = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
+                "best_program_id": best_program_id,
+            }
+            _mse_header.update(cand_source_header)
             metrics = _build_iteration_metrics_json(
                 participant_id=participant_id,
-                header={
-                    "iteration": iteration_step,
-                    "n_candidates": n_candidates_per_iteration,
-                    "n_valid": len(compile_valid_results),
-                    "n_runtime_valid": len(selected_results),
-                    "best_program_id": best_program_id,
-                },
+                header=_mse_header,
                 best={
                     "best_train_fitness": best_fitness if selected_results else None,
                     "best_train_mse": selected_results[0]["train_mse"] if selected_results else None,
                     "best_test_mse": selected_results[0]["test_mse"] if selected_results else None,
                 },
-                candidate_results=[
-                    {
-                        "idx": r["idx"],
-                        "train_mse": r.get("train_mse", None),
-                        "test_mse": r.get("test_mse", None),
-                        "fitness": r.get("fitness", None),
-                        "valid": r["valid"],
-                        "runtime_valid": r.get("runtime_valid", r["valid"]),
-                    }
-                    for r in candidate_results
-                ],
+                candidate_results=_annotate_candidate_results_with_sources(
+                    [
+                        {
+                            "idx": r["idx"],
+                            "train_mse": r.get("train_mse", None),
+                            "test_mse": r.get("test_mse", None),
+                            "fitness": r.get("fitness", None),
+                            "valid": r["valid"],
+                            "runtime_valid": r.get("runtime_valid", r["valid"]),
+                        }
+                        for r in candidate_results
+                    ],
+                    candidate_sources,
+                ),
             )
         elif is_cpc18_split:
             _cpc_cand_rows = []
@@ -6959,17 +7504,21 @@ def run_evolution(
             }
             if val_trials:
                 _cpc_best["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            _cpc_header = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
+                "best_program_id": best_program_id,
+            }
+            _cpc_header.update(cand_source_header)
             metrics = _build_iteration_metrics_json(
                 participant_id=participant_id,
-                header={
-                    "iteration": iteration_step,
-                    "n_candidates": n_candidates_per_iteration,
-                    "n_valid": len(compile_valid_results),
-                    "n_runtime_valid": len(selected_results),
-                    "best_program_id": best_program_id,
-                },
+                header=_cpc_header,
                 best=_cpc_best,
-                candidate_results=_cpc_cand_rows,
+                candidate_results=_annotate_candidate_results_with_sources(
+                    _cpc_cand_rows, candidate_sources
+                ),
             )
         elif is_binary_loglik_dataset(dataset):
             _cand_rows = []
@@ -6996,42 +7545,51 @@ def run_evolution(
             }
             if val_trials:
                 _loglik_best["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            _loglik_header = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
+                "best_program_id": best_program_id,
+            }
+            _loglik_header.update(cand_source_header)
             metrics = _build_iteration_metrics_json(
                 participant_id=participant_id,
-                header={
-                    "iteration": iteration_step,
-                    "n_candidates": n_candidates_per_iteration,
-                    "n_valid": len(compile_valid_results),
-                    "n_runtime_valid": len(selected_results),
-                    "best_program_id": best_program_id,
-                },
+                header=_loglik_header,
                 best=_loglik_best,
-                candidate_results=_cand_rows,
+                candidate_results=_annotate_candidate_results_with_sources(
+                    _cand_rows, candidate_sources
+                ),
             )
         else:
+            _acc_header = {
+                "iteration": iteration_step,
+                "n_candidates": n_candidates_per_iteration,
+                "n_valid": len(compile_valid_results),
+                "n_runtime_valid": len(selected_results),
+                "best_program_id": best_program_id,
+            }
+            _acc_header.update(cand_source_header)
             metrics = _build_iteration_metrics_json(
                 participant_id=participant_id,
-                header={
-                    "iteration": iteration_step,
-                    "n_candidates": n_candidates_per_iteration,
-                    "n_valid": len(compile_valid_results),
-                    "n_runtime_valid": len(selected_results),
-                    "best_program_id": best_program_id,
-                },
+                header=_acc_header,
                 best={
                     "best_train_acc": best_fitness if selected_results else None,
                     "best_test_acc": selected_results[0]["test_acc"] if selected_results else None,
                 },
-                candidate_results=[
-                    {
-                        "idx": r["idx"],
-                        "train_acc": r["train_acc"],
-                        "test_acc": r["test_acc"],
-                        "valid": r["valid"],
-                        "runtime_valid": r.get("runtime_valid", r["valid"]),
-                    }
-                    for r in candidate_results
-                ],
+                candidate_results=_annotate_candidate_results_with_sources(
+                    [
+                        {
+                            "idx": r["idx"],
+                            "train_acc": r["train_acc"],
+                            "test_acc": r["test_acc"],
+                            "valid": r["valid"],
+                            "runtime_valid": r.get("runtime_valid", r["valid"]),
+                        }
+                        for r in candidate_results
+                    ],
+                    candidate_sources,
+                ),
             )
         if save_artifacts and iter_dir is not None:
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -7407,6 +7965,11 @@ def run_evolution(
         ref_parents, ref_vals = _evolution_elite_to_refinement_pool(
             elite_parents, elite_val_logliks
         )
+        _fresh_val_ll = (
+            float(baseline_val_eval["avg_loglik"])
+            if baseline_val_eval is not None
+            else None
+        )
         gated_test_loglik = run_loglik_refinement_phase(
             dataset=dataset,
             client=client,
@@ -7416,6 +7979,7 @@ def run_evolution(
             test_trials=test_trials,
             n_iterations=refinement_iters,
             n_candidates_per_iteration=n_candidates_per_iteration,
+            fresh_n_candidates=fresh_n_candidates,
             sample_size=sample_size,
             sample_parents=sample_parents,
             elite_pool_size=elite_pool_size,
@@ -7433,6 +7997,9 @@ def run_evolution(
             wandb_step_offset=int(n_iterations),
             evolution_elite_parents=ref_parents,
             evolution_elite_val_logliks=ref_vals,
+            fresh_parent_code=seed_code,
+            fresh_parent_train_loglik=float(baseline_train_eval["avg_loglik"]),
+            fresh_parent_val_loglik=_fresh_val_ll,
             run_prompts_dir=run_prompts_dir,
             max_parent_chars=max_parent_chars,
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
@@ -8037,6 +8604,15 @@ def main():
         help="Skip LLM prompt generation; merge base loglik prompt with dataset description only.",
     )
     parser.add_argument(
+        "--base_prompt",
+        type=str,
+        default="prompts/teh/infer_single_choice.txt",
+        help=(
+            "Path to base loglik evolution prompt template "
+            "(default: prompts/teh/infer_single_choice.txt)."
+        ),
+    )
+    parser.add_argument(
         "--seed_path",
         type=str,
         default=None,
@@ -8156,6 +8732,28 @@ def main():
         type=int,
         default=10,
         help="Number of candidate programs per iteration",
+    )
+    parser.add_argument(
+        "--fresh_n_candidates",
+        type=int,
+        default=0,
+        help=(
+            "Max fresh children per iteration from the seed/baseline parent only (independent of "
+            "the elite pool). 0 disables fresh candidates (default). When >0, count decays each "
+            "iteration: fresh_n = max(1, floor(fresh_n_candidates * (1 - iter_idx / total_iters))), "
+            "clamped to n_candidates. Evolution, refinement, and global phase each decay over "
+            "their own iteration counts."
+        ),
+    )
+    parser.add_argument(
+        "--explore_candidates",
+        type=int,
+        default=0,
+        help=(
+            "Before per-participant evolution, generate this many seed-only candidates, evaluate "
+            "them, and merge valid programs into the initial elite pool (default: 0 = disabled). "
+            "Not used with global-phase handoff."
+        ),
     )
     parser.add_argument(
         "--num_episodes",
@@ -8286,7 +8884,7 @@ def main():
     parser.add_argument(
         "--max_prompt_train_trials",
         type=int,
-        default=1_000_000,
+        default=40,
         help=(
             "Max trials serialized into each LLM prompt. With --max_prompt_trials_per_problem > 0, "
             "sample (max // per_problem) blocks at up to per_problem trials each, plus "
@@ -8297,7 +8895,7 @@ def main():
     parser.add_argument(
         "--max_prompt_trials_per_problem",
         type=int,
-        default=0,
+        default=5,
         help=(
             "Trials per sampled block in LLM prompts (0 = flat sample of --max_prompt_train_trials only). "
             "Block = Choice13k/mixed_gambles gamble signature, CPC18 (problem_id, block_id), or problem_id."
@@ -8347,7 +8945,7 @@ def main():
     parser.add_argument(
         "--prompt_debug_on_no_valid",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "On 'No runtime-valid programs' in evolution, write prompt_debug/ artifacts "
             "(default: True). Does not exit unless --prompt_debug_exit is also set."
@@ -8513,6 +9111,15 @@ def main():
         return
     if args.n_candidates < 1:
         print("Error: --n_candidates must be >= 1.")
+        return
+    if args.fresh_n_candidates < 0 or args.fresh_n_candidates > args.n_candidates:
+        print(
+            "Error: --fresh_n_candidates must satisfy 0 <= fresh_n_candidates <= n_candidates "
+            f"(got fresh_n_candidates={args.fresh_n_candidates}, n_candidates={args.n_candidates})."
+        )
+        return
+    if args.explore_candidates < 0:
+        print("Error: --explore_candidates must be >= 0.")
         return
     if args.early_stop_iters is not None and int(args.early_stop_iters) < -1:
         print("Error: --early_stop_iters must be -1 (disabled) or >= 0.")
@@ -8748,6 +9355,7 @@ def main():
         client=teh_client,
         model_name=args.model_name,
         use_llm=not args.no_llm_prompt,
+        base_prompt_path=args.base_prompt,
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
         filter_mixed_gambles=mixed_gambles_gain_loss_only,
@@ -8772,6 +9380,7 @@ def main():
             seed_program_path=seed_program_path,
             n_iterations=args.global_iters,
             n_candidates_per_iteration=args.n_candidates,
+            fresh_n_candidates=args.fresh_n_candidates,
             sample_size=args.sample_size,
             sample_parents=args.sample_parents,
             elite_pool_size=args.elite_pool_size,
@@ -8830,6 +9439,7 @@ def main():
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 n_iterations=args.refinement_iters,
                 n_candidates_per_iteration=args.n_candidates,
+                fresh_n_candidates=args.fresh_n_candidates,
                 sample_size=args.sample_size,
                 sample_parents=args.sample_parents,
                 elite_pool_size=args.elite_pool_size,
@@ -8921,6 +9531,8 @@ def main():
                 agent_id=getattr(args, "agent_id", None),
                 n_iterations=args.n_iterations,
                 n_candidates_per_iteration=args.n_candidates,
+                fresh_n_candidates=args.fresh_n_candidates,
+                explore_candidates=args.explore_candidates,
                 model_name=args.model_name,
                 client_kwargs=client_kwargs if client_kwargs else None,
                 output_dir=base_run_dir,
@@ -9004,6 +9616,8 @@ def main():
                 agent_id=getattr(args, "agent_id", None),
                 n_iterations=args.n_iterations,
                 n_candidates_per_iteration=args.n_candidates,
+                fresh_n_candidates=args.fresh_n_candidates,
+                explore_candidates=args.explore_candidates,
                 model_name=args.model_name,
                 client_kwargs=client_kwargs if client_kwargs else None,
                 output_dir=base_run_dir,
@@ -9398,6 +10012,8 @@ def main():
                         agent_id=agent_id,
                         n_iterations=args.n_iterations,
                         n_candidates_per_iteration=args.n_candidates,
+                        fresh_n_candidates=args.fresh_n_candidates,
+                        explore_candidates=args.explore_candidates,
                         model_name=args.model_name,
                         client_kwargs=client_kwargs if client_kwargs else None,
                         output_dir=participant_output_dir,
@@ -9664,6 +10280,8 @@ def main():
                 agent_id=getattr(args, "agent_id", None),
                 n_iterations=args.n_iterations,
                 n_candidates_per_iteration=args.n_candidates,
+                fresh_n_candidates=args.fresh_n_candidates,
+                explore_candidates=args.explore_candidates,
                 model_name=args.model_name,
                 client_kwargs=client_kwargs if client_kwargs else None,
                 output_dir=participant_output_dir,
