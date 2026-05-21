@@ -16,6 +16,7 @@ comments for key naming). Config dataset keys:
     1peterson2021using:          # psych_dataset_split train
       MLE: <run_dir_or_csv>
       prospect_theory: <run_dir_or_csv>
+      openevolve: <run_dir_or_csv>
       Centaur: <run_dir_or_csv>
     1peterson2021using_test:     # psych_dataset_split test
       ...
@@ -28,8 +29,19 @@ If neither ``{alias}_test`` nor ``mixed_gambles`` applies, split defaults to tra
 2plonsky2018when.
 
 Output columns (when baselines are loaded from config):
-  participant_id, BIR, MLE, prospect_theory, Centaur, <teh_run_1>, ...
+  participant_id, BIR, MLE, prospect_theory, openevolve, Centaur, <teh_run_1>, ...
 Footer rows: Avg (per-column mean), num_best (per-column count of tied-best test_loglik).
+
+BIR is loaded from ``analysis/data/baseline_methods/bir/{config_key}.csv`` when
+present (metadata must match ``--split_ratio`` / ``--split_seed``). Otherwise it is
+computed on train trials with a progress bar and saved for the next run. Psych-101
+train and test use separate cache files (e.g. ``1peterson2021using`` vs
+``1peterson2021using_test``).
+
+Baseline columns always use ``test_loglik`` from each method's config path. The gated
+output CSV uses ``gated_test_loglik`` for TEH runs (and Centaur when present); other
+baselines keep ``test_loglik`` because those runs have no gated column. Log-likelihood
+Log-likelihood values are written with 2 decimal places.
 
 Without config entries, legacy layout is participant_id, BIR, Centaur, <teh_run>, ...
 with Avg and Better / Similar / Worse vs Centaur footers.
@@ -41,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import statistics
 import sys
@@ -50,17 +63,27 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    def tqdm(iterable: Iterable[Any], **kwargs: Any) -> Iterable[Any]:
+        return iterable
+
 _REPO_ROOT_FOR_IMPORT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT_FOR_IMPORT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT_FOR_IMPORT))
 
+from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
     PSYCH101_LEGACY_ALIASES,
+    get_psych101_binary_experiment,
     normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
+    split_psych_experiment,
 )
+from analysis.code.choices13k.bir import compute_bir
 from utils.teh.teh_datasets import PARTICIPANT_DATASETS, is_mixed_gambles_dataset
 
 # Legacy compare.py dataset names -> TEH Psych-101 aliases (train split).
@@ -75,22 +98,29 @@ _COMPARE_DATASET_CHOICES = sorted(
 
 _TEST_LOGLIK = "test_loglik"
 _GATED_LOGLIK = "gated_test_loglik"
-_BASELINE_METHODS = ("MLE", "prospect_theory", "Centaur")
+_LOGLIK_NDIGITS = 2
+_BASELINE_METHODS = ("MLE", "prospect_theory", "openevolve", "Centaur")
 _DEFAULT_BASELINE_CONFIG = "analysis/data/baseline_methods/config.yaml"
+_BIR_CACHE_SUBDIR = "bir"
+_BIR_CACHE_CSV_FIELDS = (
+    "participant_id",
+    "BIR",
+    "num_problem_groups",
+    "num_inconsistent_problem_groups",
+)
 
 
 @dataclass(frozen=True)
 class _DatasetDefaults:
     output_csv: Path
-    bir_csv: Optional[Path]
 
 
-# Default output + BIR for 1peterson2021using --psych_dataset_split train only.
-_PETERSON_TRAIN_BIR_CSV = (
-    "generated_outputs/choice13k/te_aggregate/run_260513_234734/analysis/"
-    "behavioral_inconsistency_rate.csv"
-)
+# Default output for 1peterson2021using --psych_dataset_split train only.
 _PETERSON_TRAIN_OUTPUT_CSV = "analysis/data/utils/loglik_compare_choice13k.csv"
+
+# Match Psych-101 baseline defaults (MLE / prospect_theory / openevolve / Centaur).
+_DEFAULT_SPLIT_RATIO = 0.6
+_DEFAULT_SPLIT_SEED = 0
 
 
 def _repo_root() -> Path:
@@ -127,12 +157,6 @@ def _default_output_csv(repo: Path, dataset: str, psych_dataset_split: str) -> P
     split = normalize_psych_dataset_split(psych_dataset_split)
     alias = normalize_psych101_dataset_alias(dataset)
     return utils_dir / f"loglik_compare_{alias}_{split}.csv"
-
-
-def _hardcoded_bir_csv(repo: Path, dataset: str, psych_dataset_split: str) -> Optional[Path]:
-    if _is_peterson_train(dataset, psych_dataset_split):
-        return repo / _PETERSON_TRAIN_BIR_CSV
-    return None
 
 
 def _config_dataset_key(dataset: str, psych_dataset_split: str) -> str:
@@ -191,10 +215,7 @@ def _dataset_defaults(
             f"or legacy alias in {sorted(_COMPARE_LEGACY_DATASETS)}, got {dataset!r}"
         )
     split = _effective_psych_dataset_split(alias, psych_dataset_split)
-    return _DatasetDefaults(
-        output_csv=_default_output_csv(repo, alias, split),
-        bir_csv=_hardcoded_bir_csv(repo, alias, split),
-    )
+    return _DatasetDefaults(output_csv=_default_output_csv(repo, alias, split))
 
 
 def _resolve_loglik_csv(path: Path) -> Path:
@@ -227,17 +248,21 @@ def _csv_has_column(csv_path: Path, column: str) -> bool:
     return fields is not None and column in fields
 
 
-def _read_centaur_participant_ids(centaur_path: Path) -> List[int]:
-    """All participant_id values from the Centaur CSV, in file order (deduped)."""
+def _format_loglik(value: float) -> str:
+    return f"{value:.{_LOGLIK_NDIGITS}f}"
+
+
+def _read_participant_ids_from_csv(csv_path: Path) -> List[int]:
+    """All participant_id values from a loglik CSV, in file order (deduped)."""
     ids: List[int] = []
     seen: set[int] = set()
-    with open(centaur_path, newline="", encoding="utf-8") as f:
+    with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
-            raise ValueError(f"{centaur_path}: empty CSV")
+            raise ValueError(f"{csv_path}: empty CSV")
         if "participant_id" not in reader.fieldnames:
             raise ValueError(
-                f"{centaur_path}: missing participant_id column (got {reader.fieldnames})"
+                f"{csv_path}: missing participant_id column (got {reader.fieldnames})"
             )
         for row in reader:
             raw = row.get("participant_id")
@@ -249,8 +274,13 @@ def _read_centaur_participant_ids(centaur_path: Path) -> List[int]:
             seen.add(pid)
             ids.append(pid)
     if not ids:
-        raise ValueError(f"{centaur_path}: no participant_id rows found")
+        raise ValueError(f"{csv_path}: no participant_id rows found")
     return ids
+
+
+def _read_centaur_participant_ids(centaur_path: Path) -> List[int]:
+    """Backward-compatible alias for participant roster from Centaur CSV."""
+    return _read_participant_ids_from_csv(centaur_path)
 
 
 def _participant_ids_from_experiment_csvs(csv_paths: Sequence[Path]) -> List[int]:
@@ -301,70 +331,247 @@ def _read_loglik_csv(csv_path: Path, column: str, *, required: bool) -> Dict[int
     return out
 
 
-def _read_bir_csv_file(bir_csv: Path) -> Dict[int, float]:
-    """Load BIR keyed by participant_ordinal from behavioral_inconsistency_rate.csv."""
-    if not bir_csv.is_file():
-        return {}
-    out: Dict[int, float] = {}
-    with open(bir_csv, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            return out
-        if "participant_ordinal" not in reader.fieldnames:
-            return out
-        bir_field = "BIR" if "BIR" in reader.fieldnames else (
-            "behavioral_inconsistency_rate" if "behavioral_inconsistency_rate" in reader.fieldnames else None
+def _train_trials_for_participant(
+    dataset: str,
+    participant_id: int,
+    *,
+    psych_dataset_split: str,
+    split_ratio: float,
+    split_seed: int,
+    local_dataset: Optional[str] = None,
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    filter_mixed_gambles: bool = False,
+) -> List[Dict[str, Any]]:
+    """Train trials for one participant (same split logic as TEH / Psych-101 baselines)."""
+    if is_mixed_gambles_dataset(dataset):
+        train_trials, _, _, _ = load_mixed_gambles_trials(
+            participant_id,
+            csv_path=mixed_gambles_csv,
+            filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
         )
-        if bir_field is None:
-            return out
+        return train_trials
+    alias = normalize_psych101_dataset_alias(dataset)
+    exp = get_psych101_binary_experiment(
+        alias,
+        int(participant_id),
+        split=psych_dataset_split,
+        local_dataset=local_dataset,
+    )
+    train_trials, _, _, _ = split_psych_experiment(
+        exp, split_ratio=split_ratio, split_seed=split_seed
+    )
+    return train_trials
+
+
+def _bir_cache_dir(repo: Path) -> Path:
+    return repo / "analysis" / "data" / "baseline_methods" / _BIR_CACHE_SUBDIR
+
+
+def _bir_cache_csv_path(repo: Path, dataset: str, psych_dataset_split: str) -> Path:
+    key = _config_dataset_key(dataset, psych_dataset_split)
+    return _bir_cache_dir(repo) / f"{key}.csv"
+
+
+def _bir_cache_meta_path(cache_csv: Path) -> Path:
+    return cache_csv.with_suffix(".meta.json")
+
+
+def _bir_cache_meta(
+    *,
+    dataset: str,
+    psych_dataset_split: str,
+    split_ratio: float,
+    split_seed: int,
+    mixed_gambles_csv: str,
+    filter_mixed_gambles: bool,
+    local_dataset: Optional[str],
+) -> Dict[str, Any]:
+    alias = normalize_psych101_dataset_alias(dataset) if not is_mixed_gambles_dataset(dataset) else dataset
+    return {
+        "dataset": alias,
+        "psych_dataset_split": _effective_psych_dataset_split(dataset, psych_dataset_split),
+        "config_key": _config_dataset_key(dataset, psych_dataset_split),
+        "split_ratio": float(split_ratio),
+        "split_seed": int(split_seed),
+        "mixed_gambles_csv": str(mixed_gambles_csv),
+        "filter_mixed_gambles": bool(filter_mixed_gambles),
+        "local_dataset": local_dataset,
+    }
+
+
+def _bir_meta_matches(saved: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    keys = (
+        "dataset",
+        "psych_dataset_split",
+        "config_key",
+        "split_ratio",
+        "split_seed",
+        "mixed_gambles_csv",
+        "filter_mixed_gambles",
+        "local_dataset",
+    )
+    for k in keys:
+        if saved.get(k) != expected.get(k):
+            return False
+    return True
+
+
+def _read_bir_cache_rows(cache_csv: Path) -> Dict[int, Dict[str, Any]]:
+    if not cache_csv.is_file():
+        return {}
+    rows: Dict[int, Dict[str, Any]] = {}
+    with open(cache_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or "participant_id" not in reader.fieldnames:
+            return {}
         for row in reader:
-            o = row.get("participant_ordinal")
-            if o is None or str(o).strip() == "":
+            pid_raw = row.get("participant_id")
+            bir_raw = row.get("BIR")
+            if pid_raw is None or bir_raw is None or str(pid_raw).strip() == "" or str(bir_raw).strip() == "":
                 continue
-            b = row.get(bir_field)
-            if b is None or str(b).strip() == "":
-                continue
-            out[int(float(o))] = float(b)
-    return out
+            pid = int(float(pid_raw))
+            rows[pid] = {
+                "participant_id": pid,
+                "BIR": float(bir_raw),
+                "num_problem_groups": int(float(row.get("num_problem_groups") or 0)),
+                "num_inconsistent_problem_groups": int(
+                    float(row.get("num_inconsistent_problem_groups") or 0)
+                ),
+            }
+    return rows
 
 
-def _resolve_bir_csv(path: Path) -> Path:
-    """Path to behavioral_inconsistency_rate.csv: file as-is, or run dir / analysis / csv."""
-    path = path.expanduser().resolve()
-    if path.is_file():
-        return path
-    return path / "analysis" / "behavioral_inconsistency_rate.csv"
+def _write_bir_cache(
+    cache_csv: Path,
+    meta_path: Path,
+    *,
+    rows_by_pid: Dict[int, Dict[str, Any]],
+    meta: Dict[str, Any],
+) -> None:
+    cache_csv.parent.mkdir(parents=True, exist_ok=True)
+    out_rows: List[Dict[str, Any]] = []
+    for pid in sorted(rows_by_pid):
+        r = rows_by_pid[pid]
+        out_rows.append(
+            {
+                "participant_id": str(int(r["participant_id"])),
+                "BIR": f"{float(r['BIR']):.4f}",
+                "num_problem_groups": str(int(r.get("num_problem_groups", 0))),
+                "num_inconsistent_problem_groups": str(
+                    int(r.get("num_inconsistent_problem_groups", 0))
+                ),
+            }
+        )
+    with open(cache_csv, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(_BIR_CACHE_CSV_FIELDS))
+        w.writeheader()
+        w.writerows(out_rows)
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
-def _read_bir_map(run_or_csv: Path) -> Dict[int, float]:
-    """Load BIR from analysis/behavioral_inconsistency_rate.csv under run (or next to loglik csv)."""
-    base = run_or_csv if run_or_csv.is_dir() else run_or_csv.parent
-    return _read_bir_csv_file(base / "analysis" / "behavioral_inconsistency_rate.csv")
+def _bir_for_participant(
+    dataset: str,
+    participant_id: int,
+    *,
+    psych_dataset_split: str,
+    split_ratio: float,
+    split_seed: int,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+    filter_mixed_gambles: bool,
+) -> Optional[Dict[str, Any]]:
+    try:
+        train_trials = _train_trials_for_participant(
+            dataset,
+            int(participant_id),
+            psych_dataset_split=psych_dataset_split,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+            filter_mixed_gambles=filter_mixed_gambles,
+        )
+        bir_val, n_groups, n_incon = compute_bir(train_trials)
+        return {
+            "participant_id": int(participant_id),
+            "BIR": float(bir_val),
+            "num_problem_groups": int(n_groups),
+            "num_inconsistent_problem_groups": int(n_incon),
+        }
+    except Exception:
+        return None
 
 
-def _merge_bir_from_summaries(run_paths: Sequence[Path]) -> Dict[int, float]:
-    """Fallback: participants_summary.csv behavioral_inconsistency_rate."""
-    for base in run_paths:
-        root = base if base.is_dir() else base.parent
-        summary = root / "participants_summary.csv"
-        if not summary.is_file():
-            continue
-        out: Dict[int, float] = {}
-        with open(summary, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            if not reader.fieldnames:
-                continue
-            if "participant_id" not in reader.fieldnames or "behavioral_inconsistency_rate" not in reader.fieldnames:
-                continue
-            for row in reader:
-                pid = row.get("participant_id")
-                br = row.get("behavioral_inconsistency_rate")
-                if pid is None or br is None or str(pid).strip() == "" or str(br).strip() == "":
-                    continue
-                out[int(float(pid))] = float(br)
-        if out:
-            return out
-    return {}
+def _load_or_compute_bir_map(
+    repo: Path,
+    *,
+    dataset: str,
+    psych_dataset_split: str,
+    participant_ids: Sequence[int],
+    split_ratio: float,
+    split_seed: int,
+    local_dataset: Optional[str] = None,
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    filter_mixed_gambles: bool = False,
+    recompute: bool = False,
+) -> Dict[int, float]:
+    """
+    Load cached BIR for this dataset config key, or compute missing participants.
+
+    Cache lives under analysis/data/baseline_methods/bir/{config_key}.csv with a
+    sidecar .meta.json (split_ratio, split_seed, psych_dataset_split, etc.).
+    """
+    cache_csv = _bir_cache_csv_path(repo, dataset, psych_dataset_split)
+    meta_path = _bir_cache_meta_path(cache_csv)
+    meta = _bir_cache_meta(
+        dataset=dataset,
+        psych_dataset_split=psych_dataset_split,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        mixed_gambles_csv=mixed_gambles_csv,
+        filter_mixed_gambles=filter_mixed_gambles,
+        local_dataset=local_dataset,
+    )
+
+    rows_by_pid: Dict[int, Dict[str, Any]] = {}
+    if not recompute and cache_csv.is_file() and meta_path.is_file():
+        try:
+            saved_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            saved_meta = {}
+        if _bir_meta_matches(saved_meta, meta):
+            rows_by_pid = _read_bir_cache_rows(cache_csv)
+
+    roster = sorted({int(p) for p in participant_ids})
+    missing = [pid for pid in roster if pid not in rows_by_pid]
+
+    if missing:
+        label = meta["config_key"]
+        print(
+            f"Computing BIR for {len(missing)} participant(s) "
+            f"({label}, split_ratio={split_ratio}, split_seed={split_seed})..."
+        )
+        for pid in tqdm(missing, desc=f"BIR {label}", unit="participant"):
+            row = _bir_for_participant(
+                dataset,
+                pid,
+                psych_dataset_split=psych_dataset_split,
+                split_ratio=split_ratio,
+                split_seed=split_seed,
+                local_dataset=local_dataset,
+                mixed_gambles_csv=mixed_gambles_csv,
+                filter_mixed_gambles=filter_mixed_gambles,
+            )
+            if row is not None:
+                rows_by_pid[pid] = row
+        _write_bir_cache(cache_csv, meta_path, rows_by_pid=rows_by_pid, meta=meta)
+        print(f"Wrote BIR cache ({len(rows_by_pid)} participants) -> {cache_csv}")
+    elif rows_by_pid:
+        print(f"Loaded BIR cache ({len(rows_by_pid)} participants) from {cache_csv}")
+
+    return {pid: float(rows_by_pid[pid]["BIR"]) for pid in roster if pid in rows_by_pid}
 
 
 def _finite_mean(values: Iterable[float], ndigits: int = 2) -> str:
@@ -411,13 +618,13 @@ def _any_csv_has_gated(
     return any(_csv_has_column(p, _GATED_LOGLIK) for p in experiment_csvs)
 
 
-def _centaur_scores_for_gated_table(
-    centaur_test: Dict[int, float],
-    centaur_gated: Dict[int, float],
+def _scores_for_gated_table(
+    test_scores: Dict[int, float],
+    gated_scores: Dict[int, float],
 ) -> Dict[int, float]:
-    """Centaur baseline for gated comparison: gated when available, else test_loglik."""
-    merged = dict(centaur_test)
-    merged.update(centaur_gated)
+    """Baseline/TEH scores for gated table: gated when available, else test_loglik."""
+    merged = dict(test_scores)
+    merged.update(gated_scores)
     return merged
 
 
@@ -459,7 +666,7 @@ def _write_baseline_comparison_csv(
     teh_runs: Sequence[Tuple[str, Dict[int, float]]],
     bir: Dict[int, float],
 ) -> Tuple[int, Dict[str, str], Dict[str, int]]:
-    """Write MLE / prospect_theory / Centaur / TEH table with Avg and num_best rows."""
+    """Write MLE / prospect_theory / openevolve / Centaur / TEH table with Avg and num_best rows."""
     ordered = list(participant_ids)
     score_columns = list(baselines) + list(teh_runs)
     fieldnames = ["participant_id", "BIR"] + [label for label, _ in score_columns]
@@ -472,14 +679,16 @@ def _write_baseline_comparison_csv(
             "BIR": f"{bir[pid]:.2f}" if pid in bir else "",
         }
         for label, m in score_columns:
-            row[label] = f"{m[pid]:.2f}" if pid in m else ""
+            row[label] = _format_loglik(m[pid]) if pid in m else ""
         rows.append(row)
 
     avg_row: Dict[str, str] = {"participant_id": "Avg", "BIR": ""}
     if bir:
         avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir])
     for label, m in score_columns:
-        avg_row[label] = _finite_mean([m[pid] for pid in ordered if pid in m])
+        avg_row[label] = _finite_mean(
+            [m[pid] for pid in ordered if pid in m], ndigits=_LOGLIK_NDIGITS
+        )
     rows.append(avg_row)
 
     best_counts = _num_best_counts(ordered, score_columns)
@@ -517,18 +726,22 @@ def _write_legacy_comparison_csv(
         row: Dict[str, str] = {
             "participant_id": str(pid),
             "BIR": f"{bir[pid]:.2f}" if pid in bir else "",
-            "Centaur": f"{centaur[pid]:.2f}" if pid in centaur else "",
+            "Centaur": _format_loglik(centaur[pid]) if pid in centaur else "",
         }
         for label, m in experiments:
-            row[label] = f"{m[pid]:.2f}" if pid in m else ""
+            row[label] = _format_loglik(m[pid]) if pid in m else ""
         rows.append(row)
 
     avg_row: Dict[str, str] = {"participant_id": "Avg", "BIR": "", "Centaur": ""}
     if bir:
         avg_row["BIR"] = _finite_mean([bir[pid] for pid in ordered if pid in bir])
-    avg_row["Centaur"] = _finite_mean([centaur[pid] for pid in ordered if pid in centaur])
+    avg_row["Centaur"] = _finite_mean(
+        [centaur[pid] for pid in ordered if pid in centaur], ndigits=_LOGLIK_NDIGITS
+    )
     for label, m in experiments:
-        avg_row[label] = _finite_mean([m[pid] for pid in ordered if pid in m])
+        avg_row[label] = _finite_mean(
+            [m[pid] for pid in ordered if pid in m], ndigits=_LOGLIK_NDIGITS
+        )
     rows.append(avg_row)
 
     th = float(similar_threshold)
@@ -550,40 +763,14 @@ def _write_legacy_comparison_csv(
     return len(ordered)
 
 
-def _collect_bir(
-    repo: Path,
-    bir_arg: Optional[Path],
-    ds_defaults_bir: Optional[Path],
-    run_dirs: Sequence[Path],
-    loglik_csvs: Sequence[Path],
-) -> Dict[int, float]:
-    bir: Dict[int, float] = {}
-    if bir_arg is not None:
-        bir_path = _resolve_bir_csv(bir_arg)
-        if bir_path.is_file():
-            bir = _read_bir_csv_file(bir_path)
-    if not bir and ds_defaults_bir is not None:
-        bir_path = _resolve_bir_csv(ds_defaults_bir)
-        if bir_path.is_file():
-            bir = _read_bir_csv_file(bir_path)
-    if not bir:
-        for run_dir in run_dirs:
-            bir = _read_bir_map(run_dir)
-            if bir:
-                break
-    if not bir:
-        bir = _merge_bir_from_summaries(run_dirs)
-    if not bir:
-        bir = _merge_bir_from_summaries([p.parent if p.is_file() else p for p in loglik_csvs])
-    return bir
-
-
 def _print_run_summary(
     *,
     dataset_label: str,
     config_key: str,
     baseline_paths: Dict[str, Path],
+    baseline_columns: Dict[str, str],
     teh_paths: Sequence[Path],
+    teh_columns: Dict[str, str],
     n_participants: int,
     avg_row: Dict[str, str],
     best_counts: Dict[str, int],
@@ -592,16 +779,22 @@ def _print_run_summary(
 ) -> None:
     print(f"dataset={dataset_label} (config key: {config_key})")
     if baseline_paths:
-        print("Loaded baselines:")
+        print(f"Loaded baselines (column: {score_kind}; MLE/PT/openevolve fall back to "
+              f"{_TEST_LOGLIK} in gated output when {_GATED_LOGLIK} is absent):")
         for method in _BASELINE_METHODS:
             if method in baseline_paths:
-                print(f"  {method}: {baseline_paths[method]}")
+                col = baseline_columns.get(method, score_kind)
+                csv_path = _resolve_loglik_csv(baseline_paths[method])
+                print(f"  {method}: {csv_path} [{col}]")
     else:
         print("Loaded baselines: (none from config)")
     if teh_paths:
-        print("Loaded TEH runs:")
+        print(f"Loaded TEH runs (column: {score_kind}):")
         for p in teh_paths:
-            print(f"  {p}")
+            label = p.name if p.is_dir() else p.parent.name
+            col = teh_columns.get(label, score_kind)
+            csv_path = _resolve_loglik_csv(p)
+            print(f"  {label}: {csv_path} [{col}]")
     else:
         print("Loaded TEH runs: (none)")
     print(f"Participants compared: {n_participants}")
@@ -643,7 +836,10 @@ def main() -> None:
         "--baseline_config",
         type=Path,
         default=Path(_DEFAULT_BASELINE_CONFIG),
-        help=f"YAML with datasets -> MLE / prospect_theory / Centaur paths (default: {_DEFAULT_BASELINE_CONFIG}).",
+        help=(
+            f"YAML with datasets -> MLE / prospect_theory / openevolve / Centaur paths "
+            f"(default: {_DEFAULT_BASELINE_CONFIG})."
+        ),
     )
     p.add_argument(
         "--experiment_paths",
@@ -677,10 +873,38 @@ def main() -> None:
         help="Gated output CSV (default: <output stem>_gated.csv). Legacy layout only.",
     )
     p.add_argument(
-        "--bir_csv",
-        type=Path,
+        "--split_ratio",
+        type=float,
+        default=_DEFAULT_SPLIT_RATIO,
+        help="Within-participant train fraction for BIR (default matches Psych-101 baselines).",
+    )
+    p.add_argument(
+        "--split_seed",
+        type=int,
+        default=_DEFAULT_SPLIT_SEED,
+        help="RNG seed for within-participant train/val/test split used in BIR.",
+    )
+    p.add_argument(
+        "--local_dataset",
+        type=str,
         default=None,
-        help="BIR CSV or run dir; else default te_aggregate path or baseline/TEH summaries.",
+        help="Optional local HuggingFace dataset path for Psych-101 loading.",
+    )
+    p.add_argument(
+        "--mixed_gambles_csv",
+        type=str,
+        default=DEFAULT_CSV_PATH,
+        help="CSV path for mixed_gambles BIR (default: data_modules.mixed_gambles.DEFAULT_CSV_PATH).",
+    )
+    p.add_argument(
+        "--filter_mixed_gambles",
+        action="store_true",
+        help="For mixed_gambles only: restrict BIR to gain_loss trials.",
+    )
+    p.add_argument(
+        "--recompute_bir",
+        action="store_true",
+        help="Ignore cached BIR and recompute all participants in the comparison roster.",
     )
     args = p.parse_args()
 
@@ -714,7 +938,8 @@ def main() -> None:
     output_arg = Path(args.output).expanduser() if args.output is not None else ds_defaults.output_csv
     output_arg = output_arg.resolve() if output_arg.is_absolute() else (repo / output_arg).resolve()
 
-    bir_arg = Path(args.bir_csv).expanduser() if args.bir_csv is not None else None
+    if not (0.0 < args.split_ratio < 1.0):
+        raise SystemExit(f"--split_ratio must be in (0, 1), got {args.split_ratio}.")
 
     teh_inputs = list(args.experiment_paths)
     exp_resolved: List[Path] = []
@@ -730,6 +955,7 @@ def main() -> None:
 
     all_loglik_csvs: List[Path] = list(exp_resolved)
     baseline_scores: List[Tuple[str, Dict[int, float]]] = []
+    baseline_columns: Dict[str, str] = {}
     for method in _BASELINE_METHODS:
         scores: Dict[int, float] = {}
         if method in baseline_paths:
@@ -737,35 +963,36 @@ def main() -> None:
             csv_path = _resolve_loglik_csv(run_path)
             all_loglik_csvs.append(csv_path)
             scores = _load_scores_from_run(run_path, _TEST_LOGLIK, required=False)
+            baseline_columns[method] = _TEST_LOGLIK
         baseline_scores.append((method, scores))
 
     centaur_path: Optional[Path] = None
     if "Centaur" in baseline_paths:
         centaur_path = _resolve_loglik_csv(baseline_paths["Centaur"])
 
-    roster_csvs = [centaur_path] if centaur_path is not None else []
-    roster_csvs.extend(all_loglik_csvs)
-    if centaur_path is not None:
-        participant_ids = _read_centaur_participant_ids(centaur_path)
+    roster_csvs = list(all_loglik_csvs)
+    if "MLE" in baseline_paths:
+        participant_ids = _read_participant_ids_from_csv(
+            _resolve_loglik_csv(baseline_paths["MLE"])
+        )
+    elif centaur_path is not None:
+        participant_ids = _read_participant_ids_from_csv(centaur_path)
     elif roster_csvs:
         participant_ids = _participant_ids_from_experiment_csvs(roster_csvs)
     else:
         raise SystemExit("No participant_id rows found (add baselines or TEH runs).")
 
-    run_dirs: List[Path] = []
-    for method, path in baseline_paths.items():
-        run_dirs.append(path if path.is_dir() else path.parent)
-    run_dirs.extend(
-        Path(ep).expanduser().resolve() if Path(ep).is_dir() else Path(ep).expanduser().resolve().parent
-        for ep in teh_inputs
-    )
-
-    bir = _collect_bir(
+    bir = _load_or_compute_bir_map(
         repo,
-        bir_arg,
-        ds_defaults.bir_csv,
-        run_dirs,
-        all_loglik_csvs,
+        dataset=dataset,
+        psych_dataset_split=psych_split,
+        participant_ids=participant_ids,
+        split_ratio=float(args.split_ratio),
+        split_seed=int(args.split_seed),
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=str(args.mixed_gambles_csv),
+        filter_mixed_gambles=bool(args.filter_mixed_gambles),
+        recompute=bool(args.recompute_bir),
     )
 
     ds_label = (
@@ -781,6 +1008,7 @@ def main() -> None:
                 (label, _read_loglik_csv(csv_path, _TEST_LOGLIK, required=True))
             )
 
+        teh_columns_test = {label: _TEST_LOGLIK for label, _ in teh_test}
         n_test, avg_row, best_counts = _write_baseline_comparison_csv(
             out_path=output_arg,
             participant_ids=participant_ids,
@@ -792,7 +1020,9 @@ def main() -> None:
             dataset_label=ds_label,
             config_key=config_key,
             baseline_paths=baseline_paths,
+            baseline_columns=baseline_columns,
             teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
+            teh_columns=teh_columns_test,
             n_participants=n_test,
             avg_row=avg_row,
             best_counts=best_counts,
@@ -813,24 +1043,47 @@ def main() -> None:
         )
         gated_out = gated_out.resolve() if gated_out.is_absolute() else (repo / gated_out).resolve()
 
+        test_by_method = dict(baseline_scores)
         gated_baselines: List[Tuple[str, Dict[int, float]]] = []
-        centaur_test = dict(baseline_scores[-1][1]) if baseline_scores else {}
         for method in _BASELINE_METHODS:
             scores_g: Dict[int, float] = {}
             if method in baseline_paths:
+                test_scores = test_by_method.get(method, {})
                 if method == "Centaur" and centaur_path is not None:
                     gated = _read_loglik_csv(centaur_path, _GATED_LOGLIK, required=False)
-                    scores_g = _centaur_scores_for_gated_table(centaur_test, gated)
                 else:
-                    scores_g = _load_scores_from_run(
+                    gated = _load_scores_from_run(
                         baseline_paths[method], _GATED_LOGLIK, required=False
                     )
+                scores_g = _scores_for_gated_table(test_scores, gated)
             gated_baselines.append((method, scores_g))
 
+        teh_test_by_label = dict(teh_test)
         teh_gated: List[Tuple[str, Dict[int, float]]] = []
+        teh_columns_gated: Dict[str, str] = {}
         for label, csv_path in zip(run_labels, exp_resolved):
-            teh_gated.append(
-                (label, _read_loglik_csv(csv_path, _GATED_LOGLIK, required=False))
+            test_scores = teh_test_by_label.get(label, {})
+            gated = _read_loglik_csv(csv_path, _GATED_LOGLIK, required=False)
+            teh_gated.append((label, _scores_for_gated_table(test_scores, gated)))
+            if gated:
+                teh_columns_gated[label] = _GATED_LOGLIK
+            elif test_scores:
+                teh_columns_gated[label] = f"{_GATED_LOGLIK} (fallback {_TEST_LOGLIK})"
+            else:
+                teh_columns_gated[label] = _GATED_LOGLIK
+
+        gated_baseline_columns = dict(baseline_columns)
+        for method in _BASELINE_METHODS:
+            if method not in baseline_paths:
+                continue
+            if method == "Centaur" and centaur_path is not None:
+                has_gated = _csv_has_column(centaur_path, _GATED_LOGLIK)
+            else:
+                has_gated = _csv_has_column(
+                    _resolve_loglik_csv(baseline_paths[method]), _GATED_LOGLIK
+                )
+            gated_baseline_columns[method] = (
+                _GATED_LOGLIK if has_gated else f"{_TEST_LOGLIK} (no {_GATED_LOGLIK} in run)"
             )
 
         n_gated, avg_g, best_g = _write_baseline_comparison_csv(
@@ -845,7 +1098,9 @@ def main() -> None:
             dataset_label=ds_label,
             config_key=config_key,
             baseline_paths=baseline_paths,
+            baseline_columns=gated_baseline_columns,
             teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
+            teh_columns=teh_columns_gated,
             n_participants=n_gated,
             avg_row=avg_g,
             best_counts=best_g,
@@ -891,7 +1146,7 @@ def main() -> None:
     centaur_gated: Dict[int, float] = {}
     if centaur_path is not None:
         centaur_gated = _read_loglik_csv(centaur_path, _GATED_LOGLIK, required=False)
-    centaur_for_gated = _centaur_scores_for_gated_table(centaur_scores, centaur_gated)
+    centaur_for_gated = _scores_for_gated_table(centaur_scores, centaur_gated)
     experiments_gated: List[Tuple[str, Dict[int, float]]] = []
     for label, csv_path in zip(run_labels, exp_resolved):
         experiments_gated.append(
