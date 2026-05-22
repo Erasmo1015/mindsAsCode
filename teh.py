@@ -1060,6 +1060,7 @@ def run_global_evolution_phase(
     fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
+    sampled_parents_decay: bool = True,
     elite_pool_size: Optional[int],
     model_name: str,
     client: OpenAI,
@@ -1155,18 +1156,34 @@ def run_global_evolution_phase(
             iter_dir.mkdir(parents=True, exist_ok=True)
             (iter_dir / "candidates").mkdir(exist_ok=True)
 
-        num_parents_to_use = min(sample_size, len(elite_parents))
-        if sample_parents and len(elite_parents) > 0:
+        pool_size = len(elite_parents)
+        if sample_parents and pool_size > 0:
             rng = np.random.default_rng(
                 int(split_seed) + 50_000 + int(iteration_step) * 1_000_003
             )
-            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
-            selected_parents = [elite_parents[int(j)] for j in idxs]
-            print(
-                f"\nUsing {num_parents_to_use} sampled global parent(s) "
-                f"(pool size={len(elite_parents)}):"
+            parent_idxs, best_k, sampled_k = _select_parent_indices_from_elite_pool(
+                pool_size,
+                sample_size=sample_size,
+                sample_parents=True,
+                sampled_parents_decay=sampled_parents_decay,
+                iter_idx=iteration,
+                total_iters=n_iterations,
+                rng=rng,
             )
+            selected_parents = [elite_parents[int(j)] for j in parent_idxs]
+            num_parents_to_use = len(selected_parents)
+            if sampled_parents_decay:
+                print(
+                    f"\nUsing {num_parents_to_use} global parent(s) "
+                    f"({best_k} best + {sampled_k} sampled, pool size={pool_size}):"
+                )
+            else:
+                print(
+                    f"\nUsing {num_parents_to_use} sampled global parent(s) "
+                    f"(pool size={pool_size}):"
+                )
         else:
+            num_parents_to_use = min(sample_size, pool_size)
             selected_parents = elite_parents[:num_parents_to_use]
             print(f"\nUsing top {num_parents_to_use} global parent(s):")
 
@@ -2165,6 +2182,7 @@ def run_loglik_refinement_phase(
     fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
+    sampled_parents_decay: bool = True,
     elite_pool_size: Optional[int],
     participant_id: int,
     split_ratio: float,
@@ -2302,20 +2320,36 @@ def run_loglik_refinement_phase(
             iter_dir.mkdir(parents=True, exist_ok=True)
             (iter_dir / "candidates").mkdir(exist_ok=True)
 
-        num_parents_to_use = min(sample_size, len(elite_parents))
-        if sample_parents and len(elite_parents) > 0:
+        pool_size = len(elite_parents)
+        if sample_parents and pool_size > 0:
             pid_key = int(participant_id) if participant_id is not None else 0
             rng = np.random.default_rng(
                 int(split_seed) + 9_000_000 + int(iteration_step) * 1_000_003 + pid_key * 17_179
             )
-            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
-            selected_parents = [elite_parents[int(j)] for j in idxs]
-            selected_val_lls = [elite_val_logliks[int(j)] for j in idxs]
-            print(
-                f"\nUsing {num_parents_to_use} sampled refinement parent(s) "
-                f"(elite pool size={len(elite_parents)}):"
+            parent_idxs, best_k, sampled_k = _select_parent_indices_from_elite_pool(
+                pool_size,
+                sample_size=sample_size,
+                sample_parents=True,
+                sampled_parents_decay=sampled_parents_decay,
+                iter_idx=iteration,
+                total_iters=n_iterations,
+                rng=rng,
             )
+            selected_parents = [elite_parents[int(j)] for j in parent_idxs]
+            selected_val_lls = [elite_val_logliks[int(j)] for j in parent_idxs]
+            num_parents_to_use = len(selected_parents)
+            if sampled_parents_decay:
+                print(
+                    f"\nUsing {num_parents_to_use} refinement parent(s) "
+                    f"({best_k} best + {sampled_k} sampled, elite pool size={pool_size}):"
+                )
+            else:
+                print(
+                    f"\nUsing {num_parents_to_use} sampled refinement parent(s) "
+                    f"(elite pool size={pool_size}):"
+                )
         else:
+            num_parents_to_use = min(sample_size, pool_size)
             selected_parents = elite_parents[:num_parents_to_use]
             selected_val_lls = elite_val_logliks[:num_parents_to_use]
             print(f"\nUsing top {num_parents_to_use} refinement parent(s):")
@@ -2951,6 +2985,7 @@ def run_loglik_refine_participant_from_checkpoint(
     fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
+    sampled_parents_decay: bool = True,
     elite_pool_size: Optional[int],
     max_prompt_train_trials: int,
     max_prompt_trials_per_problem: int,
@@ -3084,6 +3119,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "fresh_n_candidates": fresh_n_candidates,
         "sample_size": sample_size,
         "sample_parents": sample_parents,
+        "sampled_parents_decay": sampled_parents_decay,
         "elite_pool_size": elite_pool_size,
         "participant_id": int(participant_id),
         "split_ratio": float(split_ratio),
@@ -3174,6 +3210,7 @@ def run_loglik_refine_from_prev_experiment(
     fresh_n_candidates: int = 0,
     sample_size: int,
     sample_parents: bool,
+    sampled_parents_decay: bool = True,
     elite_pool_size: Optional[int],
     max_prompt_train_trials: int,
     max_prompt_trials_per_problem: int,
@@ -3292,6 +3329,7 @@ def run_loglik_refine_from_prev_experiment(
             fresh_n_candidates=fresh_n_candidates,
             sample_size=sample_size,
             sample_parents=sample_parents,
+            sampled_parents_decay=sampled_parents_decay,
             elite_pool_size=elite_pool_size,
             max_prompt_train_trials=max_prompt_train_trials,
             max_prompt_trials_per_problem=max_prompt_trials_per_problem,
@@ -5344,6 +5382,57 @@ def _decayed_fresh_n_for_iteration(
     return min(fresh_n, int(n_candidates))
 
 
+def _decayed_sampled_parents_k_for_iteration(
+    num_parents: int,
+    iter_idx: int,
+    total_iters: int,
+) -> int:
+    """Decay sampled parent count from num_parents toward 0 (0-based iter_idx)."""
+    num_parents = int(num_parents)
+    if num_parents <= 0:
+        return 0
+    total = max(1, int(total_iters))
+    idx = max(0, int(iter_idx))
+    raw = math.floor(float(num_parents) * (1.0 - idx / total))
+    return max(0, min(int(raw), num_parents))
+
+
+def _select_parent_indices_from_elite_pool(
+    pool_size: int,
+    *,
+    sample_size: int,
+    sample_parents: bool,
+    sampled_parents_decay: bool,
+    iter_idx: int,
+    total_iters: int,
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[List[int], int, int]:
+    """Return elite indices for parents, plus (best_k, sampled_k) counts."""
+    num_parents = min(sample_size, pool_size)
+    if num_parents <= 0:
+        return [], 0, 0
+    if not sample_parents:
+        return list(range(num_parents)), num_parents, 0
+
+    if sampled_parents_decay:
+        sampled_k = _decayed_sampled_parents_k_for_iteration(
+            num_parents, iter_idx, total_iters
+        )
+    else:
+        sampled_k = num_parents
+    best_k = num_parents - sampled_k
+
+    indices: List[int] = list(range(best_k))
+    if sampled_k > 0 and rng is not None:
+        pool_start = best_k
+        pool_len = pool_size - pool_start
+        if pool_len > 0:
+            k = min(sampled_k, pool_len)
+            offset_idxs = rng.choice(pool_len, size=k, replace=False)
+            indices.extend(int(pool_start + j) for j in offset_idxs)
+    return indices, best_k, sampled_k
+
+
 def _iteration_candidate_source_header(
     fresh_n_max: int,
     fresh_n: int,
@@ -6127,6 +6216,7 @@ def run_evolution(
     n_eval_seeds: int = 3,
     sample_size: int = 10,
     sample_parents: bool = True,
+    sampled_parents_decay: bool = True,
     elite_pool_size: Optional[int] = None,
     filter_mixed_gambles: bool = False,
     save_artifacts: bool = True,
@@ -6685,19 +6775,36 @@ def run_evolution(
         
         # Select sample_size parents: uniform sample from elite pool, or top by fitness
         # (from the trimmed elite pool; see _elite_pool_capacity / elite_pool_size).
-        num_parents_to_use = min(sample_size, len(elite_parents))
-        if sample_parents and len(elite_parents) > 0:
+        pool_size = len(elite_parents)
+        if sample_parents and pool_size > 0:
             pid_key = int(participant_id) if participant_id is not None else 0
             rng = np.random.default_rng(
                 int(split_seed) + int(iteration_step) * 1_000_003 + pid_key * 17_179
             )
-            idxs = rng.choice(len(elite_parents), size=num_parents_to_use, replace=False)
-            selected_parents = [elite_parents[int(j)] for j in idxs]
-            print(
-                f"\nUsing {num_parents_to_use} uniformly sampled parent(s) from elite pool "
-                f"(size={len(elite_parents)}, sample_size={sample_size}, sample_parents=True):"
+            parent_idxs, best_k, sampled_k = _select_parent_indices_from_elite_pool(
+                pool_size,
+                sample_size=sample_size,
+                sample_parents=True,
+                sampled_parents_decay=sampled_parents_decay,
+                iter_idx=iteration,
+                total_iters=n_iterations,
+                rng=rng,
             )
+            selected_parents = [elite_parents[int(j)] for j in parent_idxs]
+            num_parents_to_use = len(selected_parents)
+            if sampled_parents_decay:
+                print(
+                    f"\nUsing {num_parents_to_use} parent(s) from elite pool "
+                    f"({best_k} best + {sampled_k} sampled, size={pool_size}, "
+                    f"sample_size={sample_size}, sample_parents=True):"
+                )
+            else:
+                print(
+                    f"\nUsing {num_parents_to_use} uniformly sampled parent(s) from elite pool "
+                    f"(size={pool_size}, sample_size={sample_size}, sample_parents=True):"
+                )
         else:
+            num_parents_to_use = min(sample_size, pool_size)
             selected_parents = elite_parents[:num_parents_to_use]
             print(
                 f"\nUsing {num_parents_to_use} top parent(s) from elite set "
@@ -8015,6 +8122,7 @@ def run_evolution(
             fresh_n_candidates=fresh_n_candidates,
             sample_size=sample_size,
             sample_parents=sample_parents,
+            sampled_parents_decay=sampled_parents_decay,
             elite_pool_size=elite_pool_size,
             participant_id=int(participant_id),
             split_ratio=float(split_ratio),
@@ -8812,6 +8920,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--sampled_parents_decay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When --sample_parents is enabled (default), decay the number of randomly sampled parents "
+            "toward 0 over iterations (final iteration uses top parents only). "
+            "Disable with --no-sampled_parents_decay to keep uniform random sampling each iteration."
+        ),
+    )
+    parser.add_argument(
         "--elite_pool_size",
         type=int,
         default=None,
@@ -9417,6 +9535,7 @@ def main():
             fresh_n_candidates=args.fresh_n_candidates,
             sample_size=args.sample_size,
             sample_parents=args.sample_parents,
+            sampled_parents_decay=args.sampled_parents_decay,
             elite_pool_size=args.elite_pool_size,
             model_name=args.model_name,
             client=global_client,
@@ -9476,6 +9595,7 @@ def main():
                 fresh_n_candidates=args.fresh_n_candidates,
                 sample_size=args.sample_size,
                 sample_parents=args.sample_parents,
+                sampled_parents_decay=args.sampled_parents_decay,
                 elite_pool_size=args.elite_pool_size,
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
@@ -9574,6 +9694,7 @@ def main():
                 n_eval_seeds=args.n_eval_seeds,
                 sample_size=args.sample_size,
                 sample_parents=args.sample_parents,
+                sampled_parents_decay=args.sampled_parents_decay,
                 elite_pool_size=args.elite_pool_size,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 save_artifacts=True,
@@ -9659,6 +9780,7 @@ def main():
                 n_eval_seeds=args.n_eval_seeds,
                 sample_size=args.sample_size,
                 sample_parents=args.sample_parents,
+                sampled_parents_decay=args.sampled_parents_decay,
                 elite_pool_size=args.elite_pool_size,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 save_artifacts=False,
@@ -10055,6 +10177,7 @@ def main():
                         n_eval_seeds=args.n_eval_seeds,
                         sample_size=args.sample_size,
                         sample_parents=args.sample_parents,
+                        sampled_parents_decay=args.sampled_parents_decay,
                         elite_pool_size=args.elite_pool_size,
                         filter_mixed_gambles=mixed_gambles_gain_loss_only,
                         fitness_metric=args.fitness_metric,
@@ -10323,6 +10446,7 @@ def main():
                 n_eval_seeds=args.n_eval_seeds,
                 sample_size=args.sample_size,
                 sample_parents=args.sample_parents,
+                sampled_parents_decay=args.sampled_parents_decay,
                 elite_pool_size=args.elite_pool_size,
                 filter_mixed_gambles=mixed_gambles_gain_loss_only,
                 fitness_metric=args.fitness_metric,
