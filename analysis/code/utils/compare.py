@@ -12,6 +12,12 @@ When ``--experiment_paths`` is omitted, the newest TEH ``run_*`` under
 ``generated_outputs/psych101_{train|test}/teh/<dataset>/`` (or
 ``generated_outputs/mixed_gambles/teh/``) is selected automatically.
 
+``--all_in`` runs all train Psych-101 datasets plus mixed_gambles and prints a
+cross-dataset summary (avg test_loglik, avg gated, num_best per method).
+
+Participant ids from CSVs are clamped to each dataset's supported ordinal range
+(0..N-1 HF rows for Psych-101; 0..max subject for mixed_gambles).
+
 Baseline paths: config.yaml only supplies optional manual overrides per method.
 For each method, an explicit config path is used when set; otherwise the newest
 ``run_*`` under the standard ``generated_outputs/`` layout is auto-discovered
@@ -60,7 +66,7 @@ import json
 import math
 import statistics
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -81,6 +87,7 @@ from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
     PSYCH101_LEGACY_ALIASES,
+    get_filtered_psych101_split,
     get_psych101_binary_experiment,
     normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
@@ -103,6 +110,19 @@ _TEST_LOGLIK = "test_loglik"
 _GATED_LOGLIK = "gated_test_loglik"
 _LOGLIK_NDIGITS = 2
 _BASELINE_METHODS = ("MLE", "prospect_theory", "openevolve", "Centaur")
+_SUMMARY_METHOD_LABELS = _BASELINE_METHODS + ("TEH",)
+_ALL_IN_DATASETS: Tuple[str, ...] = (
+    "1peterson2021using",
+    "2plonsky2018when",
+    "3frey2017cct",
+    "4wulff2018description",
+    "5speekenbrink2008learning",
+    "6sadeghiyeh2020temporal",
+    "7hilbig2014generalized",
+    "8flesch2018comparing",
+    "mixed_gambles",
+)
+_DEFAULT_ALL_IN_SUMMARY_CSV = "analysis/data/utils/loglik_compare_all_in_summary.csv"
 _DEFAULT_BASELINE_CONFIG = "analysis/data/baseline_methods/config.yaml"
 _GENERATED_OUTPUTS_DIR = "generated_outputs"
 _LOGLIK_CSV_NAME = "participant_details_loglik.csv"
@@ -318,6 +338,8 @@ def _resolve_baseline_run_paths(
     repo: Path,
     dataset: str,
     psych_dataset_split: str,
+    *,
+    quiet: bool = False,
 ) -> Dict[str, Path]:
     """
     Method name -> run dir or CSV.
@@ -337,9 +359,11 @@ def _resolve_baseline_run_paths(
         )
         if discovered is not None:
             out[method] = discovered
-            print(
-                f"Auto-selected {method} for {config_key}: {discovered.relative_to(repo)}"
-            )
+            if not quiet:
+                print(
+                    f"Auto-selected {method} for {config_key}: "
+                    f"{discovered.relative_to(repo)}"
+                )
         else:
             roots = _baseline_search_roots(
                 repo,
@@ -467,6 +491,115 @@ def _participant_ids_from_experiment_csvs(csv_paths: Sequence[Path]) -> List[int
     if not ids:
         raise ValueError("No participant_id rows found in experiment CSVs")
     return ids
+
+
+def _mixed_gambles_max_participant_index(
+    mixed_gambles_csv: str,
+    *,
+    filter_gain_loss_only: bool,
+) -> int:
+    """Largest subject id in the mixed_gambles CSV (inclusive upper bound for ordinals)."""
+    max_id = -1
+    with open(mixed_gambles_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or "subject" not in reader.fieldnames:
+            raise ValueError(
+                f"{mixed_gambles_csv}: missing subject column (got {reader.fieldnames})"
+            )
+        for row in reader:
+            if filter_gain_loss_only and row.get("gamble_type") != "gain_loss":
+                continue
+            sid = int(float(row["subject"]))
+            if sid > max_id:
+                max_id = sid
+    if max_id < 0:
+        raise ValueError(f"{mixed_gambles_csv}: no subject rows found")
+    return max_id
+
+
+def _dataset_participant_ordinal_bounds(
+    dataset: str,
+    *,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+    filter_mixed_gambles: bool,
+) -> Tuple[int, int]:
+    """
+    Inclusive ordinal range supported by the dataset corpus (0-based row/subject ids).
+
+    Psych-101: filtered HF rows for the experiment. mixed_gambles: max subject in CSV.
+    """
+    if is_mixed_gambles_dataset(dataset):
+        return 0, _mixed_gambles_max_participant_index(
+            mixed_gambles_csv, filter_gain_loss_only=filter_mixed_gambles
+        )
+    alias = normalize_psych101_dataset_alias(dataset)
+    filtered = get_filtered_psych101_split(
+        alias, split=psych_dataset_split, local_dataset=local_dataset
+    )
+    n_rows = len(filtered)
+    if n_rows == 0:
+        raise ValueError(
+            f"No HF rows for {alias!r} psych_dataset_split={psych_dataset_split!r}"
+        )
+    return 0, n_rows - 1
+
+
+def _clamp_participant_ids_to_dataset(
+    participant_ids: Sequence[int],
+    *,
+    dataset: str,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+    filter_mixed_gambles: bool,
+    ordinal_bounds: Optional[Tuple[int, int]] = None,
+) -> Tuple[List[int], int, int]:
+    """
+    Drop participant ids outside the dataset's supported ordinal range.
+
+    Prevents IndexError / empty BIR when CSVs list ids from a larger default range
+    (e.g. 0--49) than the dataset has (e.g. 5speekenbrink2008learning: 0--22).
+
+    Returns (kept_ids, ord_min, ord_max).
+    """
+    if ordinal_bounds is None:
+        ord_min, ord_max = _dataset_participant_ordinal_bounds(
+            dataset,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+            filter_mixed_gambles=filter_mixed_gambles,
+        )
+    else:
+        ord_min, ord_max = ordinal_bounds
+    kept_set: set[int] = set()
+    kept: List[int] = []
+    for pid in participant_ids:
+        ipid = int(pid)
+        if ord_min <= ipid <= ord_max and ipid not in kept_set:
+            kept_set.add(ipid)
+            kept.append(ipid)
+    dropped = [int(pid) for pid in participant_ids if int(pid) not in kept_set]
+    if dropped:
+        label = (
+            dataset
+            if is_mixed_gambles_dataset(dataset)
+            else f"{dataset} ({psych_dataset_split})"
+        )
+        print(
+            f"Warning: dropped {len(dropped)} participant_id(s) outside ordinal range "
+            f"[{ord_min}, {ord_max}] for {label}: "
+            f"{dropped[:10]}{'...' if len(dropped) > 10 else ''}",
+            file=sys.stderr,
+        )
+    if not kept:
+        raise SystemExit(
+            f"No participant_id values in supported ordinal range [{ord_min}, {ord_max}] "
+            f"for {dataset!r}."
+        )
+    return kept, ord_min, ord_max
 
 
 def _read_loglik_csv(csv_path: Path, column: str, *, required: bool) -> Dict[int, float]:
@@ -948,6 +1081,469 @@ def _print_num_best_comparison_summary(
         _print_num_best_counts(gated_counts)
 
 
+@dataclass
+class _DatasetCompareSummary:
+    dataset: str
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT
+    n_participants: int = 0
+    teh_run: str = ""
+    avg_test: Dict[str, str] = field(default_factory=dict)
+    avg_gated: Dict[str, str] = field(default_factory=dict)
+    num_best_test: Dict[str, int] = field(default_factory=dict)
+    num_best_gated: Dict[str, int] = field(default_factory=dict)
+    output_csv: Optional[Path] = None
+    gated_csv: Optional[Path] = None
+    error: Optional[str] = None
+
+
+def _summary_method_key(label: str) -> str:
+    if label in _BASELINE_METHODS:
+        return label
+    return "TEH"
+
+
+def _collapse_metric_row(
+    row: Mapping[str, Any],
+    *,
+    teh_labels: Sequence[str],
+    value_type: type = str,
+) -> Dict[str, Any]:
+    """Map avg_row or num_best row to fixed method keys (TEH <- run_* column)."""
+    out: Dict[str, Any] = {}
+    for method in _BASELINE_METHODS:
+        if method in row and row[method] not in ("", None):
+            out[method] = row[method]
+    for tl in teh_labels:
+        if tl in row and row[tl] not in ("", None):
+            out["TEH"] = row[tl]
+            break
+    if value_type is int:
+        return {k: int(v) for k, v in out.items()}
+    return {k: str(v) for k, v in out.items()}
+
+
+def _build_dataset_summary(
+    *,
+    dataset: str,
+    psych_dataset_split: str,
+    n_participants: int,
+    teh_labels: Sequence[str],
+    avg_row: Mapping[str, str],
+    best_test: Mapping[str, int],
+    output_csv: Path,
+    gated_csv: Optional[Path] = None,
+    avg_gated: Optional[Mapping[str, str]] = None,
+    best_gated: Optional[Mapping[str, int]] = None,
+) -> _DatasetCompareSummary:
+    return _DatasetCompareSummary(
+        dataset=dataset,
+        psych_dataset_split=psych_dataset_split,
+        n_participants=n_participants,
+        teh_run=teh_labels[0] if teh_labels else "",
+        avg_test=_collapse_metric_row(avg_row, teh_labels=teh_labels, value_type=str),
+        avg_gated=_collapse_metric_row(avg_gated or {}, teh_labels=teh_labels, value_type=str),
+        num_best_test=_collapse_metric_row(best_test, teh_labels=teh_labels, value_type=int),
+        num_best_gated=_collapse_metric_row(best_gated or {}, teh_labels=teh_labels, value_type=int),
+        output_csv=output_csv,
+        gated_csv=gated_csv,
+    )
+
+
+def _write_all_in_summary_csv(path: Path, summaries: Sequence[_DatasetCompareSummary]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "dataset",
+        "psych_dataset_split",
+        "n_participants",
+        "teh_run",
+        "method",
+        "avg_test_loglik",
+        "avg_gated_test_loglik",
+        "num_best_test",
+        "num_best_gated",
+        "output_csv",
+        "gated_csv",
+        "error",
+    ]
+    rows: List[Dict[str, str]] = []
+    for s in summaries:
+        if s.error:
+            rows.append(
+                {
+                    "dataset": s.dataset,
+                    "psych_dataset_split": s.psych_dataset_split,
+                    "n_participants": str(s.n_participants),
+                    "teh_run": s.teh_run,
+                    "method": "",
+                    "avg_test_loglik": "",
+                    "avg_gated_test_loglik": "",
+                    "num_best_test": "",
+                    "num_best_gated": "",
+                    "output_csv": str(s.output_csv or ""),
+                    "gated_csv": str(s.gated_csv or ""),
+                    "error": s.error,
+                }
+            )
+            continue
+        for method in _SUMMARY_METHOD_LABELS:
+            rows.append(
+                {
+                    "dataset": s.dataset,
+                    "psych_dataset_split": s.psych_dataset_split,
+                    "n_participants": str(s.n_participants),
+                    "teh_run": s.teh_run,
+                    "method": method,
+                    "avg_test_loglik": s.avg_test.get(method, ""),
+                    "avg_gated_test_loglik": s.avg_gated.get(method, ""),
+                    "num_best_test": str(s.num_best_test.get(method, "")),
+                    "num_best_gated": str(s.num_best_gated.get(method, "")),
+                    "output_csv": str(s.output_csv or ""),
+                    "gated_csv": str(s.gated_csv or ""),
+                    "error": "",
+                }
+            )
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _format_all_in_wide_table(
+    summaries: Sequence[_DatasetCompareSummary],
+    *,
+    title: str,
+    value_attr: str,
+) -> str:
+    """Render dataset x method table for one metric family."""
+    ok = [s for s in summaries if not s.error]
+    if not ok:
+        return f"{title}\n  (no successful datasets)\n"
+    ds_col_w = max(len(s.dataset) for s in ok)
+    ds_col_w = max(ds_col_w, len("dataset"))
+    header = f"{'dataset':<{ds_col_w}}"
+    for method in _SUMMARY_METHOD_LABELS:
+        header += f"  {method:>18}"
+    lines = [title, header]
+    for s in ok:
+        row_map: Mapping[str, Any] = getattr(s, value_attr)
+        line = f"{s.dataset:<{ds_col_w}}"
+        for method in _SUMMARY_METHOD_LABELS:
+            val = row_map.get(method, "")
+            cell = "" if val is None else str(val)
+            line += f"  {cell:>18}"
+        lines.append(line)
+    err = [s for s in summaries if s.error]
+    for s in err:
+        lines.append(f"{s.dataset:<{ds_col_w}}  ERROR: {s.error}")
+    return "\n".join(lines) + "\n"
+
+
+def _print_all_in_summary(
+    summaries: Sequence[_DatasetCompareSummary],
+    summary_csv: Path,
+) -> None:
+    _write_all_in_summary_csv(summary_csv, summaries)
+    print(f"\n=== compare.py --all_in summary ===")
+    print(f"Wrote {summary_csv}\n")
+    print(
+        _format_all_in_wide_table(
+            summaries, title=f"Avg {_TEST_LOGLIK}", value_attr="avg_test"
+        )
+    )
+    print(
+        _format_all_in_wide_table(
+            summaries, title=f"Avg {_GATED_LOGLIK}", value_attr="avg_gated"
+        )
+    )
+    print(
+        _format_all_in_wide_table(
+            summaries, title=f"num_best ({_TEST_LOGLIK})", value_attr="num_best_test"
+        )
+    )
+    print(
+        _format_all_in_wide_table(
+            summaries,
+            title=f"num_best ({_GATED_LOGLIK})",
+            value_attr="num_best_gated",
+        )
+    )
+
+
+def _run_compare_dataset(
+    repo: Path,
+    args: argparse.Namespace,
+    *,
+    dataset: str,
+    psych_dataset_split: str,
+    quiet: bool,
+) -> _DatasetCompareSummary:
+    """Run one dataset comparison; write per-dataset CSVs and return summary metrics."""
+    psych_split = _effective_psych_dataset_split(dataset, psych_dataset_split)
+    config_path = Path(args.baseline_config).expanduser()
+    config_path = (
+        config_path.resolve()
+        if config_path.is_absolute()
+        else (repo / config_path).resolve()
+    )
+    config_data = _load_baseline_config_file(config_path)
+    config_key = _config_dataset_key(dataset, psych_split)
+
+    baseline_paths = _resolve_baseline_run_paths(
+        config_data, repo, dataset, psych_split, quiet=quiet
+    )
+
+    if args.centaur_csv is not None:
+        centaur_override = Path(args.centaur_csv).expanduser()
+        baseline_paths["Centaur"] = (
+            centaur_override.parent
+            if centaur_override.suffix.lower() == ".csv"
+            else centaur_override
+        )
+
+    ds_defaults = _dataset_defaults(repo, dataset, psych_split)
+    output_arg = (
+        Path(args.output).expanduser()
+        if args.output is not None
+        else ds_defaults.output_csv
+    )
+    output_arg = (
+        output_arg.resolve()
+        if output_arg.is_absolute()
+        else (repo / output_arg).resolve()
+    )
+
+    experiment_paths = args.experiment_paths
+    if experiment_paths is None:
+        discovered_teh = _auto_discover_teh_run(
+            repo, dataset=dataset, psych_dataset_split=psych_split
+        )
+        if discovered_teh is not None:
+            teh_root = _teh_search_root(repo, dataset, psych_split)
+            if not quiet:
+                print(
+                    f"Auto-selected TEH for {config_key}: "
+                    f"{discovered_teh.relative_to(repo)} "
+                    f"(newest run_* in {teh_root.relative_to(repo)})"
+                )
+            teh_inputs = [discovered_teh]
+        else:
+            teh_root = _teh_search_root(repo, dataset, psych_split)
+            print(
+                f"Warning: no TEH run found for {config_key}; "
+                f"searched {teh_root.relative_to(repo)}; continuing without TEH.",
+                file=sys.stderr,
+            )
+            teh_inputs = []
+    else:
+        teh_inputs = list(experiment_paths)
+
+    exp_resolved: List[Path] = []
+    if teh_inputs:
+        exp_resolved = [_resolve_loglik_csv(Path(ep).expanduser()) for ep in teh_inputs]
+    run_labels = [_run_column_name(p) for p in exp_resolved]
+    if len(set(run_labels)) != len(run_labels):
+        raise ValueError(f"Duplicate TEH run column names: {run_labels}")
+
+    if not exp_resolved and not baseline_paths:
+        raise SystemExit(
+            f"{dataset}: no baseline or TEH runs found "
+            "(check generated_outputs/ or pass --experiment_paths)."
+        )
+
+    all_loglik_csvs: List[Path] = list(exp_resolved)
+    baseline_scores: List[Tuple[str, Dict[int, float]]] = []
+    baseline_columns: Dict[str, str] = {}
+    for method in _BASELINE_METHODS:
+        scores: Dict[int, float] = {}
+        if method in baseline_paths:
+            run_path = baseline_paths[method]
+            csv_path = _resolve_loglik_csv(run_path)
+            all_loglik_csvs.append(csv_path)
+            scores = _load_scores_from_run(run_path, _TEST_LOGLIK, required=False)
+            baseline_columns[method] = _TEST_LOGLIK
+        baseline_scores.append((method, scores))
+
+    centaur_path: Optional[Path] = None
+    if "Centaur" in baseline_paths:
+        centaur_path = _resolve_loglik_csv(baseline_paths["Centaur"])
+
+    roster_csvs = list(all_loglik_csvs)
+    if "MLE" in baseline_paths:
+        participant_ids = _read_participant_ids_from_csv(
+            _resolve_loglik_csv(baseline_paths["MLE"])
+        )
+    elif centaur_path is not None:
+        participant_ids = _read_participant_ids_from_csv(centaur_path)
+    elif roster_csvs:
+        participant_ids = _participant_ids_from_experiment_csvs(roster_csvs)
+    else:
+        raise SystemExit(f"{dataset}: no participant_id rows found.")
+
+    n_before = len(participant_ids)
+    participant_ids, ord_min, ord_max = _clamp_participant_ids_to_dataset(
+        participant_ids,
+        dataset=dataset,
+        psych_dataset_split=psych_split,
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=str(args.mixed_gambles_csv),
+        filter_mixed_gambles=bool(args.filter_mixed_gambles),
+    )
+    if len(participant_ids) != n_before and not quiet:
+        ds_roster_label = (
+            dataset
+            if is_mixed_gambles_dataset(dataset)
+            else f"{dataset}, psych_dataset_split={psych_split}"
+        )
+        print(
+            f"Participant roster clamped to ordinals [{ord_min}, {ord_max}] "
+            f"for {ds_roster_label}: {len(participant_ids)} participant(s)."
+        )
+
+    bir = _load_or_compute_bir_map(
+        repo,
+        dataset=dataset,
+        psych_dataset_split=psych_split,
+        participant_ids=participant_ids,
+        split_ratio=float(args.split_ratio),
+        split_seed=int(args.split_seed),
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=str(args.mixed_gambles_csv),
+        filter_mixed_gambles=bool(args.filter_mixed_gambles),
+        recompute=bool(args.recompute_bir),
+    )
+
+    ds_label = (
+        f"{dataset}"
+        if is_mixed_gambles_dataset(dataset)
+        else f"{dataset}, psych_dataset_split={psych_split}"
+    )
+
+    teh_test: List[Tuple[str, Dict[int, float]]] = []
+    for label, csv_path in zip(run_labels, exp_resolved):
+        teh_test.append((label, _read_loglik_csv(csv_path, _TEST_LOGLIK, required=True)))
+
+    teh_columns_test = {label: _TEST_LOGLIK for label, _ in teh_test}
+    n_test, avg_row, best_counts = _write_baseline_comparison_csv(
+        out_path=output_arg,
+        participant_ids=participant_ids,
+        baselines=baseline_scores,
+        teh_runs=teh_test,
+        bir=bir,
+    )
+    if args.verbose:
+        _print_run_summary(
+            dataset_label=ds_label,
+            config_key=config_key,
+            baseline_paths=baseline_paths,
+            baseline_columns=baseline_columns,
+            teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
+            teh_columns=teh_columns_test,
+            n_participants=n_test,
+            avg_row=avg_row,
+            out_path=output_arg,
+            score_kind=_TEST_LOGLIK,
+        )
+    elif not quiet:
+        print(f"Wrote {output_arg} ({n_test} participants)")
+
+    gated_csvs = list(exp_resolved)
+    if centaur_path is not None:
+        gated_csvs.insert(0, centaur_path)
+    if not _any_csv_has_gated(centaur_path, gated_csvs):
+        if not quiet:
+            _print_num_best_comparison_summary(
+                test_csv=output_arg,
+                test_counts=best_counts,
+            )
+        return _build_dataset_summary(
+            dataset=dataset,
+            psych_dataset_split=psych_split,
+            n_participants=n_test,
+            teh_labels=run_labels,
+            avg_row=avg_row,
+            best_test=best_counts,
+            output_csv=output_arg,
+        )
+
+    gated_out = (
+        Path(args.output_gated).expanduser()
+        if args.output_gated is not None
+        else _gated_output_path(output_arg)
+    )
+    gated_out = (
+        gated_out.resolve()
+        if gated_out.is_absolute()
+        else (repo / gated_out).resolve()
+    )
+
+    test_by_method = dict(baseline_scores)
+    gated_baselines: List[Tuple[str, Dict[int, float]]] = []
+    for method in _BASELINE_METHODS:
+        scores_g: Dict[int, float] = {}
+        if method in baseline_paths:
+            test_scores = test_by_method.get(method, {})
+            if method == "Centaur" and centaur_path is not None:
+                gated = _read_loglik_csv(centaur_path, _GATED_LOGLIK, required=False)
+            else:
+                gated = _load_scores_from_run(
+                    baseline_paths[method], _GATED_LOGLIK, required=False
+                )
+            scores_g = _scores_for_gated_table(test_scores, gated)
+        gated_baselines.append((method, scores_g))
+
+    teh_test_by_label = dict(teh_test)
+    teh_gated: List[Tuple[str, Dict[int, float]]] = []
+    for label, csv_path in zip(run_labels, exp_resolved):
+        test_scores = teh_test_by_label.get(label, {})
+        gated = _read_loglik_csv(csv_path, _GATED_LOGLIK, required=False)
+        teh_gated.append((label, _scores_for_gated_table(test_scores, gated)))
+
+    n_gated, avg_g, best_g = _write_baseline_comparison_csv(
+        out_path=gated_out,
+        participant_ids=participant_ids,
+        baselines=gated_baselines,
+        teh_runs=teh_gated,
+        bir=bir,
+    )
+    if args.verbose:
+        print(f"--- gated ({_GATED_LOGLIK}) ---")
+        _print_run_summary(
+            dataset_label=ds_label,
+            config_key=config_key,
+            baseline_paths=baseline_paths,
+            baseline_columns=baseline_columns,
+            teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
+            teh_columns={label: _GATED_LOGLIK for label, _ in teh_gated},
+            n_participants=n_gated,
+            avg_row=avg_g,
+            out_path=gated_out,
+            score_kind=_GATED_LOGLIK,
+        )
+    elif not quiet:
+        print(f"Wrote {gated_out} ({n_gated} participants)")
+
+    if not quiet:
+        _print_num_best_comparison_summary(
+            test_csv=output_arg,
+            test_counts=best_counts,
+            gated_csv=gated_out,
+            gated_counts=best_g,
+        )
+
+    return _build_dataset_summary(
+        dataset=dataset,
+        psych_dataset_split=psych_split,
+        n_participants=n_test,
+        teh_labels=run_labels,
+        avg_row=avg_row,
+        best_test=best_counts,
+        output_csv=output_arg,
+        gated_csv=gated_out,
+        avg_gated=avg_g,
+        best_gated=best_g,
+    )
+
+
 def _print_run_summary(
     *,
     dataset_label: str,
@@ -1091,15 +1687,97 @@ def main() -> None:
         help="Ignore cached BIR and recompute all participants in the comparison roster.",
     )
     p.add_argument(
+        "--all_in",
+        action="store_true",
+        help=(
+            "Run all train Psych-101 datasets plus mixed_gambles (see _ALL_IN_DATASETS) "
+            "and print a cross-dataset summary table."
+        ),
+    )
+    p.add_argument(
+        "--summary_output",
+        type=Path,
+        default=None,
+        help=(
+            f"CSV path for --all_in summary (default: {_DEFAULT_ALL_IN_SUMMARY_CSV}). "
+            "Per-dataset comparison CSVs still use default names under analysis/data/utils/."
+        ),
+    )
+    p.add_argument(
         "--verbose",
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
             "Print full comparison log (paths, averages). Default: compact output with "
-            "num_best summary only."
+            "num_best summary only (single dataset) or final --all_in tables only."
         ),
     )
     args = p.parse_args()
+
+    if not (0.0 < args.split_ratio < 1.0):
+        raise SystemExit(f"--split_ratio must be in (0, 1), got {args.split_ratio}.")
+
+    if args.all_in:
+        if args.output is not None or args.output_gated is not None:
+            raise SystemExit(
+                "--all_in writes per-dataset CSVs to default paths; "
+                "use --summary_output for the cross-dataset summary CSV."
+            )
+        summary_path = (
+            Path(args.summary_output).expanduser()
+            if args.summary_output is not None
+            else Path(_DEFAULT_ALL_IN_SUMMARY_CSV)
+        )
+        summary_path = (
+            summary_path.resolve()
+            if summary_path.is_absolute()
+            else (repo / summary_path).resolve()
+        )
+        quiet = not args.verbose
+        summaries: List[_DatasetCompareSummary] = []
+        for ds in _ALL_IN_DATASETS:
+            dataset = _normalize_compare_dataset(ds)
+            psych_split = (
+                DEFAULT_PSYCH_DATASET_SPLIT
+                if is_mixed_gambles_dataset(dataset)
+                else "train"
+            )
+            if not quiet:
+                print(f"\n========== {dataset} (psych_dataset_split={psych_split}) ==========")
+            else:
+                print(f"[--all_in] {dataset} ...", flush=True)
+            try:
+                summaries.append(
+                    _run_compare_dataset(
+                        repo,
+                        args,
+                        dataset=dataset,
+                        psych_dataset_split=psych_split,
+                        quiet=quiet,
+                    )
+                )
+            except (SystemExit, ValueError, FileNotFoundError, OSError) as exc:
+                msg = str(exc) or type(exc).__name__
+                print(f"ERROR {dataset}: {msg}", file=sys.stderr)
+                summaries.append(
+                    _DatasetCompareSummary(
+                        dataset=dataset,
+                        psych_dataset_split=psych_split,
+                        error=msg,
+                    )
+                )
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+                print(f"ERROR {dataset}: {msg}", file=sys.stderr)
+                summaries.append(
+                    _DatasetCompareSummary(
+                        dataset=dataset,
+                        psych_dataset_split=psych_split,
+                        error=msg,
+                    )
+                )
+        _print_all_in_summary(summaries, summary_path)
+        return
 
     dataset = _normalize_compare_dataset(args.dataset)
     psych_split = _effective_psych_dataset_split(dataset, args.psych_dataset_split)
@@ -1109,294 +1787,13 @@ def main() -> None:
             f"Choose from {sorted(PARTICIPANT_DATASETS)} or legacy {sorted(_COMPARE_LEGACY_DATASETS)}."
         )
 
-    config_path = Path(args.baseline_config).expanduser()
-    config_path = config_path.resolve() if config_path.is_absolute() else (repo / config_path).resolve()
-    config_data = _load_baseline_config_file(config_path)
-    config_key = _config_dataset_key(dataset, psych_split)
-
-    baseline_paths = _resolve_baseline_run_paths(
-        config_data, repo, dataset, psych_split
-    )
-
-    if args.centaur_csv is not None:
-        centaur_override = Path(args.centaur_csv).expanduser()
-        baseline_paths["Centaur"] = (
-            centaur_override.parent
-            if centaur_override.suffix.lower() == ".csv"
-            else centaur_override
-        )
-
-    ds_defaults = _dataset_defaults(repo, dataset, psych_split)
-    output_arg = Path(args.output).expanduser() if args.output is not None else ds_defaults.output_csv
-    output_arg = output_arg.resolve() if output_arg.is_absolute() else (repo / output_arg).resolve()
-
-    if not (0.0 < args.split_ratio < 1.0):
-        raise SystemExit(f"--split_ratio must be in (0, 1), got {args.split_ratio}.")
-
-    if args.experiment_paths is None:
-        discovered_teh = _auto_discover_teh_run(
-            repo, dataset=dataset, psych_dataset_split=psych_split
-        )
-        if discovered_teh is not None:
-            teh_root = _teh_search_root(repo, dataset, psych_split)
-            print(
-                f"Auto-selected TEH for {config_key}: "
-                f"{discovered_teh.relative_to(repo)} "
-                f"(newest run_* in {teh_root.relative_to(repo)})"
-            )
-            teh_inputs = [discovered_teh]
-        else:
-            teh_root = _teh_search_root(repo, dataset, psych_split)
-            print(
-                f"Warning: no TEH run found for {config_key}; "
-                f"searched {teh_root.relative_to(repo)}; continuing without TEH.",
-                file=sys.stderr,
-            )
-            teh_inputs = []
-    else:
-        teh_inputs = list(args.experiment_paths)
-
-    exp_resolved: List[Path] = []
-    if teh_inputs:
-        exp_resolved = [_resolve_loglik_csv(Path(ep).expanduser()) for ep in teh_inputs]
-    run_labels = [_run_column_name(p) for p in exp_resolved]
-    if len(set(run_labels)) != len(run_labels):
-        raise ValueError(f"Duplicate TEH run column names: {run_labels}")
-
-    use_baseline_layout = True
-    if not exp_resolved and not baseline_paths:
-        raise SystemExit(
-            "No baseline or TEH runs found (check generated_outputs/ or pass --experiment_paths)."
-        )
-
-    all_loglik_csvs: List[Path] = list(exp_resolved)
-    baseline_scores: List[Tuple[str, Dict[int, float]]] = []
-    baseline_columns: Dict[str, str] = {}
-    for method in _BASELINE_METHODS:
-        scores: Dict[int, float] = {}
-        if method in baseline_paths:
-            run_path = baseline_paths[method]
-            csv_path = _resolve_loglik_csv(run_path)
-            all_loglik_csvs.append(csv_path)
-            scores = _load_scores_from_run(run_path, _TEST_LOGLIK, required=False)
-            baseline_columns[method] = _TEST_LOGLIK
-        baseline_scores.append((method, scores))
-
-    centaur_path: Optional[Path] = None
-    if "Centaur" in baseline_paths:
-        centaur_path = _resolve_loglik_csv(baseline_paths["Centaur"])
-
-    roster_csvs = list(all_loglik_csvs)
-    if "MLE" in baseline_paths:
-        participant_ids = _read_participant_ids_from_csv(
-            _resolve_loglik_csv(baseline_paths["MLE"])
-        )
-    elif centaur_path is not None:
-        participant_ids = _read_participant_ids_from_csv(centaur_path)
-    elif roster_csvs:
-        participant_ids = _participant_ids_from_experiment_csvs(roster_csvs)
-    else:
-        raise SystemExit("No participant_id rows found (add baselines or TEH runs).")
-
-    bir = _load_or_compute_bir_map(
+    _run_compare_dataset(
         repo,
+        args,
         dataset=dataset,
         psych_dataset_split=psych_split,
-        participant_ids=participant_ids,
-        split_ratio=float(args.split_ratio),
-        split_seed=int(args.split_seed),
-        local_dataset=args.local_dataset,
-        mixed_gambles_csv=str(args.mixed_gambles_csv),
-        filter_mixed_gambles=bool(args.filter_mixed_gambles),
-        recompute=bool(args.recompute_bir),
+        quiet=False,
     )
-
-    ds_label = (
-        f"{dataset}"
-        if is_mixed_gambles_dataset(dataset)
-        else f"{dataset}, psych_dataset_split={psych_split}"
-    )
-
-    if use_baseline_layout:
-        teh_test: List[Tuple[str, Dict[int, float]]] = []
-        for label, csv_path in zip(run_labels, exp_resolved):
-            teh_test.append(
-                (label, _read_loglik_csv(csv_path, _TEST_LOGLIK, required=True))
-            )
-
-        teh_columns_test = {label: _TEST_LOGLIK for label, _ in teh_test}
-        n_test, avg_row, best_counts = _write_baseline_comparison_csv(
-            out_path=output_arg,
-            participant_ids=participant_ids,
-            baselines=baseline_scores,
-            teh_runs=teh_test,
-            bir=bir,
-        )
-        if args.verbose:
-            _print_run_summary(
-                dataset_label=ds_label,
-                config_key=config_key,
-                baseline_paths=baseline_paths,
-                baseline_columns=baseline_columns,
-                teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
-                teh_columns=teh_columns_test,
-                n_participants=n_test,
-                avg_row=avg_row,
-                out_path=output_arg,
-                score_kind=_TEST_LOGLIK,
-            )
-        else:
-            print(f"Wrote {output_arg} ({n_test} participants)")
-
-        gated_csvs = list(exp_resolved)
-        if centaur_path is not None:
-            gated_csvs.insert(0, centaur_path)
-        if not _any_csv_has_gated(centaur_path, gated_csvs):
-            _print_num_best_comparison_summary(
-                test_csv=output_arg,
-                test_counts=best_counts,
-            )
-            return
-
-        gated_out = (
-            Path(args.output_gated).expanduser()
-            if args.output_gated is not None
-            else _gated_output_path(output_arg)
-        )
-        gated_out = gated_out.resolve() if gated_out.is_absolute() else (repo / gated_out).resolve()
-
-        test_by_method = dict(baseline_scores)
-        gated_baselines: List[Tuple[str, Dict[int, float]]] = []
-        for method in _BASELINE_METHODS:
-            scores_g: Dict[int, float] = {}
-            if method in baseline_paths:
-                test_scores = test_by_method.get(method, {})
-                if method == "Centaur" and centaur_path is not None:
-                    gated = _read_loglik_csv(centaur_path, _GATED_LOGLIK, required=False)
-                else:
-                    gated = _load_scores_from_run(
-                        baseline_paths[method], _GATED_LOGLIK, required=False
-                    )
-                scores_g = _scores_for_gated_table(test_scores, gated)
-            gated_baselines.append((method, scores_g))
-
-        teh_test_by_label = dict(teh_test)
-        teh_gated: List[Tuple[str, Dict[int, float]]] = []
-        teh_columns_gated: Dict[str, str] = {}
-        for label, csv_path in zip(run_labels, exp_resolved):
-            test_scores = teh_test_by_label.get(label, {})
-            gated = _read_loglik_csv(csv_path, _GATED_LOGLIK, required=False)
-            teh_gated.append((label, _scores_for_gated_table(test_scores, gated)))
-            if gated:
-                teh_columns_gated[label] = _GATED_LOGLIK
-            elif test_scores:
-                teh_columns_gated[label] = f"{_GATED_LOGLIK} (fallback {_TEST_LOGLIK})"
-            else:
-                teh_columns_gated[label] = _GATED_LOGLIK
-
-        gated_baseline_columns = dict(baseline_columns)
-        for method in _BASELINE_METHODS:
-            if method not in baseline_paths:
-                continue
-            if method == "Centaur" and centaur_path is not None:
-                has_gated = _csv_has_column(centaur_path, _GATED_LOGLIK)
-            else:
-                has_gated = _csv_has_column(
-                    _resolve_loglik_csv(baseline_paths[method]), _GATED_LOGLIK
-                )
-            gated_baseline_columns[method] = (
-                _GATED_LOGLIK if has_gated else f"{_TEST_LOGLIK} (no {_GATED_LOGLIK} in run)"
-            )
-
-        n_gated, avg_g, best_g = _write_baseline_comparison_csv(
-            out_path=gated_out,
-            participant_ids=participant_ids,
-            baselines=gated_baselines,
-            teh_runs=teh_gated,
-            bir=bir,
-        )
-        if args.verbose:
-            print(f"--- gated ({_GATED_LOGLIK}) ---")
-            _print_run_summary(
-                dataset_label=ds_label,
-                config_key=config_key,
-                baseline_paths=baseline_paths,
-                baseline_columns=gated_baseline_columns,
-                teh_paths=[p.parent if p.is_file() else p for p in exp_resolved],
-                teh_columns=teh_columns_gated,
-                n_participants=n_gated,
-                avg_row=avg_g,
-                out_path=gated_out,
-                score_kind=_GATED_LOGLIK,
-            )
-        else:
-            print(f"Wrote {gated_out} ({n_gated} participants)")
-        _print_num_best_comparison_summary(
-            test_csv=output_arg,
-            test_counts=best_counts,
-            gated_csv=gated_out,
-            gated_counts=best_g,
-        )
-        return
-
-    # Legacy: no baseline config for this dataset key — Centaur column + TEH only.
-    centaur_scores = dict(baseline_scores[-1][1]) if baseline_scores else {}
-
-    th = float(args.similar_threshold)
-    experiments_test: List[Tuple[str, Dict[int, float]]] = []
-    for label, csv_path in zip(run_labels, exp_resolved):
-        experiments_test.append(
-            (label, _read_loglik_csv(csv_path, _TEST_LOGLIK, required=True))
-        )
-
-    n_test = _write_legacy_comparison_csv(
-        out_path=output_arg,
-        participant_ids=participant_ids,
-        centaur=centaur_scores,
-        experiments=experiments_test,
-        bir=bir,
-        similar_threshold=th,
-    )
-    centaur_note = str(centaur_path) if centaur_path is not None else "(blank)"
-    print(
-        f"Wrote {output_arg} (legacy layout, {_TEST_LOGLIK}, dataset={ds_label}, "
-        f"{n_test} participants, {len(experiments_test)} TEH runs, centaur={centaur_note})."
-    )
-
-    if not _any_csv_has_gated(centaur_path, exp_resolved):
-        return
-
-    gated_out = (
-        Path(args.output_gated).expanduser()
-        if args.output_gated is not None
-        else _gated_output_path(output_arg)
-    )
-    gated_out = gated_out.resolve() if gated_out.is_absolute() else (repo / gated_out).resolve()
-
-    centaur_gated: Dict[int, float] = {}
-    if centaur_path is not None:
-        centaur_gated = _read_loglik_csv(centaur_path, _GATED_LOGLIK, required=False)
-    centaur_for_gated = _scores_for_gated_table(centaur_scores, centaur_gated)
-    experiments_gated: List[Tuple[str, Dict[int, float]]] = []
-    for label, csv_path in zip(run_labels, exp_resolved):
-        experiments_gated.append(
-            (label, _read_loglik_csv(csv_path, _GATED_LOGLIK, required=False))
-        )
-
-    n_gated = _write_legacy_comparison_csv(
-        out_path=gated_out,
-        participant_ids=participant_ids,
-        centaur=centaur_for_gated,
-        experiments=experiments_gated,
-        bir=bir,
-        similar_threshold=th,
-    )
-    gated_score_columns: List[Tuple[str, Dict[int, float]]] = [("Centaur", centaur_for_gated)]
-    gated_score_columns.extend(experiments_gated)
-    best_gated = _num_best_counts(participant_ids, gated_score_columns)
-    print(f"Wrote {gated_out} (legacy gated, {n_gated} participants).")
-    print(f"\n--- gated ({_GATED_LOGLIK}) ---")
-    _print_num_best_counts(best_gated)
 
 
 if __name__ == "__main__":
