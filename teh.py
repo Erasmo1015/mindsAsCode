@@ -133,6 +133,47 @@ def _participant_metric_id(participant_id: Optional[int]) -> Dict[str, Any]:
     return {"participant_id": int(participant_id)}
 
 
+def _resolve_best_program_id_for_metrics(metrics: Dict[str, Any]) -> Optional[str]:
+    for key in ("best_program_id", "iter_best_program_id", "pool_best_program_id"):
+        prog_id = metrics.get(key)
+        if prog_id is not None:
+            return str(prog_id)
+    return None
+
+
+def _best_from_fresh_candidate(
+    program_id: Optional[str],
+    iteration_step: int,
+    candidate_results: Optional[List[Dict[str, Any]]] = None,
+    candidate_sources: Optional[List[str]] = None,
+) -> Optional[str]:
+    """candidate_<idx> if program_id is this iteration's best and that slot was fresh; else null."""
+    if not program_id:
+        return None
+    match = re.match(
+        r"(?:iteration|refinement|global_iteration)_(\d+)_candidate_(\d+)$",
+        str(program_id),
+    )
+    if not match:
+        return None
+    if int(match.group(1)) != int(iteration_step):
+        return None
+    cand_idx = int(match.group(2))
+
+    def _source_for_idx(idx: int) -> Optional[str]:
+        if candidate_results:
+            for row in candidate_results:
+                if row.get("idx") == idx:
+                    return row.get("source")
+        if candidate_sources is not None and 0 <= idx < len(candidate_sources):
+            return candidate_sources[idx]
+        return None
+
+    if _source_for_idx(cand_idx) == "fresh":
+        return f"candidate_{cand_idx}"
+    return None
+
+
 def _build_iteration_metrics_json(
     *,
     participant_id: Optional[int],
@@ -146,6 +187,15 @@ def _build_iteration_metrics_json(
     out.update(header)
     out.update(best)
     out["candidate_results"] = candidate_results
+    iter_step = out.get("iteration")
+    if iter_step is not None:
+        out["best_from_fresh_candidate"] = _best_from_fresh_candidate(
+            _resolve_best_program_id_for_metrics(out),
+            int(iter_step),
+            list(candidate_results) if candidate_results else None,
+        )
+    else:
+        out["best_from_fresh_candidate"] = None
     return out
 
 
@@ -1322,6 +1372,11 @@ def run_global_evolution_phase(
                     iter_idx=iteration,
                     total_iters=n_iterations,
                 )
+            )
+            metrics["best_from_fresh_candidate"] = _best_from_fresh_candidate(
+                metrics.get("pool_best_program_id"),
+                iteration_step,
+                candidate_sources=candidate_sources,
             )
             (iter_dir / "metrics.json").write_text(
                 json.dumps(metrics, indent=2), encoding="utf-8"
@@ -7926,6 +7981,9 @@ def run_evolution(
             
             # Also save to local JSONL file
             if save_artifacts and log_file_path is not None:
+                log_dict["best_from_fresh_candidate"] = metrics.get(
+                    "best_from_fresh_candidate"
+                )
                 log_entry = _wandb_jsonl_log_entry(
                     step=iteration + 1,
                     iteration=iteration_step,
