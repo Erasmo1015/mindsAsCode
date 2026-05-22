@@ -4,13 +4,19 @@ Before running, set up the baseline methods config file:
 analysis/data/baseline_methods/config.yaml
 
 Usage:
-  python analysis/code/utils/compare.py --dataset 1peterson2021using --psych_dataset_split train --experiment_paths 
-   \\ generated_outputs/choice13k/te_dr/run_260514_231815
+  python analysis/code/utils/compare.py --dataset 2plonsky2018when --psych_dataset_split train
 
 Compare per-participant test_loglik across baseline methods, optional Centaur, and TEH runs.
 
-Baseline paths come from ``analysis/data/baseline_methods/config.yaml`` (see file
-comments for key naming). Config dataset keys:
+When ``--experiment_paths`` is omitted, the newest TEH ``run_*`` under
+``generated_outputs/psych101_{train|test}/teh/<dataset>/`` (or
+``generated_outputs/mixed_gambles/teh/``) is selected automatically.
+
+Baseline paths: config.yaml only supplies optional manual overrides per method.
+For each method, an explicit config path is used when set; otherwise the newest
+``run_*`` under the standard ``generated_outputs/`` layout is auto-discovered
+(see ``_auto_discover_baseline_run``). A dataset block in config is not required.
+Config dataset keys (when overriding paths):
 
   datasets:
     1peterson2021using:          # psych_dataset_split train
@@ -42,9 +48,6 @@ Baseline columns always use ``test_loglik`` from each method's config path. The 
 output CSV uses ``gated_test_loglik`` for TEH runs (and Centaur when present); other
 baselines keep ``test_loglik`` because those runs have no gated column. Log-likelihood
 Log-likelihood values are written with 2 decimal places.
-
-Without config entries, legacy layout is participant_id, BIR, Centaur, <teh_run>, ...
-with Avg and Better / Similar / Worse vs Centaur footers.
 
 
 """
@@ -101,6 +104,8 @@ _GATED_LOGLIK = "gated_test_loglik"
 _LOGLIK_NDIGITS = 2
 _BASELINE_METHODS = ("MLE", "prospect_theory", "openevolve", "Centaur")
 _DEFAULT_BASELINE_CONFIG = "analysis/data/baseline_methods/config.yaml"
+_GENERATED_OUTPUTS_DIR = "generated_outputs"
+_LOGLIK_CSV_NAME = "participant_details_loglik.csv"
 _BIR_CACHE_SUBDIR = "bir"
 _BIR_CACHE_CSV_FIELDS = (
     "participant_id",
@@ -182,27 +187,185 @@ def _load_baseline_config_file(config_path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _method_output_folder(method: str) -> str:
+    """Filesystem folder name under generated_outputs (Centaur -> centaur)."""
+    if method == "Centaur":
+        return "centaur"
+    return method
+
+
+def _psych101_outputs_split(psych_dataset_split: str) -> str:
+    return f"psych101_{normalize_psych_dataset_split(psych_dataset_split)}"
+
+
+def _config_dataset_entry(
+    config_data: Mapping[str, Any],
+    dataset: str,
+    psych_dataset_split: str,
+) -> Optional[Dict[str, Any]]:
+    datasets = config_data.get("datasets")
+    if not isinstance(datasets, dict):
+        return None
+    key = _config_dataset_key(dataset, psych_dataset_split)
+    entry = datasets.get(key)
+    return entry if isinstance(entry, dict) else None
+
+
+def _baseline_search_roots(
+    repo: Path,
+    *,
+    method: str,
+    dataset: str,
+    psych_dataset_split: str,
+) -> List[Path]:
+    """Candidate parent directories to scan for newest run_*."""
+    alias = normalize_psych101_dataset_alias(dataset)
+    method_dir = _method_output_folder(method)
+    roots: List[Path] = []
+    gen = repo / _GENERATED_OUTPUTS_DIR
+
+    if is_mixed_gambles_dataset(alias):
+        if method == "openevolve":
+            roots.append(gen / "psych101_train" / "openevolve" / "mixed_gambles")
+        roots.append(gen / "mixed_gambles" / method_dir)
+        return roots
+
+    split_dir = _psych101_outputs_split(psych_dataset_split)
+    roots.append(gen / split_dir / method_dir / alias)
+    return roots
+
+
+def _is_valid_baseline_run_path(path: Path) -> bool:
+    if path.is_file():
+        return path.name == _LOGLIK_CSV_NAME
+    if path.is_dir():
+        return (path / _LOGLIK_CSV_NAME).is_file()
+    return False
+
+
+def _run_sort_key(path: Path) -> Tuple[str, float]:
+    """Prefer newest run_* by name, then by mtime."""
+    if path.is_file():
+        run_name = path.parent.name
+        mtime = path.stat().st_mtime
+    else:
+        run_name = path.name
+        mtime = path.stat().st_mtime
+    return run_name, mtime
+
+
+def _collect_run_candidates(root: Path) -> List[Path]:
+    if not root.is_dir():
+        return []
+    candidates: List[Path] = []
+    for child in root.iterdir():
+        if child.name.startswith("run_") and _is_valid_baseline_run_path(child):
+            candidates.append(child)
+    direct_csv = root / _LOGLIK_CSV_NAME
+    if direct_csv.is_file():
+        candidates.append(direct_csv)
+    return candidates
+
+
+def _latest_baseline_run_under_roots(roots: Sequence[Path]) -> Optional[Path]:
+    candidates: List[Path] = []
+    for root in roots:
+        candidates.extend(_collect_run_candidates(root))
+    if not candidates:
+        return None
+    return max(candidates, key=_run_sort_key)
+
+
+def _auto_discover_baseline_run(
+    repo: Path,
+    *,
+    method: str,
+    dataset: str,
+    psych_dataset_split: str,
+) -> Optional[Path]:
+    roots = _baseline_search_roots(
+        repo, method=method, dataset=dataset, psych_dataset_split=psych_dataset_split
+    )
+    return _latest_baseline_run_under_roots(roots)
+
+
+def _teh_search_root(
+    repo: Path,
+    dataset: str,
+    psych_dataset_split: str,
+) -> Path:
+    alias = normalize_psych101_dataset_alias(dataset)
+    gen = repo / _GENERATED_OUTPUTS_DIR
+    if is_mixed_gambles_dataset(alias):
+        return gen / "mixed_gambles" / "teh"
+    split_dir = _psych101_outputs_split(psych_dataset_split)
+    return gen / split_dir / "teh" / alias
+
+
+def _auto_discover_teh_run(
+    repo: Path,
+    *,
+    dataset: str,
+    psych_dataset_split: str,
+) -> Optional[Path]:
+    """Newest TEH run_* with participant_details_loglik.csv (by run name, then mtime)."""
+    root = _teh_search_root(repo, dataset, psych_dataset_split)
+    return _latest_baseline_run_under_roots([root])
+
+
+def _resolve_baseline_run_paths(
+    config_data: Mapping[str, Any],
+    repo: Path,
+    dataset: str,
+    psych_dataset_split: str,
+) -> Dict[str, Path]:
+    """
+    Method name -> run dir or CSV.
+
+    Config paths override auto-discovery when set; otherwise always auto-discovers.
+    """
+    entry = _config_dataset_entry(config_data, dataset, psych_dataset_split)
+    out: Dict[str, Path] = {}
+    config_key = _config_dataset_key(dataset, psych_dataset_split)
+    for method in _BASELINE_METHODS:
+        raw = entry.get(method) if entry is not None else None
+        if raw is not None and str(raw).strip() != "":
+            out[method] = _resolve_repo_path(repo, str(raw))
+            continue
+        discovered = _auto_discover_baseline_run(
+            repo, method=method, dataset=dataset, psych_dataset_split=psych_dataset_split
+        )
+        if discovered is not None:
+            out[method] = discovered
+            print(
+                f"Auto-selected {method} for {config_key}: {discovered.relative_to(repo)}"
+            )
+        else:
+            roots = _baseline_search_roots(
+                repo,
+                method=method,
+                dataset=dataset,
+                psych_dataset_split=psych_dataset_split,
+            )
+            searched = ", ".join(str(r.relative_to(repo)) for r in roots)
+            print(
+                f"Warning: no run found for {method} ({config_key}); "
+                f"searched [{searched}]; skipping.",
+                file=sys.stderr,
+            )
+    return out
+
+
 def _baseline_run_paths_from_config(
     config_data: Mapping[str, Any],
     repo: Path,
     dataset: str,
     psych_dataset_split: str,
 ) -> Dict[str, Path]:
-    """Method name -> run dir or CSV (only methods present in config)."""
-    datasets = config_data.get("datasets")
-    if not isinstance(datasets, dict):
-        return {}
-    key = _config_dataset_key(dataset, psych_dataset_split)
-    entry = datasets.get(key)
-    if not isinstance(entry, dict):
-        return {}
-    out: Dict[str, Path] = {}
-    for method in _BASELINE_METHODS:
-        raw = entry.get(method)
-        if raw is None or str(raw).strip() == "":
-            continue
-        out[method] = _resolve_repo_path(repo, str(raw))
-    return out
+    """Backward-compatible alias."""
+    return _resolve_baseline_run_paths(
+        config_data, repo, dataset, psych_dataset_split
+    )
 
 
 def _dataset_defaults(
@@ -862,9 +1025,12 @@ def main() -> None:
     p.add_argument(
         "--experiment_paths",
         nargs="*",
-        default=[],
+        default=None,
         type=Path,
-        help="TEH run directories or participant_details_loglik.csv paths (zero or more).",
+        help=(
+            "TEH run directories or participant_details_loglik.csv paths (zero or more). "
+            "If omitted, auto-select the newest run_* under generated_outputs/.../teh/."
+        ),
     )
     p.add_argument(
         "--centaur_csv",
@@ -948,10 +1114,9 @@ def main() -> None:
     config_data = _load_baseline_config_file(config_path)
     config_key = _config_dataset_key(dataset, psych_split)
 
-    config_baselines = _baseline_run_paths_from_config(
+    baseline_paths = _resolve_baseline_run_paths(
         config_data, repo, dataset, psych_split
     )
-    baseline_paths = dict(config_baselines)
 
     if args.centaur_csv is not None:
         centaur_override = Path(args.centaur_csv).expanduser()
@@ -968,7 +1133,29 @@ def main() -> None:
     if not (0.0 < args.split_ratio < 1.0):
         raise SystemExit(f"--split_ratio must be in (0, 1), got {args.split_ratio}.")
 
-    teh_inputs = list(args.experiment_paths)
+    if args.experiment_paths is None:
+        discovered_teh = _auto_discover_teh_run(
+            repo, dataset=dataset, psych_dataset_split=psych_split
+        )
+        if discovered_teh is not None:
+            teh_root = _teh_search_root(repo, dataset, psych_split)
+            print(
+                f"Auto-selected TEH for {config_key}: "
+                f"{discovered_teh.relative_to(repo)} "
+                f"(newest run_* in {teh_root.relative_to(repo)})"
+            )
+            teh_inputs = [discovered_teh]
+        else:
+            teh_root = _teh_search_root(repo, dataset, psych_split)
+            print(
+                f"Warning: no TEH run found for {config_key}; "
+                f"searched {teh_root.relative_to(repo)}; continuing without TEH.",
+                file=sys.stderr,
+            )
+            teh_inputs = []
+    else:
+        teh_inputs = list(args.experiment_paths)
+
     exp_resolved: List[Path] = []
     if teh_inputs:
         exp_resolved = [_resolve_loglik_csv(Path(ep).expanduser()) for ep in teh_inputs]
@@ -976,9 +1163,11 @@ def main() -> None:
     if len(set(run_labels)) != len(run_labels):
         raise ValueError(f"Duplicate TEH run column names: {run_labels}")
 
-    use_baseline_layout = bool(config_baselines)
-    if not use_baseline_layout and not exp_resolved and not baseline_paths:
-        raise SystemExit("Provide --experiment_paths and/or baseline entries in config.")
+    use_baseline_layout = True
+    if not exp_resolved and not baseline_paths:
+        raise SystemExit(
+            "No baseline or TEH runs found (check generated_outputs/ or pass --experiment_paths)."
+        )
 
     all_loglik_csvs: List[Path] = list(exp_resolved)
     baseline_scores: List[Tuple[str, Dict[int, float]]] = []

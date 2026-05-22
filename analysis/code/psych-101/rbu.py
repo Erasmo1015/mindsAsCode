@@ -7,7 +7,7 @@ participant ordinal in the configured range:
 
 1. Load train trials (HF psych_dataset_split + within-participant train split).
 2. BIR = fraction of repeated problem groups with both actions 0 and 1.
-3. LLM structure score (combined call) -> analysis/Structure_score_all.txt.
+3. LLM structure score (one combined call per dataset for all participants; trials truncated to fit context) -> Structure_score_all.txt.
 4. S = sum of clipped numeric evidence values (summary/text fields ignored); S clipped to [0, 1].
 5. RBU = clip(BIR - S, 0, 1).
 
@@ -65,6 +65,12 @@ log = logging.getLogger(__name__)
 _STRUCTURE_SCORE_ALL_FILENAME = "Structure_score_all.txt"
 _PREPARED_INSTRUCTION_HEADER = "\n\n## Dataset-specific scoring instruction (prepared once for this run)\n"
 _STRUCTURE_TOKEN_ESTIMATE_SLACK = 1.12
+# vLLM/OpenAI count prompt_tokens + max_tokens against the context window.
+_STRUCTURE_MIN_COMPLETION_TOKENS = 4096
+_STRUCTURE_COMPLETION_CAP = 16384
+_STRUCTURE_COMPLETION_PER_PARTICIPANT = 200
+_STRUCTURE_MIN_PROMPT_RESERVE = 4096
+_STRUCTURE_CONTEXT_SAFETY_MARGIN = 64
 
 # (dataset alias, inclusive ordinal start, inclusive ordinal end)
 RBU_DATASET_ORDINAL_RANGES: Tuple[Tuple[str, int, int], ...] = (
@@ -224,6 +230,44 @@ def _compute_rbu(bir: float, structure_score: float) -> float:
     return clip01(float(bir) - float(structure_score))
 
 
+def _structure_completion_budget(
+    n_participants: int,
+    model_context_tokens: int,
+    *,
+    explicit_max_completion: Optional[int] = None,
+) -> int:
+    """
+    Reserve completion tokens for the combined structure-score call.
+
+    The old ``min(32768, 768 * n_participants)`` rule consumed the entire 32k window
+    for 43+ participants, leaving no room for the prompt (vLLM: prompt + max_tokens <= context).
+    """
+    ctx = int(model_context_tokens)
+    if explicit_max_completion is not None:
+        requested = int(explicit_max_completion)
+    else:
+        requested = max(
+            _STRUCTURE_MIN_COMPLETION_TOKENS,
+            _STRUCTURE_COMPLETION_PER_PARTICIPANT * max(1, int(n_participants)),
+        )
+        requested = min(_STRUCTURE_COMPLETION_CAP, requested)
+    prompt_floor = max(_STRUCTURE_MIN_PROMPT_RESERVE, ctx // 4)
+    max_allowed = ctx - prompt_floor - _STRUCTURE_CONTEXT_SAFETY_MARGIN
+    if max_allowed < 256:
+        raise ValueError(
+            f"model_context_tokens={ctx} too small for structure scoring "
+            f"(need prompt reserve >= {prompt_floor}); increase --structure_model_context_tokens "
+            f"or --max_model_len."
+        )
+    budget = min(int(requested), int(max_allowed))
+    if budget < 256:
+        raise ValueError(
+            f"structure completion budget={budget} with context={ctx}, n_participants={n_participants}; "
+            "lower --structure_max_completion_tokens or increase context length."
+        )
+    return budget
+
+
 def _format_train_trials_block(
     participant_ids: Sequence[int],
     train_by_pid: Dict[int, List[Dict[str, Any]]],
@@ -297,6 +341,15 @@ def _llm_write_all_participant_structure_scores(
     if not pids:
         raise ValueError("structure scoring: empty participant_ids")
 
+    log.info(
+        "[%s] structure scoring: ONE combined LLM call for %d participants (not per-participant); "
+        "completion_budget=%d model_context=%d",
+        dataset_dir.name,
+        len(pids),
+        int(max_response_tokens),
+        int(model_context_tokens),
+    )
+
     min_full = min(len(train_by[pid]) for pid in pids)
     slack = float(token_estimate_slack)
     if slack < 1.0:
@@ -305,10 +358,12 @@ def _llm_write_all_participant_structure_scores(
     def _inflate(n: int) -> int:
         return int(math.ceil(float(n) * slack))
 
-    completion_reserve = int(max_response_tokens) + 64
+    completion_reserve = int(max_response_tokens) + _STRUCTURE_CONTEXT_SAFETY_MARGIN
     if int(model_context_tokens) <= completion_reserve:
         raise ValueError(
-            f"model_context_tokens={model_context_tokens} must exceed max_response_tokens + 64"
+            f"model_context_tokens={model_context_tokens} must exceed max_response_tokens "
+            f"({_STRUCTURE_CONTEXT_SAFETY_MARGIN} safety margin); completion budget is too large for this context. "
+            "Lower --structure_max_completion_tokens or increase --structure_model_context_tokens / --max_model_len."
         )
     prompt_cap = min(int(structure_prompt_max_tokens), int(model_context_tokens) - completion_reserve)
     if prompt_cap < 1:
@@ -337,20 +392,29 @@ def _llm_write_all_participant_structure_scores(
     user_content = prefix + final_body
     est_tokens = count_tokens_approx(user_content)
     est_inflated = _inflate(est_tokens)
-    max_resp_eff = min(int(max_response_tokens), int(model_context_tokens) - est_inflated - 64)
+    max_resp_eff = min(
+        int(max_response_tokens),
+        int(model_context_tokens) - est_inflated - _STRUCTURE_CONTEXT_SAFETY_MARGIN,
+    )
     if max_resp_eff < 256:
         raise RuntimeError(
             "RBU structure prompt leaves insufficient room for completion "
-            f"(est_prompt={est_tokens}, inflated={est_inflated}, context={model_context_tokens})"
+            f"(est_prompt={est_tokens}, inflated={est_inflated}, context={model_context_tokens}, "
+            f"completion_budget={max_response_tokens}). "
+            "Reduce --structure_prompt_max_tokens or participants per call; trials were truncated to k="
+            f"{best_k} per participant."
         )
 
     log.info(
-        "[%s] structure LLM: participants=%d trials_each=%d est_prompt_tokens=%d max_completion=%d",
+        "[%s] structure LLM pack: participants=%d trials_each=%d est_prompt_tokens=%d "
+        "inflated_prompt_est=%d max_completion=%d (prompt+max_tokens <= %d)",
         dataset_dir.name,
         len(pids),
         best_k,
         est_tokens,
+        est_inflated,
         max_resp_eff,
+        int(model_context_tokens),
     )
 
     resp = client.chat.completions.create(
@@ -529,7 +593,11 @@ def process_dataset(
         )
 
         n_part = len(raw_ids)
-        max_resp_toks = min(32768, max(4096, 768 * max(1, n_part)))
+        max_resp_toks = _structure_completion_budget(
+            n_part,
+            int(args.structure_model_context_tokens),
+            explicit_max_completion=args.structure_max_completion_tokens,
+        )
         raw_scores, score_path, trials_k, _ = _llm_write_all_participant_structure_scores(
             client=client,
             model_name=args.model_name,
@@ -667,10 +735,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--structure_model_context_tokens",
+        "--max_model_len",
+        dest="structure_model_context_tokens",
         type=int,
         default=32768,
         metavar="N",
-        help="Model context window for structure-scoring calls.",
+        help=(
+            "Model context window (vLLM --max-model-len). Structure scoring packs "
+            "prompt + max_tokens to fit: trials are truncated per participant so "
+            "estimated_prompt + max_completion <= this value."
+        ),
+    )
+    p.add_argument(
+        "--structure_max_completion_tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Max completion tokens for the combined structure-score call. Default: "
+            f"min({_STRUCTURE_COMPLETION_CAP}, max({_STRUCTURE_MIN_COMPLETION_TOKENS}, "
+            f"{_STRUCTURE_COMPLETION_PER_PARTICIPANT} * n_participants)), capped to leave "
+            "prompt room in the context window."
+        ),
     )
     p.add_argument(
         "--instruction_max_tokens",
