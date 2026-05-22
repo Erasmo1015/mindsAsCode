@@ -12,6 +12,8 @@ _IMPORT_LINE_RE = re.compile(r"(?m)^\s*(?:import|from)\s+\S")
 _CHOOSE_DEF_RE = re.compile(r"(?m)^\s*def choose\s*\(")
 _TRAILING_FENCE_RE = re.compile(r"\n```(?:python)?\s*\n[\s\S]*?```\s*$", re.IGNORECASE)
 _FAKE_SIGMOID_MARKER = "1/(1+1/(1+"
+_HIDDEN_IMPORT_CALL_RE = re.compile(r"__import__\s*\(")
+_HIDDEN_IMPORT_MARKERS = ("importlib",)
 
 
 def strip_embedded_choose_from_evolution_prompt(text: str) -> str:
@@ -61,6 +63,12 @@ def _strip_python_comments(code: str) -> str:
 def _has_fake_sigmoid(code: str) -> bool:
     compact = re.sub(r"\s+", "", code)
     return _FAKE_SIGMOID_MARKER in compact
+
+
+def _has_hidden_import(code: str) -> bool:
+    if _HIDDEN_IMPORT_CALL_RE.search(code):
+        return True
+    return any(marker in code for marker in _HIDDEN_IMPORT_MARKERS)
 
 
 def _count_choose_definitions(code: str) -> int:
@@ -164,6 +172,8 @@ def describe_sanitize_failure(
     cleaned = _strip_python_comments(extracted)
     if not cleaned or _count_choose_definitions(cleaned) != 1:
         return "comments_stripped_away_choose_or_empty"
+    if _has_hidden_import(cleaned):
+        return "hidden_import_present"
     if _has_fake_sigmoid(cleaned):
         return "fake_sigmoid_pattern"
     if not _passes_python_syntax(cleaned):
@@ -196,6 +206,9 @@ def sanitize_evolution_candidate_code(
     if not cleaned or _count_choose_definitions(cleaned) != 1:
         return ""
 
+    if _has_hidden_import(cleaned):
+        return ""
+
     if _has_fake_sigmoid(cleaned):
         return ""
 
@@ -215,5 +228,5 @@ Candidate output rules (strict):
 6. No example usage or __main__ blocks.
 7. No helper functions outside choose(); nest helpers inside choose() if needed.
 8. Use only the provided problem and history.
-9. Keep the function concise.
+9. Keep the function concise, but do not simplify away useful behavioral structure.
 """

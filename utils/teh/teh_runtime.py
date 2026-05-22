@@ -52,8 +52,9 @@ BASE_REFINE_PROMPT = (
 DEFAULT_SEED_PROGRAM = REPO_ROOT / "persona_code_example" / "te_vanilla" / "choices13k.py"
 
 CONCISE_PROGRAM_GUIDANCE = (
-    "Prefer concise programs. Avoid long repetitive helper code. "
-    "Keep choose() compact, ideally under ~150 lines unless necessary."
+    "Prefer concise programs and avoid long repetitive helper code. "
+    "Do not simplify away useful behavioral structure just to make the code shorter. "
+    "Keep choose() reasonably compact unless additional logic improves behavioral fit."
 )
 
 _GENERIC_PROMPT_REQUIREMENTS = """Requirements:
@@ -66,9 +67,6 @@ _GENERIC_PROMPT_REQUIREMENTS = """Requirements:
 - Higher returned values mean a higher P(action=1) (more likely to choose action 1).
 - Avoid numerical errors such as division by zero, overflow, or invalid operations.
 - Do not use `pow(...)`; use `**` for exponentiation.
-- If using a logistic/sigmoid transform without imports, use:
-  1 / (1 + 2.718281828 ** (-x))
-  Do not use incorrect forms such as 1 / (1 + 1 / (1 + x)).
 - Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
 - Do not rely on top-level helper functions outside `choose(...)`.
 - Ensure every variable used in expressions is defined on all branches."""
@@ -200,9 +198,9 @@ def _apply_gamble_neutral_wording(text: str) -> str:
     out = re.sub(
         r"Each problem presents two gambles: Option [A-Z] and Option [A-Z]\.",
         (
-            "Each problem presents two options (option index 0 and option index 1). "
-            "problem[\"gamble_A\"] stores option 0; problem[\"gamble_B\"] stores option 1. "
-            "These are parsed schema field names and do not necessarily mean the task is a gamble problem."
+            "Each problem presents two options: option 0 and option 1. "
+            "problem[\"gamble_A\"] stores option 0. "
+            "problem[\"gamble_B\"] stores option 1."
         ),
         text,
         count=1,
@@ -375,8 +373,8 @@ def build_prompt_generation_llm_user_content(
 
     if is_gamble:
         adapt_instructions = (
-            "- The base prompt is for gamble_A/gamble_B tasks. Adapt wording only as needed "
-            "for this dataset; keep gamble field names and P(action=1)=P(action on gamble_B).\n"
+            "- Use the base prompt as the main evolution prompt. Keep the direct convention: "
+            "action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).\n"
         )
         base_section_title = "## Base prompt (gamble_A/gamble_B task)\n\n"
     else:
@@ -388,20 +386,50 @@ def build_prompt_generation_llm_user_content(
         )
         base_section_title = "## Base prompt skeleton (schema-specific)\n\n"
 
+    mixed_gambles_instructions = ""
+    if is_mixed_gambles_dataset(dataset_alias):
+        mixed_gambles_instructions = (
+            "- For mixed_gambles, the generated evolution prompt must strongly encourage "
+            "Prospect-Theory-like subjective utility:\n"
+            "  - transform rewards into subjective values before comparing options\n"
+            "  - use nonlinear gain/loss value transformation\n"
+            "  - use asymmetric treatment of gains and losses\n"
+            "  - preserve loss aversion and subjective-value structure in high-performing parents\n"
+            "  - avoid replacing PT-like structure with raw expected-value-only heuristics\n"
+            "  - prefer tuning/refining PT-like components over simplifying them away\n"
+        )
+
     return (
         f"Write the evolution system prompt for dataset `{dataset_alias}` ({display}).\n\n"
         "Requirements:\n"
+        "- The final prompt is read by a code-generation model. Keep it direct, concise, "
+        "and behavioral.\n"
+        "- Avoid vague or caveat wording such as: \"may help\", \"if appropriate\", "
+        "\"not necessarily\", \"one possible option\".\n"
+        "- Preserve the base prompt's direct action convention: action 0 -> gamble_A, "
+        "action 1 -> gamble_B; return P(action=1).\n"
+        "- For gamble_A/gamble_B tasks, preserve subjective-value guidance for reward/probability structure.\n"
+        "- Preserve parent-exploitation guidance: if a parent already performs well, "
+        "preserve and strengthen its core behavioral structure instead of replacing it "
+        "with a generic simpler heuristic.\n"
+        "- Do not rewrite the base prompt into a caveat-heavy or schema-documentation style "
+        "prompt. Keep the final prompt direct and behavior-focused.\n"
+        "- Do not ask for a program implementation inside the generated prompt.\n"
         "- Use the **Runtime schema summary** and **Parsed trial examples** sections below "
         "as the source of truth for `problem`, `history`, and action semantics.\n"
         f"{adapt_instructions}"
+        f"{mixed_gambles_instructions}"
         "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
-        "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
-        "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
-        "variables defined on all branches.\n"
-        f"- {CONCISE_PROGRAM_GUIDANCE}\n"
+        "- Preserve the base prompt's implementation requirements.\n"
         "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
         "- Do NOT append a sample, reference, or complete choose() implementation.\n"
         "- You may document the choose() API in a short docstring block, but no executable code.\n\n"
+        "Before outputting the generated prompt, verify:\n"
+        "- no logistic/sigmoid formula guidance is included\n"
+        "- no \"not necessarily a gamble problem\" caveat is included\n"
+        "- no full choose() implementation is included\n"
+        "- no vague \"if appropriate / may help\" wording is included\n"
+        "- the generated prompt preserves direct return convention P(action=1)\n\n"
         f"## Runtime schema summary\n\n{schema_summary}\n\n"
         f"{base_section_title}{base_prompt}\n\n"
         f"## Task description (high-level)\n\n{task_description}\n\n"

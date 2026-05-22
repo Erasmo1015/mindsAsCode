@@ -1,11 +1,21 @@
-Additional validation information is provided because the current behavioral program does not generalize well to held-out validation trials.
+Additional validation information is provided because the current behavioral program can be improved on held-out validation trials.
 
-Your goal is to improve the behavioral rule so it explains BOTH:
+Your goal is to extend the current program so it explains both:
+- the training behavior,
+- and the validation behavior.
 
-* the training behavior,
-* and the validation behavior.
+Treat validation trials as additional behavioral evidence.
+Look for consistent patterns in the validation examples that the current program misses.
+Add these missing patterns to the original training-evolved program.
 
-Validation failures may indicate that the current program is missing an important behavioral pattern or decision rule.
+Preserve the strongest behavioral structure from the current program.
+Do not replace a strong training-evolved rule with an unrelated rule.
+Refine or add components that improve validation behavior while keeping the training behavior reasonably well explained.
 
-Use the validation trials to identify behavioral structure that consistently explains both train and validation examples.
-Do not fit only the validation examples that harms training score; preserve broader behavioral modelling.
+Prefer meaningful behavioral additions such as:
+- improved reward/probability transformations,
+- nonlinear value transformation,
+- asymmetric gain/loss treatment,
+- subjective-value adjustments,
+- history or feedback effects,
+- participant-specific thresholds or sensitivities.
