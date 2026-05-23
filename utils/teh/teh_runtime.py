@@ -52,8 +52,9 @@ BASE_REFINE_PROMPT = (
 DEFAULT_SEED_PROGRAM = REPO_ROOT / "persona_code_example" / "te_vanilla" / "choices13k.py"
 
 CONCISE_PROGRAM_GUIDANCE = (
-    "Prefer concise programs. Avoid long repetitive helper code. "
-    "Keep choose() compact, ideally under ~150 lines unless necessary."
+    "Prefer concise programs and avoid long repetitive helper code. "
+    "Do not simplify away useful behavioral structure just to make the code shorter. "
+    "Keep choose() reasonably compact unless additional logic improves behavioral fit."
 )
 
 _GENERIC_PROMPT_REQUIREMENTS = """Requirements:
@@ -66,9 +67,6 @@ _GENERIC_PROMPT_REQUIREMENTS = """Requirements:
 - Higher returned values mean a higher P(action=1) (more likely to choose action 1).
 - Avoid numerical errors such as division by zero, overflow, or invalid operations.
 - Do not use `pow(...)`; use `**` for exponentiation.
-- If using a logistic/sigmoid transform without imports, use:
-  1 / (1 + 2.718281828 ** (-x))
-  Do not use incorrect forms such as 1 / (1 + 1 / (1 + x)).
 - Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
 - Do not rely on top-level helper functions outside `choose(...)`.
 - Ensure every variable used in expressions is defined on all branches."""
@@ -90,6 +88,212 @@ def _is_gamble_ab_task(trials: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _history_feedback_stats(trials: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize history/feedback signals from parsed sample trials."""
+    has_feedback_true = any((t.get("problem") or {}).get("has_feedback") is True for t in trials)
+    has_feedback_false_all = all(not (t.get("problem") or {}).get("has_feedback") for t in trials)
+    hist_lens = [len(t.get("history") or []) for t in trials]
+    max_hist = max(hist_lens) if hist_lens else 0
+    all_hist_empty = all(length == 0 for length in hist_lens)
+    hist_actions = 0
+    hist_feedback_non_none = 0
+    schema_types = {
+        str((t.get("problem") or {}).get("schema_type", ""))
+        for t in trials
+        if (t.get("problem") or {}).get("schema_type") not in (None, "", "?")
+    }
+    for trial in trials:
+        for entry in trial.get("history") or []:
+            if not isinstance(entry, dict):
+                continue
+            if "action" in entry:
+                hist_actions += 1
+            if entry.get("feedback") is not None:
+                hist_feedback_non_none += 1
+    return {
+        "has_feedback_true": has_feedback_true,
+        "has_feedback_false_all": has_feedback_false_all,
+        "all_hist_empty": all_hist_empty,
+        "max_hist": max_hist,
+        "hist_actions": hist_actions,
+        "hist_feedback_non_none": hist_feedback_non_none,
+        "is_bandit": "C" in schema_types,
+        "schema_types": schema_types,
+    }
+
+
+def _infer_history_feedback_guidance(
+    trials: List[Dict[str, Any]],
+    *,
+    dataset_alias: str,
+    instruction: str = "",
+    schema_summary: str = "",
+) -> List[str]:
+    """Dataset-specific history/feedback role text derived from parsed examples."""
+    if is_mixed_gambles_dataset(dataset_alias):
+        return [
+            "History/feedback is not useful for this dataset; use current problem features.",
+            "`has_feedback` is always False; history may be empty.",
+            "No outcome realizations are shown in history.",
+            "Choices should depend on the current `gamble_A` and `gamble_B` features only.",
+            "Use action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).",
+        ]
+
+    stats = _history_feedback_stats(trials)
+    instruction_l = instruction.lower()
+    schema_l = schema_summary.lower()
+    is_learning_task = stats["is_bandit"] or any(
+        token in instruction_l or token in schema_l
+        for token in ("bandit", "slot machine", "learning", "payoff")
+    )
+
+    if stats["is_bandit"] and stats["hist_feedback_non_none"] > 0 and stats["hist_actions"] > 0:
+        return [
+            "Use history to estimate option-specific payoff tendencies within the same game/block."
+        ]
+
+    if (
+        stats["has_feedback_false_all"]
+        and stats["hist_feedback_non_none"] == 0
+        and stats["all_hist_empty"]
+    ):
+        return [
+            "History/feedback is not useful for this dataset; use current problem features."
+        ]
+
+    if stats["hist_actions"] > 0 and (
+        stats["hist_feedback_non_none"] > 0 or stats["has_feedback_true"]
+    ):
+        return [
+            "History may contain useful prior actions/feedback; use it only when it improves prediction."
+        ]
+
+    if stats["hist_actions"] > 0 and stats["hist_feedback_non_none"] == 0:
+        return [
+            "History may summarize prior actions or within-round/block state, but there is no outcome feedback.",
+            "You may use action-frequency or repetition summaries when they improve prediction; "
+            "do not blindly copy the last action.",
+        ]
+
+    if is_learning_task and "feedback" in schema_l:
+        return [
+            "History may contain useful prior actions/feedback; use it only when it improves prediction."
+        ]
+
+    return [
+        "History/feedback is not useful for this dataset; use current problem features."
+    ]
+
+
+def _format_history_feedback_section(guidance_lines: Sequence[str]) -> str:
+    bullets = "\n".join(f"- {line}" for line in guidance_lines)
+    return f"History and feedback:\n{bullets}"
+
+
+def _ensure_history_feedback_guidance(text: str, guidance_lines: Sequence[str]) -> str:
+    """Append canonical history/feedback guidance when absent from generated prompt text."""
+    if not guidance_lines:
+        return text
+    if guidance_lines[0] in text:
+        return text
+    return text.rstrip() + "\n\n" + _format_history_feedback_section(guidance_lines) + "\n"
+
+
+_CCT_PROBLEM_KEYS = frozenset(
+    {
+        "current_score",
+        "n_cards_remaining",
+        "n_loss_cards",
+        "gain_amount",
+        "loss_amount",
+        "cards_flipped",
+    }
+)
+_PRODUCT_RATING_KEYS = frozenset({"ratings_A", "ratings_B"})
+_CCT_DATASET_ALIAS = "3frey2017cct"
+_PRODUCT_RATING_DATASET_ALIAS = "7hilbig2014generalized"
+
+
+def _is_cct_task(trials: List[Dict[str, Any]], *, dataset_alias: str = "") -> bool:
+    if dataset_alias and normalize_psych101_dataset_alias(dataset_alias) == _CCT_DATASET_ALIAS:
+        return True
+    problem_keys = set(_problem_keys_from_trials(trials))
+    return len(problem_keys & _CCT_PROBLEM_KEYS) >= 3
+
+
+def _is_product_rating_task(trials: List[Dict[str, Any]], *, dataset_alias: str = "") -> bool:
+    if (
+        dataset_alias
+        and normalize_psych101_dataset_alias(dataset_alias) == _PRODUCT_RATING_DATASET_ALIAS
+    ):
+        return True
+    problem_keys = set(_problem_keys_from_trials(trials))
+    return _PRODUCT_RATING_KEYS.issubset(problem_keys)
+
+
+def _cct_specific_guidance(action_sem: str) -> str:
+    return (
+        "CCT-specific guidance:\n"
+        "- This is a stop/continue risk task.\n"
+        "- Build rules around comparing stopping now against continuing.\n"
+        "- A useful structure is:\n"
+        "  ev_stop = current_score\n"
+        "  p_loss = n_loss_cards / n_cards_remaining if n_cards_remaining > 0 else 0\n"
+        "  ev_continue = current_score + (1 - p_loss) * gain_amount - p_loss * loss_amount\n"
+        "  decision_score = ev_stop - ev_continue\n"
+        "- Higher decision_score should increase P(stop), according to the dataset action semantics.\n"
+        f"- Action semantics for this dataset: {action_sem}\n"
+        "- Use current_score, remaining cards, loss-card risk, gain amount, and loss amount.\n"
+        "- Avoid generic raw expected-value rules that ignore the stop-vs-continue structure.\n"
+        "- If the stop/continue rule fits many observed choices, sharpen probabilities away from 0.5."
+    )
+
+
+def _product_rating_specific_guidance() -> str:
+    return (
+        "Product-rating guidance:\n"
+        "- This is a product-choice cue-inference task.\n"
+        "- Compare products using weighted sums of their rating cues.\n"
+        "- Prefer clean weighted-rating rules over history-heavy rules.\n"
+        "- Do not add history terms unless they improve held-out validation behavior.\n"
+        "- If a clean weighted-rating rule performs well, preserve it and tune cue "
+        "weights/confidence instead of adding idiosyncratic history bias."
+    )
+
+
+def _schema_neutral_behavioral_sections(
+    trials: List[Dict[str, Any]],
+    *,
+    dataset_alias: str,
+    action_sem: str,
+) -> str:
+    sections = [
+        "Behavioral requirements:",
+        "- Do not return constant or near-constant probabilities.",
+        "- The probability must depend meaningfully on the problem inputs.",
+        "- When the learned rule clearly favors action 1, return probability above 0.5.",
+        "- When the learned rule clearly favors action 0, return probability below 0.5.",
+        "- If a good rule predicts the correct direction but is too close to 0.5, move the "
+        "probability farther from 0.5 in the same direction.",
+        "- If the rule is uncertain or conflicting, return a probability closer to 0.5.",
+        "- Do not add history terms unless history improves behavioral fit.",
+        "- Avoid history/idiosyncratic terms that make a strong problem-based rule worse.",
+        "",
+        "Parent comparison:",
+        "- When parent programs and scores are provided, preserve components from better-scoring parents.",
+        "- Do not replace a strong parent with a generic simpler rule.",
+        "- Remove or weaken code, parameters, or history terms that appear in worse parents "
+        "but not in better parents.",
+        "- Prefer targeted changes to scaling, thresholds, confidence, feature weights, "
+        "or small behavioral components.",
+    ]
+    if _is_cct_task(trials, dataset_alias=dataset_alias):
+        sections.extend(["", _cct_specific_guidance(action_sem)])
+    if _is_product_rating_task(trials, dataset_alias=dataset_alias):
+        sections.extend(["", _product_rating_specific_guidance()])
+    return "\n".join(sections)
+
+
 def _extract_action_semantics(schema_summary: str) -> str:
     for line in schema_summary.splitlines():
         if line.startswith("- action semantics:"):
@@ -107,7 +311,12 @@ def _problem_keys_from_trials(trials: List[Dict[str, Any]]) -> List[str]:
 
 
 def _build_schema_neutral_base_prompt(
-    schema_summary: str, trials: List[Dict[str, Any]]
+    schema_summary: str,
+    trials: List[Dict[str, Any]],
+    *,
+    dataset_alias: str = "",
+    instruction: str = "",
+    history_feedback_guidance: Optional[Sequence[str]] = None,
 ) -> str:
     """Non-gamble base prompt: document observed problem/history keys only."""
     problem_keys = _problem_keys_from_trials(trials)
@@ -117,9 +326,23 @@ def _build_schema_neutral_base_prompt(
         if line.startswith("- history core keys:"):
             history_note = line.split(":", 1)[1].strip()
             break
+    guidance_lines = list(
+        history_feedback_guidance
+        or _infer_history_feedback_guidance(
+            trials,
+            dataset_alias=dataset_alias,
+            instruction=instruction,
+            schema_summary=schema_summary,
+        )
+    )
     problem_doc = (
         "\n".join(f"        - {key}: (type/structure per parsed examples)" for key in problem_keys)
         or "        - (see parsed trial examples)"
+    )
+    behavioral_sections = _schema_neutral_behavioral_sections(
+        trials,
+        dataset_alias=dataset_alias,
+        action_sem=action_sem,
     )
     return (
         "You are given observations of human choices in binary decision problems.\n"
@@ -138,11 +361,8 @@ def _build_schema_neutral_base_prompt(
         "    return: float, probability of choosing action 1, i.e. P(action=1)\n"
         '    """\n\n'
         f"{_GENERIC_PROMPT_REQUIREMENTS}\n\n"
-        "Behavioral requirements:\n"
-        "- Do not return constant or near-constant probabilities, such as always close to 0.5.\n"
-        "- The probability must depend meaningfully on the problem inputs.\n"
-        "- History may be used when helpful, but do not rely only on copying past actions.\n"
-        "- The program should behave sensibly across different problems and histories.\n\n"
+        f"{behavioral_sections}\n\n"
+        f"{_format_history_feedback_section(guidance_lines)}\n\n"
         "Generation requirements:\n"
         f"- {CONCISE_PROGRAM_GUIDANCE}\n"
         "- Programs must implement choose(problem, history) as documented above.\n"
@@ -183,11 +403,17 @@ def _base_prompt_for_trials(
     schema_summary: str,
     *,
     dataset_alias: str,
+    instruction: str = "",
     base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     if _is_gamble_ab_task(trials):
         return _choice13k_neutral_loglik_base(base_prompt_path)
-    return _build_schema_neutral_base_prompt(schema_summary, trials)
+    return _build_schema_neutral_base_prompt(
+        schema_summary,
+        trials,
+        dataset_alias=dataset_alias,
+        instruction=instruction,
+    )
 
 
 def _apply_gamble_neutral_wording(text: str) -> str:
@@ -200,9 +426,8 @@ def _apply_gamble_neutral_wording(text: str) -> str:
     out = re.sub(
         r"Each problem presents two gambles: Option [A-Z] and Option [A-Z]\.",
         (
-            "Each problem presents two options (option index 0 and option index 1). "
-            "problem[\"gamble_A\"] stores option 0; problem[\"gamble_B\"] stores option 1. "
-            "These are parsed schema field names and do not necessarily mean the task is a gamble problem."
+            "Each problem presents two options: option 0 and option 1. "
+            "problem[\"gamble_A\"] stores option 0; problem[\"gamble_B\"] stores option 1."
         ),
         text,
         count=1,
@@ -324,10 +549,17 @@ def _merge_prompt_fallback(
     base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    guidance_lines = _infer_history_feedback_guidance(
+        sample_trials,
+        dataset_alias=dataset_alias,
+        instruction=instruction,
+        schema_summary=schema_summary,
+    )
     base = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
         dataset_alias=dataset_alias,
+        instruction=instruction,
         base_prompt_path=base_prompt_path,
     )
     if is_mixed_gambles_dataset(dataset_alias):
@@ -345,7 +577,112 @@ def _merge_prompt_fallback(
         f"### Task instructions (from Psych-101 transcript)\n\n{instruction[:1500]}\n\n"
         f"### Example parsed trials\n\n{_format_trials_for_prompt(sample_trials)}\n"
     )
-    return base + extra
+    merged = base + extra
+    if _is_gamble_ab_task(sample_trials):
+        merged += "\n\n" + _format_history_feedback_section(guidance_lines) + "\n"
+    return merged
+
+
+def _combine_sample_trials_from_participants(
+    trial_lists: Sequence[List[Dict[str, Any]]],
+    *,
+    max_total: int = 8,
+) -> List[Dict[str, Any]]:
+    """Merge a few trials from each participant list (deterministic, capped)."""
+    lists = [trials for trials in trial_lists if trials]
+    if not lists:
+        return []
+    if len(lists) == 1:
+        return lists[0][:max_total]
+    per = max(1, max_total // len(lists))
+    combined: List[Dict[str, Any]] = []
+    for trials in lists:
+        combined.extend(trials[:per])
+    return combined[:max_total]
+
+
+def _psych101_sample_trials_for_prompts(
+    dataset_alias: str,
+    *,
+    n_sample_participants: int,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+) -> tuple[str, List[Dict[str, Any]], List[int]]:
+    """Instruction and merged trial examples from multiple valid participant row indices."""
+    from utils.teh.participant_ids import load_valid_participant_ids
+
+    n_want = max(1, int(n_sample_participants))
+    sample_row_indices: List[int]
+    try:
+        valid_ids = load_valid_participant_ids(
+            dataset_alias,
+            REPO_ROOT,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+        )
+        sample_row_indices = [int(x) for x in valid_ids[:n_want]] if valid_ids else [0]
+    except Exception:
+        sample_row_indices = [0]
+
+    trial_lists: List[List[Dict[str, Any]]] = []
+    instruction = ""
+    exp_id = experiment_id_for_alias(dataset_alias)
+    for row_idx in sample_row_indices:
+        exp = get_psych101_binary_experiment(
+            dataset_alias,
+            row_idx,
+            split=psych_dataset_split,
+            local_dataset=local_dataset,
+        )
+        if not instruction:
+            instruction = exp.instruction
+        trial_lists.append(
+            experiment_to_trial_dicts(
+                exp,
+                dataset_alias=dataset_alias,
+                experiment_id=exp_id,
+            )
+        )
+    return (
+        instruction,
+        _combine_sample_trials_from_participants(trial_lists, max_total=8),
+        sample_row_indices,
+    )
+
+
+def _mixed_gambles_sample_trials_for_prompts(
+    dataset_alias: str,
+    *,
+    n_sample_participants: int,
+    mixed_gambles_csv: str,
+    filter_mixed_gambles: bool,
+) -> tuple[List[Dict[str, Any]], List[int]]:
+    """Merged train-trial examples from multiple valid mixed-gambles participant ids."""
+    from utils.teh.participant_ids import load_valid_participant_ids
+
+    valid_ids = load_valid_participant_ids(
+        dataset_alias,
+        REPO_ROOT,
+        filter_mixed_gambles=filter_mixed_gambles,
+        mixed_gambles_csv=mixed_gambles_csv,
+    )
+    if not valid_ids:
+        raise ValueError(f"No valid participant ids for mixed_gambles dataset {dataset_alias!r}")
+
+    n_want = max(1, int(n_sample_participants))
+    sample_pids = [int(x) for x in valid_ids[:n_want]]
+    trial_lists: List[List[Dict[str, Any]]] = []
+    for pid in sample_pids:
+        train_trials, _, _, _ = load_mixed_gambles_trials(
+            pid,
+            csv_path=mixed_gambles_csv,
+            filter_gain_loss_only=filter_mixed_gambles,
+        )
+        trial_lists.append(train_trials)
+    return (
+        _combine_sample_trials_from_participants(trial_lists, max_total=8),
+        sample_pids,
+    )
 
 
 def build_prompt_generation_llm_user_content(
@@ -359,10 +696,17 @@ def build_prompt_generation_llm_user_content(
     display = dataset_display_name(dataset_alias)
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     is_gamble = _is_gamble_ab_task(sample_trials)
+    guidance_lines = _infer_history_feedback_guidance(
+        sample_trials,
+        dataset_alias=dataset_alias,
+        instruction=instruction,
+        schema_summary=schema_summary,
+    )
     base_prompt = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
         dataset_alias=dataset_alias,
+        instruction=instruction,
         base_prompt_path=base_prompt_path,
     )
     trial_examples = _format_trials_for_prompt(sample_trials, max_trials=10)
@@ -375,8 +719,8 @@ def build_prompt_generation_llm_user_content(
 
     if is_gamble:
         adapt_instructions = (
-            "- The base prompt is for gamble_A/gamble_B tasks. Adapt wording only as needed "
-            "for this dataset; keep gamble field names and P(action=1)=P(action on gamble_B).\n"
+            "- Use the base prompt as the main evolution prompt. Keep the direct convention: "
+            "action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).\n"
         )
         base_section_title = "## Base prompt (gamble_A/gamble_B task)\n\n"
     else:
@@ -395,12 +739,15 @@ def build_prompt_generation_llm_user_content(
         "as the source of truth for `problem`, `history`, and action semantics.\n"
         f"{adapt_instructions}"
         "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
-        "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
-        "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
-        "variables defined on all branches.\n"
-        f"- {CONCISE_PROGRAM_GUIDANCE}\n"
+        "- Preserve the base prompt's implementation requirements.\n"
+        "- Keep the final prompt direct, concise, and behavior-focused.\n"
+        "- Do not rewrite the base prompt into a caveat-heavy or schema-documentation style prompt.\n"
+        "- Avoid vague helper phrases such as \"may help\", \"if appropriate\", "
+        "\"not necessarily\", or \"one possible option\".\n"
+        "- Do not append a sample/reference/complete `choose()` implementation.\n"
+        "- Include a \"History and feedback:\" section using this guidance (verbatim bullets):\n"
+        f"{_format_history_feedback_section(guidance_lines)}\n"
         "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
-        "- Do NOT append a sample, reference, or complete choose() implementation.\n"
         "- You may document the choose() API in a short docstring block, but no executable code.\n\n"
         f"## Runtime schema summary\n\n{schema_summary}\n\n"
         f"{base_section_title}{base_prompt}\n\n"
@@ -429,6 +776,12 @@ def _generate_prompt_via_llm(
     )
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     is_gamble = _is_gamble_ab_task(sample_trials)
+    guidance_lines = _infer_history_feedback_guidance(
+        sample_trials,
+        dataset_alias=dataset_alias,
+        instruction=instruction,
+        schema_summary=schema_summary,
+    )
     if save_llm_input_to is not None:
         save_llm_input_to.parent.mkdir(parents=True, exist_ok=True)
         save_llm_input_to.write_text(user_content, encoding="utf-8")
@@ -458,7 +811,14 @@ def _generate_prompt_via_llm(
             "[TEH] LLM prompt contained gamble-specific text for a non-gamble schema; "
             "using schema-neutral base prompt."
         )
-        text = _build_schema_neutral_base_prompt(schema_summary, sample_trials)
+        text = _build_schema_neutral_base_prompt(
+            schema_summary,
+            sample_trials,
+            dataset_alias=dataset_alias,
+            instruction=instruction,
+            history_feedback_guidance=guidance_lines,
+        )
+    text = _ensure_history_feedback_guidance(text, guidance_lines)
     text = strip_embedded_choose_from_evolution_prompt(text)
     if not text:
         raise ValueError("LLM prompt was empty after removing embedded choose() code.")
@@ -492,40 +852,23 @@ def setup_teh_run_prompts(
         raise FileNotFoundError(f"Base prompt not found: {resolved_base_prompt}")
 
     if is_mixed_gambles_dataset(dataset_alias):
-        from utils.teh.participant_ids import load_valid_participant_ids
-
-        valid_ids = load_valid_participant_ids(
+        sample_trial_list, sample_participant_ids = _mixed_gambles_sample_trials_for_prompts(
             dataset_alias,
-            REPO_ROOT,
-            filter_mixed_gambles=filter_mixed_gambles,
+            n_sample_participants=n_sample_participants,
             mixed_gambles_csv=mixed_gambles_csv,
+            filter_mixed_gambles=filter_mixed_gambles,
         )
-        if not valid_ids:
-            raise ValueError(f"No valid participant ids for mixed_gambles dataset {dataset_alias!r}")
-        sample_pid = int(valid_ids[0])
-        train_trials, _, _, _ = load_mixed_gambles_trials(
-            sample_pid,
-            csv_path=mixed_gambles_csv,
-            filter_gain_loss_only=filter_mixed_gambles,
-        )
-        sample_trial_list = train_trials[:8]
         instruction = (
             "Mixed gambles: Option A is a 50/50 gamble (gain/loss); Option B is certain. "
             "action=0 gamble, action=1 certain; choose(problem, history) returns P(action=1)."
         )
     else:
-        exp = get_psych101_binary_experiment(
+        instruction, sample_trial_list, sample_participant_ids = _psych101_sample_trials_for_prompts(
             dataset_alias,
-            0,
-            split=psych_dataset_split,
+            n_sample_participants=n_sample_participants,
+            psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
         )
-        sample_trial_list = experiment_to_trial_dicts(
-            exp,
-            dataset_alias=dataset_alias,
-            experiment_id=experiment_id_for_alias(dataset_alias),
-        )
-        instruction = exp.instruction
 
     infer_path = prompts_dir / "infer_single_choice.txt"
     generated = False
@@ -572,6 +915,8 @@ def setup_teh_run_prompts(
         "llm_generated": generated,
         "seed_program_source": str(seed_src),
         "base_prompt_path": str(resolved_base_prompt),
+        "n_sample_participants": int(n_sample_participants),
+        "sample_participant_ids": sample_participant_ids,
     }
     if is_mixed_gambles_dataset(dataset_alias):
         meta["mixed_gambles_csv"] = mixed_gambles_csv
