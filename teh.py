@@ -265,6 +265,7 @@ _WANDB_JSONL_PARTICIPANT_KEY_SUFFIXES = (
     "val_loglik",
     "test_loglik",
     "gated_test_loglik",
+    "selection_score",
     "train_val_loglik",
     "train_fitness",
     "test_fitness",
@@ -331,6 +332,7 @@ _WANDB_PARTICIPANT_CHART_SUFFIXES = (
     "val_loglik",
     "test_loglik",
     "gated_test_loglik",
+    "selection_score",
     "train_fitness",
     "test_fitness",
     "train_acc",
@@ -1075,13 +1077,117 @@ def _refinement_combined_fitness(
     return (train_ratio * float(train_loglik) + val_ratio * float(val_loglik)) / denom
 
 
-def _train_loglik_from_elite_tuple(parent_tuple: Tuple[Any, ...]) -> float:
+_EVOLUTION_SELECTION_SCORES = frozenset({"train", "train_val"})
+_EVOLUTION_SELECTION_FALLBACK_WARNED: Set[str] = set()
+
+
+def _normalize_evolution_selection_score(mode: str) -> str:
+    normalized = str(mode).strip()
+    if normalized not in _EVOLUTION_SELECTION_SCORES:
+        raise ValueError(
+            f"evolution_selection_score must be one of {sorted(_EVOLUTION_SELECTION_SCORES)}, "
+            f"got {mode!r}"
+        )
+    return normalized
+
+
+def _uses_train_val_evolution_selection(
+    evolution_selection_score: str,
+    fitness_metric: str,
+) -> bool:
+    return (
+        _normalize_evolution_selection_score(evolution_selection_score) == "train_val"
+        and fitness_metric == "loglik"
+    )
+
+
+def _evolution_selection_score(
+    train_loglik: float,
+    val_loglik: Optional[float],
+    n_train: int,
+    n_val: int,
+    *,
+    evolution_selection_score: str = "train_val",
+    warn_key: Optional[str] = None,
+) -> float:
+    """
+    Pool ranking score for evolution/explore/global phases.
+
+    train: train_loglik only.
+    train_val: trial-count-weighted mean of train+val loglik; falls back to train_loglik
+    when val is missing or empty.
+    """
+    mode = _normalize_evolution_selection_score(evolution_selection_score)
+    train_ll = float(train_loglik)
+    if mode == "train":
+        return train_ll
+    val_ll = _safe_float(val_loglik)
+    if val_ll is None or int(n_val) <= 0:
+        if warn_key is not None and warn_key not in _EVOLUTION_SELECTION_FALLBACK_WARNED:
+            _EVOLUTION_SELECTION_FALLBACK_WARNED.add(warn_key)
+            print(
+                "!Warning: val_loglik missing or val set empty; "
+                "falling back to train_loglik for evolution selection score.",
+                flush=True,
+            )
+        return train_ll
+    n_tr = max(0, int(n_train))
+    n_vl = max(0, int(n_val))
+    denom = n_tr + n_vl
+    if denom <= 0:
+        return train_ll
+    return (n_tr * train_ll + n_vl * float(val_ll)) / denom
+
+
+def _apply_evolution_candidate_selection_fitness(
+    *,
+    train_loglik: float,
+    val_loglik: Optional[float],
+    train_acc: float,
+    fitness_metric: str,
+    n_train: int,
+    n_val: int,
+    evolution_selection_score: str,
+    use_train_val_selection: bool,
+    warn_key: str,
+    runtime_valid: bool,
+) -> Tuple[float, Optional[float]]:
+    """Compute pool-ranking fitness and optional selection_score for one candidate."""
+    fitness = train_loglik if fitness_metric == "loglik" else train_acc
+    selection_score: Optional[float] = None
+    if fitness_metric == "loglik":
+        selection_score = _evolution_selection_score(
+            train_loglik,
+            val_loglik,
+            n_train,
+            n_val,
+            evolution_selection_score=evolution_selection_score,
+            warn_key=warn_key if use_train_val_selection else None,
+        )
+        if use_train_val_selection:
+            fitness = selection_score
+    if not runtime_valid:
+        fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
+    return fitness, selection_score
+
+
+def _train_loglik_from_elite_tuple(
+    parent_tuple: Tuple[Any, ...],
+    *,
+    evolution_selection_score: str = "train",
+) -> float:
     """Train loglik from evolution or refinement elite tuple."""
     program_id = str(parent_tuple[3]) if len(parent_tuple) > 3 else ""
     if program_id.startswith("refinement_"):
         if len(parent_tuple) > 6 and parent_tuple[6] is not None:
             return float(parent_tuple[6])
-    # Evolution pool: index 1 is train loglik; index 6 is train accuracy for legacy tuples.
+    if (
+        _uses_train_val_evolution_selection(evolution_selection_score, "loglik")
+        and len(parent_tuple) > 6
+        and parent_tuple[6] is not None
+    ):
+        return float(parent_tuple[6])
+    # Evolution pool (train mode): index 1 is train loglik; index 6 is train accuracy.
     return float(parent_tuple[1])
 
 
@@ -1090,13 +1196,16 @@ def _evolution_elite_to_refinement_pool(
     elite_val_logliks: List[Optional[float]],
     *,
     split_ratio: float,
+    evolution_selection_score: str = "train",
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Copy evolution elite pool into refinement format; preserve evolution order (no sort)."""
     refine_parents: List[Tuple[Any, ...]] = []
     refine_vals: List[Optional[float]] = []
     for parent, val_ll in zip(elite_parents, elite_val_logliks):
         program_id = str(parent[3])
-        train_ll = _train_loglik_from_elite_tuple(parent)
+        train_ll = _train_loglik_from_elite_tuple(
+            parent, evolution_selection_score=evolution_selection_score
+        )
         val_ll_f = _safe_float(val_ll)
         combined = (
             _refinement_combined_fitness(train_ll, val_ll_f, split_ratio=split_ratio)
@@ -1116,15 +1225,29 @@ def _save_evolution_elite_pool(
     elite_val_logliks: List[Optional[float]],
     *,
     split_ratio: float,
+    n_train: int,
+    n_val: int,
+    evolution_selection_score: str = "train_val",
 ) -> Path:
     """Persist evolution-phase elite pool programs and manifest (evolution sort order)."""
     pool_dir = output_path / "evolution_elite_pool"
     pool_dir.mkdir(parents=True, exist_ok=True)
     manifest: List[Dict[str, Any]] = []
+    mode = _normalize_evolution_selection_score(evolution_selection_score)
     for rank, (parent, val_ll) in enumerate(zip(elite_parents, elite_val_logliks)):
         program_id = str(parent[3])
-        train_ll = _train_loglik_from_elite_tuple(parent)
+        train_ll = _train_loglik_from_elite_tuple(
+            parent, evolution_selection_score=evolution_selection_score
+        )
         val_ll_f = _safe_float(val_ll)
+        selection_score = _evolution_selection_score(
+            train_ll,
+            val_ll_f,
+            n_train,
+            n_val,
+            evolution_selection_score=evolution_selection_score,
+            warn_key=None,
+        )
         combined = (
             _refinement_combined_fitness(train_ll, val_ll_f, split_ratio=split_ratio)
             if val_ll_f is not None
@@ -1140,12 +1263,21 @@ def _save_evolution_elite_pool(
                 "filename": filename,
                 "train_loglik": train_ll,
                 "val_loglik": val_ll_f,
+                "selection_score": selection_score,
                 "train_val_loglik": combined,
                 "evolution_fitness": _safe_float(parent[1]),
+                "evolution_selection_score": mode,
             }
         )
     (pool_dir / "pool_manifest.json").write_text(
-        json.dumps({"n_programs": len(manifest), "programs": manifest}, indent=2),
+        json.dumps(
+            {
+                "n_programs": len(manifest),
+                "evolution_selection_score": mode,
+                "programs": manifest,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return pool_dir
@@ -1155,6 +1287,7 @@ def _load_evolution_elite_pool(
     pool_dir: Path,
     *,
     split_ratio: float,
+    evolution_selection_score: str = "train_val",
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Load evolution elite pool from saved manifest + program files."""
     manifest_path = pool_dir / "pool_manifest.json"
@@ -1162,6 +1295,9 @@ def _load_evolution_elite_pool(
         raise FileNotFoundError(f"Missing evolution elite pool manifest: {manifest_path}")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     programs = payload.get("programs", payload if isinstance(payload, list) else [])
+    pool_mode = str(
+        payload.get("evolution_selection_score", evolution_selection_score)
+    )
     elite_parents: List[Tuple[Any, ...]] = []
     elite_val_logliks: List[Optional[float]] = []
     for entry in programs:
@@ -1169,15 +1305,18 @@ def _load_evolution_elite_pool(
         code = (pool_dir / filename).read_text(encoding="utf-8")
         train_ll = float(entry["train_loglik"])
         val_ll = _safe_float(entry.get("val_loglik"))
-        if val_ll is not None:
+        if entry.get("selection_score") is not None:
+            combined = float(entry["selection_score"])
+        elif val_ll is not None:
             combined = _refinement_combined_fitness(
                 train_ll, val_ll, split_ratio=split_ratio
             )
         else:
             combined = train_ll
         program_id = str(entry.get("program_id", filename))
+        idx6 = train_ll if _uses_train_val_evolution_selection(pool_mode, "loglik") else None
         elite_parents.append(
-            (code, combined, None, program_id, None, None, train_ll)
+            (code, combined, None, program_id, None, None, idx6 if idx6 is not None else train_ll)
         )
         elite_val_logliks.append(val_ll)
     return elite_parents, elite_val_logliks
@@ -1300,10 +1439,16 @@ def _global_elite_to_participant_elite(
     *,
     dataset: str,
     n_eval_seeds: int,
+    evolution_selection_score: str = "train",
+    selection_warn_key: Optional[str] = None,
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Map global pool into participant elite tuples; preserve global order (no sort)."""
     elite_parents: List[Tuple[Any, ...]] = []
     elite_val_logliks: List[Optional[float]] = []
+    use_train_val = _uses_train_val_evolution_selection(evolution_selection_score, "loglik")
+    n_train = len(train_trials)
+    n_val = len(val_trials)
+    warn_key = selection_warn_key or f"global_handoff_{dataset}"
     for parent in global_parents:
         code = parent[0]
         src_id = str(parent[3])
@@ -1325,8 +1470,21 @@ def _global_elite_to_participant_elite(
                     dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
                 )
                 val_ll = float(val_eval["avg_loglik"])
+        pool_fitness = (
+            _evolution_selection_score(
+                train_ll,
+                val_ll,
+                n_train,
+                n_val,
+                evolution_selection_score=evolution_selection_score,
+                warn_key=warn_key if use_train_val else None,
+            )
+            if use_train_val
+            else train_ll
+        )
+        idx6 = train_ll if use_train_val else train_acc
         elite_parents.append(
-            (code, train_ll, test_acc, program_id, None, None, train_acc)
+            (code, pool_fitness, test_acc, program_id, None, None, idx6)
         )
         elite_val_logliks.append(val_ll)
     return elite_parents, elite_val_logliks
@@ -1371,6 +1529,7 @@ def run_global_evolution_phase(
     prompt_debug: bool = False,
     prompt_debug_on_no_valid: bool = True,
     prompt_debug_exit: bool = False,
+    evolution_selection_score: str = "train_val",
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -1406,7 +1565,7 @@ def run_global_evolution_phase(
         f"Global phase: {n_iterations} iteration(s), "
         f"{len(participant_ids)} participant(s), "
         f"{len(pooled_train)} pooled train trials, {len(pooled_val)} pooled val trials "
-        f"(prompt injects train+val; fitness on train only)"
+        f"(prompt injects train+val; pool ranking uses {evolution_selection_score} score)"
     )
     print(f"{'='*80}")
 
@@ -1422,20 +1581,46 @@ def run_global_evolution_phase(
         dataset, seed_fn, pooled_train, n_seeds=n_eval_seeds
     )
     baseline_ll = float(baseline_eval["avg_loglik"])
+    baseline_val_ll: Optional[float] = None
+    if pooled_val:
+        baseline_val_eval = _evaluate_loglik_for_dataset(
+            dataset, seed_fn, pooled_val, n_seeds=n_eval_seeds
+        )
+        baseline_val_ll = float(baseline_val_eval["avg_loglik"])
+    use_train_val = _uses_train_val_evolution_selection(evolution_selection_score, "loglik")
+    baseline_fitness = (
+        _evolution_selection_score(
+            baseline_ll,
+            baseline_val_ll,
+            len(pooled_train),
+            len(pooled_val),
+            evolution_selection_score=evolution_selection_score,
+            warn_key="global",
+        )
+        if use_train_val
+        else baseline_ll
+    )
     elite_parents: List[Tuple[Any, ...]] = [
         (
             seed_code,
-            baseline_ll,
+            baseline_fitness,
             None,
             "global_baseline",
             None,
             None,
-            baseline_ll,
+            baseline_ll if use_train_val else baseline_ll,
         )
     ]
     print(f"Global baseline train loglik: {baseline_ll:.6f}")
+    if baseline_val_ll is not None:
+        print(f"Global baseline val loglik: {baseline_val_ll:.6f}")
+    if use_train_val:
+        print(
+            f"Global evolution selection score mode: {evolution_selection_score} "
+            f"(baseline selection_score={baseline_fitness:.6f})"
+        )
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
-    last_significant_best = baseline_ll
+    last_significant_best = baseline_fitness
     stagnant_iters = 0
     if early_stop_patience is not None:
         print(
@@ -1569,14 +1754,36 @@ def run_global_evolution_phase(
             if train_eval.get("errors", 0) != 0:
                 continue
             train_loglik = float(train_eval["avg_loglik"])
-            selected_results.append(
-                {
-                    "idx": idx,
-                    "code": code,
-                    "train_loglik": train_loglik,
-                    "fitness": train_loglik,
-                }
+            val_loglik: Optional[float] = None
+            if use_train_val and pooled_val:
+                try:
+                    val_eval = _evaluate_loglik_for_dataset(
+                        dataset, choose_fn, pooled_val, n_seeds=n_eval_seeds
+                    )
+                except (AssertionError, TypeError, ValueError):
+                    continue
+                if val_eval.get("errors", 0) != 0:
+                    continue
+                val_loglik = float(val_eval["avg_loglik"])
+            selection_score = _evolution_selection_score(
+                train_loglik,
+                val_loglik,
+                len(pooled_train),
+                len(pooled_val),
+                evolution_selection_score=evolution_selection_score,
+                warn_key="global" if use_train_val else None,
             )
+            fitness = selection_score if use_train_val else train_loglik
+            row: Dict[str, Any] = {
+                "idx": idx,
+                "code": code,
+                "train_loglik": train_loglik,
+                "fitness": fitness,
+                "selection_score": selection_score,
+            }
+            if val_loglik is not None:
+                row["val_loglik"] = val_loglik
+            selected_results.append(row)
 
         if not selected_results:
             print("Warning: No runtime-valid global candidates; keeping elite pool.")
@@ -1586,6 +1793,11 @@ def run_global_evolution_phase(
             print(
                 f"  Best global candidate {best['idx']}: "
                 f"train_loglik={best['train_loglik']:.6f}"
+                + (
+                    f", selection_score={best['selection_score']:.6f}"
+                    if use_train_val
+                    else ""
+                )
             )
             for result in selected_results:
                 program_id = f"global_iteration_{iteration_step}_candidate_{result['idx']}"
@@ -1604,10 +1816,18 @@ def run_global_evolution_phase(
         elite_parents.sort(key=lambda x: x[1], reverse=True)
         elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
         elite_parents = elite_parents[:elite_cap]
-        pool_best_ll = _train_loglik_from_elite_tuple(elite_parents[0])
+        pool_best_ll = _train_loglik_from_elite_tuple(
+            elite_parents[0], evolution_selection_score=evolution_selection_score
+        )
+        pool_best_selection = float(elite_parents[0][1])
         print(
             f"\nGlobal elite set updated: {len(elite_parents)} programs "
-            f"(cap={elite_cap}, pool_best_train_loglik={pool_best_ll:.6f})"
+            f"(cap={elite_cap}, pool_best_train_loglik={pool_best_ll:.6f}"
+            + (
+                f", pool_best_selection_score={pool_best_selection:.6f})"
+                if use_train_val
+                else ")"
+            )
         )
 
         if iter_dir is not None:
@@ -1617,7 +1837,10 @@ def run_global_evolution_phase(
                 "n_runtime_valid": len(selected_results),
                 "pool_best_program_id": elite_parents[0][3],
                 "pool_best_global_train_loglik": pool_best_ll,
+                "evolution_selection_score": evolution_selection_score,
             }
+            if use_train_val:
+                metrics["pool_best_selection_score"] = pool_best_selection
             metrics.update(
                 _iteration_candidate_source_header(
                     fresh_n_candidates,
@@ -1638,19 +1861,19 @@ def run_global_evolution_phase(
             )
 
         if wandb_module is not None:
-            wandb_module.log(
-                {
-                    "global/train_loglik": pool_best_ll,
-                    "global/pool_size": len(elite_parents),
-                    "global/iteration": iteration_step,
-                },
-                step=iteration_step,
-            )
+            global_log: Dict[str, Any] = {
+                "global/train_loglik": pool_best_ll,
+                "global/pool_size": len(elite_parents),
+                "global/iteration": iteration_step,
+            }
+            if use_train_val:
+                global_log["global/selection_score"] = pool_best_selection
+            wandb_module.log(global_log, step=iteration_step)
 
         if early_stop_patience is not None:
-            improvement = float(pool_best_ll) - float(last_significant_best)
+            improvement = float(pool_best_selection) - float(last_significant_best)
             if improvement >= _EARLY_STOP_MIN_IMPROVEMENT:
-                last_significant_best = float(pool_best_ll)
+                last_significant_best = float(pool_best_selection)
                 stagnant_iters = 0
             else:
                 stagnant_iters += 1
@@ -1666,7 +1889,10 @@ def run_global_evolution_phase(
         pool_dir = _save_global_elite_pool(global_dir, elite_parents)
         print(f"Saved global elite pool ({len(elite_parents)} programs) -> {pool_dir}")
         pool_best_code = elite_parents[0][0]
-        pool_best_global_train_ll = _train_loglik_from_elite_tuple(elite_parents[0])
+        pool_best_global_train_ll = _train_loglik_from_elite_tuple(
+            elite_parents[0], evolution_selection_score=evolution_selection_score
+        )
+        pool_best_selection_score = float(elite_parents[0][1])
         _write_global_phase_summary_loglik_csv(
             global_dir,
             dataset=dataset,
@@ -1691,6 +1917,8 @@ def run_global_evolution_phase(
             "pool_size": len(elite_parents),
             "pool_best_program_id": str(elite_parents[0][3]),
             "pool_best_global_train_loglik": pool_best_global_train_ll,
+            "pool_best_selection_score": pool_best_selection_score,
+            "evolution_selection_score": evolution_selection_score,
             "baseline_global_train_loglik": baseline_ll,
         }
         summary_csv_path = global_dir / "summary_loglik.csv"
@@ -6296,6 +6524,7 @@ def _run_pre_evolution_explore_phase(
     prompt_token_estimator: str,
     initial_pool_from_global: bool = False,
     initial_pool_size_before_explore: Optional[int] = None,
+    evolution_selection_score: str = "train_val",
 ) -> None:
     """
     One-shot seed-only candidate generation before the evolution loop.
@@ -6304,6 +6533,11 @@ def _run_pre_evolution_explore_phase(
     n_explore = int(explore_candidates)
     if n_explore <= 0:
         return
+
+    use_train_val = _uses_train_val_evolution_selection(evolution_selection_score, fitness_metric)
+    n_train = len(train_trials)
+    n_val = len(val_trials)
+    explore_warn_key = f"explore_p{participant_id}"
 
     print(f"\n{'='*80}")
     print("PRE-EVOLUTION EXPLORE PHASE")
@@ -6429,8 +6663,21 @@ def _run_pre_evolution_explore_phase(
             continue
         train_loglik = float(train_eval["avg_loglik"])
         test_loglik = float(test_eval["avg_loglik"])
+        val_loglik = float(val_eval["avg_loglik"]) if val_eval is not None else None
         runtime_valid = train_eval.get("errors", 0) == 0 and test_eval.get("errors", 0) == 0
-        fitness = train_loglik if fitness_metric == "loglik" else float(train_eval["accuracy"])
+        if fitness_metric == "loglik":
+            selection_score = _evolution_selection_score(
+                train_loglik,
+                val_loglik,
+                n_train,
+                n_val,
+                evolution_selection_score=evolution_selection_score,
+                warn_key=explore_warn_key if use_train_val else None,
+            )
+            fitness = selection_score if use_train_val else train_loglik
+        else:
+            selection_score = None
+            fitness = float(train_eval["accuracy"])
         if not runtime_valid:
             fitness = float("-inf") if fitness_metric == "loglik" else 0.0
         row = {
@@ -6443,8 +6690,10 @@ def _run_pre_evolution_explore_phase(
             "fitness": fitness,
             "runtime_valid": runtime_valid,
         }
+        if selection_score is not None:
+            row["selection_score"] = selection_score
         if val_eval is not None:
-            row["val_loglik"] = float(val_eval["avg_loglik"])
+            row["val_loglik"] = val_loglik
         candidate_results.append(row)
 
     selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
@@ -6459,7 +6708,7 @@ def _run_pre_evolution_explore_phase(
                 program_id,
                 None,
                 None,
-                result["train_acc"],
+                result["train_loglik"] if use_train_val else result["train_acc"],
             )
         )
         if track_elite_val_loglik:
@@ -6504,6 +6753,7 @@ def _run_pre_evolution_explore_phase(
             "n_added_to_pool": len(selected_results),
             "elite_pool_size_after": len(elite_parents),
             "best_explore_fitness": best_explore_score,
+            "evolution_selection_score": evolution_selection_score,
             "candidate_results": [
                 {
                     "idx": r["idx"],
@@ -6512,6 +6762,7 @@ def _run_pre_evolution_explore_phase(
                     "train_loglik": r.get("train_loglik"),
                     "test_loglik": r.get("test_loglik"),
                     "val_loglik": r.get("val_loglik"),
+                    "selection_score": r.get("selection_score"),
                     "fitness": r.get("fitness"),
                     "runtime_valid": r.get("runtime_valid", False),
                 }
@@ -6529,6 +6780,10 @@ def _run_pre_evolution_explore_phase(
             metrics["best_explore_idx"] = selected_results[0].get("idx")
             if fitness_metric == "loglik":
                 metrics["best_explore_train_loglik"] = selected_results[0].get("train_loglik")
+                if selected_results[0].get("selection_score") is not None:
+                    metrics["best_explore_selection_score"] = selected_results[0].get(
+                        "selection_score"
+                    )
             else:
                 metrics["best_explore_train_acc"] = selected_results[0].get("train_acc")
         (explore_dir / "metrics.json").write_text(
@@ -6592,6 +6847,7 @@ def run_evolution(
     prompt_debug: bool = False,
     prompt_debug_on_no_valid: bool = True,
     prompt_debug_exit: bool = False,
+    evolution_selection_score: str = "train_val",
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -6621,6 +6877,13 @@ def run_evolution(
         raise ValueError("fitness_metric='loglik' requires a registered TEH binary dataset.")
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+    evolution_selection_score = _normalize_evolution_selection_score(
+        evolution_selection_score
+    )
+    use_train_val_selection = _uses_train_val_evolution_selection(
+        evolution_selection_score, fitness_metric
+    )
+    selection_warn_key = f"p{participant_id}"
 
     val_trials: List[Dict[str, Any]] = []
 
@@ -6762,6 +7025,16 @@ def run_evolution(
         baseline_results["test_loglik"] = baseline_test_eval["avg_loglik"]
     if baseline_val_eval is not None:
         baseline_results["val_loglik"] = baseline_val_eval["avg_loglik"]
+    if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
+        baseline_results["selection_score"] = _evolution_selection_score(
+            float(baseline_train_eval["avg_loglik"]),
+            _safe_float(baseline_val_eval["avg_loglik"]) if baseline_val_eval else None,
+            len(train_trials),
+            len(val_trials),
+            evolution_selection_score=evolution_selection_score,
+            warn_key=selection_warn_key if use_train_val_selection else None,
+        )
+        baseline_results["evolution_selection_score"] = evolution_selection_score
     
     # Log baseline to wandb at step=0
     if wandb is not None:
@@ -6832,6 +7105,10 @@ def run_evolution(
                     if baseline_val_eval is not None:
                         baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
                         baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
+                    if baseline_results.get("selection_score") is not None:
+                        baseline_log_dict[f"p{participant_id}_selection_score"] = baseline_results[
+                            "selection_score"
+                        ]
                 else:
                     baseline_log_dict = {
                         f"p{participant_id}_train_fitness": baseline_train_eval["accuracy"],
@@ -6859,6 +7136,10 @@ def run_evolution(
                 if baseline_val_eval is not None:
                     baseline_log_dict[f"p{participant_id}_val_loglik"] = baseline_val_eval["avg_loglik"]
                     baseline_log_dict["val_loglik"] = baseline_val_eval["avg_loglik"]
+                if fitness_metric == "loglik":
+                    baseline_log_dict[f"p{participant_id}_selection_score"] = baseline_results.get(
+                        "selection_score"
+                    )
         if participant_id is not None:
             _wandb_log_participant_metrics(wandb, baseline_log_dict, int(participant_id), 0)
         else:
@@ -6976,9 +7257,33 @@ def run_evolution(
         )]
     else:
         if is_binary_loglik_dataset(dataset):
+            train_ll = (
+                baseline_train_eval["avg_loglik"]
+                if fitness_metric == "loglik"
+                else None
+            )
             _baseline_fit = (
                 baseline_train_eval["avg_loglik"]
                 if fitness_metric == "loglik"
+                else baseline_train_eval["accuracy"]
+            )
+            if use_train_val_selection and train_ll is not None:
+                val_ll = (
+                    _safe_float(baseline_val_eval["avg_loglik"])
+                    if baseline_val_eval is not None
+                    else None
+                )
+                _baseline_fit = _evolution_selection_score(
+                    train_ll,
+                    val_ll,
+                    len(train_trials),
+                    len(val_trials),
+                    evolution_selection_score=evolution_selection_score,
+                    warn_key=selection_warn_key,
+                )
+            idx6 = (
+                float(baseline_train_eval["avg_loglik"])
+                if use_train_val_selection and fitness_metric == "loglik"
                 else baseline_train_eval["accuracy"]
             )
             elite_parents = [(
@@ -6988,7 +7293,7 @@ def run_evolution(
                 "baseline",
                 None,
                 None,
-                baseline_train_eval["accuracy"],
+                idx6,
             )]
         else:
             elite_parents = [(
@@ -7015,6 +7320,8 @@ def run_evolution(
             val_trials,
             dataset=dataset,
             n_eval_seeds=n_eval_seeds,
+            evolution_selection_score=evolution_selection_score,
+            selection_warn_key=selection_warn_key,
         )
         global_pool_handoff = True
         print(
@@ -7048,12 +7355,19 @@ def run_evolution(
             "run_phase='refine' must use run_loglik_refine_from_prev_experiment(), not run_evolution()."
         )
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
-    last_significant_best = float(best_fitness)
+    if is_binary_loglik_dataset(dataset) and fitness_metric == "loglik":
+        best_fitness = float(elite_parents[0][1])
+    last_significant_best = float(elite_parents[0][1])
     stagnant_iters = 0
     if early_stop_patience is not None:
         print(
             f"Evolution early stop enabled: patience={early_stop_patience}, "
             f"min_improvement={_EARLY_STOP_MIN_IMPROVEMENT:.3f}"
+        )
+    if use_train_val_selection:
+        print(
+            f"Evolution selection score mode: {evolution_selection_score} "
+            f"(trial-weighted train+val loglik for pool ranking)"
         )
 
     if (
@@ -7095,6 +7409,7 @@ def run_evolution(
             prompt_token_estimator=prompt_token_estimator,
             initial_pool_from_global=global_pool_handoff,
             initial_pool_size_before_explore=initial_pool_size_before_explore,
+            evolution_selection_score=evolution_selection_score,
         )
         last_significant_best = float(elite_parents[0][1])
 
@@ -7106,6 +7421,7 @@ def run_evolution(
         simple_iterations_dir.mkdir(parents=True, exist_ok=True)
     for iteration in range(n_iterations):
         iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
+        iter_best_selection_score: Optional[float] = None
         print(f"\n{'='*80}")
         print(f"Iteration {iteration_step}/{n_iterations}")
         print(f"{'='*80}")
@@ -7457,9 +7773,18 @@ def run_evolution(
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
-                fitness = train_loglik if fitness_metric == "loglik" else train_acc
-                if not runtime_valid:
-                    fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
+                fitness, selection_score = _apply_evolution_candidate_selection_fitness(
+                    train_loglik=train_loglik,
+                    val_loglik=val_loglik,
+                    train_acc=train_acc,
+                    fitness_metric=fitness_metric,
+                    n_train=len(train_trials),
+                    n_val=len(val_trials),
+                    evolution_selection_score=evolution_selection_score,
+                    use_train_val_selection=use_train_val_selection,
+                    warn_key=selection_warn_key,
+                    runtime_valid=runtime_valid,
+                )
                 _row = {
                     "idx": idx,
                     "code": code,
@@ -7475,6 +7800,8 @@ def run_evolution(
                     "valid": True,
                     "runtime_valid": runtime_valid,
                 }
+                if selection_score is not None:
+                    _row["selection_score"] = selection_score
                 if val_eval is not None:
                     _row["val_loglik"] = val_loglik
                 candidate_results.append(_row)
@@ -7530,9 +7857,18 @@ def run_evolution(
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
-                fitness = train_loglik if fitness_metric == "loglik" else train_acc
-                if not runtime_valid:
-                    fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
+                fitness, selection_score = _apply_evolution_candidate_selection_fitness(
+                    train_loglik=train_loglik,
+                    val_loglik=val_loglik,
+                    train_acc=train_acc,
+                    fitness_metric=fitness_metric,
+                    n_train=len(train_trials),
+                    n_val=len(val_trials),
+                    evolution_selection_score=evolution_selection_score,
+                    use_train_val_selection=use_train_val_selection,
+                    warn_key=selection_warn_key,
+                    runtime_valid=runtime_valid,
+                )
                 _row = {
                     "idx": idx,
                     "code": code,
@@ -7548,6 +7884,8 @@ def run_evolution(
                     "valid": True,
                     "runtime_valid": runtime_valid,
                 }
+                if selection_score is not None:
+                    _row["selection_score"] = selection_score
                 if val_eval is not None:
                     _row["val_loglik"] = val_loglik
                 candidate_results.append(_row)
@@ -7600,7 +7938,12 @@ def run_evolution(
                         f"test_acc={_test_acc}"
                     )
             elif is_binary_loglik_dataset(dataset) and fitness_metric == "loglik":
-                print(f"\nTop performers (by train avg log-likelihood, higher is better):")
+                metric_label = (
+                    "selection_score"
+                    if use_train_val_selection
+                    else "train avg log-likelihood"
+                )
+                print(f"\nTop performers (by {metric_label}, higher is better):")
                 for i, result in enumerate(selected_results[:5]):
                     _test_ll = (
                         f"{result['test_loglik']:.6f}"
@@ -7618,10 +7961,16 @@ def run_evolution(
                         else "N/A"
                     )
                     _val_part = f", val_loglik={_val_ll}" if val_trials else ""
+                    _sel_part = (
+                        f", selection_score={result['selection_score']:.6f}"
+                        if use_train_val_selection
+                        and result.get("selection_score") is not None
+                        else ""
+                    )
                     print(
                         f"  {i+1}. Candidate {result['idx']}: "
                         f"train_loglik={result['train_loglik']:.6f}, "
-                        f"test_loglik={_test_ll}{_val_part}, "
+                        f"test_loglik={_test_ll}{_val_part}{_sel_part}, "
                         f"train_acc={result['train_acc']:.4f}, "
                         f"test_acc={_test_acc}"
                     )
@@ -7697,7 +8046,9 @@ def run_evolution(
                         program_id,
                         None,
                         None,
-                        result["train_acc"],
+                        result["train_loglik"]
+                        if use_train_val_selection and fitness_metric == "loglik"
+                        else result["train_acc"],
                     ))
                 else:
                     elite_parents.append((
@@ -7707,7 +8058,9 @@ def run_evolution(
                         program_id,
                         None,
                         None,
-                        result["train_acc"],
+                        result["train_loglik"]
+                        if use_train_val_selection and fitness_metric == "loglik"
+                        else result["train_acc"],
                     ))
                 if track_elite_val_loglik:
                     elite_val_logliks.append(_safe_float(result.get("val_loglik")))
@@ -7733,6 +8086,11 @@ def run_evolution(
 
             # Use the updated elite-pool best for per-iteration reporting.
             iter_best_code, iter_best_fitness, _, iter_best_program_id = elite_parents[0][:4]
+            iter_best_selection_score = (
+                float(elite_parents[0][1])
+                if use_train_val_selection and fitness_metric == "loglik"
+                else None
+            )
             iter_best_train_acc = best_result["train_acc"]
             iter_best_test_acc = best_result["test_acc"]
             iter_best_train_loglik = best_result.get("train_loglik")
@@ -7759,7 +8117,11 @@ def run_evolution(
                     iter_best_test_acc = iter_best_test_eval["accuracy"]
                     iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
                     iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
-                    iter_best_fitness = iter_best_train_loglik
+                    if use_train_val_selection:
+                        iter_best_fitness = float(elite_parents[0][1])
+                        iter_best_selection_score = iter_best_fitness
+                    else:
+                        iter_best_fitness = iter_best_train_loglik
                     if val_trials:
                         iter_best_val_eval = _evaluate_loglik_for_dataset(
                             dataset, iter_best_fn, val_trials, n_seeds=n_eval_seeds
@@ -8020,6 +8382,8 @@ def run_evolution(
                 }
                 if val_trials:
                     _cr["val_loglik"] = r.get("val_loglik")
+                if r.get("selection_score") is not None:
+                    _cr["selection_score"] = r.get("selection_score")
                 _cand_rows.append(_cr)
             _loglik_best: Dict[str, Any] = {
                 "best_train_fitness": best_fitness if selected_results else None,
@@ -8030,12 +8394,15 @@ def run_evolution(
             }
             if val_trials:
                 _loglik_best["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            if iter_best_selection_score is not None and selected_results:
+                _loglik_best["best_selection_score"] = iter_best_selection_score
             _loglik_header = {
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
                 "best_program_id": best_program_id,
+                "evolution_selection_score": evolution_selection_score,
             }
             _loglik_header.update(cand_source_header)
             metrics = _build_iteration_metrics_json(
@@ -8102,6 +8469,11 @@ def run_evolution(
             }
             if val_trials:
                 summary["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            if iter_best_selection_score is not None:
+                summary["best_selection_score"] = (
+                    iter_best_selection_score if selected_results else None
+                )
+            summary["evolution_selection_score"] = evolution_selection_score
         elif is_binary_loglik_dataset(dataset):
             summary = {
                 "iteration": iteration_step,
@@ -8112,7 +8484,14 @@ def run_evolution(
                 "best_test_loglik": iter_best_test_loglik if selected_results else None,
                 "n_valid": len(compile_valid_results),
                 "n_runtime_valid": len(selected_results),
+                "evolution_selection_score": evolution_selection_score,
             }
+            if val_trials:
+                summary["best_val_loglik"] = iter_best_val_loglik if selected_results else None
+            if iter_best_selection_score is not None:
+                summary["best_selection_score"] = (
+                    iter_best_selection_score if selected_results else None
+                )
         else:
             summary = {
                 "iteration": iteration_step,
@@ -8226,6 +8605,12 @@ def run_evolution(
                         if val_trials and iter_best_val_loglik is not None:
                             log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
                             log_dict["val_loglik"] = iter_best_val_loglik
+                        if fitness_metric == "loglik" and iter_best_train_loglik is not None:
+                            log_dict[f"p{participant_id}_selection_score"] = (
+                                iter_best_selection_score
+                                if iter_best_selection_score is not None
+                                else iter_best_train_loglik
+                            )
                 else:
                     log_dict = {
                         f"p{participant_id}_n_valid": len(valid_results),
@@ -8246,6 +8631,12 @@ def run_evolution(
                         if val_trials and iter_best_val_loglik is not None:
                             log_dict[f"p{participant_id}_val_loglik"] = iter_best_val_loglik
                             log_dict["val_loglik"] = iter_best_val_loglik
+                        if fitness_metric == "loglik" and iter_best_train_loglik is not None:
+                            log_dict[f"p{participant_id}_selection_score"] = (
+                                iter_best_selection_score
+                                if iter_best_selection_score is not None
+                                else iter_best_train_loglik
+                            )
                         log_dict[f"p{participant_id}_avg_train_accuracy"] = np.mean([r["train_acc"] for r in valid_results])
                         if fitness_metric != "loglik":
                             log_dict[f"p{participant_id}_avg_test_accuracy"] = np.mean([r["test_acc"] for r in valid_results])
@@ -8393,6 +8784,16 @@ def run_evolution(
         }
         if final_val_eval is not None:
             overall_best_train["val_loglik"] = final_val_eval["avg_loglik"]
+        if fitness_metric == "loglik":
+            overall_best_train["selection_score"] = _evolution_selection_score(
+                float(overall_best_train["train_loglik"]),
+                _safe_float(overall_best_train.get("val_loglik")),
+                len(train_trials),
+                len(val_trials),
+                evolution_selection_score=evolution_selection_score,
+                warn_key=None,
+            )
+            overall_best_train["evolution_selection_score"] = evolution_selection_score
         overall_best_test = dict(overall_best_train)
     else:
         final_train_eval = evaluate_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
@@ -8410,7 +8811,13 @@ def run_evolution(
 
     if save_artifacts and track_elite_val_loglik and output_path is not None:
         pool_dir = _save_evolution_elite_pool(
-            output_path, elite_parents, elite_val_logliks, split_ratio=split_ratio
+            output_path,
+            elite_parents,
+            elite_val_logliks,
+            split_ratio=split_ratio,
+            n_train=len(train_trials),
+            n_val=len(val_trials),
+            evolution_selection_score=evolution_selection_score,
         )
         print(
             f"Saved evolution elite pool ({len(elite_parents)} programs) -> {pool_dir}"
@@ -8438,7 +8845,10 @@ def run_evolution(
             f"< threshold={float(refinement_val_threshold):.6f}"
         )
         ref_parents, ref_vals = _evolution_elite_to_refinement_pool(
-            elite_parents, elite_val_logliks, split_ratio=split_ratio
+            elite_parents,
+            elite_val_logliks,
+            split_ratio=split_ratio,
+            evolution_selection_score=evolution_selection_score,
         )
         _fresh_val_ll = (
             float(baseline_val_eval["avg_loglik"])
@@ -8767,6 +9177,12 @@ def run_evolution(
         if val_trials:
             result["val_loglik"] = overall_best_train.get("val_loglik")
             result["seed_program_val_fitness"] = baseline_results.get("val_loglik")
+        if overall_best_train.get("selection_score") is not None:
+            result["selection_score"] = overall_best_train.get("selection_score")
+        if overall_best_train.get("evolution_selection_score") is not None:
+            result["evolution_selection_score"] = overall_best_train.get(
+                "evolution_selection_score"
+            )
         if gated_test_loglik is not None:
             result["gated_test_loglik"] = gated_test_loglik
     else:
@@ -9342,6 +9758,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--evolution_selection_score",
+        type=str,
+        default="train_val",
+        choices=["train", "train_val"],
+        help=(
+            "Score for evolution/explore/global pool ranking (default: train_val). "
+            "'train' ranks by train loglik only. "
+            "'train_val' ranks by trial-count-weighted mean of train+val loglik "
+            "(falls back to train loglik with a warning if val is missing)."
+        ),
+    )
+    parser.add_argument(
         "--cpc18_official_mse",
         action="store_true",
         help="Legacy CPC18 only (not supported in TEH CLI).",
@@ -9909,6 +10337,7 @@ def main():
             prompt_debug=args.prompt_debug,
             prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
             prompt_debug_exit=args.prompt_debug_exit,
+            evolution_selection_score=args.evolution_selection_score,
         )
 
     if args.phase == "refine":
@@ -10073,6 +10502,7 @@ def main():
                 prompt_debug=args.prompt_debug,
                 prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                 prompt_debug_exit=args.prompt_debug_exit,
+                evolution_selection_score=args.evolution_selection_score,
             )
         finally:
             if wandb is not None:
@@ -10158,6 +10588,7 @@ def main():
                 prompt_debug=args.prompt_debug,
                 prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                 prompt_debug_exit=args.prompt_debug_exit,
+                evolution_selection_score=args.evolution_selection_score,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -10546,6 +10977,7 @@ def main():
                         prompt_debug=args.prompt_debug,
                         prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                         prompt_debug_exit=args.prompt_debug_exit,
+                        evolution_selection_score=args.evolution_selection_score,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -10821,6 +11253,7 @@ def main():
                 prompt_debug=args.prompt_debug,
                 prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                 prompt_debug_exit=args.prompt_debug_exit,
+                evolution_selection_score=args.evolution_selection_score,
             )
 
         try:
