@@ -1,60 +1,56 @@
 def choose(problem, history):
-    """
-    Logistic gain-loss seed for mixed gambles.
+    alpha = 0.88
+    beta_loss = 0.88
+    loss_aversion = 2.0
+    gamma = 0.65
+    decision_scale = 0.15
 
-    problem: dict with keys
-        - gamble_A: {"probs": [...], "rewards": [...]}   # risky gamble / accept
-        - gamble_B: {"probs": [...], "rewards": [...]}   # certain option / reject
-        - option_keys
-        - has_feedback: bool
+    def clip(p):
+        if p < 1e-6:
+            return 1e-6
+        if p > 1.0 - 1e-6:
+            return 1.0 - 1e-6
+        return p
 
-    history: unused
+    def value(x):
+        if x >= 0:
+            return x ** alpha
+        return -loss_aversion * ((-x) ** beta_loss)
 
-    return: float, probability of choosing option 1
-            option 1 = gamble_B / certain option / reject gamble
-    """
+    def weight(p):
+        if p <= 0.0:
+            return 0.0
+        if p >= 1.0:
+            return 1.0
+        pg = p ** gamma
+        qg = (1.0 - p) ** gamma
+        return pg / ((pg + qg) ** (1.0 / gamma))
 
-    import math
+    def probs_for(gamble):
+        rewards = gamble["rewards"]
+        probs = gamble.get("probs")
+        if probs is None:
+            return [1.0 / len(rewards)] * len(rewards)
+        return probs
 
-    # ----------------------------
-    # Parameters (fixed)
-    # ----------------------------
-    omega = 1.0
-    lam = 1.0
-    bias = 0.0
-    beta = 1.0
+    def subjective_value(gamble):
+        rewards = gamble["rewards"]
+        probs = probs_for(gamble)
+        total = 0.0
+        for p, r in zip(probs, rewards):
+            total += weight(p) * value(r)
+        return total
 
-    # ----------------------------
-    # Extract gamble magnitudes G and L from Option A
-    # ----------------------------
-    A = problem["gamble_A"]
-    rewards = A["rewards"]
+    sv_A = subjective_value(problem["gamble_A"])
+    sv_B = subjective_value(problem["gamble_B"])
 
-    # Gain magnitude G: largest positive outcome
-    G = max([r for r in rewards if r > 0.0], default=0.0)
+    score = decision_scale * (sv_B - sv_A)
 
-    # Loss magnitude L: absolute value of most negative outcome
-    L = abs(min([r for r in rewards if r < 0.0], default=0.0))
+    if score > 50:
+        p = 1.0
+    elif score < -50:
+        p = 0.0
+    else:
+        p = 1.0 / (1.0 + 2.718281828 ** (-score))
 
-    # ----------------------------
-    # Logistic gain-loss score
-    # ----------------------------
-    utility_raw = G - omega * L
-    score = lam * utility_raw + bias
-
-    # score > 0 favors option 0 = gamble_A / accept
-    # therefore P(option 1) should increase when score is negative
-    diff = -score
-
-    try:
-        p_choose_1 = 1.0 / (1.0 + math.exp(-beta * diff))
-    except OverflowError:
-        p_choose_1 = 1.0 if diff > 0 else 0.0
-
-    # Clamp for numerical stability in loglik
-    if p_choose_1 < 1e-9:
-        p_choose_1 = 1e-9
-    elif p_choose_1 > 1.0 - 1e-9:
-        p_choose_1 = 1.0 - 1e-9
-
-    return p_choose_1
+    return clip(p)

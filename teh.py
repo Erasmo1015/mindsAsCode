@@ -174,6 +174,67 @@ def _best_from_fresh_candidate(
     return None
 
 
+def _parse_final_best_program_origin(program_id: str) -> Dict[str, Any]:
+    """Map final program_id to origin_iteration, origin_candidate_idx, and origin_phase."""
+    pid = str(program_id)
+    match = re.match(r"^iteration_(\d+)_candidate_(\d+)$", pid)
+    if match is not None:
+        return {
+            "origin_iteration": int(match.group(1)),
+            "origin_candidate_idx": int(match.group(2)),
+            "origin_phase": "evolution",
+        }
+    match = re.match(r"^global_iteration_(\d+)_candidate_(\d+)$", pid)
+    if match is not None:
+        return {
+            "origin_iteration": int(match.group(1)),
+            "origin_candidate_idx": int(match.group(2)),
+            "origin_phase": "global",
+        }
+    match = re.match(r"^explore_candidate_(\d+)$", pid)
+    if match is not None:
+        return {
+            "origin_iteration": None,
+            "origin_candidate_idx": int(match.group(1)),
+            "origin_phase": "explore",
+        }
+    if pid == "global_baseline":
+        return {
+            "origin_iteration": -1,
+            "origin_candidate_idx": -1,
+            "origin_phase": "global",
+        }
+    if pid == "baseline":
+        return {
+            "origin_iteration": -1,
+            "origin_candidate_idx": -1,
+            "origin_phase": "baseline",
+        }
+    return {
+        "origin_iteration": None,
+        "origin_candidate_idx": None,
+        "origin_phase": None,
+    }
+
+
+def _resolve_final_best_from_elite_pool(
+    elite_parents: List[Tuple[Any, ...]],
+    seed_code: str,
+) -> Tuple[str, str]:
+    """Use elite pool rank-1 when it compiles; otherwise fall back to seed baseline."""
+    if elite_parents:
+        pool_code = elite_parents[0][0]
+        pool_id = str(elite_parents[0][3])
+        if pool_code and compile_program(pool_code) is not None:
+            return pool_code, pool_id
+    print(
+        "[WARN] Elite pool empty or rank-1 failed to compile; "
+        "using seed baseline for final reporting.",
+        flush=True,
+    )
+    return seed_code, "baseline"
+
+
 def _build_iteration_metrics_json(
     *,
     participant_id: Optional[int],
@@ -567,6 +628,146 @@ def resolve_participants_for_scope(
             return valid[:n]
         return list(valid)
     raise ValueError(f"Unknown participant_scope: {participant_scope!r}")
+
+
+def _psych101_experiment_trial_counts(exp: Experiment) -> Tuple[int, int]:
+    n_blocks = len(exp.blocks)
+    n_parsed = sum(len(b.trials) for b in exp.blocks)
+    return n_blocks, n_parsed
+
+
+def _print_selected_participants_trial_summary(
+    dataset: str,
+    participant_ids: List[int],
+    *,
+    repo_root: Path,
+    split_ratio: float,
+    split_seed: int,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    local_dataset: Optional[str] = None,
+) -> None:
+    """Print parsed/split trial counts for the selected participant ids."""
+    if not participant_ids:
+        return
+
+    if is_psych101_dataset(dataset):
+        valid_list = load_valid_participant_ids_from_json(
+            dataset,
+            repo_root,
+            filter_mixed_gambles=False,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            auto_prepare=False,
+        )
+        ordinal_by_pid = {int(pid): idx for idx, pid in enumerate(valid_list)}
+        rows: List[Dict[str, Any]] = []
+        for pid in participant_ids:
+            pid_i = int(pid)
+            try:
+                exp = get_psych101_binary_experiment(
+                    dataset,
+                    pid_i,
+                    split=psych_dataset_split,
+                    local_dataset=local_dataset,
+                )
+                n_blocks, n_parsed = _psych101_experiment_trial_counts(exp)
+                train_trials, val_trials, test_trials, _ = split_psych_experiment(
+                    exp, split_ratio=split_ratio, split_seed=split_seed
+                )
+                rows.append(
+                    {
+                        "valid_ordinal": ordinal_by_pid.get(pid_i, ""),
+                        "raw_id": pid_i,
+                        "blocks": n_blocks,
+                        "parsed_total": n_parsed,
+                        "train": len(train_trials),
+                        "val": len(val_trials),
+                        "test": len(test_trials),
+                    }
+                )
+            except Exception as exc:
+                rows.append(
+                    {
+                        "valid_ordinal": ordinal_by_pid.get(pid_i, ""),
+                        "raw_id": pid_i,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+
+        print("")
+        print(
+            f"Selected participants trial summary ({len(participant_ids)} ids, "
+            f"split_ratio={split_ratio:.3f}, split_seed={split_seed}):"
+        )
+        print(
+            "  valid_ordinal | raw_id | blocks | parsed_total | train | val | test"
+        )
+        show_rows = rows if len(rows) <= 60 else rows[:30] + rows[-5:]
+        for row in show_rows:
+            if row.get("error"):
+                print(
+                    f"  {str(row['valid_ordinal']):>13} | {row['raw_id']:6d} | "
+                    f"ERROR: {row['error']}"
+                )
+                continue
+            print(
+                f"  {str(row['valid_ordinal']):>13} | {row['raw_id']:6d} | "
+                f"{row['blocks']:6d} | {row['parsed_total']:12d} | "
+                f"{row['train']:5d} | {row['val']:3d} | {row['test']:4d}"
+            )
+        if len(rows) > 60:
+            print(f"  ... ({len(rows) - 35} rows omitted) ...")
+
+        ok_rows = [r for r in rows if not r.get("error")]
+        if ok_rows:
+            train_vals = [int(r["train"]) for r in ok_rows]
+            parsed_vals = [int(r["parsed_total"]) for r in ok_rows]
+            print(
+                "  Aggregate: "
+                f"train min/mean/max = {min(train_vals)}/{sum(train_vals)/len(train_vals):.2f}/{max(train_vals)}, "
+                f"parsed_total min/mean/max = {min(parsed_vals)}/{sum(parsed_vals)/len(parsed_vals):.2f}/{max(parsed_vals)}"
+            )
+        print(
+            "  Note: --range_start_ordinal/--range_end_ordinal index the valid list "
+            "(not raw HF row numbers when some rows are excluded)."
+        )
+        return
+
+    if is_mixed_gambles_dataset(dataset):
+        rows = []
+        for pid in participant_ids:
+            train_trials, val_trials, test_trials, _ = load_mixed_gambles_trials(
+                int(pid),
+                csv_path=DEFAULT_CSV_PATH,
+                filter_gain_loss_only=False,
+                split_ratio=split_ratio,
+                split_seed=split_seed,
+            )
+            n_parsed = len(train_trials) + len(val_trials) + len(test_trials)
+            rows.append(
+                {
+                    "raw_id": int(pid),
+                    "parsed_total": n_parsed,
+                    "train": len(train_trials),
+                    "val": len(val_trials),
+                    "test": len(test_trials),
+                }
+            )
+        print("")
+        print(
+            f"Selected participants trial summary ({len(participant_ids)} ids, "
+            f"split_ratio={split_ratio:.3f}, split_seed={split_seed}):"
+        )
+        print("  raw_id | parsed_total | train | val | test")
+        for row in rows[:60]:
+            print(
+                f"  {row['raw_id']:6d} | {row['parsed_total']:12d} | "
+                f"{row['train']:5d} | {row['val']:3d} | {row['test']:4d}"
+            )
+        if len(rows) > 60:
+            print(f"  ... ({len(rows) - 60} rows omitted) ...")
 
 
 def _load_gridworld_stack() -> None:
@@ -982,6 +1183,40 @@ def _load_evolution_elite_pool(
     return elite_parents, elite_val_logliks
 
 
+def _collect_pooled_split_trials_for_participants(
+    dataset: str,
+    participant_ids: List[int],
+    *,
+    split: str,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    local_dataset: Optional[str] = None,
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+) -> List[Dict[str, Any]]:
+    """Concatenate per-participant train or val splits (same splits as evolution uses)."""
+    if split not in ("train", "val"):
+        raise ValueError(f"split must be 'train' or 'val', got {split!r}")
+    split_idx = 0 if split == "train" else 1
+    pooled: List[Dict[str, Any]] = []
+    for pid in participant_ids:
+        train_trials, val_trials, _ = _trials_for_loglik_participant(
+            dataset,
+            int(pid),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+        )
+        pooled.extend((train_trials, val_trials)[split_idx])
+    return pooled
+
+
 def _collect_pooled_train_trials_for_participants(
     dataset: str,
     participant_ids: List[int],
@@ -995,21 +1230,18 @@ def _collect_pooled_train_trials_for_participants(
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
 ) -> List[Dict[str, Any]]:
     """Concatenate per-participant train splits (same splits as evolution uses)."""
-    pooled: List[Dict[str, Any]] = []
-    for pid in participant_ids:
-        train_trials, _, _ = _trials_for_loglik_participant(
-            dataset,
-            int(pid),
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-            data_path=data_path,
-            filter_mixed_gambles=filter_mixed_gambles,
-            psych_dataset_split=psych_dataset_split,
-            local_dataset=local_dataset,
-            mixed_gambles_csv=mixed_gambles_csv,
-        )
-        pooled.extend(train_trials)
-    return pooled
+    return _collect_pooled_split_trials_for_participants(
+        dataset,
+        participant_ids,
+        split="train",
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+    )
 
 
 def _save_global_elite_pool(
@@ -1136,6 +1368,9 @@ def run_global_evolution_phase(
     hard_prompt_token_cap: int = 14000,
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
+    prompt_debug: bool = False,
+    prompt_debug_on_no_valid: bool = True,
+    prompt_debug_exit: bool = False,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -1154,10 +1389,24 @@ def run_global_evolution_phase(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
     )
+    pooled_val = _collect_pooled_split_trials_for_participants(
+        dataset,
+        participant_ids,
+        split="val",
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+    )
     print(f"\n{'='*80}")
     print(
         f"Global phase: {n_iterations} iteration(s), "
-        f"{len(participant_ids)} participant(s), {len(pooled_train)} pooled train trials"
+        f"{len(participant_ids)} participant(s), "
+        f"{len(pooled_train)} pooled train trials, {len(pooled_val)} pooled val trials "
+        f"(prompt injects train+val; fitness on train only)"
     )
     print(f"{'='*80}")
 
@@ -1248,6 +1497,8 @@ def run_global_evolution_phase(
         prompt_stats_path = (
             iter_dir / "prompt_stats.json" if iter_dir is not None else None
         )
+        capture_gen_debug = bool(prompt_debug or prompt_debug_on_no_valid)
+        gen_debug: Dict[str, Any] = {}
         fresh_n = _decayed_fresh_n_for_iteration(
             fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
         )
@@ -1263,6 +1514,7 @@ def run_global_evolution_phase(
         )
         variant_kwargs = {
             "train_trials": pooled_train,
+            "extra_prompt_trials": pooled_val if pooled_val else None,
             "max_tokens": llm_max_tokens,
             "dataset": dataset,
             "max_prompt_train_trials": max_prompt_train_trials,
@@ -1282,6 +1534,9 @@ def run_global_evolution_phase(
             "phase": "global_evolution",
             "participant_id": None,
             "iteration": iteration_step,
+            "prompt_debug": prompt_debug,
+            "prompt_debug_exit": prompt_debug_exit,
+            "generation_debug_out": gen_debug if capture_gen_debug else None,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -6039,6 +6294,8 @@ def _run_pre_evolution_explore_phase(
     hard_prompt_token_cap: int,
     strict_prompt_budget: bool,
     prompt_token_estimator: str,
+    initial_pool_from_global: bool = False,
+    initial_pool_size_before_explore: Optional[int] = None,
 ) -> None:
     """
     One-shot seed-only candidate generation before the evolution loop.
@@ -6052,6 +6309,12 @@ def _run_pre_evolution_explore_phase(
     print("PRE-EVOLUTION EXPLORE PHASE")
     print(f"{'='*80}")
     print(f"Requested explore candidates: {n_explore}")
+    if initial_pool_from_global:
+        print(
+            f"Initial elite pool from global phase: "
+            f"{initial_pool_size_before_explore or len(elite_parents)} program(s); "
+            "explore uses seed program only (not pool parents)."
+        )
 
     explore_dir: Optional[Path] = None
     candidates_dir: Optional[Path] = None
@@ -6069,11 +6332,23 @@ def _run_pre_evolution_explore_phase(
     prompt_stats_path = (
         (explore_dir / "prompt_stats.json") if explore_dir is not None else None
     )
+    if val_trials:
+        print(
+            f"[LLM prompt] Explore phase injects {len(train_trials)} train + "
+            f"{len(val_trials)} validation trials "
+            f"(cap via max_prompt_train_trials={max_prompt_train_trials})."
+        )
+    else:
+        print(
+            f"[LLM prompt] Explore phase injects {len(train_trials)} train trials only "
+            f"(no validation split available)."
+        )
     candidate_codes = generate_program_variants(
         client=client,
         model_name=model_name,
         parent_programs=[seed_code],
         train_trials=train_trials,
+        extra_prompt_trials=val_trials if val_trials else None,
         n_variants=n_explore,
         max_tokens=llm_max_tokens,
         dataset=dataset,
@@ -6173,6 +6448,7 @@ def _run_pre_evolution_explore_phase(
         candidate_results.append(row)
 
     selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
+    selected_results.sort(key=lambda r: r["fitness"], reverse=True)
     for result in selected_results:
         program_id = f"explore_candidate_{result['idx']}"
         elite_parents.append(
@@ -6242,7 +6518,15 @@ def _run_pre_evolution_explore_phase(
                 for r in candidate_results
             ],
         }
+        if initial_pool_from_global:
+            metrics["initial_pool_from_global"] = True
+            metrics["initial_pool_size_before_explore"] = (
+                initial_pool_size_before_explore
+                if initial_pool_size_before_explore is not None
+                else len(elite_parents) - len(selected_results)
+            )
         if best_explore_score is not None and selected_results:
+            metrics["best_explore_idx"] = selected_results[0].get("idx")
             if fitness_metric == "loglik":
                 metrics["best_explore_train_loglik"] = selected_results[0].get("train_loglik")
             else:
@@ -6370,9 +6654,11 @@ def run_evolution(
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
+        n_parsed = len(train_trials) + len(val_trials) + len(test_trials)
         print(
-            f"[Split] Train: {len(train_trials)}, Val: {len(val_trials)}, Test: {len(test_trials)} "
-            f"(seed={split_seed}, ratio={split_ratio:.3f})"
+            f"[Load] Parsed total_trials={n_parsed} "
+            f"(train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)}, "
+            f"seed={split_seed}, ratio={split_ratio:.3f})"
         )
     else:
         print(f"Loading Psych-101 dataset {dataset} for participant {participant_id}...")
@@ -6385,11 +6671,13 @@ def run_evolution(
                 split=psych_dataset_split,
                 local_dataset=local_dataset,
             )
+        n_blocks, n_parsed = _psych101_experiment_trial_counts(exp)
         train_trials, val_trials, test_trials, options = split_psych_experiment(
             exp, split_ratio=split_ratio, split_seed=split_seed
         )
         print(
-            f"[Split] Train: {len(train_trials)}, Val: {len(val_trials)}, Test: {len(test_trials)} "
+            f"[Load] Parsed blocks={n_blocks}, total_trials={n_parsed}; "
+            f"split train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)} "
             f"(seed={split_seed}, ratio={split_ratio:.3f})"
         )
     
@@ -6730,8 +7018,8 @@ def run_evolution(
         )
         global_pool_handoff = True
         print(
-            f"\nEvolution initial pool: {len(elite_parents)} program(s) from global phase "
-            f"(global order preserved; per-participant sort by train loglik starts after iteration 1)."
+            f"\nEvolution initial pool: {len(elite_parents)} program(s) initialized from "
+            f"global phase elite pool (per-participant train/val re-evaluated; global order preserved)."
         )
         if save_artifacts and output_path is not None:
             run_root = (
@@ -6770,9 +7058,9 @@ def run_evolution(
 
     if (
         int(explore_candidates) > 0
-        and not global_elite_parents
         and run_phase in ("all", "evolution")
     ):
+        initial_pool_size_before_explore = len(elite_parents)
         _run_pre_evolution_explore_phase(
             explore_candidates=int(explore_candidates),
             client=client,
@@ -6805,6 +7093,8 @@ def run_evolution(
             hard_prompt_token_cap=hard_prompt_token_cap,
             strict_prompt_budget=strict_prompt_budget,
             prompt_token_estimator=prompt_token_estimator,
+            initial_pool_from_global=global_pool_handoff,
+            initial_pool_size_before_explore=initial_pool_size_before_explore,
         )
         last_significant_best = float(elite_parents[0][1])
 
@@ -8017,30 +8307,13 @@ def run_evolution(
 
     # Select final best program directly from the final elite pool (already sorted by train fitness).
     # This guarantees final reporting is paired from one candidate.
-    if ((is_binary_loglik_dataset(dataset)) or is_cpc18_split) and (not runtime_valid_evolved_found):
-        print(
-            "[WARN] No runtime-valid evolved program found; using baseline program for final reporting.",
-            flush=True,
-        )
-        final_best_code = seed_code
-        final_best_program_id = "baseline"
-    else:
-        final_best_code, _, _, final_best_program_id = (
-            elite_parents[0][0],
-            elite_parents[0][1],
-            elite_parents[0][2],
-            elite_parents[0][3],
-        )
-    match = re.match(r"iteration_(\d+)_candidate_(\d+)$", final_best_program_id)
-    if match is not None:
-        best_iteration = int(match.group(1))
-        best_candidate_idx = int(match.group(2))
-    elif final_best_program_id == "baseline":
-        best_iteration = -1
-        best_candidate_idx = -1
-    else:
-        best_iteration = None
-        best_candidate_idx = None
+    final_best_code, final_best_program_id = _resolve_final_best_from_elite_pool(
+        elite_parents, seed_code
+    )
+    origin = _parse_final_best_program_origin(final_best_program_id)
+    best_iteration = origin["origin_iteration"]
+    best_candidate_idx = origin["origin_candidate_idx"]
+    origin_phase = origin["origin_phase"]
     best_program_filename = BEST_PROGRAM_FILENAME
 
     if save_artifacts:
@@ -8071,6 +8344,7 @@ def run_evolution(
             "program_id": final_best_program_id,
             "origin_iteration": best_iteration,
             "origin_candidate_idx": best_candidate_idx,
+            "origin_phase": origin_phase,
             "program_file": best_program_filename,
         }
         # Keep paired train/test metrics from the same best-train program.
@@ -8086,6 +8360,7 @@ def run_evolution(
             "program_id": final_best_program_id,
             "origin_iteration": best_iteration,
             "origin_candidate_idx": best_candidate_idx,
+            "origin_phase": origin_phase,
             "program_file": best_program_filename,
         }
         overall_best_test = dict(overall_best_train)
@@ -8113,6 +8388,7 @@ def run_evolution(
             "program_id": final_best_program_id,
             "origin_iteration": best_iteration,
             "origin_candidate_idx": best_candidate_idx,
+            "origin_phase": origin_phase,
             "program_file": best_program_filename,
         }
         if final_val_eval is not None:
@@ -8127,6 +8403,7 @@ def run_evolution(
             "program_id": final_best_program_id,
             "origin_iteration": best_iteration,
             "origin_candidate_idx": best_candidate_idx,
+            "origin_phase": origin_phase,
             "program_file": best_program_filename,
         }
         overall_best_test = dict(overall_best_train)
@@ -9529,6 +9806,16 @@ def main():
         f"TEH split settings: dataset={args.dataset}, split_mode={args.split_mode}, "
         f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}"
     )
+    if args.dataset in _PARTICIPANT_DATASETS and participants_to_process:
+        _print_selected_participants_trial_summary(
+            args.dataset,
+            participants_to_process,
+            repo_root=_REPO_ROOT,
+            split_ratio=args.split_ratio,
+            split_seed=args.split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=args.local_dataset,
+        )
 
     base_run_dir = None
     if args.output_dir is None:

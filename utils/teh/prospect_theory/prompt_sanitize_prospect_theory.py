@@ -12,10 +12,8 @@ _IMPORT_LINE_RE = re.compile(r"(?m)^\s*(?:import|from)\s+\S")
 _CHOOSE_DEF_RE = re.compile(r"(?m)^\s*def choose\s*\(")
 _TRAILING_FENCE_RE = re.compile(r"\n```(?:python)?\s*\n[\s\S]*?```\s*$", re.IGNORECASE)
 _FAKE_SIGMOID_MARKER = "1/(1+1/(1+"
-_FORBIDDEN_DYNAMIC_RE = re.compile(
-    r"__import__\s*\(|\bimportlib\b|\beval\s*\(|\bexec\s*\(|\bglobals\s*\(|\blocals\s*\(",
-    re.IGNORECASE,
-)
+_HIDDEN_IMPORT_CALL_RE = re.compile(r"__import__\s*\(")
+_HIDDEN_IMPORT_MARKERS = ("importlib",)
 
 
 def strip_embedded_choose_from_evolution_prompt(text: str) -> str:
@@ -65,6 +63,12 @@ def _strip_python_comments(code: str) -> str:
 def _has_fake_sigmoid(code: str) -> bool:
     compact = re.sub(r"\s+", "", code)
     return _FAKE_SIGMOID_MARKER in compact
+
+
+def _has_hidden_import(code: str) -> bool:
+    if _HIDDEN_IMPORT_CALL_RE.search(code):
+        return True
+    return any(marker in code for marker in _HIDDEN_IMPORT_MARKERS)
 
 
 def _count_choose_definitions(code: str) -> int:
@@ -138,7 +142,7 @@ def _extract_python_from_llm_reply(
             ordered.append(c)
 
     for c in ordered:
-        if required_markers and not all(_marker_present(c, m) for m in required_markers):
+        if required_markers and not any(_marker_present(c, m) for m in required_markers):
             continue
         if _passes_python_syntax(c):
             return c
@@ -155,7 +159,7 @@ def describe_sanitize_failure(
         return "empty_llm_content"
     extracted = _extract_python_from_llm_reply(text, required_markers=required_markers)
     if not extracted:
-        if required_markers and not all(
+        if required_markers and not any(
             _marker_present(text, m) for m in required_markers
         ):
             return f"missing_markers:{required_markers}"
@@ -168,10 +172,10 @@ def describe_sanitize_failure(
     cleaned = _strip_python_comments(extracted)
     if not cleaned or _count_choose_definitions(cleaned) != 1:
         return "comments_stripped_away_choose_or_empty"
+    if _has_hidden_import(cleaned):
+        return "hidden_import_present"
     if _has_fake_sigmoid(cleaned):
         return "fake_sigmoid_pattern"
-    if _FORBIDDEN_DYNAMIC_RE.search(cleaned):
-        return "forbidden_dynamic_code_present"
     if not _passes_python_syntax(cleaned):
         return "syntax_error_after_cleaning"
     return "ok"
@@ -202,10 +206,10 @@ def sanitize_evolution_candidate_code(
     if not cleaned or _count_choose_definitions(cleaned) != 1:
         return ""
 
-    if _has_fake_sigmoid(cleaned):
+    if _has_hidden_import(cleaned):
         return ""
 
-    if _FORBIDDEN_DYNAMIC_RE.search(cleaned):
+    if _has_fake_sigmoid(cleaned):
         return ""
 
     if not _passes_python_syntax(cleaned):
