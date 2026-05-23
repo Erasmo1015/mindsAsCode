@@ -2905,6 +2905,7 @@ def run_loglik_refinement_phase(
 
         parent_codes = [p[0] for p in selected_parents]
         parent_train_lls = [_train_loglik_from_elite_tuple(p) for p in selected_parents]
+        parent_overall_lls = [float(p[1]) for p in selected_parents]
 
         print(
             f"[LLM prompt] Refinement uses {len(val_for_prompt)} validation trials only "
@@ -2972,6 +2973,7 @@ def run_loglik_refinement_phase(
             fresh_parent_val_logliks=fresh_parent_val_lls,
             normal_parent_train_accuracies=parent_train_lls,
             normal_parent_val_logliks=selected_val_lls,
+            normal_parent_overall_logliks=parent_overall_lls,
         )
 
         candidate_results: List[Dict[str, Any]] = []
@@ -5793,6 +5795,24 @@ Generate the variant now:"""
 _PARENT_TRUNCATION_MARKER = "# truncated; keep concise\n"
 
 
+def _format_parent_loglik_prompt_metrics(
+    *,
+    train_loglik: float,
+    val_loglik: Optional[float] = None,
+    overall_loglik: Optional[float] = None,
+) -> str:
+    """Format parent log-likelihood metrics for LLM prompts."""
+    if val_loglik is not None:
+        parts = [
+            f"train_loglik={train_loglik:.4f}",
+            f"val_loglik={val_loglik:.4f}",
+        ]
+        if overall_loglik is not None:
+            parts.append(f"overall_loglik={overall_loglik:.4f}")
+        return ", ".join(parts)
+    return f"log-likelihood={train_loglik:.4f}"
+
+
 def _build_parent_context_for_prompt(
     *,
     prompt_parent_programs: List[str],
@@ -5802,6 +5822,7 @@ def _build_parent_context_for_prompt(
     parent_train_accuracies: Optional[List[float]],
     parent_train_mses: Optional[List[float]],
     parent_val_logliks: Optional[List[Optional[float]]],
+    parent_overall_logliks: Optional[List[Optional[float]]] = None,
     cpc18_official_mse: bool,
 ) -> str:
     """Parent program section for LLM prompts (metrics + code blocks)."""
@@ -5817,13 +5838,20 @@ def _build_parent_context_for_prompt(
             and is_binary_loglik_dataset(dataset)
         ):
             train_ll = parent_train_accuracies[0]
-            if parent_val_logliks and len(parent_val_logliks) > 0 and parent_val_logliks[0] is not None:
-                parent_context += (
-                    f"Parent performance: train_loglik={train_ll:.4f}, "
-                    f"val_loglik={parent_val_logliks[0]:.4f}\n\n"
-                )
-            else:
-                parent_context += f"Parent performance: train_loglik={train_ll:.4f}\n\n"
+            val_ll = (
+                parent_val_logliks[0]
+                if parent_val_logliks and len(parent_val_logliks) > 0
+                else None
+            )
+            overall_ll = (
+                parent_overall_logliks[0]
+                if parent_overall_logliks and len(parent_overall_logliks) > 0
+                else None
+            )
+            parent_context += (
+                f"Parent performance: "
+                f"{_format_parent_loglik_prompt_metrics(train_ll=train_ll, val_loglik=val_ll, overall_loglik=overall_ll)}\n\n"
+            )
         parent_context += (
             "Generate a variant that improves upon or explores alternatives to the parent program.\n"
         )
@@ -5849,17 +5877,22 @@ def _build_parent_context_for_prompt(
                     and i < len(parent_val_logliks)
                     and parent_val_logliks[i] is not None
                 ):
-                    metric_str = (
-                        f" (train_loglik: {parent_metric:.4f}, "
-                        f"val_loglik: {parent_val_logliks[i]:.4f})"
+                    overall_ll = (
+                        parent_overall_logliks[i]
+                        if parent_overall_logliks and i < len(parent_overall_logliks)
+                        else None
                     )
+                    metric_parts = [
+                        f"train_loglik: {parent_metric:.4f}",
+                        f"val_loglik: {parent_val_logliks[i]:.4f}",
+                    ]
+                    if overall_ll is not None:
+                        metric_parts.append(f"overall_loglik: {overall_ll:.4f}")
+                    metric_str = f" ({', '.join(metric_parts)})"
+                elif fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
+                    metric_str = f" (log-likelihood: {parent_metric:.4f})"
                 else:
-                    metric_label = (
-                        "train_loglik"
-                        if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset)
-                        else "train_acc"
-                    )
-                    metric_str = f" ({metric_label}: {parent_metric:.4f})"
+                    metric_str = f" (train_acc: {parent_metric:.4f})"
             else:
                 metric_str = ""
             parent_context += f"\nParent {i+1}{metric_str}:\n```python\n{parent_program}\n```\n"
@@ -6044,8 +6077,10 @@ def _generate_iteration_candidate_codes(
     variant_kwargs: Dict[str, Any],
     fresh_parent_train_accuracies: Optional[List[float]] = None,
     fresh_parent_val_logliks: Optional[List[Optional[float]]] = None,
+    fresh_parent_overall_logliks: Optional[List[Optional[float]]] = None,
     normal_parent_train_accuracies: Optional[List[float]] = None,
     normal_parent_val_logliks: Optional[List[Optional[float]]] = None,
+    normal_parent_overall_logliks: Optional[List[Optional[float]]] = None,
 ) -> Tuple[List[str], List[str]]:
     """Generate candidates: first fresh_n from seed/baseline only, rest from normal parents."""
     fresh_n = int(fresh_n_candidates)
@@ -6065,6 +6100,8 @@ def _generate_iteration_candidate_codes(
             fresh_kw["parent_train_accuracies"] = fresh_parent_train_accuracies
         if fresh_parent_val_logliks is not None:
             fresh_kw["parent_val_logliks"] = fresh_parent_val_logliks
+        if fresh_parent_overall_logliks is not None:
+            fresh_kw["parent_overall_logliks"] = fresh_parent_overall_logliks
         fresh_codes = generate_program_variants(**fresh_kw)
         codes.extend(fresh_codes)
         sources.extend(["fresh"] * len(fresh_codes))
@@ -6080,6 +6117,8 @@ def _generate_iteration_candidate_codes(
             normal_kw["parent_train_accuracies"] = normal_parent_train_accuracies
         if normal_parent_val_logliks is not None:
             normal_kw["parent_val_logliks"] = normal_parent_val_logliks
+        if normal_parent_overall_logliks is not None:
+            normal_kw["parent_overall_logliks"] = normal_parent_overall_logliks
         normal_codes = generate_program_variants(**normal_kw)
         codes.extend(normal_codes)
         sources.extend(["normal"] * len(normal_codes))
@@ -6096,6 +6135,7 @@ def generate_program_variants(
     parent_train_accuracies: Optional[List[float]] = None,
     parent_train_mses: Optional[List[float]] = None,
     parent_val_logliks: Optional[List[Optional[float]]] = None,
+    parent_overall_logliks: Optional[List[Optional[float]]] = None,
     dataset: str = "choice13k",
     max_prompt_train_trials: int = 1_000_000,
     max_prompt_trials_per_problem: int = 0,
@@ -6263,6 +6303,7 @@ Provide only the code for choose(...) as a complete function body.
         "parent_train_accuracies": parent_train_accuracies,
         "parent_train_mses": parent_train_mses,
         "parent_val_logliks": parent_val_logliks,
+        "parent_overall_logliks": parent_overall_logliks,
         "cpc18_official_mse": cpc18_official_mse,
     }
 
@@ -7481,7 +7522,7 @@ def run_evolution(
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
                 if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
-                    print(f"  Parent {i+1}: {prog_id} (train_loglik={fitness:.4f}, test_acc={test_acc:.4f})")
+                    print(f"  Parent {i+1}: {prog_id} (log-likelihood={fitness:.4f}, test_acc={test_acc:.4f})")
                 else:
                     print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
         
@@ -7492,7 +7533,7 @@ def run_evolution(
             parent_train_mses = [p[4] for p in selected_parents if p[4] is not None]
             parent_test_mses = [p[5] for p in selected_parents if p[5] is not None]
         else:
-            # In loglik mode, feed train fitness (log-likelihood) into prompt context.
+            # In loglik mode, feed pool-ranking log-likelihood (elite tuple fitness) into prompts.
             if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
                 parent_train_accs = [p[1] for p in selected_parents]
             else:

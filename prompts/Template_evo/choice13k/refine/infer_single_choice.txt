@@ -1,21 +1,16 @@
-Additional validation information is provided because the current behavioral program can be improved on held-out validation trials.
+Additional validation information is provided to improve the current program.
 
-Your goal is to extend the current program so it explains both:
-- the training behavior,
-- and the validation behavior.
+Refinement goal: maximize overall log-likelihood across training and validation behavior.
 
-Treat validation trials as additional behavioral evidence.
-Look for consistent patterns in the validation examples that the current program misses.
-Add these missing patterns to the original training-evolved program.
+Use validation trials as additional behavioral evidence.
+Preserve the strongest structure from the current program.
+Add missing patterns only when they improve validation behavior without harming the main training behavior.
 
-Preserve the strongest behavioral structure from the current program.
-Do not replace a strong training-evolved rule with an unrelated rule.
-Refine or add components that improve validation behavior while keeping the training behavior reasonably well explained.
+Prefer targeted edits:
+- adjust score scaling, thresholds, confidence, or feature weights;
+- add one missing behavioral component;
+- remove or weaken components that hurt validation behavior.
 
-Prefer meaningful behavioral additions such as:
-- improved reward/probability transformations,
-- nonlinear value transformation,
-- asymmetric gain/loss treatment,
-- subjective-value adjustments,
-- history or feedback effects,
-- participant-specific thresholds or sensitivities.
+Do not replace a strong training-evolved rule with an unrelated generic rule.
+Do not add history terms unless validation behavior supports them.
+Make meaningful behavioral improvements rather than superficial code changes.
