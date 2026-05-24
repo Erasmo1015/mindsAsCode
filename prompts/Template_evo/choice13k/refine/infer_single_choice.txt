@@ -1,18 +1,11 @@
-Additional validation information is provided to improve the current program.
+Additional validation information is provided because the current behavioral program does not generalize well to held-out validation trials.
 
-Goal: maximize overall log-likelihood across training and validation behavior.
+Your goal is to improve the behavioral rule so it explains BOTH:
 
-Treat validation trials as additional behavioral evidence, but do not chase validation-only patterns that strongly hurt training behavior.
+* the training behavior,
+* and the validation behavior.
 
-Preserve the strongest structure from the current program.
-Prefer targeted edits: adjust scaling, thresholds, confidence, feature weights; add one missing component; or weaken components that hurt validation.
+Validation failures may indicate that the current program is missing an important behavioral pattern or decision rule.
 
-Do not replace a strong training-evolved rule with an unrelated generic rule.
-Preserve useful existing history/feedback logic when it helps.
-Do not add new history/feedback terms unless the available fields support them.
-If using history/feedback, handle empty history, missing feedback keys, and None feedback safely.
-
-Avoid numerical errors such as unbounded exponentiation.
-Always return a finite probability strictly inside (0, 1).
-
-Make meaningful behavioral improvements, not superficial edits.
+Use the validation trials to identify behavioral structure that consistently explains both train and validation examples.
+Do not fit only the validation examples that harms training score; preserve broader behavioral modelling.
