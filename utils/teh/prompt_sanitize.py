@@ -31,6 +31,17 @@ def strip_embedded_choose_from_evolution_prompt(text: str) -> str:
     matches = list(_CHOOSE_DEF_RE.finditer(out))
     if len(matches) > 1:
         out = out[: matches[-1].start()].rstrip()
+    elif len(matches) == 1:
+        # Conservative extra case: remove a single choose() only when it looks like
+        # a trailing appended implementation (not API documentation).
+        match = matches[0]
+        choose_start = out.find("def choose", match.start(), match.end())
+        if choose_start < 0:
+            choose_start = match.start()
+        prefix = out[:choose_start]
+        suffix = out[choose_start:]
+        if _should_strip_single_trailing_choose(prefix, suffix, len(out), choose_start):
+            out = prefix.rstrip()
     return out
 
 
@@ -72,10 +83,79 @@ def _count_choose_definitions(code: str) -> int:
 
 
 def _extract_fenced_blocks(text: str) -> List[str]:
+    # Single pass to avoid duplicate extraction of ```python ...``` blocks.
+    fence_re = re.compile(r"```[ \t]*([a-zA-Z0-9_+-]*)[^\n]*\n([\s\S]*?)```")
     blocks: List[str] = []
-    blocks.extend(re.findall(r"```python(.*?)```", text, re.DOTALL | re.IGNORECASE))
-    blocks.extend(re.findall(r"```(.*?)```", text, re.DOTALL))
-    return [b.strip() for b in blocks if b and b.strip()]
+    for match in fence_re.finditer(text):
+        block = (match.group(2) or "").strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _looks_like_instruction_prefix(text: str) -> bool:
+    prefix = text.strip().lower()
+    if not prefix:
+        return False
+    marker_count = sum(
+        marker in prefix
+        for marker in (
+            "requirements",
+            "instruction",
+            "history",
+            "action semantics",
+            "p(action=1)",
+            "return",
+            "dataset",
+            "prompt",
+        )
+    )
+    if len(prefix) >= 280 and prefix.count("\n") >= 6:
+        return True
+    return len(prefix) >= 120 and prefix.count("\n") >= 3 and marker_count >= 2
+
+
+def _looks_like_executable_choose_block(choose_block: str) -> bool:
+    lines = choose_block.splitlines()
+    if not lines:
+        return False
+    in_docstring = False
+    body_lines = 0
+    executable_hits = 0
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(('"""', "'''")):
+            quote = stripped[:3]
+            if stripped.count(quote) >= 2:
+                continue
+            in_docstring = not in_docstring
+            continue
+        if in_docstring:
+            continue
+        if not line.startswith((" ", "\t")):
+            break
+        body_lines += 1
+        if stripped.startswith(("return ", "if ", "for ", "while ", "try:", "except ")):
+            executable_hits += 1
+        if "=" in stripped and "==" not in stripped and "!=" not in stripped:
+            executable_hits += 1
+    return body_lines >= 2 and executable_hits >= 1
+
+
+def _should_strip_single_trailing_choose(
+    prefix: str,
+    choose_block: str,
+    total_len: int,
+    choose_start: int,
+) -> bool:
+    near_end = choose_start >= int(total_len * 0.55)
+    return (
+        near_end
+        and _looks_like_instruction_prefix(prefix)
+        and _looks_like_executable_choose_block(choose_block)
+    )
 
 
 def _passes_python_syntax(candidate: str) -> bool:
