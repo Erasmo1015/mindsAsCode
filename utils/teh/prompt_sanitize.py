@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 _IMPORT_LINE_RE = re.compile(r"(?m)^\s*(?:import|from)\s+\S")
 _CHOOSE_DEF_RE = re.compile(r"(?m)^\s*def choose\s*\(")
+_TOP_LEVEL_CHOOSE_DEF_RE = re.compile(r"(?m)^def choose\s*\(")
 _TRAILING_FENCE_RE = re.compile(r"\n```(?:python)?\s*\n[\s\S]*?```\s*$", re.IGNORECASE)
 _FAKE_SIGMOID_MARKER = "1/(1+1/(1+"
 _FORBIDDEN_DYNAMIC_RE = re.compile(
@@ -28,7 +29,8 @@ def strip_embedded_choose_from_evolution_prompt(text: str) -> str:
     if not text:
         return ""
     out = _TRAILING_FENCE_RE.sub("", text).strip()
-    matches = list(_CHOOSE_DEF_RE.finditer(out))
+    # For prompt stripping, only consider top-level choose() definitions.
+    matches = list(_TOP_LEVEL_CHOOSE_DEF_RE.finditer(out))
     if len(matches) > 1:
         out = out[: matches[-1].start()].rstrip()
     elif len(matches) == 1:
@@ -83,11 +85,14 @@ def _count_choose_definitions(code: str) -> int:
 
 
 def _extract_fenced_blocks(text: str) -> List[str]:
-    # Single pass to avoid duplicate extraction of ```python ...``` blocks.
-    fence_re = re.compile(r"```[ \t]*([a-zA-Z0-9_+-]*)[^\n]*\n([\s\S]*?)```")
+    # Single pass with optional language tag avoids duplicate python extraction.
+    fence_re = re.compile(
+        r"```(?:[ \t]*[a-zA-Z0-9_+-]+[^\n]*)?\n([\s\S]*?)```",
+        re.IGNORECASE,
+    )
     blocks: List[str] = []
     for match in fence_re.finditer(text):
-        block = (match.group(2) or "").strip()
+        block = (match.group(1) or "").strip()
         if block:
             blocks.append(block)
     return blocks

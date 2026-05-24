@@ -306,6 +306,193 @@ def _format_guidance_section(title: str, lines: Sequence[str]) -> str:
     return f"{title}\n{bullets}"
 
 
+def _dedupe_lines_preserve_order(lines: Sequence[str]) -> List[str]:
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        key = line.strip()
+        if not key:
+            continue
+        low_key = " ".join(key.lower().split())
+        if low_key.startswith(
+            "history is empty in parsed examples; rely on current problem fields"
+        ):
+            key = "History is empty in parsed examples; rely on current problem fields."
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(line.strip())
+    return deduped
+
+
+def _strip_prompt_generation_meta_instructions(text: str) -> str:
+    out_lines: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            out_lines.append(raw_line)
+            continue
+        low = line.lower()
+        if "include this section verbatim" in low:
+            continue
+        if "use the following points when writing" in low:
+            continue
+        if "output only the evolution instruction prompt text" in low:
+            continue
+        if "your task is not to rewrite the full base prompt" in low:
+            continue
+        out_lines.append(raw_line)
+    return "\n".join(out_lines).strip()
+
+
+def _dedupe_history_empty_guidance_lines(text: str) -> str:
+    out_lines: List[str] = []
+    seen_history_empty = False
+    for raw_line in text.splitlines():
+        normalized = " ".join(raw_line.strip().lower().split())
+        if normalized.startswith(
+            "- history is empty in parsed examples; rely on current problem fields"
+        ):
+            if seen_history_empty:
+                continue
+            seen_history_empty = True
+        out_lines.append(raw_line)
+    return "\n".join(out_lines).strip()
+
+
+def _filter_unsupported_behavioral_priors(lines: Sequence[str]) -> List[str]:
+    banned = (
+        "prospect theory",
+        "loss aversion",
+        "subjective utility",
+        "win-stay",
+        "lose-shift",
+        "exploration/exploitation",
+        "participant bias",
+        "weighted-sum",
+        "weighted sum",
+    )
+    kept: List[str] = []
+    for line in lines:
+        low = line.lower()
+        if any(term in low for term in banned):
+            continue
+        kept.append(line)
+    return kept
+
+
+def _render_dataset_schema_history_section(
+    dataset_guidance_lines: Sequence[str],
+    history_guidance_lines: Sequence[str],
+) -> str:
+    dataset_lines = _dedupe_lines_preserve_order(
+        _filter_unsupported_behavioral_priors(dataset_guidance_lines)
+    )
+    history_lines = _dedupe_lines_preserve_order(
+        _filter_unsupported_behavioral_priors(history_guidance_lines)
+    )
+    section_parts: List[str] = []
+    if dataset_lines:
+        section_parts.append(_format_guidance_section("Dataset/task-format guidance:", dataset_lines))
+    if history_lines:
+        section_parts.append(_format_history_feedback_section(history_lines))
+    return "\n\n".join(section_parts).strip()
+
+
+def _extract_section_block(prompt_text: str, section_title: str) -> str:
+    lines = prompt_text.splitlines()
+    section_titles = {
+        "Requirements:",
+        "History and feedback safety:",
+        "Behavioral requirements:",
+        "Parent comparison and improvement requirements:",
+        "Generation requirements:",
+    }
+    start_idx: Optional[int] = None
+    for idx, line in enumerate(lines):
+        if line.strip() == section_title:
+            start_idx = idx
+            break
+    if start_idx is None:
+        return ""
+
+    end_idx = len(lines)
+    for idx in range(start_idx + 1, len(lines)):
+        if lines[idx].strip() in section_titles:
+            end_idx = idx
+            break
+    return "\n".join(lines[start_idx:end_idx]).strip()
+
+
+def _ensure_invariant_base_sections(
+    final_prompt: str,
+    base_prompt: str,
+    *,
+    audit: Dict[str, Any],
+) -> tuple[str, List[str]]:
+    out = final_prompt
+    warnings: List[str] = []
+    required_sections = [
+        "Requirements:",
+        "History and feedback safety:",
+        "Behavioral requirements:",
+        "Parent comparison and improvement requirements:",
+        "Generation requirements:",
+    ]
+    if "def choose(problem, history)" not in out and "def choose(problem, history)" in base_prompt:
+        warnings.append("Missing `def choose(problem, history)` signature; restored from base prompt.")
+        out = out.rstrip() + "\n\n" + "def choose(problem, history):" + "\n"
+
+    for title in required_sections:
+        if title in out:
+            continue
+        block = _extract_section_block(base_prompt, title)
+        if block:
+            warnings.append(f"Missing invariant section `{title}`; restored from base prompt.")
+            out = out.rstrip() + "\n\n" + block + "\n"
+
+    final_rule = "Provide only the code for `choose(...)` as a complete function."
+    if final_rule not in out and final_rule in base_prompt:
+        warnings.append("Missing final code-only rule; restored from base prompt.")
+        out = out.rstrip() + "\n\n" + final_rule + "\n"
+
+    if audit.get("has_gamble_ab"):
+        action_mapping_lines = [
+            '- action 0 -> `problem["gamble_A"]`',
+            '- action 1 -> `problem["gamble_B"]`',
+            "- return P(action=1)",
+        ]
+        if not all(line in out for line in action_mapping_lines):
+            warnings.append("Missing gamble action mapping; restored canonical mapping.")
+            out = (
+                out.rstrip()
+                + "\n\nDataset/task-format guidance:\n"
+                + "\n".join(action_mapping_lines)
+                + "\n"
+            )
+
+    return out, warnings
+
+
+def _assemble_prompt_with_invariant_base(
+    base_prompt: str,
+    dataset_schema_history_section: str,
+    *,
+    audit: Dict[str, Any],
+) -> tuple[str, List[str]]:
+    section = _strip_prompt_generation_meta_instructions(dataset_schema_history_section)
+    section_lines = _dedupe_lines_preserve_order(section.splitlines())
+    section = "\n".join(section_lines).strip()
+    if section:
+        prompt = section + "\n\n" + base_prompt.strip()
+    else:
+        prompt = base_prompt.strip()
+    prompt, invariant_warnings = _ensure_invariant_base_sections(prompt, base_prompt, audit=audit)
+    prompt = _strip_prompt_generation_meta_instructions(prompt)
+    prompt = _dedupe_history_empty_guidance_lines(prompt)
+    return prompt.strip() + "\n", invariant_warnings
+
+
 def _history_safety_requirements_from_audit(audit: Dict[str, Any]) -> str:
     lines: List[str] = [
         "Code must work when history is empty.",
@@ -437,6 +624,72 @@ def _ensure_section(text: str, section_text: str, section_title: str) -> str:
     return text.rstrip() + "\n\n" + section_text + "\n"
 
 
+def _has_history_safety_content(text: str) -> bool:
+    lower = text.lower()
+    has_feedback_guard = (
+        'h.get("feedback")' in text
+        or "feedback key may be absent" in lower
+        or "feedback may be absent" in lower
+        or "do not use h[\"feedback\"]" in lower
+    )
+    has_empty_history_guard = (
+        "history is empty" in lower
+        or "code must work when `history` is empty" in lower
+        or "code must work when history is empty" in lower
+    )
+    return has_feedback_guard and has_empty_history_guard
+
+
+def _has_numerical_stability_content(text: str) -> bool:
+    lower = text.lower()
+    has_clip = (
+        "clip the score to a safe range before exponentiation" in lower
+        or "clip the score to a safe range" in lower
+    )
+    has_exp_guard = (
+        "avoid unbounded 10 ** (-score)" in lower
+        or "avoid unbounded 2.718281828 ** (-score)" in lower
+        or ("avoid unbounded" in lower and "exponent" in lower)
+        or "overflow" in lower
+    )
+    return has_clip and has_exp_guard
+
+
+def _ensure_compact_prompt_safety_additions(text: str, audit: Dict[str, Any]) -> str:
+    out = text.rstrip()
+    if not _has_history_safety_content(out):
+        history_additions: List[str] = [
+            "Code must work when history is empty.",
+            'Prefer h.get("feedback") and explicitly check whether the value is None; feedback key may be absent.',
+        ]
+        if audit.get("total_history_entries", 0) == 0:
+            history_additions.append(
+                "History is empty in parsed examples; rely on current problem fields."
+            )
+        out = (
+            out
+            + "\n\n"
+            + _format_guidance_section("History safety additions:", history_additions)
+            + "\n"
+        )
+
+    if not _has_numerical_stability_content(out):
+        out = (
+            out
+            + "\n\n"
+            + _format_guidance_section(
+                "Numerical stability additions:",
+                [
+                    "Clip the score to a safe range before exponentiation (e.g., [-50, 50]).",
+                    "Avoid unbounded exponentiation / overflow (e.g., unbounded 10 ** (-score)).",
+                ],
+            )
+            + "\n"
+        )
+
+    return out
+
+
 def _ensure_prompt_safety_content(text: str, audit: Dict[str, Any]) -> str:
     out = text
     lower = out.lower()
@@ -460,27 +713,7 @@ def _ensure_prompt_safety_content(text: str, audit: Dict[str, Any]) -> str:
                 + "\n"
             )
 
-    has_numerical_title = "Numerical stability:" in out
-    has_clip = "clip the score to a safe range" in lower
-    has_unbounded_exp_guard = "avoid unbounded 10 ** (-score)" in lower or (
-        "avoid unbounded" in lower and "exponent" in lower
-    )
-    if not has_numerical_title:
-        out = _ensure_section(out, _numerical_stability_requirements(), "Numerical stability:")
-    elif not (has_clip and has_unbounded_exp_guard):
-        out = (
-            out.rstrip()
-            + "\n\n"
-            + _format_guidance_section(
-                "Numerical stability additions:",
-                [
-                    "If using sigmoid/logistic/exponential mappings, clip the score to a safe range before exponentiation, e.g. [-50, 50].",
-                    "Avoid unbounded 10 ** (-score) or 2.718281828 ** (-score) when score can be large.",
-                ],
-            )
-            + "\n"
-        )
-    return out
+    return _ensure_compact_prompt_safety_additions(out, audit)
 
 
 _CCT_PROBLEM_KEYS = frozenset(
@@ -873,7 +1106,7 @@ def _merge_prompt_fallback(
     sample_trials: List[Dict[str, Any]],
     *,
     base_prompt_path: Optional[Path | str] = None,
-) -> str:
+) -> tuple[str, str, List[str]]:
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     audit = _prompt_schema_audit_from_trials(
         dataset_alias, sample_trials, instruction, schema_summary
@@ -891,8 +1124,6 @@ def _merge_prompt_fallback(
         schema_summary,
         audit,
     )
-    history_safety = _history_safety_requirements_from_audit(audit)
-    numerical_stability = _numerical_stability_requirements()
     base = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
@@ -900,37 +1131,18 @@ def _merge_prompt_fallback(
         instruction=instruction,
         base_prompt_path=base_prompt_path,
     )
-    if is_mixed_gambles_dataset(dataset_alias):
-        display = dataset_display_name(dataset_alias)
-        task_desc = instruction
-    else:
-        alias = normalize_psych101_dataset_alias(dataset_alias)
-        spec = PSYCH101_BINARY_DATASETS[alias]
-        display = spec["display_name"]
-        task_desc = spec["task_description"]
-    extra = (
-        f"\n\n## Dataset: {display} (`{dataset_alias}`)\n\n"
-        f"{task_desc}\n\n"
-        f"### Runtime schema summary (from parsed trials)\n\n{schema_summary}\n\n"
-        "### Prompt schema audit (from parsed trials)\n\n"
-        f"{json.dumps({k: audit[k] for k in ('observed_problem_keys', 'observed_history_keys', 'total_trial_count', 'empty_history_trial_count', 'total_history_entries', 'hist_action_key_present', 'hist_action_key_missing', 'hist_feedback_key_present', 'hist_feedback_key_missing', 'hist_feedback_none', 'hist_feedback_non_none', 'has_feedback_ever_true', 'has_feedback_ever_false', 'feedback_key_may_be_absent', 'feedback_may_be_none', 'feedback_observed_non_none', 'schema_types')}, indent=2)}\n\n"
-        f"{_format_guidance_section('Dataset/task-format guidance:', dataset_guidance_lines)}\n\n"
-        f"{history_safety}\n\n"
-        f"{numerical_stability}\n\n"
-        f"### Task instructions (from Psych-101 transcript)\n\n{instruction[:1500]}\n\n"
-        f"### Example parsed trials\n\n{_format_trials_for_prompt(sample_trials)}\n"
+    dataset_schema_history_section = _render_dataset_schema_history_section(
+        dataset_guidance_lines, guidance_lines
     )
-    merged = base + extra
+    merged, invariant_warnings = _assemble_prompt_with_invariant_base(
+        base,
+        dataset_schema_history_section,
+        audit=audit,
+    )
     merged = _ensure_history_feedback_guidance(merged, guidance_lines)
-    merged = _ensure_section(merged, history_safety, "History safety requirements:")
-    merged = _ensure_section(merged, numerical_stability, "Numerical stability:")
-    merged = _ensure_section(
-        merged,
-        _format_guidance_section("Dataset/task-format guidance:", dataset_guidance_lines),
-        "Dataset/task-format guidance:",
-    )
     merged = _ensure_prompt_safety_content(merged, audit)
-    return merged
+    merged = _dedupe_history_empty_guidance_lines(merged)
+    return merged, dataset_schema_history_section, invariant_warnings
 
 
 def _combine_sample_trials_from_participants(
@@ -1042,7 +1254,7 @@ def build_prompt_generation_llm_user_content(
     *,
     base_prompt_path: Optional[Path | str] = None,
 ) -> str:
-    """User message sent to the prompt-generation LLM (no API call)."""
+    """User message for generating only dataset/schema/history adaptation text."""
     display = dataset_display_name(dataset_alias)
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     audit = _prompt_schema_audit_from_trials(
@@ -1063,7 +1275,6 @@ def build_prompt_generation_llm_user_content(
         audit,
     )
     history_safety = _history_safety_requirements_from_audit(audit)
-    numerical_stability = _numerical_stability_requirements()
     base_prompt = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
@@ -1079,53 +1290,52 @@ def build_prompt_generation_llm_user_content(
             normalize_psych101_dataset_alias(dataset_alias)
         ]["task_description"]
 
+    adaptation_shape = (
+        "Dataset/task-format guidance:\n"
+        "- <bullet 1>\n"
+        "- <bullet 2>\n\n"
+        "History and feedback:\n"
+        "- <bullet 1>\n"
+        "- <bullet 2>\n"
+    )
     if is_gamble:
-        adapt_instructions = (
-            "- Use the base prompt only for reusable API, safety, and programming guidance.\n"
-            "- The runtime schema summary and parsed trial examples are the source of truth for problem fields, history fields, optional/missing keys, feedback availability, action semantics, and return convention.\n"
-            "- If the base prompt conflicts with parsed examples or runtime schema summary, revise the final prompt to match parsed examples/schema.\n"
-            "- Preserve the action convention: action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).\n"
+        adapt_constraints = (
+            "- Preserve action mapping: action 0 -> `problem[\"gamble_A\"]`, action 1 -> `problem[\"gamble_B\"]`, return P(action=1).\n"
+            "- Do not add unsupported behavioral priors (Prospect Theory, loss aversion, subjective utility, etc.) unless directly present in parsed schema/instruction.\n"
         )
-        base_section_title = "## Base prompt (gamble_A/gamble_B task)\n\n"
     else:
-        adapt_instructions = (
-            "- The base prompt skeleton is schema-specific (non-gamble). Expand it into a "
-            "complete evolution prompt using ONLY fields from the runtime schema summary.\n"
-            "- Do NOT mention gamble_A, gamble_B, unknown probabilities, lottery, or Choice13k.\n"
-            "- Document exact `problem` keys and action semantics from the schema summary.\n"
+        adapt_constraints = (
+            "- Document only observed non-gamble fields and action semantics from parsed examples/schema.\n"
+            "- Do not introduce gamble-only field assumptions unless present in parsed schema.\n"
         )
-        base_section_title = "## Base prompt skeleton (schema-specific)\n\n"
 
     return (
-        f"Write the evolution system prompt for dataset `{dataset_alias}` ({display}).\n\n"
-        "Requirements:\n"
-        "- Use the **Runtime schema summary** and **Parsed trial examples** sections below "
-        "as the source of truth for `problem`, `history`, and action semantics.\n"
-        "- Before writing the final prompt, compare the base prompt against the runtime schema summary and parsed trial examples.\n"
-        "- Check problem keys, history keys, optional/missing keys, feedback availability, probabilities/rewards, action semantics, and return convention.\n"
-        "- If there is a mismatch, the final prompt must follow the parsed examples/schema, not the base prompt.\n"
-        f"{adapt_instructions}"
-        "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
-        "- Preserve the base prompt's implementation requirements.\n"
-        "- Keep the final prompt direct, concise, and behavior-focused.\n"
-        "- Keep the final prompt direct and concise, but explicitly correct any base-prompt schema statements that conflict with the runtime schema summary or parsed examples.\n"
-        "- Avoid vague behavioral caveats such as \"may help\" or \"if appropriate\", "
-        "but explicitly document optional or missing schema fields when shown by parsed examples.\n"
-        "- Do not append a sample/reference/complete `choose()` implementation.\n"
-        "- Include a \"Dataset/task-format guidance:\" section matching the parsed schema/examples.\n"
-        "- Include a \"History and feedback:\" section using this guidance (verbatim bullets):\n"
-        f"{_format_history_feedback_section(guidance_lines)}\n"
-        f"- Include this section verbatim:\n{history_safety}\n"
-        f"- Include this section verbatim:\n{numerical_stability}\n"
-        "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
-        "- You may document the choose() API in a short docstring block, but no executable code.\n\n"
+        f"Generate only a concise dataset/schema/history adaptation section for dataset `{dataset_alias}` ({display}).\n\n"
+        "Your task is NOT to rewrite the full base prompt. Generate only the dataset-specific schema/history section that should be inserted before the invariant base prompt.\n"
+        "Use runtime schema summary and parsed trial examples as source of truth for:\n"
+        "- observed problem keys,\n"
+        "- observed history keys,\n"
+        "- optional/missing keys,\n"
+        "- feedback availability,\n"
+        "- action semantics,\n"
+        "- return convention.\n\n"
+        "Do not remove, summarize, or weaken invariant base prompt requirements. The invariant base prompt already contains API, implementation, safety, behavioral-search, parent-comparison, and generation rules.\n"
+        "Output only the adaptation section text (no code fence, no Python code).\n"
+        "Keep it concise and non-repetitive; deduplicate repeated lines.\n"
+        "Do not include prompt-generation meta-instructions such as \"Include this section verbatim\".\n"
+        "Do not force unsupported dataset-specific behavioral priors.\n"
+        f"{adapt_constraints}"
+        "Prefer these exact section titles in output:\n"
+        f"{adaptation_shape}\n"
+        "When history is unavailable, state that plainly and rely on current problem fields.\n"
+        "When action history exists but feedback is unavailable, do not claim history is unavailable.\n\n"
         f"## Runtime schema summary\n\n{schema_summary}\n\n"
         "## Prompt schema audit (from parsed trials)\n\n"
         f"{json.dumps({k: audit[k] for k in ('observed_problem_keys', 'observed_history_keys', 'total_trial_count', 'empty_history_trial_count', 'total_history_entries', 'hist_action_key_present', 'hist_action_key_missing', 'hist_feedback_key_present', 'hist_feedback_key_missing', 'hist_feedback_none', 'hist_feedback_non_none', 'has_feedback_ever_true', 'has_feedback_ever_false', 'feedback_key_may_be_absent', 'feedback_may_be_none', 'feedback_observed_non_none', 'schema_types')}, indent=2)}\n\n"
         f"{_format_guidance_section('Dataset/task-format guidance:', dataset_guidance_lines)}\n\n"
+        f"{_format_history_feedback_section(guidance_lines)}\n\n"
         f"{history_safety}\n\n"
-        f"{numerical_stability}\n\n"
-        f"{base_section_title}{base_prompt}\n\n"
+        f"## Invariant base prompt (do not rewrite)\n\n{base_prompt}\n\n"
         f"## Task description (high-level)\n\n{task_description}\n\n"
         f"## Instruction excerpt from data\n\n{instruction[:2000]}\n\n"
         f"## Parsed trial examples\n\n{trial_examples}\n"
@@ -1142,7 +1352,7 @@ def _generate_prompt_via_llm(
     max_tokens: int = 2048,
     save_llm_input_to: Optional[Path] = None,
     base_prompt_path: Optional[Path | str] = None,
-) -> str:
+) -> tuple[str, str, List[str]]:
     user_content = build_prompt_generation_llm_user_content(
         dataset_alias,
         instruction,
@@ -1153,7 +1363,6 @@ def _generate_prompt_via_llm(
     audit = _prompt_schema_audit_from_trials(
         dataset_alias, sample_trials, instruction, schema_summary
     )
-    is_gamble = _is_gamble_ab_task(sample_trials)
     guidance_lines = _infer_history_feedback_guidance(
         sample_trials,
         dataset_alias=dataset_alias,
@@ -1167,8 +1376,13 @@ def _generate_prompt_via_llm(
         schema_summary,
         audit,
     )
-    history_safety = _history_safety_requirements_from_audit(audit)
-    numerical_stability = _numerical_stability_requirements()
+    base_prompt = _base_prompt_for_trials(
+        sample_trials,
+        schema_summary,
+        dataset_alias=dataset_alias,
+        instruction=instruction,
+        base_prompt_path=base_prompt_path,
+    )
     if save_llm_input_to is not None:
         save_llm_input_to.parent.mkdir(parents=True, exist_ok=True)
         save_llm_input_to.write_text(user_content, encoding="utf-8")
@@ -1191,33 +1405,62 @@ def _generate_prompt_via_llm(
     if not text:
         raise ValueError("LLM prompt generation returned empty text.")
     text = strip_embedded_choose_from_evolution_prompt(text)
-    if is_gamble:
-        text = _apply_gamble_neutral_wording(text)
-    elif _prompt_has_gamble_leakage(text):
+    text = _strip_prompt_generation_meta_instructions(text)
+    llm_lines = _dedupe_lines_preserve_order(text.splitlines())
+    llm_lines = _filter_unsupported_behavioral_priors(llm_lines)
+    canonical_section = _render_dataset_schema_history_section(
+        dataset_guidance_lines,
+        guidance_lines,
+    )
+    if llm_lines:
+        llm_section = "\n".join(llm_lines).strip()
+        if "Dataset/task-format guidance:" not in llm_section:
+            llm_section = canonical_section + "\n\n" + llm_section
+        dataset_schema_history_section = llm_section.strip()
+    else:
+        dataset_schema_history_section = canonical_section
+
+    final_prompt, invariant_warnings = _assemble_prompt_with_invariant_base(
+        base_prompt,
+        dataset_schema_history_section,
+        audit=audit,
+    )
+    if _is_gamble_ab_task(sample_trials):
+        final_prompt = _apply_gamble_neutral_wording(final_prompt)
+    elif _prompt_has_gamble_leakage(final_prompt):
         print(
-            "[TEH] LLM prompt contained gamble-specific text for a non-gamble schema; "
-            "using schema-neutral base prompt."
+            "[TEH] Non-gamble prompt contained gamble-specific text after assembly; "
+            "falling back to schema-neutral base prompt with canonical schema/history section."
         )
-        text = _build_schema_neutral_base_prompt(
+        schema_neutral_base = _build_schema_neutral_base_prompt(
             schema_summary,
             sample_trials,
             dataset_alias=dataset_alias,
             instruction=instruction,
             history_feedback_guidance=guidance_lines,
         )
-    text = _ensure_history_feedback_guidance(text, guidance_lines)
-    text = _ensure_section(
-        text,
+        final_prompt, fallback_warnings = _assemble_prompt_with_invariant_base(
+            schema_neutral_base,
+            canonical_section,
+            audit=audit,
+        )
+        invariant_warnings.extend(fallback_warnings)
+    final_prompt = _ensure_history_feedback_guidance(final_prompt, guidance_lines)
+    final_prompt = _ensure_section(
+        final_prompt,
         _format_guidance_section("Dataset/task-format guidance:", dataset_guidance_lines),
         "Dataset/task-format guidance:",
     )
-    text = _ensure_section(text, history_safety, "History safety requirements:")
-    text = _ensure_section(text, numerical_stability, "Numerical stability:")
-    text = _ensure_prompt_safety_content(text, audit)
-    text = strip_embedded_choose_from_evolution_prompt(text)
-    if not text:
+    final_prompt = _ensure_section(
+        final_prompt, _format_history_feedback_section(guidance_lines), "History and feedback:"
+    )
+    final_prompt = _ensure_prompt_safety_content(final_prompt, audit)
+    final_prompt = _dedupe_history_empty_guidance_lines(final_prompt)
+    final_prompt = strip_embedded_choose_from_evolution_prompt(final_prompt)
+    final_prompt = _strip_prompt_generation_meta_instructions(final_prompt)
+    if not final_prompt:
         raise ValueError("LLM prompt was empty after removing embedded choose() code.")
-    return text
+    return final_prompt, dataset_schema_history_section, invariant_warnings
 
 
 def setup_teh_run_prompts(
@@ -1283,12 +1526,15 @@ def setup_teh_run_prompts(
         schema_summary,
         audit,
     )
+    generated_dataset_schema_history_section = _render_dataset_schema_history_section(
+        dataset_guidance, history_guidance
+    )
     audit_warnings: List[str] = []
     generated = False
     final_prompt_text = ""
     if use_llm and client is not None:
         try:
-            infer_text = _generate_prompt_via_llm(
+            infer_text, generated_dataset_schema_history_section, invariant_warnings = _generate_prompt_via_llm(
                 client,
                 model_name,
                 dataset_alias,
@@ -1299,13 +1545,14 @@ def setup_teh_run_prompts(
             )
             final_prompt_text = strip_embedded_choose_from_evolution_prompt(infer_text)
             infer_path.write_text(final_prompt_text, encoding="utf-8")
+            audit_warnings.extend(invariant_warnings)
             generated = True
             print(f"[TEH] Wrote LLM-generated prompt -> {infer_path}")
         except Exception as e:
             print(f"[TEH] LLM prompt generation failed ({e}); using merge fallback.")
 
     if not generated:
-        merged = _merge_prompt_fallback(
+        merged, generated_dataset_schema_history_section, invariant_warnings = _merge_prompt_fallback(
             dataset_alias,
             instruction,
             sample_trial_list,
@@ -1316,6 +1563,7 @@ def setup_teh_run_prompts(
         merged = strip_embedded_choose_from_evolution_prompt(merged)
         final_prompt_text = merged
         infer_path.write_text(final_prompt_text, encoding="utf-8")
+        audit_warnings.extend(invariant_warnings)
         print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
 
     if final_prompt_text:
@@ -1355,6 +1603,7 @@ def setup_teh_run_prompts(
         "schema_types": audit["schema_types"],
         "generated_dataset_task_format_guidance": dataset_guidance,
         "generated_history_feedback_guidance": history_guidance,
+        "generated_dataset_schema_history_section": generated_dataset_schema_history_section,
         "warnings": audit_warnings,
         "schema_source_of_truth": True,
     }
