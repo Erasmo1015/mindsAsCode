@@ -91,6 +91,8 @@ _SHARED_EXPERIMENT_CSV_LOCK = threading.Lock()
 _WANDB_PARTICIPANT_LOG_LOCK = threading.Lock()
 _RUN_PHASES = frozenset({"all", "evolution", "refine"})
 _EARLY_STOP_MIN_IMPROVEMENT = 0.005
+# TEMP: when True, refinement ignores --fresh_n_candidates and samples only from the evolution pool.
+_DISABLE_REFINEMENT_FRESH_CANDIDATES = True
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
@@ -2760,6 +2762,13 @@ def run_loglik_refinement_phase(
     """
     if not val_trials or not test_trials or n_iterations < 1:
         return None
+
+    if _DISABLE_REFINEMENT_FRESH_CANDIDATES and fresh_n_candidates > 0:
+        print(
+            "Note: refinement fresh candidates disabled (_DISABLE_REFINEMENT_FRESH_CANDIDATES); "
+            f"ignoring fresh_n_candidates={fresh_n_candidates}, using evolution pool only."
+        )
+        fresh_n_candidates = 0
 
     refine_suffix = _load_refinement_prompt_suffix(dataset, run_prompts_dir=run_prompts_dir)
     val_for_prompt = _cap_and_subsample_prompt_trials(
@@ -5850,7 +5859,7 @@ def _build_parent_context_for_prompt(
             )
             parent_context += (
                 f"Parent performance: "
-                f"{_format_parent_loglik_prompt_metrics(train_ll=train_ll, val_loglik=val_ll, overall_loglik=overall_ll)}\n\n"
+                f"{_format_parent_loglik_prompt_metrics(train_loglik=train_ll, val_loglik=val_ll, overall_loglik=overall_ll)}\n\n"
             )
         parent_context += (
             "Generate a variant that improves upon or explores alternatives to the parent program.\n"
