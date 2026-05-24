@@ -4589,6 +4589,7 @@ def evaluate_choice13k_program(
     source_code = getattr(choose_fn, "__teh_source_code", None)
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
+        nonlocal first_error
         loglik_acc = 0.0
         correct = 0
         errors = 0
@@ -4683,6 +4684,7 @@ def evaluate_cpc18_split_program(
     source_code = getattr(choose_fn, "__teh_source_code", None)
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
+        nonlocal first_error
         loglik_acc = 0.0
         correct = 0
         errors = 0
