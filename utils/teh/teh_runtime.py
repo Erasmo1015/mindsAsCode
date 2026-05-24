@@ -88,37 +88,119 @@ def _is_gamble_ab_task(trials: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _prompt_schema_audit_from_trials(
+    dataset_alias: str,
+    trials: List[Dict[str, Any]],
+    instruction: str,
+    schema_summary: str,
+) -> Dict[str, Any]:
+    """Audit runtime-observed prompt schema from parsed train/prompt trials only."""
+    observed_problem_keys: set[str] = set()
+    observed_history_keys: set[str] = set()
+    schema_types: set[str] = set()
+    has_feedback_ever_true = False
+    has_feedback_ever_false = False
+    total_trial_count = len(trials)
+    empty_history_trial_count = 0
+    total_history_entries = 0
+    hist_action_key_present = 0
+    hist_action_key_missing = 0
+    hist_feedback_key_present = 0
+    hist_feedback_key_missing = 0
+    hist_feedback_none = 0
+    hist_feedback_non_none = 0
+    max_history_len = 0
+
+    for trial in trials:
+        problem = trial.get("problem") if isinstance(trial.get("problem"), dict) else {}
+        for key in problem:
+            if key not in ("dataset_alias", "experiment_id"):
+                observed_problem_keys.add(key)
+        has_feedback_val = problem.get("has_feedback")
+        if has_feedback_val is True:
+            has_feedback_ever_true = True
+        if has_feedback_val is False:
+            has_feedback_ever_false = True
+        schema_type = problem.get("schema_type")
+        if schema_type not in (None, "", "?"):
+            schema_types.add(str(schema_type))
+
+        history = trial.get("history") if isinstance(trial.get("history"), list) else []
+        max_history_len = max(max_history_len, len(history))
+        if not history:
+            empty_history_trial_count += 1
+            continue
+        for entry in history:
+            total_history_entries += 1
+            if not isinstance(entry, dict):
+                hist_action_key_missing += 1
+                hist_feedback_key_missing += 1
+                continue
+            observed_history_keys.update(entry.keys())
+            if "action" in entry:
+                hist_action_key_present += 1
+            else:
+                hist_action_key_missing += 1
+            if "feedback" in entry:
+                hist_feedback_key_present += 1
+                if entry.get("feedback") is None:
+                    hist_feedback_none += 1
+                else:
+                    hist_feedback_non_none += 1
+            else:
+                hist_feedback_key_missing += 1
+
+    has_gamble_a = "gamble_A" in observed_problem_keys
+    has_gamble_b = "gamble_B" in observed_problem_keys
+    feedback_key_may_be_absent = hist_feedback_key_missing > 0
+    feedback_may_be_none = hist_feedback_none > 0
+    feedback_observed_non_none = hist_feedback_non_none > 0
+
+    return {
+        "dataset_alias": dataset_alias,
+        "instruction_excerpt": instruction[:500],
+        "schema_summary_excerpt": schema_summary[:1200],
+        "total_trial_count": total_trial_count,
+        "empty_history_trial_count": empty_history_trial_count,
+        "max_history_len": max_history_len,
+        "total_history_entries": total_history_entries,
+        "observed_problem_keys": sorted(observed_problem_keys),
+        "observed_history_keys": sorted(observed_history_keys),
+        "has_gamble_a": has_gamble_a,
+        "has_gamble_b": has_gamble_b,
+        "has_gamble_ab": has_gamble_a and has_gamble_b,
+        "hist_action_key_present": hist_action_key_present,
+        "hist_action_key_missing": hist_action_key_missing,
+        "hist_feedback_key_present": hist_feedback_key_present,
+        "hist_feedback_key_missing": hist_feedback_key_missing,
+        "hist_feedback_none": hist_feedback_none,
+        "hist_feedback_non_none": hist_feedback_non_none,
+        "has_feedback_ever_true": has_feedback_ever_true,
+        "has_feedback_ever_false": has_feedback_ever_false,
+        "feedback_key_may_be_absent": feedback_key_may_be_absent,
+        "feedback_may_be_none": feedback_may_be_none,
+        "feedback_observed_non_none": feedback_observed_non_none,
+        "schema_types": sorted(schema_types),
+    }
+
+
 def _history_feedback_stats(trials: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Summarize history/feedback signals from parsed sample trials."""
-    has_feedback_true = any((t.get("problem") or {}).get("has_feedback") is True for t in trials)
-    has_feedback_false_all = all(not (t.get("problem") or {}).get("has_feedback") for t in trials)
-    hist_lens = [len(t.get("history") or []) for t in trials]
-    max_hist = max(hist_lens) if hist_lens else 0
-    all_hist_empty = all(length == 0 for length in hist_lens)
-    hist_actions = 0
-    hist_feedback_non_none = 0
-    schema_types = {
-        str((t.get("problem") or {}).get("schema_type", ""))
-        for t in trials
-        if (t.get("problem") or {}).get("schema_type") not in (None, "", "?")
-    }
-    for trial in trials:
-        for entry in trial.get("history") or []:
-            if not isinstance(entry, dict):
-                continue
-            if "action" in entry:
-                hist_actions += 1
-            if entry.get("feedback") is not None:
-                hist_feedback_non_none += 1
+    audit = _prompt_schema_audit_from_trials("", trials, "", "")
     return {
-        "has_feedback_true": has_feedback_true,
-        "has_feedback_false_all": has_feedback_false_all,
-        "all_hist_empty": all_hist_empty,
-        "max_hist": max_hist,
-        "hist_actions": hist_actions,
-        "hist_feedback_non_none": hist_feedback_non_none,
-        "is_bandit": "C" in schema_types,
-        "schema_types": schema_types,
+        "has_feedback_true": audit["has_feedback_ever_true"],
+        "has_feedback_false_all": not audit["has_feedback_ever_true"],
+        "all_hist_empty": audit["empty_history_trial_count"] == audit["total_trial_count"],
+        "max_hist": audit["max_history_len"],
+        "hist_actions": audit["hist_action_key_present"],
+        "hist_feedback_non_none": audit["hist_feedback_non_none"],
+        "hist_feedback_key_present": audit["hist_feedback_key_present"],
+        "hist_feedback_key_missing": audit["hist_feedback_key_missing"],
+        "hist_feedback_none": audit["hist_feedback_none"],
+        "hist_action_key_present": audit["hist_action_key_present"],
+        "hist_action_key_missing": audit["hist_action_key_missing"],
+        "is_bandit": "C" in set(audit["schema_types"]),
+        "schema_types": set(audit["schema_types"]),
     }
 
 
@@ -130,59 +212,88 @@ def _infer_history_feedback_guidance(
     schema_summary: str = "",
 ) -> List[str]:
     """Dataset-specific history/feedback role text derived from parsed examples."""
-    if is_mixed_gambles_dataset(dataset_alias):
-        return [
-            "History/feedback is not useful for this dataset; use current problem features.",
-            "`has_feedback` is always False; history may be empty.",
-            "No outcome realizations are shown in history.",
-            "Choices should depend on the current `gamble_A` and `gamble_B` features only.",
-            "Use action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).",
-        ]
-
-    stats = _history_feedback_stats(trials)
-    instruction_l = instruction.lower()
-    schema_l = schema_summary.lower()
-    is_learning_task = stats["is_bandit"] or any(
-        token in instruction_l or token in schema_l
-        for token in ("bandit", "slot machine", "learning", "payoff")
+    audit = _prompt_schema_audit_from_trials(
+        dataset_alias, trials, instruction, schema_summary
+    )
+    lines: List[str] = []
+    history_empty = audit["empty_history_trial_count"] == audit["total_trial_count"]
+    no_history_entries = audit["total_history_entries"] == 0
+    has_actions = audit["hist_action_key_present"] > 0
+    feedback_any_non_none = audit["hist_feedback_non_none"] > 0
+    feedback_absent_or_none = (
+        audit["hist_feedback_key_present"] == 0 or not feedback_any_non_none
     )
 
-    if stats["is_bandit"] and stats["hist_feedback_non_none"] > 0 and stats["hist_actions"] > 0:
-        return [
-            "Use history to estimate option-specific payoff tendencies within the same game/block."
+    if history_empty or no_history_entries:
+        lines.append(
+            "History is empty in parsed examples; rely on current problem fields instead of creating artificial history terms."
+        )
+    elif has_actions and feedback_absent_or_none:
+        lines.append(
+            "History contains prior actions, but non-None outcome feedback is not observed in parsed examples."
+        )
+        lines.append(
+            "Do not create feedback-based rules when feedback is absent or always None."
+        )
+        lines.append("If using history, use action-history safely.")
+    elif has_actions and feedback_any_non_none:
+        lines.append(
+            "History contains prior actions and some non-None feedback values."
+        )
+        if audit["feedback_key_may_be_absent"] or audit["feedback_may_be_none"]:
+            lines.append(
+                "Some history entries may still have missing feedback keys or None feedback values."
+            )
+    elif audit["total_history_entries"] > 0:
+        lines.append(
+            "History entries are present; use only observed keys and guard key access safely."
+        )
+
+    if audit["feedback_key_may_be_absent"]:
+        lines.append("The feedback key may be absent from some history entries.")
+        lines.append(
+            'Do not use h["feedback"] or history[-1]["feedback"] without checking key existence.'
+        )
+        lines.append(
+            'Prefer h.get("feedback") and explicitly check whether the value is None.'
+        )
+    elif audit["feedback_may_be_none"] or audit["feedback_observed_non_none"]:
+        lines.append(
+            'Prefer h.get("feedback") and explicitly check whether the value is None.'
+        )
+        if audit["feedback_observed_non_none"] and (
+            audit["feedback_may_be_none"] or audit["feedback_key_may_be_absent"]
+        ):
+            lines.append(
+                "Feedback may still be missing or None in some entries, so guard all key access."
+            )
+
+    if audit["hist_action_key_missing"] > 0:
+        lines.append(
+            'If using history, use only entries that contain "action" or guard key access safely.'
+        )
+
+    if (history_empty or no_history_entries) and audit["has_gamble_ab"]:
+        lines.append(
+            "History is empty in parsed examples; rely on current problem fields."
+        )
+    elif history_empty or no_history_entries:
+        lines.append(
+            "History is empty in parsed examples; rely on currently observed problem fields."
+        )
+
+    if is_mixed_gambles_dataset(dataset_alias):
+        lines = [line for line in lines if "feedback-based rules" not in line] + [
+            "Do not invent feedback-based rules when feedback is absent or always None in parsed examples."
         ]
 
-    if (
-        stats["has_feedback_false_all"]
-        and stats["hist_feedback_non_none"] == 0
-        and stats["all_hist_empty"]
-    ):
-        return [
-            "History/feedback is not useful for this dataset; use current problem features."
-        ]
-
-    if stats["hist_actions"] > 0 and (
-        stats["hist_feedback_non_none"] > 0 or stats["has_feedback_true"]
-    ):
-        return [
-            "History may contain useful prior actions/feedback; use it only when it improves prediction."
-        ]
-
-    if stats["hist_actions"] > 0 and stats["hist_feedback_non_none"] == 0:
-        return [
-            "History may summarize prior actions or within-round/block state, but there is no outcome feedback.",
-            "You may use action-frequency or repetition summaries when they improve prediction; "
-            "do not blindly copy the last action.",
-        ]
-
-    if is_learning_task and "feedback" in schema_l:
-        return [
-            "History may contain useful prior actions/feedback; use it only when it improves prediction."
-        ]
-
-    return [
-        "History/feedback is not useful for this dataset; use current problem features."
-    ]
+    deduped: List[str] = []
+    seen = set()
+    for line in lines:
+        if line not in seen:
+            deduped.append(line)
+            seen.add(line)
+    return deduped
 
 
 def _format_history_feedback_section(guidance_lines: Sequence[str]) -> str:
@@ -190,13 +301,186 @@ def _format_history_feedback_section(guidance_lines: Sequence[str]) -> str:
     return f"History and feedback:\n{bullets}"
 
 
+def _format_guidance_section(title: str, lines: Sequence[str]) -> str:
+    bullets = "\n".join(f"- {line}" for line in lines)
+    return f"{title}\n{bullets}"
+
+
+def _history_safety_requirements_from_audit(audit: Dict[str, Any]) -> str:
+    lines: List[str] = [
+        "Code must work when history is empty.",
+        "History entries may not all contain the same keys.",
+        'Do not use h["feedback"] or history[-1]["feedback"] unless checking key existence.',
+        'Prefer h.get("feedback") and explicitly check whether the value is None.',
+    ]
+    if audit["hist_action_key_missing"] > 0:
+        lines.append(
+            'If using historical actions, use only entries that contain "action" or guard key access safely.'
+        )
+    if (
+        audit["total_history_entries"] > 0
+        and audit["hist_action_key_present"] > 0
+        and not audit["feedback_observed_non_none"]
+    ):
+        lines.append(
+            "History actions may be available, but feedback is absent or None; do not create feedback-based rules."
+        )
+    if (
+        audit["hist_feedback_key_present"] == 0
+        or not audit["feedback_observed_non_none"]
+    ):
+        lines.append(
+            "Do not invent feedback-based rules when feedback is absent, always None, or unavailable in the parsed examples."
+        )
+    lines.append(
+        "Feedback logic should be consistent with which action produced the feedback."
+    )
+    if audit["total_history_entries"] == 0:
+        lines.append(
+            "History is empty in parsed examples; rely on current problem fields instead of creating artificial history terms."
+        )
+    return _format_guidance_section("History safety requirements:", lines)
+
+
+def _numerical_stability_requirements() -> str:
+    return _format_guidance_section(
+        "Numerical stability:",
+        [
+            "If using sigmoid/logistic/exponential mappings, clip the score to a safe range before exponentiation, e.g. [-50, 50].",
+            "Avoid unbounded 10 ** (-score) or 2.718281828 ** (-score) when score can be large.",
+            "Always return a finite float strictly inside (0, 1).",
+        ],
+    )
+
+
+def _dataset_task_format_guidance(
+    dataset_alias: str,
+    trials: List[Dict[str, Any]],
+    instruction: str,
+    schema_summary: str,
+    audit: Dict[str, Any],
+) -> List[str]:
+    _ = instruction
+    lines: List[str] = []
+    if audit["has_gamble_ab"]:
+        lines.extend(
+            [
+                'problem["gamble_A"] corresponds to action 0.',
+                'problem["gamble_B"] corresponds to action 1.',
+                "choose(problem, history) returns P(action=1).",
+                "Use only fields observed in the runtime schema summary and parsed examples.",
+            ]
+        )
+        if audit["total_history_entries"] == 0:
+            lines.append(
+                "History is empty in parsed examples; history/feedback is unavailable in these parsed examples."
+            )
+        elif audit["hist_action_key_present"] > 0 and not audit["feedback_observed_non_none"]:
+            lines.append(
+                "Action history is available in parsed examples, but non-None feedback is unavailable."
+            )
+            lines.append(
+                "Do not create feedback-based rules when non-None feedback is not observed."
+            )
+        elif audit["feedback_observed_non_none"]:
+            lines.append(
+                "Non-None feedback is observed in parsed examples; guard key access because feedback may still be missing or None in some entries."
+            )
+        return lines
+
+    action_sem = _extract_action_semantics(schema_summary)
+    lines.extend(
+        [
+            f"Action semantics from schema summary: {action_sem}",
+            "Use only fields observed in the runtime schema summary and parsed examples.",
+        ]
+    )
+    if _is_gamble_ab_task(trials):
+        lines.append("Return convention remains P(action=1).")
+    else:
+        lines.append(
+            f'Observed problem keys: {", ".join(audit["observed_problem_keys"]) or "(none observed)"}'
+        )
+        lines.append(
+            f'Observed history keys: {", ".join(audit["observed_history_keys"]) or "(none observed)"}'
+        )
+    return lines
+
+
 def _ensure_history_feedback_guidance(text: str, guidance_lines: Sequence[str]) -> str:
     """Append canonical history/feedback guidance when absent from generated prompt text."""
     if not guidance_lines:
         return text
-    if guidance_lines[0] in text:
+    if "History and feedback:" in text:
+        critical = [
+            line
+            for line in guidance_lines
+            if "feedback key may be absent" in line.lower()
+            or "h.get(\"feedback\")" in line
+            or "do not use h[\"feedback\"]" in line.lower()
+        ]
+        missing = [line for line in critical if line not in text]
+        if missing:
+            return (
+                text.rstrip()
+                + "\n\n"
+                + _format_guidance_section("History and feedback safety additions:", missing)
+                + "\n"
+            )
         return text
     return text.rstrip() + "\n\n" + _format_history_feedback_section(guidance_lines) + "\n"
+
+
+def _ensure_section(text: str, section_text: str, section_title: str) -> str:
+    if section_title in text:
+        return text
+    return text.rstrip() + "\n\n" + section_text + "\n"
+
+
+def _ensure_prompt_safety_content(text: str, audit: Dict[str, Any]) -> str:
+    out = text
+    lower = out.lower()
+    if audit.get("feedback_key_may_be_absent"):
+        feedback_safety_tokens = (
+            'h.get("feedback")' in out
+            or "feedback key may be absent" in lower
+            or "guard feedback access" in lower
+        )
+        if not feedback_safety_tokens:
+            out = (
+                out.rstrip()
+                + "\n\n"
+                + _format_guidance_section(
+                    "Feedback key safety addition:",
+                    [
+                        "Feedback key may be absent in some history entries; guard feedback access safely.",
+                        'Prefer h.get("feedback") and explicitly check whether the value is None.',
+                    ],
+                )
+                + "\n"
+            )
+
+    has_numerical_title = "Numerical stability:" in out
+    has_clip = "clip the score to a safe range" in lower
+    has_unbounded_exp_guard = "avoid unbounded 10 ** (-score)" in lower or (
+        "avoid unbounded" in lower and "exponent" in lower
+    )
+    if not has_numerical_title:
+        out = _ensure_section(out, _numerical_stability_requirements(), "Numerical stability:")
+    elif not (has_clip and has_unbounded_exp_guard):
+        out = (
+            out.rstrip()
+            + "\n\n"
+            + _format_guidance_section(
+                "Numerical stability additions:",
+                [
+                    "If using sigmoid/logistic/exponential mappings, clip the score to a safe range before exponentiation, e.g. [-50, 50].",
+                    "Avoid unbounded 10 ** (-score) or 2.718281828 ** (-score) when score can be large.",
+                ],
+            )
+            + "\n"
+        )
+    return out
 
 
 _CCT_PROBLEM_KEYS = frozenset(
@@ -215,18 +499,13 @@ _PRODUCT_RATING_DATASET_ALIAS = "7hilbig2014generalized"
 
 
 def _is_cct_task(trials: List[Dict[str, Any]], *, dataset_alias: str = "") -> bool:
-    if dataset_alias and normalize_psych101_dataset_alias(dataset_alias) == _CCT_DATASET_ALIAS:
-        return True
+    _ = dataset_alias
     problem_keys = set(_problem_keys_from_trials(trials))
     return len(problem_keys & _CCT_PROBLEM_KEYS) >= 3
 
 
 def _is_product_rating_task(trials: List[Dict[str, Any]], *, dataset_alias: str = "") -> bool:
-    if (
-        dataset_alias
-        and normalize_psych101_dataset_alias(dataset_alias) == _PRODUCT_RATING_DATASET_ALIAS
-    ):
-        return True
+    _ = dataset_alias
     problem_keys = set(_problem_keys_from_trials(trials))
     return _PRODUCT_RATING_KEYS.issubset(problem_keys)
 
@@ -245,19 +524,17 @@ def _cct_specific_guidance(action_sem: str) -> str:
         f"- Action semantics for this dataset: {action_sem}\n"
         "- Use current_score, remaining cards, loss-card risk, gain amount, and loss amount.\n"
         "- Avoid generic raw expected-value rules that ignore the stop-vs-continue structure.\n"
-        "- If the stop/continue rule fits many observed choices, sharpen probabilities away from 0.5."
+        "- If the stop/continue rule consistently fits observed choices, use appropriately confident probabilities; otherwise stay calibrated."
     )
 
 
 def _product_rating_specific_guidance() -> str:
     return (
         "Product-rating guidance:\n"
-        "- This is a product-choice cue-inference task.\n"
-        "- Compare products using weighted sums of their rating cues.\n"
-        "- Prefer clean weighted-rating rules over history-heavy rules.\n"
-        "- Do not add history terms unless they improve held-out validation behavior.\n"
-        "- If a clean weighted-rating rule performs well, preserve it and tune cue "
-        "weights/confidence instead of adding idiosyncratic history bias."
+        "- Parsed fields indicate a product/cue-rating choice task.\n"
+        "- `ratings_A` and `ratings_B` are observed problem fields.\n"
+        "- Compare and use observed rating fields in ways consistent with dataset action semantics.\n"
+        "- Do not describe this task as a gamble task."
     )
 
 
@@ -321,11 +598,13 @@ def _build_schema_neutral_base_prompt(
     """Non-gamble base prompt: document observed problem/history keys only."""
     problem_keys = _problem_keys_from_trials(trials)
     action_sem = _extract_action_semantics(schema_summary)
-    history_note = "action, feedback"
-    for line in schema_summary.splitlines():
-        if line.startswith("- history core keys:"):
-            history_note = line.split(":", 1)[1].strip()
-            break
+    observed_history_keys: set[str] = set()
+    for trial in trials:
+        history = trial.get("history") if isinstance(trial.get("history"), list) else []
+        for entry in history:
+            if isinstance(entry, dict):
+                observed_history_keys.update(entry.keys())
+    history_note = ", ".join(sorted(observed_history_keys)) if observed_history_keys else "(none observed)"
     guidance_lines = list(
         history_feedback_guidance
         or _infer_history_feedback_guidance(
@@ -396,6 +675,53 @@ def _sanitize_schema_summary_for_prompt(
     for old, new in replacements:
         out = out.replace(old, new)
     return out
+
+
+def _prompt_schema_sanity_warnings(
+    prompt_text: str,
+    *,
+    dataset_alias: str,
+    audit: Dict[str, Any],
+) -> List[str]:
+    warnings: List[str] = []
+    is_gamble = bool(audit.get("has_gamble_ab"))
+    text_l = prompt_text.lower()
+
+    if is_gamble:
+        if "def choose(problem, history)" not in prompt_text:
+            warnings.append("Prompt missing explicit `def choose(problem, history)` API signature.")
+        if "p(action=1)" not in text_l and "probability of choosing action 1" not in text_l:
+            warnings.append("Prompt does not clearly document return convention as P(action=1).")
+        if not re.search(r"action\s*0.*gamble_a", text_l):
+            warnings.append("Prompt missing explicit mapping: action 0 -> gamble_A.")
+        if not re.search(r"action\s*1.*gamble_b", text_l):
+            warnings.append("Prompt missing explicit mapping: action 1 -> gamble_B.")
+
+        if audit.get("feedback_key_may_be_absent"):
+            rigid_pattern = re.compile(
+                r"history\s*:\s*list of dicts with keys action and feedback", re.IGNORECASE
+            )
+            optional_pattern = re.compile(
+                r"feedback key may be absent|optional|guard.*feedback|h\.get\([\"']feedback[\"']\)",
+                re.IGNORECASE,
+            )
+            if rigid_pattern.search(prompt_text) and not optional_pattern.search(prompt_text):
+                warnings.append(
+                    "Prompt states rigid history keys (action+feedback) without documenting optional/missing feedback."
+                )
+            if not optional_pattern.search(prompt_text):
+                warnings.append(
+                    "Prompt does not mention safe feedback access (`h.get(\"feedback\")` or key-absence guarding)."
+                )
+    else:
+        if not is_gamble and re.search(
+            r"gamble_A|gamble_B|unknown probabilit|\blottery\b|choice13k", prompt_text, re.IGNORECASE
+        ):
+            warnings.append(
+                f"Non-gamble dataset `{dataset_alias}` prompt contains gamble-specific terminology."
+            )
+
+    return warnings
 
 
 def _base_prompt_for_trials(
@@ -549,12 +875,24 @@ def _merge_prompt_fallback(
     base_prompt_path: Optional[Path | str] = None,
 ) -> str:
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    audit = _prompt_schema_audit_from_trials(
+        dataset_alias, sample_trials, instruction, schema_summary
+    )
     guidance_lines = _infer_history_feedback_guidance(
         sample_trials,
         dataset_alias=dataset_alias,
         instruction=instruction,
         schema_summary=schema_summary,
     )
+    dataset_guidance_lines = _dataset_task_format_guidance(
+        dataset_alias,
+        sample_trials,
+        instruction,
+        schema_summary,
+        audit,
+    )
+    history_safety = _history_safety_requirements_from_audit(audit)
+    numerical_stability = _numerical_stability_requirements()
     base = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
@@ -574,12 +912,24 @@ def _merge_prompt_fallback(
         f"\n\n## Dataset: {display} (`{dataset_alias}`)\n\n"
         f"{task_desc}\n\n"
         f"### Runtime schema summary (from parsed trials)\n\n{schema_summary}\n\n"
+        "### Prompt schema audit (from parsed trials)\n\n"
+        f"{json.dumps({k: audit[k] for k in ('observed_problem_keys', 'observed_history_keys', 'total_trial_count', 'empty_history_trial_count', 'total_history_entries', 'hist_action_key_present', 'hist_action_key_missing', 'hist_feedback_key_present', 'hist_feedback_key_missing', 'hist_feedback_none', 'hist_feedback_non_none', 'has_feedback_ever_true', 'has_feedback_ever_false', 'feedback_key_may_be_absent', 'feedback_may_be_none', 'feedback_observed_non_none', 'schema_types')}, indent=2)}\n\n"
+        f"{_format_guidance_section('Dataset/task-format guidance:', dataset_guidance_lines)}\n\n"
+        f"{history_safety}\n\n"
+        f"{numerical_stability}\n\n"
         f"### Task instructions (from Psych-101 transcript)\n\n{instruction[:1500]}\n\n"
         f"### Example parsed trials\n\n{_format_trials_for_prompt(sample_trials)}\n"
     )
     merged = base + extra
-    if _is_gamble_ab_task(sample_trials):
-        merged += "\n\n" + _format_history_feedback_section(guidance_lines) + "\n"
+    merged = _ensure_history_feedback_guidance(merged, guidance_lines)
+    merged = _ensure_section(merged, history_safety, "History safety requirements:")
+    merged = _ensure_section(merged, numerical_stability, "Numerical stability:")
+    merged = _ensure_section(
+        merged,
+        _format_guidance_section("Dataset/task-format guidance:", dataset_guidance_lines),
+        "Dataset/task-format guidance:",
+    )
+    merged = _ensure_prompt_safety_content(merged, audit)
     return merged
 
 
@@ -695,6 +1045,9 @@ def build_prompt_generation_llm_user_content(
     """User message sent to the prompt-generation LLM (no API call)."""
     display = dataset_display_name(dataset_alias)
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    audit = _prompt_schema_audit_from_trials(
+        dataset_alias, sample_trials, instruction, schema_summary
+    )
     is_gamble = _is_gamble_ab_task(sample_trials)
     guidance_lines = _infer_history_feedback_guidance(
         sample_trials,
@@ -702,6 +1055,15 @@ def build_prompt_generation_llm_user_content(
         instruction=instruction,
         schema_summary=schema_summary,
     )
+    dataset_guidance_lines = _dataset_task_format_guidance(
+        dataset_alias,
+        sample_trials,
+        instruction,
+        schema_summary,
+        audit,
+    )
+    history_safety = _history_safety_requirements_from_audit(audit)
+    numerical_stability = _numerical_stability_requirements()
     base_prompt = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
@@ -719,8 +1081,10 @@ def build_prompt_generation_llm_user_content(
 
     if is_gamble:
         adapt_instructions = (
-            "- Use the base prompt as the main evolution prompt. Keep the direct convention: "
-            "action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).\n"
+            "- Use the base prompt only for reusable API, safety, and programming guidance.\n"
+            "- The runtime schema summary and parsed trial examples are the source of truth for problem fields, history fields, optional/missing keys, feedback availability, action semantics, and return convention.\n"
+            "- If the base prompt conflicts with parsed examples or runtime schema summary, revise the final prompt to match parsed examples/schema.\n"
+            "- Preserve the action convention: action 0 -> gamble_A, action 1 -> gamble_B, return P(action=1).\n"
         )
         base_section_title = "## Base prompt (gamble_A/gamble_B task)\n\n"
     else:
@@ -737,19 +1101,30 @@ def build_prompt_generation_llm_user_content(
         "Requirements:\n"
         "- Use the **Runtime schema summary** and **Parsed trial examples** sections below "
         "as the source of truth for `problem`, `history`, and action semantics.\n"
+        "- Before writing the final prompt, compare the base prompt against the runtime schema summary and parsed trial examples.\n"
+        "- Check problem keys, history keys, optional/missing keys, feedback availability, probabilities/rewards, action semantics, and return convention.\n"
+        "- If there is a mismatch, the final prompt must follow the parsed examples/schema, not the base prompt.\n"
         f"{adapt_instructions}"
         "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
         "- Preserve the base prompt's implementation requirements.\n"
         "- Keep the final prompt direct, concise, and behavior-focused.\n"
-        "- Do not rewrite the base prompt into a caveat-heavy or schema-documentation style prompt.\n"
-        "- Avoid vague helper phrases such as \"may help\", \"if appropriate\", "
-        "\"not necessarily\", or \"one possible option\".\n"
+        "- Keep the final prompt direct and concise, but explicitly correct any base-prompt schema statements that conflict with the runtime schema summary or parsed examples.\n"
+        "- Avoid vague behavioral caveats such as \"may help\" or \"if appropriate\", "
+        "but explicitly document optional or missing schema fields when shown by parsed examples.\n"
         "- Do not append a sample/reference/complete `choose()` implementation.\n"
+        "- Include a \"Dataset/task-format guidance:\" section matching the parsed schema/examples.\n"
         "- Include a \"History and feedback:\" section using this guidance (verbatim bullets):\n"
         f"{_format_history_feedback_section(guidance_lines)}\n"
+        f"- Include this section verbatim:\n{history_safety}\n"
+        f"- Include this section verbatim:\n{numerical_stability}\n"
         "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
         "- You may document the choose() API in a short docstring block, but no executable code.\n\n"
         f"## Runtime schema summary\n\n{schema_summary}\n\n"
+        "## Prompt schema audit (from parsed trials)\n\n"
+        f"{json.dumps({k: audit[k] for k in ('observed_problem_keys', 'observed_history_keys', 'total_trial_count', 'empty_history_trial_count', 'total_history_entries', 'hist_action_key_present', 'hist_action_key_missing', 'hist_feedback_key_present', 'hist_feedback_key_missing', 'hist_feedback_none', 'hist_feedback_non_none', 'has_feedback_ever_true', 'has_feedback_ever_false', 'feedback_key_may_be_absent', 'feedback_may_be_none', 'feedback_observed_non_none', 'schema_types')}, indent=2)}\n\n"
+        f"{_format_guidance_section('Dataset/task-format guidance:', dataset_guidance_lines)}\n\n"
+        f"{history_safety}\n\n"
+        f"{numerical_stability}\n\n"
         f"{base_section_title}{base_prompt}\n\n"
         f"## Task description (high-level)\n\n{task_description}\n\n"
         f"## Instruction excerpt from data\n\n{instruction[:2000]}\n\n"
@@ -775,6 +1150,9 @@ def _generate_prompt_via_llm(
         base_prompt_path=base_prompt_path,
     )
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
+    audit = _prompt_schema_audit_from_trials(
+        dataset_alias, sample_trials, instruction, schema_summary
+    )
     is_gamble = _is_gamble_ab_task(sample_trials)
     guidance_lines = _infer_history_feedback_guidance(
         sample_trials,
@@ -782,6 +1160,15 @@ def _generate_prompt_via_llm(
         instruction=instruction,
         schema_summary=schema_summary,
     )
+    dataset_guidance_lines = _dataset_task_format_guidance(
+        dataset_alias,
+        sample_trials,
+        instruction,
+        schema_summary,
+        audit,
+    )
+    history_safety = _history_safety_requirements_from_audit(audit)
+    numerical_stability = _numerical_stability_requirements()
     if save_llm_input_to is not None:
         save_llm_input_to.parent.mkdir(parents=True, exist_ok=True)
         save_llm_input_to.write_text(user_content, encoding="utf-8")
@@ -819,6 +1206,14 @@ def _generate_prompt_via_llm(
             history_feedback_guidance=guidance_lines,
         )
     text = _ensure_history_feedback_guidance(text, guidance_lines)
+    text = _ensure_section(
+        text,
+        _format_guidance_section("Dataset/task-format guidance:", dataset_guidance_lines),
+        "Dataset/task-format guidance:",
+    )
+    text = _ensure_section(text, history_safety, "History safety requirements:")
+    text = _ensure_section(text, numerical_stability, "Numerical stability:")
+    text = _ensure_prompt_safety_content(text, audit)
     text = strip_embedded_choose_from_evolution_prompt(text)
     if not text:
         raise ValueError("LLM prompt was empty after removing embedded choose() code.")
@@ -871,7 +1266,26 @@ def setup_teh_run_prompts(
         )
 
     infer_path = prompts_dir / "infer_single_choice.txt"
+    schema_summary = _runtime_schema_summary_for_prompt(sample_trial_list)
+    audit = _prompt_schema_audit_from_trials(
+        dataset_alias, sample_trial_list, instruction, schema_summary
+    )
+    history_guidance = _infer_history_feedback_guidance(
+        sample_trial_list,
+        dataset_alias=dataset_alias,
+        instruction=instruction,
+        schema_summary=schema_summary,
+    )
+    dataset_guidance = _dataset_task_format_guidance(
+        dataset_alias,
+        sample_trial_list,
+        instruction,
+        schema_summary,
+        audit,
+    )
+    audit_warnings: List[str] = []
     generated = False
+    final_prompt_text = ""
     if use_llm and client is not None:
         try:
             infer_text = _generate_prompt_via_llm(
@@ -883,9 +1297,8 @@ def setup_teh_run_prompts(
                 save_llm_input_to=prompts_dir / "llm_input_prompt.txt",
                 base_prompt_path=resolved_base_prompt,
             )
-            infer_path.write_text(
-                strip_embedded_choose_from_evolution_prompt(infer_text), encoding="utf-8"
-            )
+            final_prompt_text = strip_embedded_choose_from_evolution_prompt(infer_text)
+            infer_path.write_text(final_prompt_text, encoding="utf-8")
             generated = True
             print(f"[TEH] Wrote LLM-generated prompt -> {infer_path}")
         except Exception as e:
@@ -901,8 +1314,51 @@ def setup_teh_run_prompts(
         if _is_gamble_ab_task(sample_trial_list):
             merged = _apply_gamble_neutral_wording(merged)
         merged = strip_embedded_choose_from_evolution_prompt(merged)
-        infer_path.write_text(merged, encoding="utf-8")
+        final_prompt_text = merged
+        infer_path.write_text(final_prompt_text, encoding="utf-8")
         print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
+
+    if final_prompt_text:
+        audit_warnings.extend(
+            _prompt_schema_sanity_warnings(
+                final_prompt_text,
+                dataset_alias=dataset_alias,
+                audit=audit,
+            )
+        )
+    for warning in audit_warnings:
+        print(f"[TEH][prompt-warning] {warning}")
+
+    audit_path = prompts_dir / "prompt_schema_audit.json"
+    audit_payload: Dict[str, Any] = {
+        "dataset_alias": dataset_alias,
+        "sample_participant_ids": sample_participant_ids,
+        "observed_problem_keys": audit["observed_problem_keys"],
+        "observed_history_keys": audit["observed_history_keys"],
+        "has_gamble_a": audit["has_gamble_a"],
+        "has_gamble_b": audit["has_gamble_b"],
+        "has_gamble_ab": audit["has_gamble_ab"],
+        "total_trial_count": audit["total_trial_count"],
+        "empty_history_trial_count": audit["empty_history_trial_count"],
+        "total_history_entries": audit["total_history_entries"],
+        "hist_action_key_present": audit["hist_action_key_present"],
+        "hist_action_key_missing": audit["hist_action_key_missing"],
+        "hist_feedback_key_present": audit["hist_feedback_key_present"],
+        "hist_feedback_key_missing": audit["hist_feedback_key_missing"],
+        "hist_feedback_none": audit["hist_feedback_none"],
+        "hist_feedback_non_none": audit["hist_feedback_non_none"],
+        "has_feedback_ever_true": audit["has_feedback_ever_true"],
+        "has_feedback_ever_false": audit["has_feedback_ever_false"],
+        "feedback_key_may_be_absent": audit["feedback_key_may_be_absent"],
+        "feedback_may_be_none": audit["feedback_may_be_none"],
+        "feedback_observed_non_none": audit["feedback_observed_non_none"],
+        "schema_types": audit["schema_types"],
+        "generated_dataset_task_format_guidance": dataset_guidance,
+        "generated_history_feedback_guidance": history_guidance,
+        "warnings": audit_warnings,
+        "schema_source_of_truth": True,
+    }
+    audit_path.write_text(json.dumps(audit_payload, indent=2) + "\n", encoding="utf-8")
 
     shutil.copy2(BASE_REFINE_PROMPT, prompts_dir / "refine.txt")
     seed_src = seed_program_path.expanduser().resolve()
@@ -917,6 +1373,8 @@ def setup_teh_run_prompts(
         "base_prompt_path": str(resolved_base_prompt),
         "n_sample_participants": int(n_sample_participants),
         "sample_participant_ids": sample_participant_ids,
+        "prompt_schema_audit_path": str(audit_path),
+        "schema_source_of_truth": True,
     }
     if is_mixed_gambles_dataset(dataset_alias):
         meta["mixed_gambles_csv"] = mixed_gambles_csv
