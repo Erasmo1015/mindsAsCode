@@ -18,6 +18,7 @@ import shutil
 import socket
 import sys
 import threading
+import traceback
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Callable, Optional, Tuple, Set
@@ -93,6 +94,11 @@ _RUN_PHASES = frozenset({"all", "evolution", "refine"})
 _EARLY_STOP_MIN_IMPROVEMENT = 0.005
 # TEMP: when True, refinement ignores --fresh_n_candidates and samples only from the evolution pool.
 _DISABLE_REFINEMENT_FRESH_CANDIDATES = True
+MAX_ERROR_MESSAGE_CHARS = 160
+MAX_INVALID_LINE_CHARS = 160
+RECENT_ERROR_WINDOW = 3
+KEEP_TOP_FREQUENT = 3
+MAX_ERROR_ITEMS = 8
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
@@ -133,6 +139,275 @@ def _participant_metric_id(participant_id: Optional[int]) -> Dict[str, Any]:
     if participant_id is None:
         return {}
     return {"participant_id": int(participant_id)}
+
+
+def _truncate_text_for_prompt(value: Any, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _normalize_text(text: Any, max_len: int) -> str:
+    if not text:
+        return ""
+    out = " ".join(str(text).strip().lower().split())
+    return out[: max(0, int(max_len))]
+
+
+def _extract_relevant_invalid_source_line(code: str, exc: BaseException) -> str:
+    lines = str(code or "").splitlines()
+    if isinstance(exc, SyntaxError):
+        if exc.text:
+            return str(exc.text).strip()
+        if exc.lineno and 1 <= int(exc.lineno) <= len(lines):
+            return lines[int(exc.lineno) - 1].strip()
+    try:
+        tb_entries = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    except Exception:
+        tb_entries = []
+    for frame in reversed(tb_entries):
+        if frame.filename == "<string>" and 1 <= int(frame.lineno) <= len(lines):
+            return lines[int(frame.lineno) - 1].strip()
+    for ln in lines:
+        ln_s = ln.strip()
+        if ln_s:
+            return ln_s
+    return ""
+
+
+def _build_invalid_program_error_entry(
+    *,
+    code: str,
+    exc: BaseException,
+) -> Optional[Dict[str, str]]:
+    if exc is None:
+        return None
+    line_raw = _extract_relevant_invalid_source_line(code, exc)
+    line = _truncate_text_for_prompt(line_raw, MAX_INVALID_LINE_CHARS) if line_raw else ""
+    error_type = _truncate_text_for_prompt(type(exc).__name__, 80)
+    error_message = _truncate_text_for_prompt(str(exc), MAX_ERROR_MESSAGE_CHARS)
+    norm_type = _normalize_text(error_type, 80)
+    norm_msg = _normalize_text(error_message, MAX_ERROR_MESSAGE_CHARS)
+    norm_line = _normalize_text(line, MAX_INVALID_LINE_CHARS)
+    if norm_line:
+        dedup_key = (norm_type, norm_msg, norm_line)
+    else:
+        dedup_key = (norm_type, norm_msg)
+    return {
+        "invalid_line": line,
+        "error_type": error_type,
+        "error_message": error_message,
+        "normalized_key": "||".join(dedup_key),
+    }
+
+
+def _append_error_history_jsonl(
+    history_path: Optional[Path],
+    row: Dict[str, Any],
+) -> None:
+    if history_path is None:
+        return
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+
+def _record_invalid_program_error_summary(
+    error_store: List[Dict[str, Any]],
+    error_entry: Optional[Dict[str, Any]],
+    *,
+    iteration: int,
+    participant_id: Optional[int],
+    candidate_id: Optional[str],
+    history_path: Optional[Path],
+) -> None:
+    if not error_entry:
+        return
+    normalized_key = str(error_entry.get("normalized_key") or "").strip()
+    if not normalized_key:
+        return
+    invalid_line = _truncate_text_for_prompt(
+        error_entry.get("invalid_line", ""), MAX_INVALID_LINE_CHARS
+    )
+    error_type = _truncate_text_for_prompt(error_entry.get("error_type", ""), 80)
+    error_message = _truncate_text_for_prompt(
+        error_entry.get("error_message", ""), MAX_ERROR_MESSAGE_CHARS
+    )
+    if not error_type and not error_message:
+        return
+    matched: Optional[Dict[str, Any]] = None
+    for item in error_store:
+        if item.get("normalized_key") == normalized_key:
+            matched = item
+            break
+    if matched is None:
+        matched = {
+            "normalized_key": normalized_key,
+            "invalid_line": invalid_line,
+            "error_type": error_type,
+            "error_message": error_message,
+            "count": 0,
+            "first_seen_iteration": int(iteration),
+            "last_seen_iteration": int(iteration),
+        }
+        error_store.append(matched)
+    else:
+        # Refresh with latest concise fields so recurring errors stay contextually current.
+        if invalid_line:
+            matched["invalid_line"] = invalid_line
+        if error_type:
+            matched["error_type"] = error_type
+        if error_message:
+            matched["error_message"] = error_message
+        matched["last_seen_iteration"] = int(iteration)
+    matched["count"] = int(matched.get("count", 0)) + 1
+    _append_error_history_jsonl(
+        history_path,
+        {
+            "iteration": int(iteration),
+            "participant_id": int(participant_id) if participant_id is not None else None,
+            "candidate_id": candidate_id,
+            "invalid_line": invalid_line or None,
+            "error_type": error_type,
+            "error_message": error_message,
+            "normalized_key": normalized_key,
+            "count": int(matched["count"]),
+            "last_seen_iteration": int(matched["last_seen_iteration"]),
+        },
+    )
+
+
+def _record_invalid_program_error(
+    error_store: List[Dict[str, Any]],
+    *,
+    code: str,
+    exc: Optional[BaseException],
+    iteration: int,
+    participant_id: Optional[int],
+    candidate_id: Optional[str],
+    history_path: Optional[Path],
+) -> None:
+    if exc is None:
+        return
+    entry = _build_invalid_program_error_entry(code=code, exc=exc)
+    _record_invalid_program_error_summary(
+        error_store,
+        entry,
+        iteration=iteration,
+        participant_id=participant_id,
+        candidate_id=candidate_id,
+        history_path=history_path,
+    )
+
+
+def _select_errors_for_prompt(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+) -> List[Dict[str, Any]]:
+    if not error_store:
+        return []
+    if iteration is None:
+        recency_floor = -10**9
+    else:
+        recency_floor = int(iteration) - int(RECENT_ERROR_WINDOW) + 1
+    recent = [
+        item
+        for item in error_store
+        if int(item.get("last_seen_iteration", -10**9)) >= recency_floor
+    ]
+    recent.sort(
+        key=lambda x: (
+            -int(x.get("last_seen_iteration", -10**9)),
+            -int(x.get("count", 0)),
+        )
+    )
+    selected: List[Dict[str, Any]] = []
+    seen_keys: Set[str] = set()
+    for item in recent:
+        key = str(item.get("normalized_key") or "")
+        if key and key not in seen_keys:
+            selected.append(item)
+            seen_keys.add(key)
+        if len(selected) >= int(MAX_ERROR_ITEMS):
+            return selected
+    frequent = sorted(
+        error_store,
+        key=lambda x: (
+            -int(x.get("count", 0)),
+            -int(x.get("last_seen_iteration", -10**9)),
+        ),
+    )
+    keep_top = int(max(0, KEEP_TOP_FREQUENT))
+    kept = 0
+    for item in frequent:
+        key = str(item.get("normalized_key") or "")
+        if not key or key in seen_keys:
+            continue
+        selected.append(item)
+        seen_keys.add(key)
+        kept += 1
+        if kept >= keep_top or len(selected) >= int(MAX_ERROR_ITEMS):
+            break
+    return selected[: int(MAX_ERROR_ITEMS)]
+
+
+def _build_past_error_prompt_section(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+    max_error_prompt_chars: int,
+) -> str:
+    if not error_store:
+        return ""
+    max_chars = int(max_error_prompt_chars)
+    if max_chars <= 0:
+        return ""
+    selected = _select_errors_for_prompt(error_store, iteration=iteration)
+    if not selected:
+        return ""
+    items: List[str] = []
+    used = 0
+    for entry in selected:
+        line = str(entry.get("invalid_line") or "").strip()
+        err_type = str(entry.get("error_type") or "").strip()
+        err_msg = str(entry.get("error_message") or "").strip()
+        if not err_type and not err_msg:
+            continue
+        err = f"{err_type}: {err_msg}" if err_msg else err_type
+        if line:
+            item = f"- Line: {line}\n  Error: {err}"
+        else:
+            item = f"- Error: {err}"
+        projected = used + len(item) + (2 if items else 0)
+        if projected > max_chars and items:
+            break
+        if projected > max_chars:
+            continue
+        items.append(item)
+        used = projected
+    if not items:
+        return ""
+    past_error_summary = "\n\n".join(items)
+    return (
+        "Past invalid-program errors to avoid:\n"
+        "The following are previous invalid generated-program mistakes. Do not repeat them. "
+        "Each item shows the invalid line, when available, and the error it caused.\n\n"
+        f"{past_error_summary}"
+    )
+
+
+def _write_iteration_error_prompt_file(
+    iter_dir: Optional[Path],
+    error_prompt_section: str,
+) -> None:
+    if iter_dir is None:
+        return
+    path = iter_dir / "error_prompt.txt"
+    path.write_text(error_prompt_section or "", encoding="utf-8")
 
 
 def _resolve_best_program_id_for_metrics(metrics: Dict[str, Any]) -> Optional[str]:
@@ -943,11 +1218,10 @@ def find_template_program_for_gridworld(num_blocks: int, num_walls: int, agent_i
     return None
 
 
-def compile_program(code_str: str) -> Optional[Callable]:
-    """Safely compile program code and return choose callable if present."""
+def compile_program_with_error(code_str: str) -> Tuple[Optional[Callable], Optional[BaseException]]:
+    """Safely compile program code; return (choose_fn, compile_error)."""
     # Provide minimal safe builtins needed for the program to run
     # Only include what's necessary for pure Python computation
-    import builtins
     import math
     safe_builtins = {
         'zip': zip,
@@ -980,13 +1254,21 @@ def compile_program(code_str: str) -> Optional[Callable]:
     try:
         exec(code_str, global_ns, local_ns)
     except Exception as e:
-        # For debugging: uncomment to see what went wrong
-        # print(f"Compilation error: {e}")
-        return None
+        return None, e
     choose_fn = local_ns.get("choose") or global_ns.get("choose")
     if callable(choose_fn):
-        return choose_fn
-    return None
+        try:
+            setattr(choose_fn, "__teh_source_code", str(code_str or ""))
+        except Exception:
+            pass
+        return choose_fn, None
+    return None, TypeError("missing callable choose(problem, history)")
+
+
+def compile_program(code_str: str) -> Optional[Callable]:
+    """Safely compile program code and return choose callable if present."""
+    choose_fn, _ = compile_program_with_error(code_str)
+    return choose_fn
 
 
 _CHOICE13K_GATE_THRESHOLD = -0.45
@@ -1532,6 +1814,7 @@ def run_global_evolution_phase(
     prompt_debug_on_no_valid: bool = True,
     prompt_debug_exit: bool = False,
     evolution_selection_score: str = "train_val",
+    max_error_prompt_chars: int = 1200,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -1624,6 +1907,8 @@ def run_global_evolution_phase(
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
     last_significant_best = baseline_fitness
     stagnant_iters = 0
+    invalid_candidate_errors: List[Dict[str, Any]] = []
+    error_history_path = global_dir / "error_history.jsonl"
     if early_stop_patience is not None:
         print(
             f"Global early stop enabled: patience={early_stop_patience}, "
@@ -1699,6 +1984,18 @@ def run_global_evolution_phase(
             f"\nGenerating {n_candidates_per_iteration} global candidates: "
             f"{fresh_n} fresh (seed/baseline only), {n_normal} from sampled parents..."
         )
+        error_prompt_section = _build_past_error_prompt_section(
+            invalid_candidate_errors,
+            iteration=iteration_step,
+            max_error_prompt_chars=max_error_prompt_chars,
+        )
+        _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
+        error_prompt_chars_used = len(error_prompt_section)
+        print(
+            "Error prompt summary: "
+            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"error_prompt_chars_used={error_prompt_chars_used}"
+        )
         variant_kwargs = {
             "train_trials": pooled_train,
             "extra_prompt_trials": pooled_val if pooled_val else None,
@@ -1724,6 +2021,9 @@ def run_global_evolution_phase(
             "prompt_debug": prompt_debug,
             "prompt_debug_exit": prompt_debug_exit,
             "generation_debug_out": gen_debug if capture_gen_debug else None,
+            "past_invalid_program_errors": invalid_candidate_errors,
+            "past_error_prompt_section": error_prompt_section,
+            "max_error_prompt_chars": max_error_prompt_chars,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -1738,22 +2038,52 @@ def run_global_evolution_phase(
         )
 
         selected_results: List[Dict[str, Any]] = []
+        num_invalid_candidates = 0
         for idx, code in enumerate(candidate_codes):
             if iter_dir is not None:
                 (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "")
             code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
             if not code:
                 continue
-            choose_fn = compile_program(code)
+            choose_fn, compile_error = compile_program_with_error(code)
             if choose_fn is None:
+                num_invalid_candidates += 1
+                _record_invalid_program_error(
+                    invalid_candidate_errors,
+                    code=code,
+                    exc=compile_error,
+                    iteration=iteration_step,
+                    participant_id=None,
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
                 continue
             try:
                 train_eval = _evaluate_loglik_for_dataset(
                     dataset, choose_fn, pooled_train, n_seeds=n_eval_seeds
                 )
-            except (AssertionError, TypeError, ValueError):
+            except (AssertionError, TypeError, ValueError) as exc:
+                num_invalid_candidates += 1
+                _record_invalid_program_error(
+                    invalid_candidate_errors,
+                    code=code,
+                    exc=exc,
+                    iteration=iteration_step,
+                    participant_id=None,
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
                 continue
             if train_eval.get("errors", 0) != 0:
+                num_invalid_candidates += 1
+                _record_invalid_program_error_summary(
+                    invalid_candidate_errors,
+                    train_eval.get("first_error"),
+                    iteration=iteration_step,
+                    participant_id=None,
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
                 continue
             train_loglik = float(train_eval["avg_loglik"])
             val_loglik: Optional[float] = None
@@ -1762,9 +2092,28 @@ def run_global_evolution_phase(
                     val_eval = _evaluate_loglik_for_dataset(
                         dataset, choose_fn, pooled_val, n_seeds=n_eval_seeds
                     )
-                except (AssertionError, TypeError, ValueError):
+                except (AssertionError, TypeError, ValueError) as exc:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error(
+                        invalid_candidate_errors,
+                        code=code,
+                        exc=exc,
+                        iteration=iteration_step,
+                        participant_id=None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                     continue
                 if val_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        val_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                     continue
                 val_loglik = float(val_eval["avg_loglik"])
             selection_score = _evolution_selection_score(
@@ -1786,6 +2135,13 @@ def run_global_evolution_phase(
             if val_loglik is not None:
                 row["val_loglik"] = val_loglik
             selected_results.append(row)
+
+        print(
+            "Iteration invalid summary: "
+            f"num_invalid_candidates={num_invalid_candidates}, "
+            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"error_prompt_chars_used={error_prompt_chars_used}"
+        )
 
         if not selected_results:
             print("Warning: No runtime-valid global candidates; keeping elite pool.")
@@ -1837,6 +2193,9 @@ def run_global_evolution_phase(
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_runtime_valid": len(selected_results),
+                "num_invalid_candidates": num_invalid_candidates,
+                "num_unique_errors_available": len(invalid_candidate_errors),
+                "error_prompt_chars_used": error_prompt_chars_used,
                 "pool_best_program_id": elite_parents[0][3],
                 "pool_best_global_train_loglik": pool_best_ll,
                 "evolution_selection_score": evolution_selection_score,
@@ -2752,6 +3111,7 @@ def run_loglik_refinement_phase(
     hard_prompt_token_cap: int = 14000,
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
+    max_error_prompt_chars: int = 1200,
 ) -> Optional[float]:
     """
     Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
@@ -2849,6 +3209,12 @@ def run_loglik_refinement_phase(
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
     last_significant_best = float(elite_parents[0][1])
     stagnant_iters = 0
+    invalid_candidate_errors: List[Dict[str, Any]] = []
+    error_history_path = (
+        (output_path / "error_history.jsonl")
+        if output_path is not None
+        else None
+    )
     if early_stop_patience is not None:
         print(
             f"Refinement early stop enabled: patience={early_stop_patience}, "
@@ -2936,6 +3302,18 @@ def run_loglik_refinement_phase(
             f"\nGenerating {n_candidates_per_iteration} refinement candidates: "
             f"{fresh_n} fresh (seed/baseline only), {n_normal} from sampled parents..."
         )
+        error_prompt_section = _build_past_error_prompt_section(
+            invalid_candidate_errors,
+            iteration=iteration_step,
+            max_error_prompt_chars=max_error_prompt_chars,
+        )
+        _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
+        error_prompt_chars_used = len(error_prompt_section)
+        print(
+            "Error prompt summary: "
+            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"error_prompt_chars_used={error_prompt_chars_used}"
+        )
         (
             fresh_parent_codes,
             fresh_parent_train_lls,
@@ -2969,6 +3347,9 @@ def run_loglik_refinement_phase(
             "phase": "refinement",
             "participant_id": participant_id,
             "iteration": iteration_step,
+            "past_invalid_program_errors": invalid_candidate_errors,
+            "past_error_prompt_section": error_prompt_section,
+            "max_error_prompt_chars": max_error_prompt_chars,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -2986,6 +3367,7 @@ def run_loglik_refinement_phase(
         )
 
         candidate_results: List[Dict[str, Any]] = []
+        num_invalid_candidates = 0
         for idx, code in enumerate(candidate_codes):
             if iter_dir is not None:
                 (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "")
@@ -3002,8 +3384,18 @@ def run_loglik_refinement_phase(
                     }
                 )
                 continue
-            choose_fn = compile_program(code)
+            choose_fn, compile_error = compile_program_with_error(code)
             if choose_fn is None:
+                num_invalid_candidates += 1
+                _record_invalid_program_error(
+                    invalid_candidate_errors,
+                    code=code,
+                    exc=compile_error,
+                    iteration=iteration_step,
+                    participant_id=int(participant_id),
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
                 candidate_results.append(
                     {
                         "idx": idx,
@@ -3022,7 +3414,17 @@ def run_loglik_refinement_phase(
                 val_eval = _evaluate_loglik_for_dataset(
                     dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
                 )
-            except (AssertionError, TypeError, ValueError):
+            except (AssertionError, TypeError, ValueError) as exc:
+                num_invalid_candidates += 1
+                _record_invalid_program_error(
+                    invalid_candidate_errors,
+                    code=code,
+                    exc=exc,
+                    iteration=iteration_step,
+                    participant_id=int(participant_id),
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
                 candidate_results.append(
                     {
                         "idx": idx,
@@ -3035,6 +3437,26 @@ def run_loglik_refinement_phase(
                 )
                 continue
             runtime_valid = train_eval.get("errors", 0) == 0
+            if train_eval.get("errors", 0) != 0:
+                num_invalid_candidates += 1
+                _record_invalid_program_error_summary(
+                    invalid_candidate_errors,
+                    train_eval.get("first_error"),
+                    iteration=iteration_step,
+                    participant_id=int(participant_id),
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
+            if val_eval.get("errors", 0) != 0:
+                num_invalid_candidates += 1
+                _record_invalid_program_error_summary(
+                    invalid_candidate_errors,
+                    val_eval.get("first_error"),
+                    iteration=iteration_step,
+                    participant_id=int(participant_id),
+                    candidate_id=f"candidate_{idx}",
+                    history_path=error_history_path,
+                )
             train_loglik = float(train_eval["avg_loglik"])
             val_loglik = float(val_eval["avg_loglik"])
             train_val_loglik = (
@@ -3054,6 +3476,13 @@ def run_loglik_refinement_phase(
                     "runtime_valid": runtime_valid,
                 }
             )
+
+        print(
+            "Iteration invalid summary: "
+            f"num_invalid_candidates={num_invalid_candidates}, "
+            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"error_prompt_chars_used={error_prompt_chars_used}"
+        )
 
         selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
         iter_best_result: Optional[Dict[str, Any]] = None
@@ -3135,6 +3564,9 @@ def run_loglik_refinement_phase(
                 "iteration": iteration_step,
                 "n_candidates": n_candidates_per_iteration,
                 "n_runtime_valid": len(selected_results),
+                "num_invalid_candidates": num_invalid_candidates,
+                "num_unique_errors_available": len(invalid_candidate_errors),
+                "error_prompt_chars_used": error_prompt_chars_used,
             }
             refine_header.update(
                 _iteration_candidate_source_header(
@@ -3554,6 +3986,7 @@ def run_loglik_refine_participant_from_checkpoint(
     hard_prompt_token_cap: int = 14000,
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
+    max_error_prompt_chars: int = 1200,
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -3693,6 +4126,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "hard_prompt_token_cap": hard_prompt_token_cap,
         "strict_prompt_budget": strict_prompt_budget,
         "prompt_token_estimator": prompt_token_estimator,
+        "max_error_prompt_chars": max_error_prompt_chars,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
         ref_parents, ref_vals = _load_evolution_elite_pool(
@@ -3781,6 +4215,7 @@ def run_loglik_refine_from_prev_experiment(
     hard_prompt_token_cap: int = 14000,
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
+    max_error_prompt_chars: int = 1200,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -3898,6 +4333,7 @@ def run_loglik_refine_from_prev_experiment(
             hard_prompt_token_cap=hard_prompt_token_cap,
             strict_prompt_budget=strict_prompt_budget,
             prompt_token_estimator=prompt_token_estimator,
+            max_error_prompt_chars=max_error_prompt_chars,
         )
         return int(participant_id), metrics
 
@@ -4096,6 +4532,8 @@ def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose:
     accuracies = []
     total = len(trials)
     max_errors_per_seed = 0
+    first_error: Optional[Dict[str, str]] = None
+    source_code = getattr(choose_fn, "__teh_source_code", None)
 
     for seed in range(n_seeds):
         correct = 0
@@ -4107,6 +4545,8 @@ def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose:
                     correct += 1
             except Exception as e:
                 errors += 1
+                if first_error is None and isinstance(source_code, str) and source_code:
+                    first_error = _build_invalid_program_error_entry(code=source_code, exc=e)
                 if verbose and errors <= 3 and seed == 0:
                     print(f"  Evaluation error: {e}")
         acc = correct / total if total > 0 else 0.0
@@ -4120,6 +4560,7 @@ def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose:
         "total": total,
         "correct": correct,
         "errors": max_errors_per_seed,
+        "first_error": first_error,
     }
     if verbose and max_errors_per_seed > 0:
         print(f"  Total evaluation errors: {max_errors_per_seed}/{total} (max per seed)")
@@ -4144,6 +4585,8 @@ def evaluate_choice13k_program(
     seed_avg_logliks: List[float] = []
     total_errors = 0
     max_errors_per_seed = 0
+    first_error: Optional[Dict[str, str]] = None
+    source_code = getattr(choose_fn, "__teh_source_code", None)
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
         loglik_acc = 0.0
@@ -4156,6 +4599,8 @@ def evaluate_choice13k_program(
                 p_use = _parse_choice13k_choose_output(p_raw)
             except Exception as e:
                 errors += 1
+                if first_error is None and isinstance(source_code, str) and source_code:
+                    first_error = _build_invalid_program_error_entry(code=source_code, exc=e)
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error: {e}")
                 p = 0.5
@@ -4199,6 +4644,7 @@ def evaluate_choice13k_program(
         "correct": correct,
         "errors": max_errors_per_seed,
         "total_errors": total_errors,
+        "first_error": first_error,
     }
 
 
@@ -4233,6 +4679,8 @@ def evaluate_cpc18_split_program(
     seed_avg_logliks: List[float] = []
     total_errors = 0
     max_errors_per_seed = 0
+    first_error: Optional[Dict[str, str]] = None
+    source_code = getattr(choose_fn, "__teh_source_code", None)
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int]:
         loglik_acc = 0.0
@@ -4244,6 +4692,8 @@ def evaluate_cpc18_split_program(
                 p_raw = choose_fn(t["problem"], t["history"])
             except Exception as e:
                 errors += 1
+                if first_error is None and isinstance(source_code, str) and source_code:
+                    first_error = _build_invalid_program_error_entry(code=source_code, exc=e)
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error: {e}")
                 p = 0.5
@@ -4294,6 +4744,7 @@ def evaluate_cpc18_split_program(
         "correct": correct,
         "errors": max_errors_per_seed,
         "total_errors": total_errors,
+        "first_error": first_error,
     }
 
 
@@ -6171,6 +6622,9 @@ def generate_program_variants(
     prompt_debug: bool = False,
     prompt_debug_exit: bool = True,
     generation_debug_out: Optional[Dict[str, Any]] = None,
+    past_invalid_program_errors: Optional[List[Dict[str, Any]]] = None,
+    past_error_prompt_section: Optional[str] = None,
+    max_error_prompt_chars: int = 1200,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -6215,8 +6669,8 @@ Write Python code that reproduces the observed behavior. You must generate a pro
 def choose(problem, history):
     \"\"\"
     problem: dict with keys
-        - gamble_A: {"probs": List[float], "rewards": List[float]}
-        - gamble_B: {"probs": List[float], "rewards": List[float]}
+        - gamble_A: {"probs": List[float] or None, "rewards": List[float]}
+        - gamble_B: {"probs": List[float] or None, "rewards": List[float]}
         - option_keys: e.g., ["A","B"]
         - has_feedback: bool
     history: list of dicts with keys
@@ -6233,6 +6687,8 @@ Constraints:
 - The returned value must be the probability of choosing option 1 (Option B).
 - Higher returned values should mean the participant is more likely to choose Option B.
 - Do not sample or use randomness.
+- `problem["gamble_A"]["probs"]` or `problem["gamble_B"]["probs"]` may be None.
+- Handle missing probabilities safely with an explicit None check.
 
 Provide only the code for choose(...) as a complete function body.
 
@@ -6297,6 +6753,15 @@ Provide only the code for choose(...) as a complete function body.
 
     if prompt_suffix:
         base_prompt = f"{base_prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
+    error_section = (past_error_prompt_section or "").strip()
+    if not error_section and past_invalid_program_errors:
+        error_section = _build_past_error_prompt_section(
+            list(past_invalid_program_errors),
+            iteration=iteration,
+            max_error_prompt_chars=max_error_prompt_chars,
+        ).strip()
+    if error_section:
+        base_prompt = f"{base_prompt.rstrip()}\n\n{error_section}\n"
 
     from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
 
@@ -6898,6 +7363,7 @@ def run_evolution(
     prompt_debug_on_no_valid: bool = True,
     prompt_debug_exit: bool = False,
     evolution_selection_score: str = "train_val",
+    max_error_prompt_chars: int = 1200,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -6934,6 +7400,7 @@ def run_evolution(
         evolution_selection_score, fitness_metric
     )
     selection_warn_key = f"p{participant_id}"
+    invalid_candidate_errors: List[Dict[str, Any]] = []
 
     val_trials: List[Dict[str, Any]] = []
 
@@ -7004,6 +7471,7 @@ def run_evolution(
     output_path = Path(output_dir)
     if save_artifacts:
         output_path.mkdir(parents=True, exist_ok=True)
+    error_history_path = output_path / "error_history.jsonl"
     
     # Set up local log file for wandb metrics (if wandb is enabled)
     log_file_path = None
@@ -7577,6 +8045,18 @@ def run_evolution(
             f"\nGenerating {n_candidates_per_iteration} candidate programs: "
             f"{fresh_n} fresh (seed/baseline only), {n_normal} from sampled parents..."
         )
+        error_prompt_section = _build_past_error_prompt_section(
+            invalid_candidate_errors,
+            iteration=iteration_step,
+            max_error_prompt_chars=max_error_prompt_chars,
+        )
+        _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
+        error_prompt_chars_used = len(error_prompt_section)
+        print(
+            "Error prompt summary: "
+            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"error_prompt_chars_used={error_prompt_chars_used}"
+        )
         fresh_parent_train_accs = None
         if is_cpc18_mse:
             fresh_parent_train_accs = [
@@ -7611,6 +8091,9 @@ def run_evolution(
             "prompt_debug": prompt_debug,
             "prompt_debug_exit": prompt_debug_exit,
             "generation_debug_out": gen_debug if capture_gen_debug else None,
+            "past_invalid_program_errors": invalid_candidate_errors,
+            "past_error_prompt_section": error_prompt_section,
+            "max_error_prompt_chars": max_error_prompt_chars,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -7627,6 +8110,7 @@ def run_evolution(
         # Evaluate candidates
         print(f"\nEvaluating candidates...")
         candidate_results = []
+        num_invalid_candidates = 0
         for idx, code in enumerate(tqdm(candidate_codes, desc="Evaluating")):
             if dataset == "gridworld":
                 code = _sanitize_llm_python_candidate(
@@ -7772,9 +8256,21 @@ def run_evolution(
                         "runtime_valid": False,
                     })
                     continue
-                choose_fn = compile_program(code)
+                choose_fn, compile_error = compile_program_with_error(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
                 if choose_fn is None:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error(
+                        invalid_candidate_errors,
+                        code=code,
+                        exc=compile_error,
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                     _fail = {
                         "idx": idx,
                         "code": code,
@@ -7799,7 +8295,19 @@ def run_evolution(
                         if val_trials
                         else None
                     )
-                except (TypeError, ValueError, AssertionError):
+                except (TypeError, ValueError, AssertionError) as exc:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error(
+                        invalid_candidate_errors,
+                        code=code,
+                        exc=exc,
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                     _fail = {
                         "idx": idx,
                         "code": code,
@@ -7823,6 +8331,42 @@ def run_evolution(
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
+                if train_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        train_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
+                if test_eval is not None and test_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        test_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
+                if val_eval is not None and val_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        val_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                 fitness, selection_score = _apply_evolution_candidate_selection_fitness(
                     train_loglik=train_loglik,
                     val_loglik=val_loglik,
@@ -7856,9 +8400,21 @@ def run_evolution(
                     _row["val_loglik"] = val_loglik
                 candidate_results.append(_row)
             elif is_binary_loglik_dataset(dataset):
-                choose_fn = compile_program(code)
+                choose_fn, compile_error = compile_program_with_error(code)
                 _worst = float("-inf") if fitness_metric == "loglik" else 0.0
                 if choose_fn is None:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error(
+                        invalid_candidate_errors,
+                        code=code,
+                        exc=compile_error,
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                     _fail = {
                         "idx": idx,
                         "code": code,
@@ -7883,7 +8439,19 @@ def run_evolution(
                         if val_trials
                         else None
                     )
-                except (AssertionError, TypeError, ValueError):
+                except (AssertionError, TypeError, ValueError) as exc:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error(
+                        invalid_candidate_errors,
+                        code=code,
+                        exc=exc,
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                     _fail = {
                         "idx": idx,
                         "code": code,
@@ -7907,6 +8475,42 @@ def run_evolution(
                 runtime_valid = (train_eval.get("errors", 0) == 0) and (
                     test_eval is None or test_eval.get("errors", 0) == 0
                 )
+                if train_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        train_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
+                if test_eval is not None and test_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        test_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
+                if val_eval is not None and val_eval.get("errors", 0) != 0:
+                    num_invalid_candidates += 1
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        val_eval.get("first_error"),
+                        iteration=iteration_step,
+                        participant_id=int(participant_id)
+                        if participant_id is not None
+                        else None,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
                 fitness, selection_score = _apply_evolution_candidate_selection_fitness(
                     train_loglik=train_loglik,
                     val_loglik=val_loglik,
@@ -7939,6 +8543,13 @@ def run_evolution(
                 if val_eval is not None:
                     _row["val_loglik"] = val_loglik
                 candidate_results.append(_row)
+
+        print(
+            "Iteration invalid summary: "
+            f"num_invalid_candidates={num_invalid_candidates}, "
+            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"error_prompt_chars_used={error_prompt_chars_used}"
+        )
             
         # Report results
         print(f"\n{'='*80}")
@@ -8493,6 +9104,9 @@ def run_evolution(
                     candidate_sources,
                 ),
             )
+        metrics["num_invalid_candidates"] = num_invalid_candidates
+        metrics["num_unique_errors_available"] = len(invalid_candidate_errors)
+        metrics["error_prompt_chars_used"] = error_prompt_chars_used
         if save_artifacts and iter_dir is not None:
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         
@@ -8944,6 +9558,7 @@ def run_evolution(
             hard_prompt_token_cap=hard_prompt_token_cap,
             strict_prompt_budget=strict_prompt_budget,
             prompt_token_estimator=prompt_token_estimator,
+            max_error_prompt_chars=max_error_prompt_chars,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -9935,6 +10550,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--max_error_prompt_chars",
+        type=int,
+        default=1200,
+        help=(
+            "Max characters reserved for compact past invalid-program errors in each "
+            "evolution prompt (0 disables the section)."
+        ),
+    )
+    parser.add_argument(
         "--warn_parent_truncation_ratio",
         type=float,
         default=0.5,
@@ -10067,6 +10691,9 @@ def main():
         return
     if args.max_parent_chars < 0:
         print("Error: --max_parent_chars must be >= 0 (0 = no truncation).")
+        return
+    if args.max_error_prompt_chars < 0:
+        print("Error: --max_error_prompt_chars must be >= 0.")
         return
     if not (0.0 <= args.warn_parent_truncation_ratio <= 1.0):
         print("Error: --warn_parent_truncation_ratio must be in [0, 1].")
@@ -10388,6 +11015,7 @@ def main():
             prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
             prompt_debug_exit=args.prompt_debug_exit,
             evolution_selection_score=args.evolution_selection_score,
+            max_error_prompt_chars=args.max_error_prompt_chars,
         )
 
     if args.phase == "refine":
@@ -10441,6 +11069,7 @@ def main():
                 hard_prompt_token_cap=args.hard_prompt_token_cap,
                 strict_prompt_budget=args.strict_prompt_budget,
                 prompt_token_estimator=args.prompt_token_estimator,
+                max_error_prompt_chars=args.max_error_prompt_chars,
             )
         finally:
             if wandb is not None:
@@ -10553,6 +11182,7 @@ def main():
                 prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
+                max_error_prompt_chars=args.max_error_prompt_chars,
             )
         finally:
             if wandb is not None:
@@ -10639,6 +11269,7 @@ def main():
                 prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
+                max_error_prompt_chars=args.max_error_prompt_chars,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -11028,6 +11659,7 @@ def main():
                         prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                         prompt_debug_exit=args.prompt_debug_exit,
                         evolution_selection_score=args.evolution_selection_score,
+                        max_error_prompt_chars=args.max_error_prompt_chars,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -11304,6 +11936,7 @@ def main():
                 prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
+                max_error_prompt_chars=args.max_error_prompt_chars,
             )
 
         try:

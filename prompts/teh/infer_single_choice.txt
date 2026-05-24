@@ -1,43 +1,85 @@
-You are given observations of human choices in binary risky-choice problems.
-Each problem presents two options. The input stores option 0 as problem["gamble_A"] and option 1 as problem["gamble_B"].
+You are given observations of human choices in risky-gamble problems.
+Each problem presents two gambles: Option A and Option B.
+A gamble has outcomes/rewards and may have probabilities.
+You will see a short history of previous trials for the same participant and problem, including chosen option and feedback if available.
 
-Write Python code that reproduces the observed behavior. You must generate:
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
 
 def choose(problem, history):
     """
     Evaluated by log-likelihood.
     Goal: maximize log-likelihood of the observed human choices.
 
-    problem:
+    problem: dict with keys
         - gamble_A: {"probs": List[float] or None, "rewards": List[float]}
         - gamble_B: {"probs": List[float] or None, "rewards": List[float]}
-        - option_keys: optional display labels
+        - option_keys: optional display labels from the original dataset
         - has_feedback: optional bool
 
     history: list of dicts. Entries may contain:
-        - action: int
-        - feedback: optional float or None; this key may be absent
+        - action: int (0 for A / gamble_A, 1 for B / gamble_B)
+        - feedback: float or None; this key may be absent
 
-    return: float, probability of choosing action 1, i.e. gamble_B
+    return: float, probability of choosing option 1 (Option B / gamble_B)
     """
 
 Requirements:
 - Pure Python, no imports, deterministic.
-- Use only problem and history.
-- Return one finite float strictly inside (0, 1).
-- Always use:
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing Option B / action 1.
+- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].
+- Higher returned values mean the participant is more likely to choose Option B / action 1.
+- Always use the fixed action convention:
   - action 0 -> problem["gamble_A"]
   - action 1 -> problem["gamble_B"]
   - return P(action=1)
-- Do not infer action mapping from option_keys or display labels.
-- problem["gamble_A"].get("probs") or problem["gamble_B"].get("probs") may be None.
-- If probabilities are missing, handle safely, e.g. use equal weights over rewards.
-- History may be empty.
-- History entries may omit feedback. If using feedback, use h.get("feedback") and check for None.
-- Avoid division by zero, overflow, invalid operations, and undefined variables.
-- If using exponential/sigmoid, clip the score before exponentiation.
-- Keep helper logic inside choose(); nested functions are allowed.
-- Do not return constant or near-constant probabilities unless no reliable pattern is available.
-- Produce a valid program that meaningfully changes behavior, not superficial edits.
+- Do not infer action mapping from option_keys or display labels. Display labels do not override the action convention.
+- Avoid numerical errors such as division by zero, overflow, invalid operations, or undefined variables.
+- Some trials may have unknown probabilities: problem["gamble_A"].get("probs") or problem["gamble_B"].get("probs") can be None.
+- Your code must handle missing probabilities safely. Do not iterate over None and do not assume probabilities are always present.
+- If probabilities are missing, use a deterministic fallback, such as equal weights over listed rewards, and continue returning a valid probability in (0, 1).
+- If using a sigmoid/logistic/exponential transform, clip the score to a safe range before exponentiation, such as [-50, 50].
+- Do not use pow(...); use ** for exponentiation.
+- Keep all helper logic used by choose(...) inside choose(...). Nested functions are allowed.
+- Do not rely on top-level helper functions outside choose(...).
+- Ensure every variable used in expressions is defined on all branches.
+
+History and feedback safety:
+- Code must work when history is empty.
+- History entries may not all contain the same keys.
+- If using feedback, use h.get("feedback") and explicitly check whether the value is not None.
+- Do not use h["feedback"] or history[-1]["feedback"] unless you first check that the key exists.
+- If feedback is absent or always None, do not invent feedback-based rules.
+- If using historical actions, guard key access or use only entries containing "action".
+- History may be used when helpful, but do not rely only on copying or smoothing past actions.
+- Do not blindly copy the last action.
+
+Behavioral requirements:
+- Do not return constant or near-constant probabilities, unless no reliable input pattern is available.
+- Do not add small noise or artificial variation to a constant value.
+- The probability must depend meaningfully on the problem inputs and, when useful, available history.
+- Raw expected-value differences can be useful, but avoid collapsing every program into the same generic EV-sigmoid rule when other stable input or history patterns improve log-likelihood.
+- Useful compact features may include expected value, reward magnitude, probability sensitivity, outcome spread, certainty, thresholds, bounded risk features, confidence scaling, or simple history summaries.
+- Use score scaling, thresholds, normalization, or bounded mappings when helpful so returned probabilities are stable.
+- If evidence is uncertain or conflicting, prefer a less confident probability closer to 0.5.
+- Avoid brittle extra terms that make a strong problem-based or history-based rule worse.
+- The program should behave sensibly across different problems and histories.
+
+Parent comparison and improvement requirements:
+- When parent programs and scores are provided, preserve useful components from better-scoring parents.
+- Do not replace a strong parent with an unrelated generic rule.
+- Prefer targeted edits: adjust scaling, thresholds, confidence, feature weights, or one small behavioral component.
+- Remove or weaken components that appear in worse parents unless they clearly add missing behavior.
+- Produce a valid program that is meaningfully different from the parent.
+- Avoid making only superficial changes without changing behavior.
+
+Generation requirements:
+- Prefer concise programs. Avoid long repetitive helper code.
+- Keep choose() compact, ideally under ~150 lines unless additional logic clearly improves behavior.
+- Do not simplify away useful behavioral structure just to make the code shorter.
+- Make meaningful behavioral improvements rather than superficial code changes.
+- Produce only valid executable code for choose(problem, history).
 
 Provide only the code for choose(...) as a complete function.

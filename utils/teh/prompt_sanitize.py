@@ -17,6 +17,20 @@ _FORBIDDEN_DYNAMIC_RE = re.compile(
     r"__import__\s*\(|\bimportlib\b|\beval\s*\(|\bexec\s*\(|\bglobals\s*\(|\blocals\s*\(",
     re.IGNORECASE,
 )
+_PROBS_GET_WITH_DEFAULT_RE = re.compile(
+    r"""
+    ^
+    (?P<indent>[ \t]*)
+    (?P<var>[A-Za-z_][A-Za-z0-9_]*)
+    \s*=\s*
+    (?P<obj>[A-Za-z_][A-Za-z0-9_]*)
+    \s*\.\s*get\s*\(\s*
+    (?P<quote>["'])probs(?P=quote)\s*,\s*
+    (?P<default>.+?)
+    \s*\)\s*$
+    """,
+    re.VERBOSE,
+)
 
 
 def strip_embedded_choose_from_evolution_prompt(text: str) -> str:
@@ -190,6 +204,28 @@ def _slice_from_marker(code: str, marker: str) -> Optional[str]:
     return code[idx:].strip()
 
 
+def _normalize_probs_none_fallback(code: str) -> str:
+    """
+    Repair a common unsafe pattern from LLM outputs:
+      probs = gamble.get("probs", <default>)
+    This default is not used when probs exists but is None.
+    """
+    out_lines: List[str] = []
+    for line in code.splitlines():
+        m = _PROBS_GET_WITH_DEFAULT_RE.match(line)
+        if m is None:
+            out_lines.append(line)
+            continue
+        indent = m.group("indent")
+        var = m.group("var")
+        obj = m.group("obj")
+        default_expr = m.group("default").strip()
+        out_lines.append(f'{indent}{var} = {obj}.get("probs")')
+        out_lines.append(f"{indent}if {var} is None:")
+        out_lines.append(f"{indent}    {var} = {default_expr}")
+    return "\n".join(out_lines)
+
+
 def _extract_python_from_llm_reply(
     text: str,
     *,
@@ -287,6 +323,8 @@ def sanitize_evolution_candidate_code(
     if not cleaned or _count_choose_definitions(cleaned) != 1:
         return ""
 
+    cleaned = _normalize_probs_none_fallback(cleaned)
+
     if _has_fake_sigmoid(cleaned):
         return ""
 
@@ -310,4 +348,5 @@ Candidate output rules (strict):
 7. No helper functions outside choose(); nest helpers inside choose() if needed.
 8. Use only the provided problem and history.
 9. Keep the function concise, but do not simplify away useful behavioral structure.
+10. If gamble probs can be None, use explicit None checks (not only dict.get default fallback).
 """
