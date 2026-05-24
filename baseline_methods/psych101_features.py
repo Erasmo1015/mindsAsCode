@@ -20,7 +20,19 @@ def _task_kind(problem: Dict[str, Any]) -> str:
         return "gamble"
     if "pHa" in problem:
         return "gamble_cpc18"
-    if schema == "D" or "n_cards_remaining" in problem:
+    if "memory_set_letters" in problem and "probe_letter" in problem:
+        return "memory_probe"
+    if "stimulus_features" in problem and "correct_category" in problem:
+        return "category_learning"
+    if (
+        "balloon_id" in problem
+        and "pump_count_before" in problem
+        and "accumulated_points_before" in problem
+    ):
+        return "balloon_risk"
+    if "n_cards_remaining" in problem:
+        return "cct"
+    if schema == "D":
         return "cct"
     if schema == "C" or "machine_options" in problem:
         return "bandit"
@@ -91,6 +103,26 @@ def _cct_one_step_ev(problem: Dict[str, Any]) -> Tuple[float, float]:
     return ev_stop, ev_continue
 
 
+def _balloon_explosion_prob(pump_count_before: float) -> float:
+    """Simple monotone hazard proxy for BART-like tasks."""
+    p = (float(pump_count_before) + 1.0) / 64.0
+    return float(min(0.95, max(0.02, p)))
+
+
+def _balloon_one_step_ev(problem: Dict[str, Any]) -> Tuple[float, float]:
+    """
+    Expected utility of stop vs one more pump.
+
+    action=0 -> pump, action=1 -> stop.
+    """
+    cur = max(0.0, float(problem.get("accumulated_points_before", 0.0)))
+    pump_count = max(0.0, float(problem.get("pump_count_before", 0.0)))
+    p_explode = _balloon_explosion_prob(pump_count)
+    ev_pump = (1.0 - p_explode) * (cur + 1.0) + p_explode * 0.0
+    ev_stop = cur
+    return ev_stop, ev_pump
+
+
 def option_b_feature_diff(
     problem: Dict[str, Any],
     history: Optional[List[Dict[str, Any]]] = None,
@@ -103,6 +135,10 @@ def option_b_feature_diff(
         ev_stop, ev_continue = _cct_one_step_ev(problem)
         # action 0 = flip, 1 = stop; positive x favors stop
         return ev_stop - ev_continue
+    if kind == "balloon_risk":
+        ev_stop, ev_pump = _balloon_one_step_ev(problem)
+        # action 0 = pump, 1 = stop; positive x favors stop
+        return ev_stop - ev_pump
     if kind == "bandit":
         means = _bandit_empirical_means(history)
         return means[1] - means[0]
@@ -117,6 +153,23 @@ def option_b_feature_diff(
         if not cards:
             return 0.0
         return float(sum(cards)) / float(len(cards))
+    if kind == "memory_probe":
+        # action 1 corresponds to "yes/in-set" for supported recent-probe parser.
+        probe_in_set = bool(problem.get("probe_in_set", False))
+        return 1.0 if probe_in_set else -1.0
+    if kind == "category_learning":
+        # Binary category choice with observed correct category in trial feedback.
+        keys = problem.get("option_keys") or []
+        if len(keys) < 2:
+            return 0.0
+        correct = str(problem.get("correct_category", "")).upper()
+        key_a = str(keys[0]).upper()
+        key_b = str(keys[1]).upper()
+        if correct == key_b:
+            return 1.0
+        if correct == key_a:
+            return -1.0
+        return 0.0
     return 0.0
 
 
@@ -215,6 +268,53 @@ def _gamble_getters_weather() -> Tuple[GambleGetter, GambleGetter]:
     return opt_a, opt_b
 
 
+def _gamble_getters_balloon_risk() -> Tuple[GambleGetter, GambleGetter]:
+    # option A/action=0 -> pump, option B/action=1 -> stop
+    def pump(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        cur = max(0.0, float(p.get("accumulated_points_before", 0.0)))
+        pump_count = max(0.0, float(p.get("pump_count_before", 0.0)))
+        p_explode = _balloon_explosion_prob(pump_count)
+        return ([cur + 1.0, 0.0], [1.0 - p_explode, p_explode])
+
+    def stop(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        cur = max(0.0, float(p.get("accumulated_points_before", 0.0)))
+        return ([cur], [1.0])
+
+    return pump, stop
+
+
+def _gamble_getters_memory_probe() -> Tuple[GambleGetter, GambleGetter]:
+    # option A/action=0 -> "no", option B/action=1 -> "yes"
+    def no_opt(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        probe_in_set = bool(p.get("probe_in_set", False))
+        return ([-1.0 if probe_in_set else 1.0], [1.0])
+
+    def yes_opt(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        probe_in_set = bool(p.get("probe_in_set", False))
+        return ([1.0 if probe_in_set else -1.0], [1.0])
+
+    return no_opt, yes_opt
+
+
+def _gamble_getters_category_learning() -> Tuple[GambleGetter, GambleGetter]:
+    # option A/action=0 and option B/action=1 mapped by option_keys.
+    def opt_a(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        keys = p.get("option_keys") or []
+        if len(keys) < 2:
+            return ([0.0], [1.0])
+        correct = str(p.get("correct_category", "")).upper()
+        return ([1.0 if str(keys[0]).upper() == correct else -1.0], [1.0])
+
+    def opt_b(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        keys = p.get("option_keys") or []
+        if len(keys) < 2:
+            return ([0.0], [1.0])
+        correct = str(p.get("correct_category", "")).upper()
+        return ([1.0 if str(keys[1]).upper() == correct else -1.0], [1.0])
+
+    return opt_a, opt_b
+
+
 def prospect_gamble_getters(
     problem: Dict[str, Any],
 ) -> Tuple[GambleGetter, GambleGetter]:
@@ -226,6 +326,8 @@ def prospect_gamble_getters(
         return _gamble_getters_cpc18()
     if kind == "cct":
         return _gamble_getters_cct()
+    if kind == "balloon_risk":
+        return _gamble_getters_balloon_risk()
     if kind == "bandit":
         return _gamble_getters_bandit()
     if kind == "product":
@@ -234,4 +336,8 @@ def prospect_gamble_getters(
         return _gamble_getters_tree()
     if kind == "weather":
         return _gamble_getters_weather()
+    if kind == "memory_probe":
+        return _gamble_getters_memory_probe()
+    if kind == "category_learning":
+        return _gamble_getters_category_learning()
     raise ValueError(f"Unsupported task kind for prospect getters: {kind!r}")

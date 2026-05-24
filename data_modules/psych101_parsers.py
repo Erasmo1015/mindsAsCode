@@ -75,6 +75,39 @@ _RE_TREE_TRIAL = re.compile(
     r"You press <<([A-Z])>>(?: and get (-?\d+) points)?",
     re.I,
 )
+_RE_WILSON_GAME_SPLIT = re.compile(r"(?=Game\s+\d+\.)", re.I)
+_RE_FREY_RISK_KEYS = re.compile(
+    r"pump up the balloon by pressing ([A-Z]).+?stop pumping up the balloon by pressing ([A-Z])",
+    re.I | re.S,
+)
+_RE_BALLOON_HEADER = re.compile(r"Balloon\s+(\d+):\s*", re.I)
+_RE_BALLOON_SEQUENCE = re.compile(
+    r"You press ((?:<<[A-Z]>>\s*)+)\.\s*(?:"
+    r"You stop inflating the balloon and get (\d+) points\.|"
+    r"The balloon was inflated too much and explodes\.)",
+    re.I,
+)
+_RE_ENKAVI_KEYMAP = re.compile(
+    r"If you think it was,\s*you have to press ([A-Z])\.\s*"
+    r"If you think it was not,\s*press ([A-Z])\.",
+    re.I,
+)
+_RE_ENKAVI_TRIAL = re.compile(
+    r"You are shown the letters \[(.*?)\]\.\s*"
+    r"You see the letter ([A-Z])\.\s*"
+    r"You press <<([A-Z])>>\.",
+    re.I,
+)
+_RE_BADHAM_BLOCK_SPLIT = re.compile(
+    r"You encounter a new problem with a new rule determining which objects belong to each category:\s*",
+    re.I,
+)
+_RE_BADHAM_TRIAL = re.compile(
+    r"You see a (big|small) (white|black) (square|triangle)\.\s*"
+    r"You press <<([A-Z])>>\.\s*"
+    r"The correct category is ([A-Z])\.",
+    re.I,
+)
 _N_CCT_CARDS = 32
 
 
@@ -597,6 +630,351 @@ def parse_flesch_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment
     )
 
 
+def parse_wilson_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
+    text = row["text"]
+    m0 = re.search(r"Game\s+\d+\.", text, re.I)
+    instruction = text[: m0.start()].strip() if m0 else text.split("\n\n")[0]
+    ml = _RE_MACHINE_LABEL.search(text)
+    if not ml:
+        raise ValueError("wilson: no machine labels in instruction")
+    option_keys = [ml.group(1).upper(), ml.group(2).upper()]
+
+    blocks: List[PsychBlock] = []
+    game_chunks = _RE_WILSON_GAME_SPLIT.split(text[m0.start() :] if m0 else text)
+    for chunk in game_chunks:
+        if not re.match(r"Game\s+\d+\.", chunk.strip(), re.I):
+            continue
+        gh = _RE_GAME_HEADER.search(chunk)
+        if not gh:
+            continue
+        game_id = int(gh.group(1))
+        n_trials_game = int(gh.group(2))
+        events: List[Tuple[int, str, str, int]] = []
+        for im in _RE_INSTRUCTED.finditer(chunk):
+            events.append((im.start(), "instructed", im.group(1).upper(), int(im.group(2))))
+        for pm in _RE_SLOT_PRESS.finditer(chunk):
+            events.append((pm.start(), "free", pm.group(1).upper(), int(pm.group(2))))
+        if not events:
+            continue
+        events.sort(key=lambda x: x[0])
+
+        instructed_context: List[Dict[str, Any]] = []
+        within_game_history: List[Dict[str, Any]] = []
+        free_trial_index = 0
+        game_trial_index = 0
+        free_trials: List[ParsedTrial] = []
+
+        for _, phase, key, reward in events:
+            if key not in option_keys:
+                raise ValueError(f"wilson: key {key} not in {option_keys}")
+            action = option_keys.index(key)
+            event_entry = {
+                "phase": phase,
+                "trial_index_game": game_trial_index,
+                "action": action,
+                "action_key": key,
+                "reward": float(reward),
+            }
+            if phase == "instructed":
+                instructed_context.append(dict(event_entry))
+                within_game_history.append(dict(event_entry))
+                game_trial_index += 1
+                continue
+
+            # Free-choice trials are prediction targets; instructed trials stay in context/history.
+            free_trials.append(
+                ParsedTrial(
+                    action=action,
+                    feedback=float(reward),
+                    problem_fields={
+                        "phase": "free",
+                        "trial_index": free_trial_index,
+                        "trial_index_game": game_trial_index,
+                        "payoff": float(reward),
+                        "machine_options": list(option_keys),
+                        "instructed_context": list(instructed_context),
+                        "within_game_action_reward_history": list(within_game_history),
+                    },
+                )
+            )
+            free_trial_index += 1
+            within_game_history.append(dict(event_entry))
+            game_trial_index += 1
+
+        if not free_trials:
+            continue
+        blocks.append(
+            PsychBlock(
+                trials=free_trials,
+                option_keys=list(option_keys),
+                problem_static={
+                    "schema_type": "C",
+                    "option_keys": list(option_keys),
+                    "game_id": game_id,
+                    "n_trials_game": n_trials_game,
+                    "machine_options": list(option_keys),
+                },
+                schema_type="C",
+            )
+        )
+
+    if not blocks:
+        raise ValueError("wilson parser produced no free-choice target trials")
+    return PsychExperiment(
+        instruction=instruction,
+        blocks=blocks,
+        dataset_alias=dataset_alias,
+        schema_type="C",
+    )
+
+
+def parse_frey_risk_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
+    text = row["text"]
+    m0 = _RE_BALLOON_HEADER.search(text)
+    instruction = text[: m0.start()].strip() if m0 else text.split("\n\n")[0]
+    km = _RE_FREY_RISK_KEYS.search(instruction)
+    if km:
+        pump_key, stop_key = km.group(1).upper(), km.group(2).upper()
+    else:
+        pump_key, stop_key = "N", "X"
+    option_keys = [pump_key, stop_key]
+    blocks: List[PsychBlock] = []
+
+    balloon_chunks = re.split(r"(?=Balloon\s+\d+:\s*)", text[m0.start() :] if m0 else text)
+    for chunk in balloon_chunks:
+        hm = _RE_BALLOON_HEADER.match(chunk.strip())
+        if not hm:
+            continue
+        balloon_id = int(hm.group(1))
+        sm = _RE_BALLOON_SEQUENCE.search(chunk)
+        if not sm:
+            continue
+        key_seq = [k.upper() for k in re.findall(r"<<([A-Z])>>", sm.group(1), re.I)]
+        if not key_seq:
+            continue
+        cashout_points = int(sm.group(2)) if sm.group(2) is not None else None
+        exploded = cashout_points is None
+
+        trials: List[ParsedTrial] = []
+        pump_count = 0
+        accumulated_points = 0
+        for i, key in enumerate(key_seq):
+            if key not in option_keys:
+                raise ValueError(f"frey_risk: key {key} not in inferred {option_keys}")
+            action = option_keys.index(key)
+            is_last = i == len(key_seq) - 1
+            outcome_marker = "ongoing"
+            feedback: Optional[Any] = None
+            if is_last:
+                if exploded:
+                    outcome_marker = "explode"
+                    feedback = 0.0
+                elif action == 1:
+                    outcome_marker = "cashout"
+                    feedback = float(cashout_points)
+            trials.append(
+                ParsedTrial(
+                    action=action,
+                    feedback=feedback,
+                    problem_fields={
+                        "balloon_id": balloon_id,
+                        "step_index": i,
+                        "pump_count_before": pump_count,
+                        "accumulated_points_before": accumulated_points,
+                        "pump_key": pump_key,
+                        "stop_key": stop_key,
+                        "outcome_marker": outcome_marker,
+                        "exploded": exploded and is_last,
+                    },
+                )
+            )
+            if action == 0:
+                pump_count += 1
+                accumulated_points += 1
+
+        # Some transcripts report cashout without an explicit stop key in the compressed sequence.
+        if cashout_points is not None and key_seq[-1] != stop_key:
+            trials.append(
+                ParsedTrial(
+                    action=1,
+                    feedback=float(cashout_points),
+                    problem_fields={
+                        "balloon_id": balloon_id,
+                        "step_index": len(key_seq),
+                        "pump_count_before": pump_count,
+                        "accumulated_points_before": accumulated_points,
+                        "pump_key": pump_key,
+                        "stop_key": stop_key,
+                        "outcome_marker": "cashout",
+                        "exploded": False,
+                    },
+                )
+            )
+
+        if not trials:
+            continue
+        blocks.append(
+            PsychBlock(
+                trials=trials,
+                option_keys=list(option_keys),
+                problem_static={
+                    "schema_type": "D",
+                    "option_keys": list(option_keys),
+                    "balloon_id": balloon_id,
+                    "pump_key": pump_key,
+                    "stop_key": stop_key,
+                },
+                schema_type="D",
+            )
+        )
+
+    if not blocks:
+        raise ValueError("frey_risk parser produced no balloon blocks")
+    return PsychExperiment(
+        instruction=instruction,
+        blocks=blocks,
+        dataset_alias=dataset_alias,
+        schema_type="D",
+    )
+
+
+def parse_enkavi_recentprobes_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
+    text = row["text"]
+    m0 = re.search(r"You are shown the letters", text, re.I)
+    instruction = text[: m0.start()].strip() if m0 else text.split("\n\n")[0]
+    km = _RE_ENKAVI_KEYMAP.search(text)
+    if km:
+        yes_key = km.group(1).upper()
+        no_key = km.group(2).upper()
+        option_keys = [no_key, yes_key]
+    else:
+        # Keep action=1 as "yes/in-set" when key mapping is not explicitly parsed.
+        option_keys = ["L", "N"]
+    trials: List[ParsedTrial] = []
+    for m in _RE_ENKAVI_TRIAL.finditer(text):
+        letters_raw = m.group(1)
+        memory_set = [x.strip().strip("'\"") for x in letters_raw.split(",") if x.strip()]
+        probe_letter = m.group(2).upper()
+        key = m.group(3).upper()
+        if key not in option_keys:
+            raise ValueError(f"enkavi: key {key} not in {option_keys}")
+        action = option_keys.index(key)
+        probe_in_set = probe_letter in set(memory_set)
+        trials.append(
+            ParsedTrial(
+                action=action,
+                feedback=None,
+                problem_fields={
+                    "memory_set_letters": memory_set,
+                    "probe_letter": probe_letter,
+                    "probe_in_set": probe_in_set,
+                    "yes_key": option_keys[1],
+                    "no_key": option_keys[0],
+                },
+            )
+        )
+    if not trials:
+        raise ValueError("enkavi parser produced no trials")
+    return PsychExperiment(
+        instruction=instruction,
+        blocks=[
+            PsychBlock(
+                trials=trials,
+                option_keys=option_keys,
+                problem_static={
+                    "schema_type": "B",
+                    "option_keys": option_keys,
+                    "task": "recent_probes_memory",
+                    "key_mapping": {"no": option_keys[0], "yes": option_keys[1]},
+                },
+                schema_type="B",
+            )
+        ],
+        dataset_alias=dataset_alias,
+        schema_type="B",
+    )
+
+
+def parse_badham_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
+    text = row["text"]
+    m0 = _RE_BADHAM_BLOCK_SPLIT.search(text)
+    instruction = text[: m0.start()].strip() if m0 else text.split("\n\n")[0]
+    block_chunks = _RE_BADHAM_BLOCK_SPLIT.split(text)
+    blocks: List[PsychBlock] = []
+    cm = re.search(r"belongs to the ([A-Z]) or ([A-Z]) category", instruction, re.I)
+    if cm:
+        option_keys = [cm.group(1).upper(), cm.group(2).upper()]
+    else:
+        seen_keys = [k.upper() for k in re.findall(r"You press <<([A-Z])>>", text)]
+        uniq = []
+        for k in seen_keys:
+            if k not in uniq:
+                uniq.append(k)
+        if len(uniq) < 2:
+            raise ValueError("badham: could not infer two category keys")
+        option_keys = uniq[:2]
+
+    for block_id, chunk in enumerate(block_chunks[1:]):
+        trials: List[ParsedTrial] = []
+        for m in _RE_BADHAM_TRIAL.finditer(chunk):
+            size = m.group(1).lower()
+            color = m.group(2).lower()
+            shape = m.group(3).lower()
+            key = m.group(4).upper()
+            correct_category = m.group(5).upper()
+            if key not in option_keys:
+                raise ValueError(f"badham: key {key} not in {option_keys}")
+            action = option_keys.index(key)
+            is_correct = key == correct_category
+            trials.append(
+                ParsedTrial(
+                    action=action,
+                    feedback={
+                        "correct_category": correct_category,
+                        "is_correct": is_correct,
+                    },
+                    problem_fields={
+                        "rule_block_id": block_id,
+                        "stimulus_features": {
+                            "size": size,
+                            "color": color,
+                            "shape": shape,
+                        },
+                        "correct_category": correct_category,
+                        "category_key_mapping": {
+                            option_keys[0]: option_keys[0],
+                            option_keys[1]: option_keys[1],
+                        },
+                        "response_key": key,
+                    },
+                )
+            )
+        if not trials:
+            continue
+        blocks.append(
+            PsychBlock(
+                trials=trials,
+                option_keys=list(option_keys),
+                problem_static={
+                    "schema_type": "B",
+                    "option_keys": list(option_keys),
+                    "task": "category_learning",
+                    "rule_block_id": block_id,
+                },
+                schema_type="B",
+            )
+        )
+
+    if not blocks:
+        raise ValueError("badham parser produced no blocks")
+    return PsychExperiment(
+        instruction=instruction,
+        blocks=blocks,
+        dataset_alias=dataset_alias,
+        schema_type="B",
+    )
+
+
 PARSER_DISPATCH = {
     "choice13k": _experiment_from_choice13k_row,
     "option_delivers_extended": _experiment_from_plonsky_row,
@@ -606,4 +984,8 @@ PARSER_DISPATCH = {
     "slot_machine_bandit": parse_sadeghiyeh_row,
     "columbia_card_task": parse_frey_cct_row,
     "tree_accept_reject": parse_flesch_row,
+    "wilson_two_armed_bandit": parse_wilson_row,
+    "frey_balloon_risk": parse_frey_risk_row,
+    "enkavi_recent_probes": parse_enkavi_recentprobes_row,
+    "badham_category_learning": parse_badham_row,
 }

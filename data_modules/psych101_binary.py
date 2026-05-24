@@ -128,6 +128,46 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
         "implemented": True,
         "task_description": "Tree accept/reject in North/South gardens.",
     },
+    "9wilson2014humans": {
+        "experiment_id": "wilson2014humans/",
+        "display_name": "Wilson two-armed bandit",
+        "schema_type": "C",
+        "parser": "wilson_two_armed_bandit",
+        "implemented": True,
+        "task_description": (
+            "Two-armed slot-machine bandit across games; instructed then free-choice trials."
+        ),
+    },
+    "10frey2017risk": {
+        "experiment_id": "frey2017risk/exp1.csv",
+        "display_name": "Frey balloon risk",
+        "schema_type": "D",
+        "parser": "frey_balloon_risk",
+        "implemented": True,
+        "task_description": (
+            "Balloon risk task with compressed pump/stop key sequences and cashout/explosion outcomes."
+        ),
+    },
+    "11enkavi2019recentprobes": {
+        "experiment_id": "enkavi2019recentprobes/exp1.csv",
+        "display_name": "Enkavi recent probes",
+        "schema_type": "B",
+        "parser": "enkavi_recent_probes",
+        "implemented": True,
+        "task_description": (
+            "Recent-probes memory task with memory-set letters and probe-recognition binary choice."
+        ),
+    },
+    "12badham2017deficits": {
+        "experiment_id": "badham2017deficits/exp1.csv",
+        "display_name": "Badham category learning",
+        "schema_type": "B",
+        "parser": "badham_category_learning",
+        "implemented": True,
+        "task_description": (
+            "Category learning with geometric stimuli, key/category mapping, and trial-level feedback."
+        ),
+    },
 }
 
 # Unprefixed aliases accepted on CLI for backward compatibility.
@@ -217,6 +257,8 @@ def get_filtered_psych101_split(
         )
     exp_id = experiment_id_for_alias(alias)
     split_ds = _load_hf_split(split, local_dataset=local_dataset)
+    if str(exp_id).endswith("/"):
+        return split_ds.filter(lambda ex, e=str(exp_id): str(ex["experiment"]).startswith(e))
     return split_ds.filter(lambda ex, e=exp_id: ex["experiment"] == e)
 
 

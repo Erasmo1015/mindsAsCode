@@ -172,6 +172,10 @@ def _action_key(keys: List[str], action: int) -> str:
 
 
 def _schema_b_subtype(problem: Dict[str, Any]) -> str:
+    if "memory_set_letters" in problem and "probe_letter" in problem:
+        return "memory_probe"
+    if "stimulus_features" in problem and "correct_category" in problem:
+        return "category_learning"
     if "tree_features" in problem:
         return "tree"
     if "cards" in problem or problem.get("features", {}).get("task") == "weather_prediction":
@@ -347,6 +351,29 @@ def _build_cct_prefix(
     return "\n\n".join(parts)
 
 
+def _balloon_problem_line(problem: Dict[str, Any]) -> str:
+    balloon_id = problem.get("balloon_id", "?")
+    pump_n = problem.get("pump_count_before", 0)
+    acc = problem.get("accumulated_points_before", 0)
+    return (
+        f"Balloon {balloon_id}: You have pumped {pump_n} times and accumulated {acc} points. "
+        f"You can pump once more or stop and cash out."
+    )
+
+
+def _balloon_history_line(past_problem: Dict[str, Any], h: Dict[str, Any]) -> str:
+    keys = past_problem.get("option_keys", [])
+    letter = _action_key(keys, int(h["action"]))
+    line = f"You press <<{letter}>>."
+    marker = str(h.get("outcome_marker", "ongoing"))
+    if marker == "cashout":
+        fb = h.get("feedback", 0)
+        line += f" You stop inflating the balloon and get {int(float(fb))} points."
+    elif marker == "explode" or h.get("exploded"):
+        line += " The balloon was inflated too much and explodes."
+    return line
+
+
 def _build_schema_b_prefix(
     trials: List[Dict[str, Any]], trial_index: int, *, instruction: str = ""
 ) -> str:
@@ -364,12 +391,39 @@ def _build_schema_b_prefix(
             parts.append(_weather_history_line(pp, h))
         elif subtype == "tree":
             parts.append(_tree_history_line(pp, h))
+        elif subtype == "memory_probe":
+            ms = pp.get("memory_set_letters", [])
+            probe = pp.get("probe_letter", "?")
+            letter = _action_key(pp.get("option_keys", []), int(h["action"]))
+            parts.append(
+                f"You are shown the letters {ms}. You see the letter {probe}. You press <<{letter}>>."
+            )
+        elif subtype == "category_learning":
+            sf = pp.get("stimulus_features", {})
+            size = sf.get("size", "?")
+            color = sf.get("color", "?")
+            shape = sf.get("shape", "?")
+            letter = _action_key(pp.get("option_keys", []), int(h["action"]))
+            corr = h.get("correct_category", pp.get("correct_category", "?"))
+            parts.append(
+                f"You see a {size} {color} {shape}. You press <<{letter}>>. The correct category is {corr}."
+            )
         else:
             parts.append(_product_history_line(pp, h))
     if subtype == "weather":
         parts.append(_weather_trial_lines(cur))
     elif subtype == "tree":
         parts.append(_tree_problem_line(cur))
+    elif subtype == "memory_probe":
+        parts.append(
+            f"You are shown the letters {cur.get('memory_set_letters', [])}. "
+            f"You see the letter {cur.get('probe_letter', '?')}."
+        )
+    elif subtype == "category_learning":
+        sf = cur.get("stimulus_features", {})
+        parts.append(
+            f"You see a {sf.get('size', '?')} {sf.get('color', '?')} {sf.get('shape', '?')}."
+        )
     else:
         parts.append(_product_problem_lines(cur))
     parts.append("You press ")
@@ -390,6 +444,24 @@ def _build_bandit_prefix(
         parts.append(_bandit_game_header(cur))
     for j, h in enumerate(hist):
         parts.append(_bandit_history_line(h))
+    parts.append("You press ")
+    return "\n\n".join(parts)
+
+
+def _build_balloon_prefix(
+    trials: List[Dict[str, Any]], trial_index: int, *, instruction: str = ""
+) -> str:
+    cur = trials[trial_index]["problem"]
+    hist = trials[trial_index]["history"]
+    L = len(hist)
+    start = trial_index - L
+    parts: List[str] = []
+    if instruction.strip():
+        parts.append(instruction.strip()[:2000])
+    if L == 0 or trials[start - 1]["problem"].get("balloon_id") != cur.get("balloon_id"):
+        parts.append(_balloon_problem_line(cur))
+    for j, h in enumerate(hist):
+        parts.append(_balloon_history_line(trials[start + j]["problem"], h))
     parts.append("You press ")
     return "\n\n".join(parts)
 
@@ -426,6 +498,8 @@ def build_centaur_prompt_prefix_indexed(
     ):
         return _build_gamble_prefix(trials, trial_index, instruction=instruction)
     if schema == "D":
+        if "balloon_id" in trials[trial_index]["problem"]:
+            return _build_balloon_prefix(trials, trial_index, instruction=instruction)
         return _build_cct_prefix(trials, trial_index, instruction=instruction)
     if schema == "B":
         return _build_schema_b_prefix(trials, trial_index, instruction=instruction)

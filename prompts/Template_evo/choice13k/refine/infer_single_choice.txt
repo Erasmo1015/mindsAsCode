@@ -8,6 +8,7 @@ Preserve the strongest structure from the current program.
 Prefer targeted edits: adjust scaling, thresholds, confidence, feature weights; add one missing component; or weaken components that hurt validation.
 
 Do not replace a strong training-evolved rule with an unrelated generic rule.
+Preserve useful existing history/feedback logic when it helps.
 Do not add new history/feedback terms unless the available fields support them.
 If using history/feedback, handle empty history, missing feedback keys, and None feedback safely.
 

@@ -521,6 +521,27 @@ def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
     problem = trial.get("problem") or {}
     if "gamble_A" in problem:
         core = _compact_gamble(problem)
+    elif "memory_set_letters" in problem and "probe_letter" in problem:
+        core = (
+            "memory_set="
+            f"{problem.get('memory_set_letters', [])} "
+            f"probe={problem.get('probe_letter')} "
+            f"in_set={problem.get('probe_in_set')}"
+        )
+    elif "stimulus_features" in problem and "correct_category" in problem:
+        sf = problem.get("stimulus_features") or {}
+        core = (
+            f"stim=({sf.get('size')},{sf.get('color')},{sf.get('shape')}) "
+            f"correct={problem.get('correct_category')} "
+            f"rule_block={problem.get('rule_block_id')}"
+        )
+    elif "balloon_id" in problem and "pump_count_before" in problem:
+        core = (
+            f"balloon={problem.get('balloon_id')} "
+            f"pump_n={problem.get('pump_count_before')} "
+            f"acc={problem.get('accumulated_points_before')} "
+            f"outcome={problem.get('outcome_marker')}"
+        )
     else:
         keys = problem.get("option_keys") or []
         core = f"keys={list(keys)}"
