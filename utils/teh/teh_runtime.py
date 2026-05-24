@@ -211,7 +211,7 @@ def _infer_history_feedback_guidance(
     instruction: str = "",
     schema_summary: str = "",
 ) -> List[str]:
-    """Dataset-specific history/feedback role text derived from parsed examples."""
+    """Minimal history/feedback availability guidance from parsed examples."""
     audit = _prompt_schema_audit_from_trials(
         dataset_alias, trials, instruction, schema_summary
     )
@@ -220,72 +220,19 @@ def _infer_history_feedback_guidance(
     no_history_entries = audit["total_history_entries"] == 0
     has_actions = audit["hist_action_key_present"] > 0
     feedback_any_non_none = audit["hist_feedback_non_none"] > 0
-    feedback_absent_or_none = (
-        audit["hist_feedback_key_present"] == 0 or not feedback_any_non_none
-    )
+    feedback_absent_or_none = not feedback_any_non_none
 
     if history_empty or no_history_entries:
-        lines.append(
-            "History is empty in parsed examples; rely on current problem fields instead of creating artificial history terms."
-        )
+        lines.append("History is empty in parsed examples; rely on current problem fields.")
+        lines.append("Non-None feedback is not observed in parsed examples.")
     elif has_actions and feedback_absent_or_none:
-        lines.append(
-            "History contains prior actions, but non-None outcome feedback is not observed in parsed examples."
-        )
-        lines.append(
-            "Do not create feedback-based rules when feedback is absent or always None."
-        )
-        lines.append("If using history, use action-history safely.")
+        lines.append("Parsed examples contain prior actions.")
+        lines.append("Non-None feedback is not observed in parsed examples.")
     elif has_actions and feedback_any_non_none:
-        lines.append(
-            "History contains prior actions and some non-None feedback values."
-        )
-        if audit["feedback_key_may_be_absent"] or audit["feedback_may_be_none"]:
-            lines.append(
-                "Some history entries may still have missing feedback keys or None feedback values."
-            )
-    elif audit["total_history_entries"] > 0:
-        lines.append(
-            "History entries are present; use only observed keys and guard key access safely."
-        )
-
-    if audit["feedback_key_may_be_absent"]:
-        lines.append("The feedback key may be absent from some history entries.")
-        lines.append(
-            'Do not use h["feedback"] or history[-1]["feedback"] without checking key existence.'
-        )
-        lines.append(
-            'Prefer h.get("feedback") and explicitly check whether the value is None.'
-        )
-    elif audit["feedback_may_be_none"] or audit["feedback_observed_non_none"]:
-        lines.append(
-            'Prefer h.get("feedback") and explicitly check whether the value is None.'
-        )
-        if audit["feedback_observed_non_none"] and (
-            audit["feedback_may_be_none"] or audit["feedback_key_may_be_absent"]
-        ):
-            lines.append(
-                "Feedback may still be missing or None in some entries, so guard all key access."
-            )
-
-    if audit["hist_action_key_missing"] > 0:
-        lines.append(
-            'If using history, use only entries that contain "action" or guard key access safely.'
-        )
-
-    if (history_empty or no_history_entries) and audit["has_gamble_ab"]:
-        lines.append(
-            "History is empty in parsed examples; rely on current problem fields."
-        )
-    elif history_empty or no_history_entries:
-        lines.append(
-            "History is empty in parsed examples; rely on currently observed problem fields."
-        )
-
-    if is_mixed_gambles_dataset(dataset_alias):
-        lines = [line for line in lines if "feedback-based rules" not in line] + [
-            "Do not invent feedback-based rules when feedback is absent or always None in parsed examples."
-        ]
+        lines.append("Parsed examples contain prior actions.")
+        lines.append("Some feedback values are observed; feedback may be missing or None.")
+    else:
+        lines.append("History entries are present; use only observed history keys.")
 
     deduped: List[str] = []
     seen = set()
@@ -457,12 +404,22 @@ def _ensure_invariant_base_sections(
         out = out.rstrip() + "\n\n" + final_rule + "\n"
 
     if audit.get("has_gamble_ab"):
-        action_mapping_lines = [
-            '- action 0 -> `problem["gamble_A"]`',
-            '- action 1 -> `problem["gamble_B"]`',
-            "- return P(action=1)",
-        ]
-        if not all(line in out for line in action_mapping_lines):
+        out_l = out.lower()
+        has_action0 = (
+            'action 0 -> problem["gamble_a"]' in out_l
+            or 'action 0 -> `problem["gamble_a"]`' in out_l
+        )
+        has_action1 = (
+            'action 1 -> problem["gamble_b"]' in out_l
+            or 'action 1 -> `problem["gamble_b"]`' in out_l
+        )
+        has_return = "return p(action=1)" in out_l
+        if not (has_action0 and has_action1 and has_return):
+            action_mapping_lines = [
+                '- action 0 -> `problem["gamble_A"]`',
+                '- action 1 -> `problem["gamble_B"]`',
+                "- return P(action=1)",
+            ]
             warnings.append("Missing gamble action mapping; restored canonical mapping.")
             out = (
                 out.rstrip()
@@ -555,24 +512,9 @@ def _dataset_task_format_guidance(
                 'problem["gamble_A"] corresponds to action 0.',
                 'problem["gamble_B"] corresponds to action 1.',
                 "choose(problem, history) returns P(action=1).",
-                "Use only fields observed in the runtime schema summary and parsed examples.",
+                "Use only fields observed in parsed examples/schema.",
             ]
         )
-        if audit["total_history_entries"] == 0:
-            lines.append(
-                "History is empty in parsed examples; history/feedback is unavailable in these parsed examples."
-            )
-        elif audit["hist_action_key_present"] > 0 and not audit["feedback_observed_non_none"]:
-            lines.append(
-                "Action history is available in parsed examples, but non-None feedback is unavailable."
-            )
-            lines.append(
-                "Do not create feedback-based rules when non-None feedback is not observed."
-            )
-        elif audit["feedback_observed_non_none"]:
-            lines.append(
-                "Non-None feedback is observed in parsed examples; guard key access because feedback may still be missing or None in some entries."
-            )
         return lines
 
     action_sem = _extract_action_semantics(schema_summary)
@@ -595,25 +537,10 @@ def _dataset_task_format_guidance(
 
 
 def _ensure_history_feedback_guidance(text: str, guidance_lines: Sequence[str]) -> str:
-    """Append canonical history/feedback guidance when absent from generated prompt text."""
+    """Ensure a minimal History and feedback section exists."""
     if not guidance_lines:
         return text
     if "History and feedback:" in text:
-        critical = [
-            line
-            for line in guidance_lines
-            if "feedback key may be absent" in line.lower()
-            or "h.get(\"feedback\")" in line
-            or "do not use h[\"feedback\"]" in line.lower()
-        ]
-        missing = [line for line in critical if line not in text]
-        if missing:
-            return (
-                text.rstrip()
-                + "\n\n"
-                + _format_guidance_section("History and feedback safety additions:", missing)
-                + "\n"
-            )
         return text
     return text.rstrip() + "\n\n" + _format_history_feedback_section(guidance_lines) + "\n"
 
@@ -626,18 +553,18 @@ def _ensure_section(text: str, section_text: str, section_title: str) -> str:
 
 def _has_history_safety_content(text: str) -> bool:
     lower = text.lower()
-    has_feedback_guard = (
+    has_empty_history = (
+        "history may be empty" in lower
+        or "history is empty" in lower
+        or "code must work when history is empty" in lower
+        or "code must work when `history` is empty" in lower
+    )
+    has_feedback_absence_guard = (
         'h.get("feedback")' in text
         or "feedback key may be absent" in lower
         or "feedback may be absent" in lower
-        or "do not use h[\"feedback\"]" in lower
     )
-    has_empty_history_guard = (
-        "history is empty" in lower
-        or "code must work when `history` is empty" in lower
-        or "code must work when history is empty" in lower
-    )
-    return has_feedback_guard and has_empty_history_guard
+    return has_empty_history and has_feedback_absence_guard
 
 
 def _has_numerical_stability_content(text: str) -> bool:
@@ -645,6 +572,14 @@ def _has_numerical_stability_content(text: str) -> bool:
     has_clip = (
         "clip the score to a safe range before exponentiation" in lower
         or "clip the score to a safe range" in lower
+        or "clip the score before exponentiation" in lower
+        or "clip to a safe range" in lower
+    )
+    has_exp_or_overflow = (
+        "exponentiation" in lower
+        or "exponential" in lower
+        or "overflow" in lower
+        or "unbounded" in lower
     )
     has_exp_guard = (
         "avoid unbounded 10 ** (-score)" in lower
@@ -652,15 +587,15 @@ def _has_numerical_stability_content(text: str) -> bool:
         or ("avoid unbounded" in lower and "exponent" in lower)
         or "overflow" in lower
     )
-    return has_clip and has_exp_guard
+    return has_clip and (has_exp_guard or has_exp_or_overflow)
 
 
 def _ensure_compact_prompt_safety_additions(text: str, audit: Dict[str, Any]) -> str:
     out = text.rstrip()
     if not _has_history_safety_content(out):
         history_additions: List[str] = [
-            "Code must work when history is empty.",
-            'Prefer h.get("feedback") and explicitly check whether the value is None; feedback key may be absent.',
+            "History may be empty.",
+            'Prefer h.get("feedback"); feedback key may be absent.',
         ]
         if audit.get("total_history_entries", 0) == 0:
             history_additions.append(
@@ -691,29 +626,7 @@ def _ensure_compact_prompt_safety_additions(text: str, audit: Dict[str, Any]) ->
 
 
 def _ensure_prompt_safety_content(text: str, audit: Dict[str, Any]) -> str:
-    out = text
-    lower = out.lower()
-    if audit.get("feedback_key_may_be_absent"):
-        feedback_safety_tokens = (
-            'h.get("feedback")' in out
-            or "feedback key may be absent" in lower
-            or "guard feedback access" in lower
-        )
-        if not feedback_safety_tokens:
-            out = (
-                out.rstrip()
-                + "\n\n"
-                + _format_guidance_section(
-                    "Feedback key safety addition:",
-                    [
-                        "Feedback key may be absent in some history entries; guard feedback access safely.",
-                        'Prefer h.get("feedback") and explicitly check whether the value is None.',
-                    ],
-                )
-                + "\n"
-            )
-
-    return _ensure_compact_prompt_safety_additions(out, audit)
+    return _ensure_compact_prompt_safety_additions(text, audit)
 
 
 _CCT_PROBLEM_KEYS = frozenset(
@@ -1274,7 +1187,6 @@ def build_prompt_generation_llm_user_content(
         schema_summary,
         audit,
     )
-    history_safety = _history_safety_requirements_from_audit(audit)
     base_prompt = _base_prompt_for_trials(
         sample_trials,
         schema_summary,
@@ -1334,7 +1246,6 @@ def build_prompt_generation_llm_user_content(
         f"{json.dumps({k: audit[k] for k in ('observed_problem_keys', 'observed_history_keys', 'total_trial_count', 'empty_history_trial_count', 'total_history_entries', 'hist_action_key_present', 'hist_action_key_missing', 'hist_feedback_key_present', 'hist_feedback_key_missing', 'hist_feedback_none', 'hist_feedback_non_none', 'has_feedback_ever_true', 'has_feedback_ever_false', 'feedback_key_may_be_absent', 'feedback_may_be_none', 'feedback_observed_non_none', 'schema_types')}, indent=2)}\n\n"
         f"{_format_guidance_section('Dataset/task-format guidance:', dataset_guidance_lines)}\n\n"
         f"{_format_history_feedback_section(guidance_lines)}\n\n"
-        f"{history_safety}\n\n"
         f"## Invariant base prompt (do not rewrite)\n\n{base_prompt}\n\n"
         f"## Task description (high-level)\n\n{task_description}\n\n"
         f"## Instruction excerpt from data\n\n{instruction[:2000]}\n\n"
