@@ -12,8 +12,8 @@ When ``--experiment_paths`` is omitted, the newest TEH ``run_*`` under
 ``generated_outputs/psych101_{train|test}/teh/<dataset>/`` (or
 ``generated_outputs/mixed_gambles/teh/``) is selected automatically.
 
-``--all_in`` runs all train Psych-101 datasets plus mixed_gambles and prints a
-cross-dataset summary (avg test_loglik, avg gated, num_best per method).
+``--all_in`` runs the default dataset subset in ``_ALL_IN_DATASETS`` and prints
+a cross-dataset summary (avg test_loglik, avg gated, num_best per method).
 
 ``--accuracy`` compares test accuracy instead of test_loglik (works with ``--all_in``).
 Accuracy is loaded from ``participants_summary.csv`` when present, else
@@ -128,17 +128,10 @@ _SUMMARY_METHOD_LABELS = _BASELINE_METHODS + ("TEH",)
 _ALL_IN_DATASETS: Tuple[str, ...] = (
     "1peterson2021using",
     "2plonsky2018when",
-    "3frey2017cct",
-    "4wulff2018description",
     "5speekenbrink2008learning",
-    "6sadeghiyeh2020temporal",
-    "7hilbig2014generalized",
-    "8flesch2018comparing",
-    "9wilson2014humans",
     "10frey2017risk",
     "11enkavi2019recentprobes",
     "12badham2017deficits",
-    "mixed_gambles",
 )
 # Temporary: hide these datasets from --all_in printed wide tables only.
 _ALL_IN_PRINT_EXCLUDE: Tuple[str, ...] = ("8flesch2018comparing",)
@@ -2296,7 +2289,7 @@ def main() -> None:
         "--all_in",
         action="store_true",
         help=(
-            "Run all train Psych-101 datasets plus mixed_gambles (see _ALL_IN_DATASETS) "
+            "Run the default dataset subset for --all_in (see _ALL_IN_DATASETS) "
             "and print a cross-dataset summary table."
         ),
     )
