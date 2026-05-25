@@ -13,7 +13,8 @@ When ``--experiment_paths`` is omitted, the newest TEH ``run_*`` under
 ``generated_outputs/mixed_gambles/teh/``) is selected automatically.
 
 ``--all_in`` runs the default dataset subset in ``_ALL_IN_DATASETS`` and prints
-a cross-dataset summary (avg test_loglik, avg gated, num_best per method).
+a cross-dataset summary (avg test_loglik, avg gated, num_best per method, plus
+PT-best/Ours-second and MLE-best/Ours-second counts with average gaps).
 
 ``--accuracy`` compares test accuracy instead of test_loglik (works with ``--all_in``).
 Accuracy is loaded from ``participants_summary.csv`` when present, else
@@ -116,6 +117,7 @@ _COMPARE_DATASET_CHOICES = sorted(
 _TEST_LOGLIK = "test_loglik"
 _GATED_LOGLIK = "gated_test_loglik"
 _LOGLIK_NDIGITS = 2
+_LOGLIK_WIN_THRESHOLD = -0.69
 _TEST_ACC = "test_acc"
 _TRAIN_ACC = "train_acc"
 _ACC_NDIGITS = 4
@@ -1378,6 +1380,104 @@ def _num_best_counts(
     return counts
 
 
+def _count_above_threshold(
+    participant_ids: Sequence[int],
+    method_columns: Sequence[Tuple[str, Dict[int, float]]],
+    *,
+    threshold: float,
+) -> Dict[str, int]:
+    """Per-method participant count with finite score > threshold."""
+    counts = {label: 0 for label, _ in method_columns}
+    for pid in participant_ids:
+        for label, scores in method_columns:
+            if pid not in scores:
+                continue
+            value = scores[pid]
+            if math.isfinite(value) and value > threshold:
+                counts[label] += 1
+    return counts
+
+
+def _best_method_ours_second_stats(
+    participant_ids: Sequence[int],
+    method_columns: Sequence[Tuple[str, Dict[int, float]]],
+    *,
+    best_label: str,
+    ours_label: str,
+) -> Tuple[int, str]:
+    """
+    Count participants where best_label is best and Ours (TEH) is second.
+
+    "Best" allows ties for best_label at the maximum score.
+    "Second" allows ties at the second-highest score among non-best methods.
+    """
+    method_map = {label: scores for label, scores in method_columns}
+    best_scores = method_map.get(best_label, {})
+    ours_scores = method_map.get(ours_label, {})
+    count = 0
+    gaps: List[float] = []
+    for pid in participant_ids:
+        if pid not in best_scores or pid not in ours_scores:
+            continue
+        best_val = best_scores[pid]
+        ours_val = ours_scores[pid]
+        if not (math.isfinite(best_val) and math.isfinite(ours_val)):
+            continue
+        vals = {
+            label: scores[pid]
+            for label, scores in method_columns
+            if pid in scores and math.isfinite(scores[pid])
+        }
+        if best_label not in vals or ours_label not in vals:
+            continue
+        top_val = max(vals.values())
+        if vals[best_label] < top_val:
+            continue
+        if vals[ours_label] >= vals[best_label]:
+            continue
+        non_best = [v for label, v in vals.items() if label != best_label]
+        if not non_best:
+            continue
+        second_val = max(non_best)
+        if vals[ours_label] == second_val:
+            count += 1
+            gaps.append(vals[best_label] - vals[ours_label])
+    return count, _finite_mean(gaps, ndigits=_LOGLIK_NDIGITS)
+
+
+def _best_method_avg_gap(
+    participant_ids: Sequence[int],
+    method_columns: Sequence[Tuple[str, Dict[int, float]]],
+    *,
+    best_label: str,
+    ours_label: str,
+) -> str:
+    """Average (best_label - Ours) over participants where best_label is best."""
+    method_map = {label: scores for label, scores in method_columns}
+    best_scores = method_map.get(best_label, {})
+    ours_scores = method_map.get(ours_label, {})
+    gaps: List[float] = []
+    for pid in participant_ids:
+        if pid not in best_scores or pid not in ours_scores:
+            continue
+        best_val = best_scores[pid]
+        ours_val = ours_scores[pid]
+        if not (math.isfinite(best_val) and math.isfinite(ours_val)):
+            continue
+        vals = {
+            label: scores[pid]
+            for label, scores in method_columns
+            if pid in scores and math.isfinite(scores[pid])
+        }
+        if best_label not in vals or ours_label not in vals:
+            continue
+        top_val = max(vals.values())
+        if vals[best_label] < top_val:
+            continue
+        gaps.append(vals[best_label] - vals[ours_label])
+    return _finite_mean(gaps, ndigits=_LOGLIK_NDIGITS)
+
+
 def _write_baseline_comparison_csv(
     *,
     out_path: Path,
@@ -1539,11 +1639,16 @@ class _DatasetCompareSummary:
     avg_gated: Dict[str, str] = field(default_factory=dict)
     num_best_test: Dict[str, int] = field(default_factory=dict)
     num_best_gated: Dict[str, int] = field(default_factory=dict)
+    num_test_loglik_gt_threshold: Dict[str, int] = field(default_factory=dict)
     found_methods: frozenset[str] = field(default_factory=frozenset)
     output_csv: Optional[Path] = None
     gated_csv: Optional[Path] = None
     error: Optional[str] = None
     compare_accuracy: bool = False
+    pt_best_ours_second_count: int = 0
+    pt_best_ours_second_avg_gap: str = ""
+    mle_best_ours_second_count: int = 0
+    mle_best_avg_gap: str = ""
 
 
 def _summary_found_methods(
@@ -1603,6 +1708,11 @@ def _build_dataset_summary(
     gated_csv: Optional[Path] = None,
     avg_gated: Optional[Mapping[str, str]] = None,
     best_gated: Optional[Mapping[str, int]] = None,
+    num_test_loglik_gt_threshold: Optional[Mapping[str, int]] = None,
+    pt_best_ours_second_count: int = 0,
+    pt_best_ours_second_avg_gap: str = "",
+    mle_best_ours_second_count: int = 0,
+    mle_best_avg_gap: str = "",
 ) -> _DatasetCompareSummary:
     return _DatasetCompareSummary(
         dataset=dataset,
@@ -1621,10 +1731,20 @@ def _build_dataset_summary(
         num_best_gated=_collapse_metric_row(
             best_gated or {}, teh_labels=teh_labels, found_methods=found_methods, value_type=int
         ),
+        num_test_loglik_gt_threshold=_collapse_metric_row(
+            num_test_loglik_gt_threshold or {},
+            teh_labels=teh_labels,
+            found_methods=found_methods,
+            value_type=int,
+        ),
         found_methods=frozenset(found_methods),
         output_csv=output_csv,
         gated_csv=gated_csv,
         compare_accuracy=compare_accuracy,
+        pt_best_ours_second_count=int(pt_best_ours_second_count),
+        pt_best_ours_second_avg_gap=str(pt_best_ours_second_avg_gap),
+        mle_best_ours_second_count=int(mle_best_ours_second_count),
+        mle_best_avg_gap=str(mle_best_avg_gap),
     )
 
 
@@ -1642,6 +1762,11 @@ def _write_all_in_summary_csv(
             "method",
             "avg_test_acc",
             "num_best_test",
+            "pt_best_ours_second_count",
+            "pt_best_ours_second_avg_gap",
+            "mle_best_ours_second_count",
+            "mle_best_avg_gap",
+            "num_test_loglik_gt_threshold",
             "output_csv",
             "error",
         ]
@@ -1656,6 +1781,11 @@ def _write_all_in_summary_csv(
             "avg_gated_test_loglik",
             "num_best_test",
             "num_best_gated",
+            "pt_best_ours_second_count",
+            "pt_best_ours_second_avg_gap",
+            "mle_best_ours_second_count",
+            "mle_best_avg_gap",
+            "num_test_loglik_gt_threshold",
             "output_csv",
             "gated_csv",
             "error",
@@ -1670,6 +1800,11 @@ def _write_all_in_summary_csv(
                 "teh_run": s.teh_run,
                 "method": "",
                 "num_best_test": "",
+                "pt_best_ours_second_count": str(s.pt_best_ours_second_count),
+                "pt_best_ours_second_avg_gap": s.pt_best_ours_second_avg_gap,
+                "mle_best_ours_second_count": str(s.mle_best_ours_second_count),
+                "mle_best_avg_gap": s.mle_best_avg_gap,
+                "num_test_loglik_gt_threshold": "",
                 "output_csv": str(s.output_csv or ""),
                 "error": s.error,
             }
@@ -1690,6 +1825,13 @@ def _write_all_in_summary_csv(
                 "teh_run": s.teh_run,
                 "method": method,
                 "num_best_test": str(s.num_best_test.get(method, "")),
+                "pt_best_ours_second_count": str(s.pt_best_ours_second_count),
+                "pt_best_ours_second_avg_gap": s.pt_best_ours_second_avg_gap,
+                "mle_best_ours_second_count": str(s.mle_best_ours_second_count),
+                "mle_best_avg_gap": s.mle_best_avg_gap,
+                "num_test_loglik_gt_threshold": str(
+                    s.num_test_loglik_gt_threshold.get(method, "")
+                ),
                 "output_csv": str(s.output_csv or ""),
                 "error": "",
             }
@@ -1705,6 +1847,41 @@ def _write_all_in_summary_csv(
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
+
+
+def _format_all_in_best_vs_ours_second_table(
+    summaries: Sequence[_DatasetCompareSummary],
+    *,
+    title: str,
+    count_attr: str,
+    gap_attr: str,
+    gap_col: str,
+) -> str:
+    ok = [s for s in summaries if not s.error]
+    if not ok:
+        return f"{title}\n  (no successful datasets)\n"
+    ds_col_w = max(max(len(s.dataset) for s in ok), len("dataset"))
+    count_col = count_attr
+    count_w = max(len(count_col), 8)
+    gap_w = max(len(gap_col), 8)
+    header = (
+        f"{'dataset':<{ds_col_w}}  "
+        f"{count_col:>{count_w}}  "
+        f"{gap_col:>{gap_w}}"
+    )
+    lines = [title, header]
+    for s in ok:
+        count = int(getattr(s, count_attr))
+        gap = str(getattr(s, gap_attr) or _NA)
+        lines.append(
+            f"{s.dataset:<{ds_col_w}}  "
+            f"{count:>{count_w}}  "
+            f"{gap:>{gap_w}}"
+        )
+    err = [s for s in summaries if s.error]
+    for s in err:
+        lines.append(f"{s.dataset:<{ds_col_w}}  ERROR: {s.error}")
+    return "\n".join(lines) + "\n"
 
 
 def _format_all_in_wide_table(
@@ -1773,6 +1950,31 @@ def _print_all_in_summary(
                 printable,
                 title=f"num_best ({_GATED_LOGLIK})",
                 value_attr="num_best_gated",
+            )
+        )
+        print(
+            _format_all_in_wide_table(
+                printable,
+                title=f"num ({_TEST_LOGLIK} > {_LOGLIK_WIN_THRESHOLD})",
+                value_attr="num_test_loglik_gt_threshold",
+            )
+        )
+        print(
+            _format_all_in_best_vs_ours_second_table(
+                printable,
+                title="PT-best with Ours-second",
+                count_attr="pt_best_ours_second_count",
+                gap_attr="pt_best_ours_second_avg_gap",
+                gap_col="avg_pt_minus_ours",
+            )
+        )
+        print(
+            _format_all_in_best_vs_ours_second_table(
+                printable,
+                title="MLE-best with Ours-second",
+                count_attr="mle_best_ours_second_count",
+                gap_attr="mle_best_avg_gap",
+                gap_col="avg_mle_minus_ours_when_mle_best",
             )
         )
 
@@ -1970,6 +2172,47 @@ def _run_compare_dataset(
             teh_scores = _read_loglik_csv(csv_path, _TEST_LOGLIK, required=True)
         teh_test.append((label, teh_scores))
 
+    pt_best_ours_second_count = 0
+    pt_best_ours_second_avg_gap = ""
+    mle_best_ours_second_count = 0
+    mle_best_avg_gap = ""
+    num_test_loglik_gt_threshold: Dict[str, int] = {}
+    combined_method_scores = baseline_scores + teh_test
+    if not compare_accuracy:
+        num_test_loglik_gt_threshold = _count_above_threshold(
+            participant_ids,
+            combined_method_scores,
+            threshold=_LOGLIK_WIN_THRESHOLD,
+        )
+    if (
+        not compare_accuracy
+        and "prospect_theory" in baseline_paths
+        and len(teh_test) > 0
+    ):
+        pt_best_ours_second_count, pt_best_ours_second_avg_gap = _best_method_ours_second_stats(
+            participant_ids,
+            combined_method_scores,
+            best_label="prospect_theory",
+            ours_label=teh_test[0][0],
+        )
+    if (
+        not compare_accuracy
+        and "MLE" in baseline_paths
+        and len(teh_test) > 0
+    ):
+        mle_best_ours_second_count, _ = _best_method_ours_second_stats(
+            participant_ids,
+            combined_method_scores,
+            best_label="MLE",
+            ours_label=teh_test[0][0],
+        )
+        mle_best_avg_gap = _best_method_avg_gap(
+            participant_ids,
+            combined_method_scores,
+            best_label="MLE",
+            ours_label=teh_test[0][0],
+        )
+
     method_column_order = list(_BASELINE_METHODS) + (run_labels if run_labels else ["TEH"])
     summary_found_methods = _summary_found_methods(baseline_paths, run_labels)
     found_methods = _comparison_found_methods(baseline_paths, run_labels)
@@ -2020,6 +2263,11 @@ def _run_compare_dataset(
             best_test=best_counts,
             output_csv=output_arg,
             compare_accuracy=True,
+            num_test_loglik_gt_threshold=num_test_loglik_gt_threshold,
+            pt_best_ours_second_count=pt_best_ours_second_count,
+            pt_best_ours_second_avg_gap=pt_best_ours_second_avg_gap,
+            mle_best_ours_second_count=mle_best_ours_second_count,
+            mle_best_avg_gap=mle_best_avg_gap,
         )
 
     gated_csvs = list(exp_resolved)
@@ -2043,6 +2291,11 @@ def _run_compare_dataset(
             avg_row=avg_row,
             best_test=best_counts,
             output_csv=output_arg,
+            num_test_loglik_gt_threshold=num_test_loglik_gt_threshold,
+            pt_best_ours_second_count=pt_best_ours_second_count,
+            pt_best_ours_second_avg_gap=pt_best_ours_second_avg_gap,
+            mle_best_ours_second_count=mle_best_ours_second_count,
+            mle_best_avg_gap=mle_best_avg_gap,
         )
 
     gated_out = (
@@ -2126,6 +2379,11 @@ def _run_compare_dataset(
         gated_csv=gated_out,
         avg_gated=avg_g,
         best_gated=best_g,
+        num_test_loglik_gt_threshold=num_test_loglik_gt_threshold,
+        pt_best_ours_second_count=pt_best_ours_second_count,
+        pt_best_ours_second_avg_gap=pt_best_ours_second_avg_gap,
+        mle_best_ours_second_count=mle_best_ours_second_count,
+        mle_best_avg_gap=mle_best_avg_gap,
     )
 
 
