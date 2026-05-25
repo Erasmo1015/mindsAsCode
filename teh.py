@@ -7353,6 +7353,7 @@ def run_evolution(
     global_pool_handoff: bool = False,
     run_prompts_dir: Optional[str] = None,
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    ablation: Optional[str] = None,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_parent_chars: int = 6000,
@@ -7467,7 +7468,7 @@ def run_evolution(
     if output_dir is None:
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
         output_dir = (
-            f"{teh_output_base_dir(dataset, timestamp, psych_dataset_split=psych_dataset_split)}"
+            f"{teh_output_base_dir(dataset, timestamp, psych_dataset_split=psych_dataset_split, ablation=ablation)}"
             f"/participant_{participant_id}"
         )
     output_path = Path(output_dir)
@@ -9882,6 +9883,7 @@ def run_evolution_gridworld_ensemble(
     sample_size: int = 3,
     top_k: int = 0,
     max_workers: int = 5,
+    ablation: Optional[str] = None,
 ):
     """
     Run gridworld evolution with K independent ensemble members; test = ROTE-aligned weighted ensemble.
@@ -9901,7 +9903,9 @@ def run_evolution_gridworld_ensemble(
     if output_dir is None:
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
         mode = "non_strict"
-        output_dir = f"generated_outputs/gridworld_ensemble/{mode}/run_{timestamp}/agent_{agent_id}"
+        output_root = "generated_outputs_ablation" if ablation else "generated_outputs"
+        run_dir = ablation if ablation else f"run_{timestamp}"
+        output_dir = f"{output_root}/gridworld_ensemble/{mode}/{run_dir}/agent_{agent_id}"
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     log_file_path = output_path / "wandb_metrics.jsonl" if wandb is not None else None
@@ -10401,6 +10405,16 @@ def main():
         help="Output directory (default: auto-generated)",
     )
     parser.add_argument(
+        "--ablation",
+        type=str,
+        default=None,
+        metavar="LABEL",
+        help=(
+            "Ablation label. When set, logs are written under generated_outputs_ablation/ and "
+            "the run folder uses LABEL (e.g. --ablation population -> .../teh/.../population)."
+        ),
+    )
+    parser.add_argument(
         "--no_log",
         action="store_true",
         help="Disable wandb logging. Default is enabled.",
@@ -10658,6 +10672,14 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.ablation is not None:
+        args.ablation = args.ablation.strip()
+        if not args.ablation:
+            print("Error: --ablation must be a non-empty label when provided.")
+            return
+        if "/" in args.ablation or "\\" in args.ablation:
+            print("Error: --ablation label must not contain path separators ('/' or '\\').")
+            return
     args.dataset = normalize_psych101_dataset_alias(args.dataset)
     if args.fitness_metric == "loglik" and not is_binary_loglik_dataset(args.dataset) and not (
         args.dataset == "cpc18" and not args.cpc18_official_mse
@@ -10801,6 +10823,8 @@ def main():
 
     # Create timestamp once at the beginning to ensure consistency between wandb name and folder name
     timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+    output_root_dir = "generated_outputs_ablation" if args.ablation else "generated_outputs"
+    run_dir_name = args.ablation if args.ablation else f"run_{timestamp}"
     
     # Optional wandb setup
     wandb_enabled = False
@@ -10927,7 +10951,10 @@ def main():
     base_run_dir = None
     if args.output_dir is None:
         base_run_dir = teh_output_base_dir(
-            args.dataset, timestamp, psych_dataset_split=psych_dataset_split
+            args.dataset,
+            timestamp,
+            psych_dataset_split=psych_dataset_split,
+            ablation=args.ablation,
         )
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
     elif len(participants_to_process) > 1:
@@ -11172,6 +11199,7 @@ def main():
                 max_workers=args.max_workers,
                 run_prompts_dir=str(run_prompts_dir),
                 psych_dataset_split=psych_dataset_split,
+                ablation=args.ablation,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,
@@ -11259,6 +11287,7 @@ def main():
                 global_elite_parents=global_elite_for_handoff,
                 run_prompts_dir=str(run_prompts_dir),
                 psych_dataset_split=psych_dataset_split,
+                ablation=args.ablation,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,
@@ -11454,7 +11483,7 @@ def main():
                 seed_path = "persona_code_example/vanilla.py"
             else:
                 print(f"Auto-detected seed program: {seed_path}")
-        output_dir = base_run_dir if base_run_dir else f"generated_outputs/gridworld/non_strict/run_{timestamp}"
+        output_dir = base_run_dir if base_run_dir else f"{output_root_dir}/gridworld/non_strict/{run_dir_name}"
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
         episode_results, mean_test_acc = run_evolution_gridworld_rote_episodes(
@@ -11508,7 +11537,7 @@ def main():
                     agent_output_dir = os.path.join(base_run_dir, f"agent_{agent_id}")
                 else:
                     mode = "non_strict"
-                    agent_output_dir = f"generated_outputs/gridworld_ensemble/{mode}/run_{timestamp}/agent_{agent_id}"
+                    agent_output_dir = f"{output_root_dir}/gridworld_ensemble/{mode}/{run_dir_name}/agent_{agent_id}"
                 agent_summary = run_evolution_gridworld_ensemble(
                     seed_program_path=agent_seed_path,
                     participant_id=agent_id,
@@ -11526,6 +11555,7 @@ def main():
                     sample_size=args.sample_size,
                     top_k=getattr(args, 'top_k', 0),
                     max_workers=args.max_workers,
+                    ablation=args.ablation,
                 )
                 if agent_summary is not None and summary_file is not None:
                     participants_summary.append({
@@ -11595,7 +11625,7 @@ def main():
                     participant_output_dir = os.path.join(base_run_dir, f"epoch_{epoch}", f"agent_{agent_id}")
                 else:
                     mode = "non_strict"
-                    participant_output_dir = f"generated_outputs/{out_subdir}/{mode}/run_{timestamp}/epoch_{epoch}/agent_{agent_id}"
+                    participant_output_dir = f"{output_root_dir}/{out_subdir}/{mode}/{run_dir_name}/epoch_{epoch}/agent_{agent_id}"
                 
                 if use_ensemble:
                     participant_summary = run_evolution_gridworld_ensemble(
@@ -11615,6 +11645,7 @@ def main():
                         sample_size=args.sample_size,
                         top_k=getattr(args, 'top_k', 0),
                         max_workers=args.max_workers,
+                        ablation=args.ablation,
                     )
                 else:
                     participant_summary = run_evolution(
@@ -11662,6 +11693,7 @@ def main():
                         prompt_debug_exit=args.prompt_debug_exit,
                         evolution_selection_score=args.evolution_selection_score,
                         max_error_prompt_chars=args.max_error_prompt_chars,
+                        ablation=args.ablation,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -11886,6 +11918,7 @@ def main():
                     sample_size=args.sample_size,
                     top_k=getattr(args, "top_k", 0),
                     max_workers=candidate_workers_per_participant,
+                    ablation=args.ablation,
                 )
 
             return run_evolution(
@@ -11926,6 +11959,7 @@ def main():
                 global_elite_parents=global_elite_for_handoff,
                 run_prompts_dir=str(run_prompts_dir),
                 psych_dataset_split=psych_dataset_split,
+                ablation=args.ablation,
                 local_dataset=args.local_dataset,
                 mixed_gambles_csv=args.mixed_gambles_csv,
                 max_parent_chars=args.max_parent_chars,

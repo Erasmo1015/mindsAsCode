@@ -4,7 +4,7 @@ TEH dataset registry: Psych-101 binary aliases + local mixed_gambles.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import FrozenSet
+from typing import FrozenSet, Optional
 
 from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
@@ -90,12 +90,15 @@ def teh_output_base_dir(
     timestamp: str,
     *,
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    ablation: Optional[str] = None,
 ) -> str:
+    output_root = "generated_outputs_ablation" if ablation else "generated_outputs"
+    run_dir = ablation if ablation else f"run_{timestamp}"
     if is_mixed_gambles_dataset(dataset):
-        return f"generated_outputs/mixed_gambles/teh/run_{timestamp}"
+        return f"{output_root}/mixed_gambles/teh/{run_dir}"
     split = normalize_psych_dataset_split(psych_dataset_split)
     alias = normalize_psych101_dataset_alias(dataset)
-    return f"generated_outputs/psych101_{split}/teh/{alias}/run_{timestamp}"
+    return f"{output_root}/psych101_{split}/teh/{alias}/{run_dir}"
 
 
 def dataset_display_name(dataset: str) -> str:

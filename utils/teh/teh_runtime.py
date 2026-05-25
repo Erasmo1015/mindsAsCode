@@ -275,9 +275,13 @@ def teh_output_base_dir(
     timestamp: str,
     *,
     psych_dataset_split: str = "train",
+    ablation: Optional[str] = None,
 ) -> str:
     return _teh_output_base_dir(
-        dataset_alias, timestamp, psych_dataset_split=psych_dataset_split
+        dataset_alias,
+        timestamp,
+        psych_dataset_split=psych_dataset_split,
+        ablation=ablation,
     )
 
 
