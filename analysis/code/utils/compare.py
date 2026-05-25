@@ -137,6 +137,7 @@ _ALL_IN_DATASETS: Tuple[str, ...] = (
     "9wilson2014humans",
     "10frey2017risk",
     "11enkavi2019recentprobes",
+    "12badham2017deficits",
     "mixed_gambles",
 )
 # Temporary: hide these datasets from --all_in printed wide tables only.
