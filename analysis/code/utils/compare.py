@@ -130,10 +130,14 @@ _SUMMARY_METHOD_LABELS = _BASELINE_METHODS + ("TEH",)
 _ALL_IN_DATASETS: Tuple[str, ...] = (
     "1peterson2021using",
     "2plonsky2018when",
+    "3frey2017cct",
+    "4wulff2018description",
     "5speekenbrink2008learning",
+    "7hilbig2014generalized",
     "10frey2017risk",
     "11enkavi2019recentprobes",
     "12badham2017deficits",
+    "mixed_gambles",
 )
 # Temporary: hide these datasets from --all_in printed wide tables only.
 _ALL_IN_PRINT_EXCLUDE: Tuple[str, ...] = ("8flesch2018comparing",)
@@ -1889,6 +1893,8 @@ def _format_all_in_wide_table(
     *,
     title: str,
     value_attr: str,
+    include_avg_last_row: bool = False,
+    avg_ndigits: int = 2,
 ) -> str:
     """Render dataset x method table for one metric family."""
     ok = [s for s in summaries if not s.error]
@@ -1914,6 +1920,81 @@ def _format_all_in_wide_table(
     err = [s for s in summaries if s.error]
     for s in err:
         lines.append(f"{s.dataset:<{ds_col_w}}  ERROR: {s.error}")
+    if include_avg_last_row:
+        avg_line = f"{'Avg':<{ds_col_w}}"
+        for method in _SUMMARY_METHOD_LABELS:
+            vals: List[float] = []
+            for s in ok:
+                if method not in s.found_methods:
+                    continue
+                row_map = getattr(s, value_attr)
+                raw = row_map.get(method, "")
+                if raw in ("", None):
+                    continue
+                try:
+                    v = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(v):
+                    vals.append(v)
+            cell = _NA if not vals else f"{statistics.mean(vals):.{avg_ndigits}f}"
+            avg_line += f"  {cell:>18}"
+        lines.append(avg_line)
+    return "\n".join(lines) + "\n"
+
+
+def _format_all_in_threshold_percentage_table(
+    summaries: Sequence[_DatasetCompareSummary],
+    *,
+    title: str,
+) -> str:
+    """Render dataset x method table for num/total and percentage above threshold."""
+    ok = [s for s in summaries if not s.error]
+    if not ok:
+        return f"{title}\n  (no successful datasets)\n"
+    ds_col_w = max(len(s.dataset) for s in ok)
+    ds_col_w = max(ds_col_w, len("dataset"))
+    header = f"{'dataset':<{ds_col_w}}"
+    for method in _SUMMARY_METHOD_LABELS:
+        header += f"  {method:>18}"
+    lines = [title, header]
+
+    total_by_method: Dict[str, int] = {m: 0 for m in _SUMMARY_METHOD_LABELS}
+    total_participants_by_method: Dict[str, int] = {m: 0 for m in _SUMMARY_METHOD_LABELS}
+
+    for s in ok:
+        line = f"{s.dataset:<{ds_col_w}}"
+        total = int(s.n_participants)
+        for method in _SUMMARY_METHOD_LABELS:
+            if method not in s.found_methods:
+                cell = _NA
+            else:
+                count = int(s.num_test_loglik_gt_threshold.get(method, 0))
+                if total <= 0:
+                    cell = _NA
+                else:
+                    pct = 100.0 * count / total
+                    cell = f"{pct:.0f}% ({count}/{total})"
+                    total_by_method[method] += count
+                    total_participants_by_method[method] += total
+            line += f"  {cell:>18}"
+        lines.append(line)
+
+    avg_line = f"{'Avg':<{ds_col_w}}"
+    for method in _SUMMARY_METHOD_LABELS:
+        denom = total_participants_by_method[method]
+        if denom <= 0:
+            cell = _NA
+        else:
+            num = total_by_method[method]
+            pct = 100.0 * num / denom
+            cell = f"{pct:.0f}% ({num}/{denom})"
+        avg_line += f"  {cell:>18}"
+    lines.append(avg_line)
+
+    err = [s for s in summaries if s.error]
+    for s in err:
+        lines.append(f"{s.dataset:<{ds_col_w}}  ERROR: {s.error}")
     return "\n".join(lines) + "\n"
 
 
@@ -1930,18 +2011,27 @@ def _print_all_in_summary(
     test_metric = _TEST_ACC if compare_accuracy else _TEST_LOGLIK
     print(
         _format_all_in_wide_table(
-            printable, title=f"Avg {test_metric}", value_attr="avg_test"
+            printable,
+            title=f"Avg {test_metric}",
+            value_attr="avg_test",
+            include_avg_last_row=True,
         )
     )
     if not compare_accuracy:
         print(
             _format_all_in_wide_table(
-                printable, title=f"Avg {_GATED_LOGLIK}", value_attr="avg_gated"
+                printable,
+                title=f"Avg {_GATED_LOGLIK}",
+                value_attr="avg_gated",
+                include_avg_last_row=True,
             )
         )
     print(
         _format_all_in_wide_table(
-            printable, title=f"num_best ({test_metric})", value_attr="num_best_test"
+            printable,
+            title=f"num_best ({test_metric})",
+            value_attr="num_best_test",
+            include_avg_last_row=True,
         )
     )
     if not compare_accuracy:
@@ -1950,6 +2040,7 @@ def _print_all_in_summary(
                 printable,
                 title=f"num_best ({_GATED_LOGLIK})",
                 value_attr="num_best_gated",
+                include_avg_last_row=True,
             )
         )
         print(
@@ -1957,6 +2048,13 @@ def _print_all_in_summary(
                 printable,
                 title=f"num ({_TEST_LOGLIK} > {_LOGLIK_WIN_THRESHOLD})",
                 value_attr="num_test_loglik_gt_threshold",
+                include_avg_last_row=True,
+            )
+        )
+        print(
+            _format_all_in_threshold_percentage_table(
+                printable,
+                title=f"% num ({_TEST_LOGLIK} > {_LOGLIK_WIN_THRESHOLD})",
             )
         )
         print(
