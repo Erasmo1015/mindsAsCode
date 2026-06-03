@@ -188,6 +188,7 @@ scripts/*
 wandb/
 generated_outputs/
 generated_outputs_ablation/
+generated_outputs_transfer/
 cluster/
 
 reference_repos/

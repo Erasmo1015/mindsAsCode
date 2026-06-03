@@ -190,6 +190,10 @@ This section is a **short orientation** for anyone (human or agent) touching Min
 
 - **`te_aggregate.py` (choice13k / cpc18 / mixed_gambles):** Two-phase runs: optional **text-profile warmup** (per participant, `participant_<id>/profile.txt`), then **per-participant adaptation** from the run seed program with held-out loglik, CSV summaries under the run root, and optional W&B. There is **no** cross-participant aggregate evolution directory.
 
+- **`teh.py` (Psych-101 TEH):** Per-participant loglik evolution on numbered Psych-101 aliases + optional **`--global_phase`**; see **`### Latest updates (teh.py — TEH, May 2026)`** above.
+
+- **`teh_transfer.py` (cross-task transfer):** Multi-dataset population global evolution + leave-one-out transfer from other datasets’ best programs; config **`configs/teh_transfer.yaml`**; outputs under **`generated_outputs_transfer/teh_transfer/`**. See **`### teh_transfer.py`** above.
+
 - **`te_dr.py` (Choice13k focus):** Single-phase **data-driven** evolution with train/val/test by **problem block**, default loglik prompts from **`prompts/te_data_driven/evolution/choices13k.txt`**, default run root **`generated_outputs/choice13k/te_dr/run_*`**. See the **`### te_dr.py`** subsection below for CLI constraints and behavior.
 
 - **RBU vs BIR:** With **`--use_rbu True`** (default), the run uses **one** dataset instruction file, **one** combined structure-scoring response in **`analysis/Structure_score_all.txt`**, and per-participant **RBU** in selection and adaptation prompts. With **`--use_rbu False`**, structure scoring is skipped and **BIR** substitutes in the same regularization slot. Primary flags: **`--uncertainty_lambda`**, **`--uncertainty_threshold`**, **`--structure_weight`**, **`--structure_prompt_max_tokens`**, **`--prepare_instruction_path`**, **`--use_instruction_path`** (aliases **`--rbu_lambda`**, **`--rbu_threshold`**, **`--rbu_structure_weight`** still work).
@@ -286,3 +290,19 @@ Short changelog of committed non-strict work (choice13k / cpc18 / mixed_gambles)
 - **Per-iteration fresh candidates (`--fresh_n_candidates`, default `0`):** Each evolution/refinement/global iteration, up to **`fresh_n`** children are generated from the **seed/baseline parent only** (not sampled elite parents); the rest use normal parent sampling. **`0` disables** fresh candidates. When **`> 0`**, **`fresh_n` decays automatically** within each phase (no extra flag): `fresh_n = max(1, floor(fresh_n_candidates * (1 - iter_idx / total_iters)))`, clamped to **`n_candidates`**. Example with **`--n_iterations 10`** and **`--fresh_n_candidates 10`**: iteration 0 → 10 fresh / 0 parent-sampled; iteration 9 → 1 fresh / 9 parent-sampled. Refinement uses the same schedule over **`--refinement_iters`**. Requires seed/baseline as fresh parent (evolution passes **`seed_code`**; refinement passes **`fresh_parent_code`**).
 
 - **Combined score (`train_val_loglik` / OpenEvolve `combined_score`):** Refinement pool ranking and Psych-101 OpenEvolve evolution use split-proportional train+val loglik — `(split_ratio·train + val_ratio·val) / (split_ratio + val_ratio)` with `val_ratio = (1 - split_ratio)/2` (e.g. `--split_ratio 0.6` → `(0.6·train + 0.2·val)/0.8`); per-split **`train_loglik`**, **`val_loglik`**, and **`test_loglik`** logging are unchanged.
+
+### `teh_transfer.py` (population-level cross-task transfer)
+
+- **Role:** Extends TEH with **population-level** program evolution and **leave-one-dataset-out** transfer. There are **no shared participants** across datasets; fitness pools **train+val trials across all selected participants** per dataset (not per-participant adaptation). Main script: **`teh_transfer.py`**. Helpers: **`utils/teh_transfer/`** (`config.py`, `evolution.py`, `prompts.py`, `participants.py`).
+
+- **Pipeline:** (1) Load datasets from **`--transfer_config`** (default **`configs/teh_transfer.yaml`**; keys like **`1peterson2021using_test`** → test split). (2) **Global phase** per dataset: same machinery as **`teh.run_global_evolution_phase`** on pooled train+val (**`--global_iters`**, **`--max_prompt_train_trials`**, **`--n_candidates`**, etc.). (3) **Transfer phase** per target: inject each of the **N−1** source datasets’ task description, **one example trial**, and **best global program** into the prompt; evolve on the target for **`--transfer_iters`** with **`--transfer_max_prompt_trials`** target trials (default **1**). Target-side **elite parents** (seed → evolved programs) use the same **`--sample_size`**, **`--fresh_n_candidates`** decay, and parent sampling as TEH global evolution.
+
+- **Outputs:** **`generated_outputs_transfer/teh_transfer/run_TIMESTAMP/<config_key>/`** with **`global/`** (renamed from `global_phase`), **`transfer/`**, per-dataset **`prompts/`**, and run-level **`summary_csv/transfer.csv`** (columns: **`dataset`**, **`global_best`**, **`transfer`**, **`transfer_1st`**). WandB project: **`teh_transfer`**. Optional **`--debug_prompt`** writes **`run_*/debug/prompt_<dataset>.txt`** (one full global-iter-1 and transfer-iter-1 prompt).
+
+- **Participants:** Same scope flags as **`teh.py`** (**`--participant_scope`**, **`range`**, **`all`**, etc.), applied **per dataset**. With **`range`**, **`range_end_ordinal`** is **auto-clamped** per dataset when it exceeds that dataset’s valid-id list (warning logged).
+
+- **Parallelism:** **`--parallel_datasets`** (default **True**): `dataset_workers = max_workers // n_candidates`; each dataset uses **`n_candidates`** LLM workers for child generation.
+
+- **Prompt budget note:** Transfer prompts are heavier than global (fixed **N−1 source program** block). **`--transfer_max_prompt_trials`** can be set high (e.g. 60); TEH truncates trials under **`--hard_prompt_token_cap`** if needed. Source trials stay **1 each** regardless of CLI.
+
+- **Cluster example:** **`cluster/teh_transfer/1.sh`** (vLLM local mode; ensure line continuations after every arg — a missing `\` drops **`--mode local`**).
