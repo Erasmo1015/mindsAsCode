@@ -1850,7 +1850,7 @@ def run_global_evolution_phase(
         f"Global phase: {n_iterations} iteration(s), "
         f"{len(participant_ids)} participant(s), "
         f"{len(pooled_train)} pooled train trials, {len(pooled_val)} pooled val trials "
-        f"(prompt injects train+val; pool ranking uses {evolution_selection_score} score)"
+        f"(prompt injects train+val with shared cap; pool ranking uses {evolution_selection_score} score)"
     )
     print(f"{'='*80}")
 
@@ -2619,6 +2619,46 @@ def _cap_and_subsample_prompt_trials(
     return out
 
 
+def _cap_prompt_train_and_val_trials(
+    train_trials: List[Dict[str, Any]],
+    val_trials: Optional[List[Dict[str, Any]]],
+    *,
+    max_trials: int,
+    max_trials_per_problem: int,
+    subsample_seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Cap trials for prompts: ``max_trials`` applies to the union when val is present."""
+    train_list = list(train_trials)
+    val_list = list(val_trials) if val_trials else []
+    if not val_list:
+        capped_train = _cap_and_subsample_prompt_trials(
+            train_list,
+            max_trials=max_trials,
+            max_trials_per_problem=max_trials_per_problem,
+            subsample_seed=subsample_seed,
+            label="train",
+        )
+        return capped_train, []
+    train_ids = {id(t) for t in train_list}
+    pooled = train_list + val_list
+    capped = _cap_and_subsample_prompt_trials(
+        pooled,
+        max_trials=max_trials,
+        max_trials_per_problem=max_trials_per_problem,
+        subsample_seed=subsample_seed,
+        label="train+validation (union)",
+    )
+    capped_train = [t for t in capped if id(t) in train_ids]
+    capped_val = [t for t in capped if id(t) not in train_ids]
+    print(
+        f"[LLM prompt] Union cap split: {len(capped)} total "
+        f"({len(capped_train)} train, {len(capped_val)} validation) "
+        f"from {len(train_list)} train + {len(val_list)} validation "
+        f"(max={max_trials}, seed={subsample_seed})."
+    )
+    return capped_train, capped_val
+
+
 _PROMPT_DIAGNOSTICS_LOCK = threading.Lock()
 _TRAIN_TRIAL_CAP_STEPS = (40, 30, 20, 10, 5)
 _VAL_TRIAL_CAP_STEPS = (40, 30, 20, 10, 5)
@@ -2881,17 +2921,36 @@ def _truncate_psych_prompt_to_budget(
     """
     steps: List[str] = []
     compact = False
+    use_shared_trial_budget = (
+        val_trials_source is not None and not refinement_val_observations
+    )
     effective_max_train = max_prompt_train_trials
     effective_max_val = max_prompt_train_trials
+    effective_max_total = max_prompt_train_trials
     effective_per_problem = max_prompt_trials_per_problem
 
     base = base_prompt
     parents = list(parent_programs)
     n_parents_before = len(parents)
+    shared_cap_cache: Dict[Tuple[int, int], Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
+
+    def _shared_capped_trials() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        key = (effective_max_total, effective_per_problem)
+        if key not in shared_cap_cache:
+            shared_cap_cache[key] = _cap_prompt_train_and_val_trials(
+                train_trials_source,
+                val_trials_source,
+                max_trials=effective_max_total,
+                max_trials_per_problem=effective_per_problem,
+                subsample_seed=prompt_train_trials_seed,
+            )
+        return shared_cap_cache[key]
 
     def _cap_train() -> List[Dict[str, Any]]:
         if pre_capped_train:
             return list(train_trials)
+        if use_shared_trial_budget:
+            return _shared_capped_trials()[0]
         return _cap_and_subsample_prompt_trials(
             train_trials_source,
             max_trials=effective_max_train,
@@ -2905,6 +2964,8 @@ def _truncate_psych_prompt_to_budget(
             return []
         if pre_capped_val:
             return list(val_trials or [])
+        if use_shared_trial_budget:
+            return _shared_capped_trials()[1]
         return _cap_and_subsample_prompt_trials(
             val_trials_source,
             max_trials=effective_max_val,
@@ -2985,9 +3046,16 @@ def _truncate_psych_prompt_to_budget(
         steps.append("drop_extra_parent")
         prompt, _, _, n_train, n_val, n_parents = _assemble()
 
-    # 4) train trial caps (monotone 40 -> 30 -> 20 -> 10 -> 5)
+    # 4) trial caps (monotone 40 -> 30 -> 20 -> 10 -> 5)
     for cap in _TRAIN_TRIAL_CAP_STEPS:
-        effective_max_train = min(effective_max_train, cap) if effective_max_train > 0 else cap
+        if use_shared_trial_budget:
+            effective_max_total = (
+                min(effective_max_total, cap) if effective_max_total > 0 else cap
+            )
+        else:
+            effective_max_train = (
+                min(effective_max_train, cap) if effective_max_train > 0 else cap
+            )
         steps.append(f"train_trials_cap_{cap}")
         prompt, _, _, n_train, n_val, n_parents = _assemble()
         if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
@@ -3008,17 +3076,20 @@ def _truncate_psych_prompt_to_budget(
         steps.append("compact_trial_serialization")
         prompt, _, _, n_train, n_val, n_parents = _assemble()
 
-    # 7) val trial caps (keep minimum for refinement)
-    min_val = _MIN_VAL_TRIALS_REFINEMENT if refinement_val_observations else 1
-    for cap in _VAL_TRIAL_CAP_STEPS:
-        if val_trials_source is None:
-            break
-        next_cap = max(cap, min_val) if refinement_val_observations else cap
-        effective_max_val = min(effective_max_val, next_cap) if effective_max_val > 0 else next_cap
-        steps.append(f"val_trials_cap_{effective_max_val}")
-        prompt, _, _, n_train, n_val, n_parents = _assemble()
-        if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
-            break
+    # 7) val-only trial caps when train and val are capped separately
+    if not use_shared_trial_budget:
+        min_val = _MIN_VAL_TRIALS_REFINEMENT if refinement_val_observations else 1
+        for cap in _VAL_TRIAL_CAP_STEPS:
+            if val_trials_source is None:
+                break
+            next_cap = max(cap, min_val) if refinement_val_observations else cap
+            effective_max_val = (
+                min(effective_max_val, next_cap) if effective_max_val > 0 else next_cap
+            )
+            steps.append(f"val_trials_cap_{effective_max_val}")
+            prompt, _, _, n_train, n_val, n_parents = _assemble()
+            if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+                break
 
     # 8) parent char truncation (comments already stripped)
     if max_parent_chars > 0:
@@ -3036,11 +3107,16 @@ def _truncate_psych_prompt_to_budget(
     tokens_after = estimate_tokens(prompt, estimator=prompt_token_estimator)
     if tokens_after > hard_prompt_token_cap:
         # 9) final fallback
-        effective_max_train = _MIN_TRAIN_TRIALS_FINAL
-        if val_trials_source is not None:
-            effective_max_val = (
-                _MIN_VAL_TRIALS_FINAL if refinement_val_observations else _MIN_TRAIN_TRIALS_FINAL
-            )
+        if use_shared_trial_budget:
+            effective_max_total = _MIN_TRAIN_TRIALS_FINAL
+        else:
+            effective_max_train = _MIN_TRAIN_TRIALS_FINAL
+            if val_trials_source is not None:
+                effective_max_val = (
+                    _MIN_VAL_TRIALS_FINAL
+                    if refinement_val_observations
+                    else _MIN_TRAIN_TRIALS_FINAL
+                )
         effective_per_problem = 1
         compact = True
         if len(parents) > 1:
@@ -6730,9 +6806,21 @@ Provide only the code for choose(...) as a complete function body.
     
     # Trials serialized into the prompt (evaluation still uses full train_trials elsewhere).
     refinement_val_observations = prompt_observation_trials is not None
+    val_trials_for_budget: Optional[List[Dict[str, Any]]] = None
+    val_source: Optional[List[Dict[str, Any]]] = None
     if refinement_val_observations:
         observation_trials_source = list(prompt_observation_trials)
         trials_for_prompt = list(prompt_observation_trials)
+    elif extra_prompt_trials is not None:
+        val_source = extra_prompt_trials
+        observation_trials_source = train_trials
+        trials_for_prompt, val_trials_for_budget = _cap_prompt_train_and_val_trials(
+            train_trials,
+            extra_prompt_trials,
+            max_trials=max_prompt_train_trials,
+            max_trials_per_problem=max_prompt_trials_per_problem,
+            subsample_seed=prompt_train_trials_seed,
+        )
     else:
         observation_trials_source = train_trials
         trials_for_prompt = _cap_and_subsample_prompt_trials(
@@ -6788,18 +6876,6 @@ Provide only the code for choose(...) as a complete function body.
             prompt_parent_programs=prompt_parent_programs,
             num_parents=len(prompt_parent_programs),
             **parent_ctx_kwargs,
-        )
-
-    val_trials_for_budget: Optional[List[Dict[str, Any]]] = None
-    val_source: Optional[List[Dict[str, Any]]] = None
-    if extra_prompt_trials is not None and not refinement_val_observations:
-        val_source = extra_prompt_trials
-        val_trials_for_budget = _cap_and_subsample_prompt_trials(
-            extra_prompt_trials,
-            max_trials=max_prompt_train_trials,
-            max_trials_per_problem=max_prompt_trials_per_problem,
-            subsample_seed=int(prompt_train_trials_seed) + 424_242,
-            label="validation",
         )
 
     prompt_text, trunc_diag, trunc_steps = _truncate_psych_prompt_to_budget(
@@ -7087,7 +7163,7 @@ def _run_pre_evolution_explore_phase(
         print(
             f"[LLM prompt] Explore phase injects {len(train_trials)} train + "
             f"{len(val_trials)} validation trials "
-            f"(cap via max_prompt_train_trials={max_prompt_train_trials})."
+            f"(shared cap via max_prompt_train_trials={max_prompt_train_trials})."
         )
     else:
         print(
@@ -10482,10 +10558,11 @@ def main():
         type=int,
         default=40,
         help=(
-            "Max trials serialized into each LLM prompt. With --max_prompt_trials_per_problem > 0, "
-            "sample (max // per_problem) blocks at up to per_problem trials each, plus "
-            "(max %% per_problem) extra trials. With per_problem=0, flat-random sample of max trials. "
-            "0 = no cap (full split in prompt). Default 1000000."
+            "Max trials serialized into each LLM prompt (total across train and validation when both "
+            "are injected). With --max_prompt_trials_per_problem > 0, sample (max // per_problem) "
+            "blocks at up to per_problem trials each, plus (max %% per_problem) extra trials, from the "
+            "union of available splits. With per_problem=0, flat-random sample of max trials. "
+            "0 = no cap (full split in prompt). Default 40."
         ),
     )
     parser.add_argument(
