@@ -502,6 +502,8 @@ def main() -> None:
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     run_dir = Path(args.output_dir) if args.output_dir else transfer_output_run_dir(timestamp)
     run_dir.mkdir(parents=True, exist_ok=True)
+    cmd_log = teh._write_command_line_log(run_dir)
+    print(f"Saved command log -> {cmd_log}")
     (run_dir / "transfer_config.json").write_text(
         json.dumps(
             {
