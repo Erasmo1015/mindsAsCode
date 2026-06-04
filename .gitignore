@@ -193,6 +193,7 @@ cluster/
 
 reference_repos/
 analysis/data/
+!analysis/data/baseline_methods/config_EMNLP_sub.yaml
 
 cpc18_baselines.zip
 cpc18_baselines/
@@ -204,3 +205,4 @@ analysis_plot/
 
 datasets/psych101_test
 datasets/psych101_train
+

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Before running, set up the baseline methods config file:
-analysis/data/baseline_methods/config.yaml
+Before running, set up the baseline methods config file (default:
+analysis/data/baseline_methods/config.yaml; override with --config_path).
 
 Usage:
   python analysis/code/utils/compare.py --dataset 2plonsky2018when --psych_dataset_split train
+  python analysis/code/utils/compare.py --config_path analysis/data/baseline_methods/config_old.yaml
 
 Compare per-participant test_loglik across baseline methods, optional Centaur, and TEH runs.
 
@@ -38,6 +39,7 @@ Config dataset keys (when overriding paths):
       prospect_theory: <run_dir_or_csv>
       openevolve: <run_dir_or_csv>
       Centaur: <run_dir_or_csv>
+      TEH: <run_dir_or_csv>
     1peterson2021using_test:     # psych_dataset_split test
       ...
     2plonsky2018when:            # train
@@ -360,6 +362,46 @@ def _auto_discover_teh_run(
     """Newest TEH run_* with participant_details_loglik.csv (by run name, then mtime)."""
     root = _teh_search_root(repo, dataset, psych_dataset_split)
     return _latest_baseline_run_under_roots([root])
+
+
+def _resolve_teh_run_path(
+    config_data: Mapping[str, Any],
+    repo: Path,
+    dataset: str,
+    psych_dataset_split: str,
+    *,
+    quiet: bool = False,
+) -> Optional[Path]:
+    """Config TEH path overrides auto-discovery when set."""
+    entry = _config_dataset_entry(config_data, dataset, psych_dataset_split)
+    raw = entry.get("TEH") if entry is not None else None
+    config_key = _config_dataset_key(dataset, psych_dataset_split)
+    if raw is not None and str(raw).strip() != "":
+        path = _resolve_repo_path(repo, str(raw))
+        if not quiet:
+            print(
+                f"Using TEH from config for {config_key}: {path.relative_to(repo)}"
+            )
+        return path
+    discovered = _auto_discover_teh_run(
+        repo, dataset=dataset, psych_dataset_split=psych_dataset_split
+    )
+    if discovered is not None:
+        teh_root = _teh_search_root(repo, dataset, psych_dataset_split)
+        if not quiet:
+            print(
+                f"Auto-selected TEH for {config_key}: "
+                f"{discovered.relative_to(repo)} "
+                f"(newest run_* in {teh_root.relative_to(repo)})"
+            )
+        return discovered
+    teh_root = _teh_search_root(repo, dataset, psych_dataset_split)
+    print(
+        f"Warning: no TEH run found for {config_key}; "
+        f"searched {teh_root.relative_to(repo)}; continuing without TEH.",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _resolve_baseline_run_paths(
@@ -2087,7 +2129,7 @@ def _run_compare_dataset(
 ) -> _DatasetCompareSummary:
     """Run one dataset comparison; write per-dataset CSVs and return summary metrics."""
     psych_split = _effective_psych_dataset_split(dataset, psych_dataset_split)
-    config_path = Path(args.baseline_config).expanduser()
+    config_path = Path(args.config_path).expanduser()
     config_path = (
         config_path.resolve()
         if config_path.is_absolute()
@@ -2124,26 +2166,10 @@ def _run_compare_dataset(
 
     experiment_paths = args.experiment_paths
     if experiment_paths is None:
-        discovered_teh = _auto_discover_teh_run(
-            repo, dataset=dataset, psych_dataset_split=psych_split
+        teh_path = _resolve_teh_run_path(
+            config_data, repo, dataset, psych_split, quiet=quiet
         )
-        if discovered_teh is not None:
-            teh_root = _teh_search_root(repo, dataset, psych_split)
-            if not quiet:
-                print(
-                    f"Auto-selected TEH for {config_key}: "
-                    f"{discovered_teh.relative_to(repo)} "
-                    f"(newest run_* in {teh_root.relative_to(repo)})"
-                )
-            teh_inputs = [discovered_teh]
-        else:
-            teh_root = _teh_search_root(repo, dataset, psych_split)
-            print(
-                f"Warning: no TEH run found for {config_key}; "
-                f"searched {teh_root.relative_to(repo)}; continuing without TEH.",
-                file=sys.stderr,
-            )
-            teh_inputs = []
+        teh_inputs = [teh_path] if teh_path is not None else []
     else:
         teh_inputs = list(experiment_paths)
 
@@ -2547,11 +2573,13 @@ def main() -> None:
         help="Psych-101 HF corpus (train | test). Ignored for mixed_gambles.",
     )
     p.add_argument(
+        "--config_path",
         "--baseline_config",
         type=Path,
         default=Path(_DEFAULT_BASELINE_CONFIG),
+        dest="config_path",
         help=(
-            f"YAML with datasets -> MLE / prospect_theory / openevolve / Centaur paths "
+            f"YAML with datasets -> MLE / prospect_theory / openevolve / Centaur / TEH paths "
             f"(default: {_DEFAULT_BASELINE_CONFIG})."
         ),
     )

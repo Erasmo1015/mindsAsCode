@@ -1,0 +1,86 @@
+# EMNLP submission subset: newest run_* per method (psych101_train split).
+# Generated from compare.py auto-discovery; override paths manually as needed.
+# Methods: MLE, prospect_theory, openevolve, Centaur, TEH
+#
+# Datasets:
+#   1peterson2021using       -> Choice13k
+#   2plonsky2018when          -> CPC18 Psych-101
+#   3frey2017cct              -> Frey CCT
+#   4wulff2018description     -> Wulff description
+#   5speekenbrink2008learning -> Speekenbrink learning
+#   7hilbig2014generalized    -> Hilbig generalized
+#   10frey2017risk            -> Frey balloon risk
+#   11enkavi2019recentprobes  -> Enkavi recent probes
+#   12badham2017deficits      -> Badham category learning
+#   mixed_gambles             -> mixed_gambles
+
+datasets:
+  1peterson2021using:  # Choice13k
+    MLE: generated_outputs/psych101_train/MLE/1peterson2021using/run_260522_174702
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/1peterson2021using/run_260522_174629
+    openevolve: generated_outputs/psych101_train/openevolve/1peterson2021using/run_260523_151301
+    Centaur: generated_outputs/psych101_train/centaur/1peterson2021using/run_260520_001539
+    TEH: generated_outputs/psych101_train/teh/1peterson2021using/run_260525_031227
+
+  2plonsky2018when:  # CPC18 Psych-101
+    MLE: generated_outputs/psych101_train/MLE/2plonsky2018when/run_260522_174840
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/2plonsky2018when/run_260522_174912
+    openevolve: generated_outputs/psych101_train/openevolve/2plonsky2018when/run_260523_192751
+    Centaur: generated_outputs/psych101_train/centaur/2plonsky2018when/run_260520_003639
+    TEH: generated_outputs/psych101_train/teh/2plonsky2018when/run_260525_040017
+
+  3frey2017cct:  # Frey CCT
+    MLE: generated_outputs/psych101_train/MLE/3frey2017cct/run_260522_175021
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/3frey2017cct/run_260522_175533
+    openevolve: generated_outputs/psych101_train/openevolve/3frey2017cct/run_260523_014917
+    Centaur: generated_outputs/psych101_train/centaur/3frey2017cct/run_260520_022613
+    TEH: generated_outputs/psych101_train/teh/3frey2017cct/run_260525_052650
+
+  4wulff2018description:  # Wulff description
+    MLE: generated_outputs/psych101_train/MLE/4wulff2018description/run_260523_225323
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/4wulff2018description/run_260523_225349
+    openevolve: generated_outputs/psych101_train/openevolve/4wulff2018description/run_260524_052141
+    Centaur: generated_outputs/psych101_train/centaur/4wulff2018description/run_260524_050330
+    TEH: generated_outputs/psych101_train/teh/4wulff2018description/run_260525_053312
+
+  5speekenbrink2008learning:  # Speekenbrink learning
+    MLE: generated_outputs/psych101_train/MLE/5speekenbrink2008learning/run_260522_175333
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/5speekenbrink2008learning/run_260522_180240
+    openevolve: generated_outputs/psych101_train/openevolve/5speekenbrink2008learning/run_260523_015243
+    Centaur: generated_outputs/psych101_train/centaur/5speekenbrink2008learning/run_260520_032240
+    TEH: generated_outputs/psych101_train/teh/5speekenbrink2008learning/run_260525_064208
+
+  7hilbig2014generalized:  # Hilbig generalized
+    MLE: generated_outputs/psych101_train/MLE/7hilbig2014generalized/run_260522_175601
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/7hilbig2014generalized/run_260522_180524
+    openevolve: generated_outputs/psych101_train/openevolve/7hilbig2014generalized/run_260523_043552
+    Centaur: generated_outputs/psych101_train/centaur/7hilbig2014generalized/run_260520_041940
+    TEH: generated_outputs/psych101_train/teh/7hilbig2014generalized/run_260525_065629
+
+  10frey2017risk:  # Frey balloon risk
+    MLE: generated_outputs/psych101_train/MLE/10frey2017risk/run_260525_041248
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/10frey2017risk/run_260525_041811
+    openevolve: generated_outputs/psych101_train/openevolve/10frey2017risk/run_260525_100011
+    Centaur: generated_outputs/psych101_train/centaur/10frey2017risk/run_260525_082910
+    TEH: generated_outputs/psych101_train/teh/10frey2017risk/run_260525_071930
+
+  11enkavi2019recentprobes:  # Enkavi recent probes
+    MLE: generated_outputs/psych101_train/MLE/11enkavi2019recentprobes/run_260525_041438
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/11enkavi2019recentprobes/run_260525_042031
+    openevolve: generated_outputs/psych101_train/openevolve/11enkavi2019recentprobes/run_260525_115543
+    Centaur: generated_outputs/psych101_train/centaur/11enkavi2019recentprobes/run_260525_083340
+    TEH: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/run_260525_074430
+
+  12badham2017deficits:  # Badham category learning
+    MLE: generated_outputs/psych101_train/MLE/12badham2017deficits/run_260525_150542
+    prospect_theory: generated_outputs/psych101_train/prospect_theory/12badham2017deficits/run_260525_150604
+    openevolve: generated_outputs/psych101_train/openevolve/12badham2017deficits/run_260525_155932
+    Centaur: generated_outputs/psych101_train/centaur/12badham2017deficits/run_260525_150749
+    TEH: generated_outputs/psych101_train/teh/12badham2017deficits/run_260525_154455
+
+  mixed_gambles:
+    MLE: generated_outputs/mixed_gambles/MLE/run_260522_175918
+    prospect_theory: generated_outputs/mixed_gambles/prospect_theory/run_260522_180925
+    openevolve: generated_outputs/psych101_train/openevolve/mixed_gambles/run_260523_150800
+    Centaur: generated_outputs/mixed_gambles/centaur/run_260517_190705
+    TEH: generated_outputs/mixed_gambles/teh/run_260525_040017
