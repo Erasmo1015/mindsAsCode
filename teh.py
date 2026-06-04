@@ -1694,6 +1694,10 @@ def _save_global_elite_pool(
         json.dumps({"n_programs": len(manifest), "programs": manifest}, indent=2),
         encoding="utf-8",
     )
+    if elite_parents:
+        (global_dir / BEST_PROGRAM_FILENAME).write_text(
+            elite_parents[0][0] or "", encoding="utf-8"
+        )
     return pool_dir
 
 
@@ -2249,6 +2253,7 @@ def run_global_evolution_phase(
     if save_artifacts:
         pool_dir = _save_global_elite_pool(global_dir, elite_parents)
         print(f"Saved global elite pool ({len(elite_parents)} programs) -> {pool_dir}")
+        print(f"Saved best program -> {global_dir / BEST_PROGRAM_FILENAME}")
         pool_best_code = elite_parents[0][0]
         pool_best_global_train_ll = _train_loglik_from_elite_tuple(
             elite_parents[0], evolution_selection_score=evolution_selection_score

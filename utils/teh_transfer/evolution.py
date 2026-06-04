@@ -40,6 +40,7 @@ class PopulationEvolutionResult:
     best_loglik: float
     best_program_code: str
     best_program_id: str
+    best_test_loglik: Optional[float] = None
     first_iter_best_loglik: Optional[float] = None
     participant_ids: Optional[List[int]] = None
     global_prompt_capture: Optional[str] = None
@@ -125,6 +126,9 @@ def _read_phase_best_loglik(phase_dir: Path) -> Tuple[float, str, str]:
     if score is None:
         raise KeyError(f"No pool-best loglik in {results_path}")
     program_id = str(payload.get("pool_best_program_id", "unknown"))
+    best_path = phase_dir / teh.BEST_PROGRAM_FILENAME
+    if best_path.is_file():
+        return float(score), program_id, best_path.read_text(encoding="utf-8")
     pool_dir = phase_dir / "global_elite_pool"
     code = ""
     manifest = pool_dir / "pool_manifest.json"
@@ -147,6 +151,39 @@ def _first_iteration_best_loglik(phase_dir: Path) -> Optional[float]:
     if metrics.get("pool_best_global_train_loglik") is not None:
         return float(metrics["pool_best_global_train_loglik"])
     return None
+
+
+def _read_phase_avg_test_loglik(phase_dir: Path) -> Optional[float]:
+    """Read avg_test_loglik from phase ``summary_loglik.csv`` if present."""
+    summary_path = phase_dir / "summary_loglik.csv"
+    if not summary_path.is_file():
+        return None
+    with summary_path.open(newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f), None)
+    if not row or row.get("avg_test_loglik") in (None, ""):
+        return None
+    return float(row["avg_test_loglik"])
+
+
+def _merge_summary_loglik_into_results(
+    results: Dict[str, Any], phase_dir: Path
+) -> None:
+    """Copy averaged train/val/test loglik columns from summary_loglik.csv into results."""
+    summary_path = phase_dir / "summary_loglik.csv"
+    if not summary_path.is_file():
+        return
+    with summary_path.open(newline="", encoding="utf-8") as f:
+        row = next(csv.DictReader(f), None)
+    if not row:
+        return
+    for key in (
+        "avg_train_loglik",
+        "avg_test_loglik",
+        "avg_val_loglik",
+        "avg_gated_test_loglik",
+    ):
+        if row.get(key) not in (None, ""):
+            results[key] = float(row[key])
 
 
 def run_dataset_global_phase(
@@ -304,6 +341,7 @@ def run_dataset_global_phase(
         best_loglik=best_loglik,
         best_program_code=code,
         best_program_id=program_id,
+        best_test_loglik=_read_phase_avg_test_loglik(global_dir),
         participant_ids=list(participants),
         global_prompt_capture=prompt_capture,
     )
@@ -627,8 +665,24 @@ def run_transfer_evolution_phase(
                     break
 
     teh._save_global_elite_pool(transfer_dir, elite_parents)
+    print(f"Saved best program -> {transfer_dir / teh.BEST_PROGRAM_FILENAME}")
     pool_best_ll = teh._train_loglik_from_elite_tuple(
         elite_parents[0], evolution_selection_score=evolution_selection_score
+    )
+    best_code = elite_parents[0][0] or ""
+    teh._write_global_phase_summary_loglik_csv(
+        transfer_dir,
+        dataset=dataset,
+        participant_ids=participant_ids,
+        pool_best_code=best_code,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        n_eval_seeds=n_eval_seeds,
+        psych_dataset_split=target.psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
     )
     transfer_results = {
         "phase": "transfer",
@@ -647,11 +701,11 @@ def run_transfer_evolution_phase(
         "baseline_global_train_loglik": baseline_ll,
         "first_iteration_best_selection_score": first_iter_best,
     }
+    _merge_summary_loglik_into_results(transfer_results, transfer_dir)
     (transfer_dir / "results.json").write_text(
         json.dumps(transfer_results, indent=2), encoding="utf-8"
     )
 
-    best_code = elite_parents[0][0] or ""
     return PopulationEvolutionResult(
         dataset_alias=target.dataset_alias,
         config_key=target.config_key,
@@ -661,6 +715,7 @@ def run_transfer_evolution_phase(
         best_loglik=pool_best_selection,
         best_program_code=best_code,
         best_program_id=str(elite_parents[0][3]),
+        best_test_loglik=_read_phase_avg_test_loglik(transfer_dir),
         first_iter_best_loglik=first_iter_best,
         participant_ids=participant_ids,
         global_prompt_capture=target.global_prompt_capture,
@@ -736,11 +791,11 @@ def build_source_contexts_for_target(
     return contexts
 
 
-def write_transfer_summary_csv(
+def write_run_train_val_summary_csv(
     path: Path,
     rows: Sequence[Dict[str, Any]],
 ) -> None:
-    """Write summary_csv/transfer.csv with global and transfer best logliks."""
+    """Write run-level train+val selection scores (used for prompting/selection)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["dataset", "global_best", "transfer", "transfer_1st"]
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -748,6 +803,28 @@ def write_transfer_summary_csv(
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def write_run_test_loglik_summary_csv(
+    path: Path,
+    rows: Sequence[Dict[str, Any]],
+) -> None:
+    """Write run-level held-out test loglik (evaluation/reporting only)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["dataset", "global_test", "transfer_test"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def write_transfer_summary_csv(
+    path: Path,
+    rows: Sequence[Dict[str, Any]],
+) -> None:
+    """Deprecated alias for ``write_run_train_val_summary_csv``."""
+    write_run_train_val_summary_csv(path, rows)
 
 
 def run_global_phases_parallel(

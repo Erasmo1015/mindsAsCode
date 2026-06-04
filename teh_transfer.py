@@ -42,6 +42,8 @@ from utils.teh_transfer.evolution import (
     transfer_output_run_dir,
     write_debug_prompts_file,
     write_transfer_summary_csv,
+    write_run_train_val_summary_csv,
+    write_run_test_loglik_summary_csv,
 )
 
 
@@ -574,7 +576,11 @@ def main() -> None:
         )
 
     if args.skip_global:
-        from utils.teh_transfer.evolution import PopulationEvolutionResult, _read_phase_best_loglik
+        from utils.teh_transfer.evolution import (
+            PopulationEvolutionResult,
+            _read_phase_avg_test_loglik,
+            _read_phase_best_loglik,
+        )
 
         for spec in specs:
             dataset_output = run_dir / spec.config_key
@@ -595,6 +601,7 @@ def main() -> None:
                 best_loglik=best_loglik,
                 best_program_code=code,
                 best_program_id=program_id,
+                best_test_loglik=_read_phase_avg_test_loglik(global_dir),
                 participant_ids=_resolve_participants(
                     args,
                     spec.dataset_alias,
@@ -656,6 +663,7 @@ def main() -> None:
         )
 
     summary_rows: List[Dict[str, Any]] = []
+    test_summary_rows: List[Dict[str, Any]] = []
     for spec in specs:
         g = global_results[spec.config_key]
         t = transfer_results.get(spec.config_key)
@@ -670,10 +678,29 @@ def main() -> None:
             ),
         }
         summary_rows.append(row)
+        test_summary_rows.append(
+            {
+                "dataset": spec.config_key,
+                "global_test": (
+                    f"{g.best_test_loglik:.6f}"
+                    if g.best_test_loglik is not None
+                    else ""
+                ),
+                "transfer_test": (
+                    f"{t.best_test_loglik:.6f}"
+                    if t and t.best_test_loglik is not None
+                    else ""
+                ),
+            }
+        )
 
-    summary_path = run_dir / "summary_csv" / "transfer.csv"
-    write_transfer_summary_csv(summary_path, summary_rows)
-    print(f"\nWrote summary -> {summary_path}")
+    summary_dir = run_dir / "summary_csv"
+    train_val_path = summary_dir / "train_val_loglik.csv"
+    test_path = summary_dir / "test_loglik.csv"
+    write_run_train_val_summary_csv(train_val_path, summary_rows)
+    write_run_test_loglik_summary_csv(test_path, test_summary_rows)
+    print(f"\nWrote train+val selection summary -> {train_val_path}")
+    print(f"Wrote test loglik summary -> {test_path}")
 
     if args.debug_prompt:
         debug_dir = run_dir / "debug"
@@ -699,6 +726,21 @@ def main() -> None:
                     else None,
                     f"summary/{row['dataset']}/transfer_1st": float(row["transfer_1st"])
                     if row.get("transfer_1st")
+                    else None,
+                }
+            )
+        for test_row in test_summary_rows:
+            wandb.log(
+                {
+                    f"summary/{test_row['dataset']}/global_test": float(
+                        test_row["global_test"]
+                    )
+                    if test_row.get("global_test")
+                    else None,
+                    f"summary/{test_row['dataset']}/transfer_test": float(
+                        test_row["transfer_test"]
+                    )
+                    if test_row.get("transfer_test")
                     else None,
                 }
             )
