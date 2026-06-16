@@ -1,7 +1,11 @@
 datasets:
-  1peterson2021using_test:
+  1peterson2021using:
   2plonsky2018when:
+  3frey2017cct:
+  4wulff2018description:
   5speekenbrink2008learning:
+  7hilbig2014generalized:
   10frey2017risk:
   11enkavi2019recentprobes:
   12badham2017deficits:
+  mixed_gambles:
