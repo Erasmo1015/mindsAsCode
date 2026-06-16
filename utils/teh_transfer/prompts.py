@@ -83,7 +83,7 @@ def build_transfer_source_suffix(sources: List[SourceTransferContext]) -> str:
 def make_source_context(
     *,
     dataset_alias: str,
-    pooled_train_val_trials: List[Dict[str, Any]],
+    example_trials: List[Dict[str, Any]],
     best_program_code: str,
     best_loglik: float,
     example_seed: int,
@@ -95,7 +95,7 @@ def make_source_context(
         display_name=dataset_display_name(dataset_alias),
         task_description=task_description_for_dataset(dataset_alias, instruction=instruction),
         example_trial_text=one_example_trial_text(
-            pooled_train_val_trials, seed=example_seed
+            example_trials, seed=example_seed
         ),
         best_program_code=best_program_code,
         best_loglik=float(best_loglik),

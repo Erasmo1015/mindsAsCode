@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ class PopulationEvolutionResult:
     best_program_id: str
     best_test_loglik: Optional[float] = None
     first_iter_best_loglik: Optional[float] = None
+    first_iter_best_test_loglik: Optional[float] = None
     participant_ids: Optional[List[int]] = None
     global_prompt_capture: Optional[str] = None
     transfer_prompt_capture: Optional[str] = None
@@ -163,6 +165,370 @@ def _read_phase_avg_test_loglik(phase_dir: Path) -> Optional[float]:
     if not row or row.get("avg_test_loglik") in (None, ""):
         return None
     return float(row["avg_test_loglik"])
+
+
+def _resolve_dataset_global_dir(dataset_output: Path) -> Path:
+    """Return the global-phase directory for a dataset output tree."""
+    global_dir = dataset_output / "global"
+    if global_dir.is_dir():
+        return global_dir
+    legacy_dir = dataset_output / "global_phase"
+    if legacy_dir.is_dir():
+        return legacy_dir
+    return global_dir
+
+
+_CLI_ARGS_IGNORED_FOR_SOURCE_DIFF = frozenset(
+    {
+        "output_dir",
+        "global_run_dir",
+        "skip_global",
+        "skip_transfer",
+        "no_log",
+        "backfill_test_loglik_summary",
+    }
+)
+
+_CLI_PATH_KEYS = frozenset(
+    {
+        "transfer_config",
+        "seed_path",
+        "base_prompt",
+        "mixed_gambles_csv",
+        "local_dataset",
+    }
+)
+
+
+def _normalize_cli_arg_for_diff(
+    key: str, value: Any, *, repo_root: Path
+) -> Any:
+    if value is None:
+        return None
+    if key in _CLI_PATH_KEYS and isinstance(value, str):
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = repo_root / path
+        try:
+            return str(path.resolve())
+        except OSError:
+            return value
+    if key == "datasets" and value is None:
+        return None
+    if key == "datasets" and isinstance(value, list):
+        return sorted(str(item) for item in value)
+    if key == "ordinals" and isinstance(value, list):
+        return [int(item) for item in value]
+    return value
+
+
+def _dataset_entries_signature(
+    entries: Sequence[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    signature: List[Dict[str, str]] = []
+    for entry in entries:
+        signature.append(
+            {
+                "config_key": str(entry.get("config_key", "")),
+                "dataset_alias": str(entry.get("dataset_alias", "")),
+                "psych_dataset_split": str(
+                    entry.get("psych_dataset_split", DEFAULT_PSYCH_DATASET_SPLIT)
+                ),
+            }
+        )
+    return sorted(signature, key=lambda row: row["config_key"])
+
+
+def load_source_run_metadata(source_run_dir: Path) -> Dict[str, Any]:
+    """Load ``transfer_config.json`` from a completed transfer run."""
+    config_path = source_run_dir / "transfer_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Missing transfer config in global source run: {config_path}"
+        )
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def warn_new_run_differs_from_global_source(
+    *,
+    source_run_dir: Path,
+    new_cli_args: Dict[str, Any],
+    new_dataset_entries: Sequence[Dict[str, Any]],
+    repo_root: Path,
+) -> None:
+    """
+    Print warnings when the new run's CLI/config differs from the global source run.
+
+    Uses ``transfer_config.json`` from the source run (same metadata as ``log/command.txt``).
+    """
+    source_payload = load_source_run_metadata(source_run_dir)
+    source_cli_args = source_payload.get("cli_args") or {}
+    source_dataset_entries = source_payload.get("datasets") or []
+
+    differences: List[str] = []
+    all_keys = sorted(
+        {
+            key
+            for key in set(source_cli_args) | set(new_cli_args)
+            if key not in _CLI_ARGS_IGNORED_FOR_SOURCE_DIFF
+        }
+    )
+    for key in all_keys:
+        old_value = _normalize_cli_arg_for_diff(
+            key, source_cli_args.get(key), repo_root=repo_root
+        )
+        new_value = _normalize_cli_arg_for_diff(
+            key, new_cli_args.get(key), repo_root=repo_root
+        )
+        if old_value != new_value:
+            differences.append(f"  {key}: {old_value!r} (source) -> {new_value!r} (new)")
+
+    old_datasets = _dataset_entries_signature(source_dataset_entries)
+    new_datasets = _dataset_entries_signature(new_dataset_entries)
+    if old_datasets != new_datasets:
+        differences.append(
+            "  datasets: "
+            f"{old_datasets!r} (source) -> {new_datasets!r} (new)"
+        )
+
+    command_log = source_run_dir / "log" / "command.txt"
+    command_hint = (
+        str(command_log) if command_log.is_file() else str(source_run_dir / "transfer_config.json")
+    )
+
+    if not differences:
+        print(
+            f"\n[global source] Using global phase results from {source_run_dir} "
+            f"(no config differences vs source run; see {command_hint})."
+        )
+        return
+
+    print("\n" + "=" * 80)
+    print("WARNING: New run configuration differs from global source run.")
+    print(f"  Source run: {source_run_dir}")
+    print(f"  Source command log: {command_hint}")
+    print("-" * 80)
+    for line in differences:
+        print(line)
+    print("-" * 80)
+    print("Continuing with this run's arguments.")
+    print("=" * 80 + "\n")
+
+
+def load_global_results_from_source_run(
+    *,
+    source_run_dir: Path,
+    dest_run_dir: Path,
+    specs: Sequence[TransferDatasetSpec],
+    resolve_participants_fn,
+    copy_prompts: bool,
+) -> Dict[str, PopulationEvolutionResult]:
+    """
+    Build ``PopulationEvolutionResult`` objects from a completed global phase.
+
+    When ``copy_prompts`` is True (new experiment from an external source run),
+    copies each dataset's ``prompts/`` tree into ``dest_run_dir``.
+    """
+    results: Dict[str, PopulationEvolutionResult] = {}
+    for spec in specs:
+        source_dataset_output = source_run_dir / spec.config_key
+        global_dir = _resolve_dataset_global_dir(source_dataset_output)
+        if not global_dir.is_dir():
+            raise FileNotFoundError(
+                f"Missing global results for {spec.config_key} under {source_run_dir}"
+            )
+
+        dest_dataset_output = dest_run_dir / spec.config_key
+        dest_dataset_output.mkdir(parents=True, exist_ok=True)
+
+        source_prompts_dir = source_dataset_output / "prompts"
+        dest_prompts_dir = dest_dataset_output / "prompts"
+        if copy_prompts:
+            if not source_prompts_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Missing prompts for {spec.config_key} under {source_run_dir}"
+                )
+            if dest_prompts_dir.exists():
+                shutil.rmtree(dest_prompts_dir)
+            shutil.copytree(source_prompts_dir, dest_prompts_dir)
+        elif not dest_prompts_dir.is_dir():
+            if source_prompts_dir.is_dir():
+                shutil.copytree(source_prompts_dir, dest_prompts_dir)
+            else:
+                raise FileNotFoundError(
+                    f"Missing prompts for {spec.config_key} under {dest_run_dir}"
+                )
+
+        best_loglik, program_id, code = _read_phase_best_loglik(global_dir)
+        results[spec.config_key] = PopulationEvolutionResult(
+            dataset_alias=spec.dataset_alias,
+            config_key=spec.config_key,
+            psych_dataset_split=spec.psych_dataset_split,
+            output_dir=dest_dataset_output,
+            prompts_dir=dest_prompts_dir,
+            best_loglik=best_loglik,
+            best_program_code=code,
+            best_program_id=program_id,
+            best_test_loglik=_read_phase_avg_test_loglik(global_dir),
+            participant_ids=resolve_participants_fn(spec),
+        )
+    return results
+
+
+_TRANSFER_PROGRAM_ID_RE = re.compile(
+    r"^transfer_iteration_(?P<iteration>\d+)_candidate_(?P<candidate>\d+)$"
+)
+
+
+def _candidate_path_for_transfer_program_id(
+    transfer_dir: Path, program_id: str
+) -> Optional[Path]:
+    """Resolve saved candidate source for a transfer ``pool_best_program_id``."""
+    match = _TRANSFER_PROGRAM_ID_RE.match(str(program_id))
+    if not match:
+        return None
+    return (
+        transfer_dir
+        / f"iteration_{match.group('iteration')}"
+        / "candidates"
+        / f"candidate_{match.group('candidate')}.py"
+    )
+
+
+def _load_transfer_program_code(transfer_dir: Path, program_id: str) -> Optional[str]:
+    """
+    Load program source for a transfer ``pool_best_program_id``.
+
+    Supports iteration candidates (``transfer_iteration_*_candidate_*``), the seed
+    baseline (``transfer_baseline``), and any program archived under
+    ``global_elite_pool/``.
+    """
+    program_id = str(program_id)
+    candidate_path = _candidate_path_for_transfer_program_id(transfer_dir, program_id)
+    if candidate_path is not None and candidate_path.is_file():
+        return candidate_path.read_text(encoding="utf-8")
+
+    pool_dir = transfer_dir / "global_elite_pool"
+    manifest_path = pool_dir / "pool_manifest.json"
+    if manifest_path.is_file():
+        programs = json.loads(manifest_path.read_text(encoding="utf-8")).get(
+            "programs", []
+        )
+        for entry in programs:
+            if str(entry.get("program_id")) != program_id:
+                continue
+            filename = entry.get("filename")
+            if not filename:
+                break
+            pool_path = pool_dir / str(filename)
+            if pool_path.is_file():
+                return pool_path.read_text(encoding="utf-8")
+            break
+
+    if program_id == "transfer_baseline":
+        for pool_path in sorted(pool_dir.glob("*transfer_baseline*.py")):
+            return pool_path.read_text(encoding="utf-8")
+
+    return None
+
+
+def _compute_avg_test_loglik_for_program_code(
+    *,
+    dataset: str,
+    participant_ids: Sequence[int],
+    program_code: str,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str,
+    filter_mixed_gambles: bool,
+    n_eval_seeds: int,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+    progress_label: Optional[str] = None,
+) -> Optional[float]:
+    """Average held-out test loglik for one program across participants."""
+    choose_fn = teh.compile_program(program_code)
+    if choose_fn is None:
+        return None
+    test_vals: List[float] = []
+    pid_iter: Any = participant_ids
+    if progress_label:
+        pid_iter = tqdm(
+            participant_ids,
+            desc=progress_label,
+            unit="participant",
+            leave=False,
+        )
+    for pid in pid_iter:
+        _, _, test_trials = teh._trials_for_loglik_participant(
+            dataset,
+            int(pid),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+        )
+        test_eval = teh._evaluate_loglik_for_dataset(
+            dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
+        )
+        test_vals.append(float(test_eval["avg_loglik"]))
+    return float(np.mean(test_vals)) if test_vals else None
+
+
+def read_first_iteration_transfer_test_loglik(
+    transfer_dir: Path,
+    *,
+    dataset: str,
+    participant_ids: Sequence[int],
+    split_ratio: float,
+    split_seed: int,
+    data_path: str,
+    filter_mixed_gambles: bool,
+    n_eval_seeds: int,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+    progress_label: Optional[str] = None,
+) -> Optional[float]:
+    """
+    Return iteration-1 transfer test loglik from ``results.json`` or by re-evaluating
+    the saved iteration-1 pool-best candidate.
+    """
+    results_path = transfer_dir / "results.json"
+    if results_path.is_file():
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+        cached = payload.get("first_iteration_best_test_loglik")
+        if cached not in (None, ""):
+            return float(cached)
+
+    metrics_path = transfer_dir / "iteration_1" / "metrics.json"
+    if not metrics_path.is_file():
+        return None
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    program_id = metrics.get("pool_best_program_id")
+    if not program_id:
+        return None
+    program_code = _load_transfer_program_code(transfer_dir, str(program_id))
+    if program_code is None:
+        return None
+    return _compute_avg_test_loglik_for_program_code(
+        dataset=dataset,
+        participant_ids=participant_ids,
+        program_code=program_code,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        n_eval_seeds=n_eval_seeds,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+        progress_label=progress_label,
+    )
 
 
 def _merge_summary_loglik_into_results(
@@ -389,6 +755,11 @@ def run_transfer_evolution_phase(
     """
     dataset = target.dataset_alias
     participant_ids = target.participant_ids or []
+    print(
+        f"[transfer] Pooling target train+val for {target.config_key} "
+        f"({len(participant_ids)} participant(s))...",
+        flush=True,
+    )
     pooled_train, pooled_val = collect_pooled_train_val_trials(
         dataset,
         participant_ids,
@@ -451,6 +822,7 @@ def run_transfer_evolution_phase(
     invalid_candidate_errors: List[Dict[str, Any]] = []
     error_history_path = transfer_dir / "error_history.jsonl"
     first_iter_best: Optional[float] = None
+    first_iter_best_code: Optional[str] = None
     transfer_prompt_capture: Optional[str] = None
 
     for iteration in range(n_iterations):
@@ -632,6 +1004,7 @@ def run_transfer_evolution_phase(
 
         if iteration == 0:
             first_iter_best = pool_best_selection
+            first_iter_best_code = elite_parents[0][0]
 
         metrics: Dict[str, Any] = {
             "iteration": iteration_step,
@@ -702,8 +1075,32 @@ def run_transfer_evolution_phase(
         "first_iteration_best_selection_score": first_iter_best,
     }
     _merge_summary_loglik_into_results(transfer_results, transfer_dir)
+    first_iter_best_test_loglik: Optional[float] = None
+    if first_iter_best_code:
+        print(
+            f"[transfer] {target.config_key}: evaluating iteration-1 best on test "
+            f"({len(participant_ids)} participants)...",
+            flush=True,
+        )
+        first_iter_best_test_loglik = _compute_avg_test_loglik_for_program_code(
+            dataset=dataset,
+            participant_ids=participant_ids,
+            program_code=first_iter_best_code,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+            n_eval_seeds=n_eval_seeds,
+            psych_dataset_split=target.psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+            progress_label=f"{target.config_key} transfer_1st",
+        )
+    if first_iter_best_test_loglik is not None:
+        transfer_results["first_iteration_best_test_loglik"] = first_iter_best_test_loglik
     (transfer_dir / "results.json").write_text(
-        json.dumps(transfer_results, indent=2), encoding="utf-8"
+        json.dumps(transfer_results, indent=2),
+        encoding="utf-8",
     )
 
     return PopulationEvolutionResult(
@@ -717,10 +1114,43 @@ def run_transfer_evolution_phase(
         best_program_id=str(elite_parents[0][3]),
         best_test_loglik=_read_phase_avg_test_loglik(transfer_dir),
         first_iter_best_loglik=first_iter_best,
+        first_iter_best_test_loglik=first_iter_best_test_loglik,
         participant_ids=participant_ids,
         global_prompt_capture=target.global_prompt_capture,
         transfer_prompt_capture=transfer_prompt_capture,
     )
+
+
+def _collect_example_trials_for_source(
+    dataset: str,
+    participant_ids: List[int],
+    *,
+    example_seed: int,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str,
+    filter_mixed_gambles: bool,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+) -> List[Dict[str, Any]]:
+    """Train+val trials from one participant (enough for one prompt example trial)."""
+    if not participant_ids:
+        return []
+    rng = np.random.default_rng(int(example_seed))
+    participant_id = int(participant_ids[int(rng.integers(len(participant_ids)))])
+    train, val, _ = teh._trials_for_loglik_participant(
+        dataset,
+        participant_id,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+    )
+    return train + val
 
 
 def build_source_contexts_for_target(
@@ -736,10 +1166,17 @@ def build_source_contexts_for_target(
     repo_root: Path,
 ) -> List[SourceTransferContext]:
     """Build source contexts from all datasets except the target."""
+    n_sources = sum(1 for key in global_results if key != target_key)
+    print(
+        f"[transfer] Building source contexts for target={target_key} "
+        f"({n_sources} source(s))...",
+        flush=True,
+    )
     contexts: List[SourceTransferContext] = []
     for key, result in global_results.items():
         if key == target_key:
             continue
+        example_seed = split_seed + hash(key) % 10_000
         participants = result.participant_ids or teh.resolve_participants_for_scope(
             dataset=result.dataset_alias,
             repo_root=repo_root,
@@ -756,9 +1193,10 @@ def build_source_contexts_for_target(
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
         )
-        train, val = collect_pooled_train_val_trials(
+        example_trials = _collect_example_trials_for_source(
             result.dataset_alias,
             participants,
+            example_seed=example_seed,
             split_ratio=split_ratio,
             split_seed=split_seed,
             data_path=data_path,
@@ -781,10 +1219,10 @@ def build_source_contexts_for_target(
         contexts.append(
             make_source_context(
                 dataset_alias=result.dataset_alias,
-                pooled_train_val_trials=train + val,
+                example_trials=example_trials,
                 best_program_code=result.best_program_code,
                 best_loglik=result.best_loglik,
-                example_seed=split_seed + hash(key) % 10_000,
+                example_seed=example_seed,
                 instruction=instruction,
             )
         )
@@ -811,12 +1249,161 @@ def write_run_test_loglik_summary_csv(
 ) -> None:
     """Write run-level held-out test loglik (evaluation/reporting only)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["dataset", "global_test", "transfer_test"]
+    fieldnames = ["dataset", "global_test", "transfer", "transfer_1st"]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def backfill_run_test_loglik_summary_csv(
+    run_dir: Path,
+    *,
+    datasets: Optional[Sequence[str]] = None,
+    verbose: bool = False,
+    write_results_cache: bool = True,
+) -> Path:
+    """
+    Rebuild ``summary_csv/test_loglik.csv`` for an existing transfer run.
+
+    Uses saved phase summaries for ``global_test`` / ``transfer`` and
+    re-evaluates (or reads cached) iteration-1 transfer test loglik.
+    """
+    config_path = run_dir / "transfer_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Missing transfer config: {config_path}")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    cli_args = payload.get("cli_args") or {}
+    dataset_entries = payload.get("datasets") or []
+    if datasets:
+        allowed = {str(name) for name in datasets}
+        dataset_entries = [
+            entry
+            for entry in dataset_entries
+            if str(entry.get("config_key")) in allowed
+        ]
+        if not dataset_entries:
+            raise ValueError(
+                f"No datasets matched filter {sorted(allowed)!r} in {config_path}"
+            )
+
+    rows: List[Dict[str, Any]] = []
+    for entry in dataset_entries:
+        config_key = str(entry["config_key"])
+        dataset_alias = str(entry["dataset_alias"])
+        psych_dataset_split = str(entry.get("psych_dataset_split", DEFAULT_PSYCH_DATASET_SPLIT))
+        dataset_output = run_dir / config_key
+        global_dir = dataset_output / "global"
+        if not global_dir.is_dir():
+            global_dir = dataset_output / "global_phase"
+        transfer_dir = dataset_output / "transfer"
+
+        global_results_path = global_dir / "results.json"
+        participant_ids: List[int] = []
+        if global_results_path.is_file():
+            global_payload = json.loads(global_results_path.read_text(encoding="utf-8"))
+            participant_ids = [
+                int(pid) for pid in (global_payload.get("participant_ids") or [])
+            ]
+
+        row: Dict[str, Any] = {
+            "dataset": config_key,
+            "global_test": "",
+            "transfer": "",
+            "transfer_1st": "",
+        }
+        global_test = _read_phase_avg_test_loglik(global_dir)
+        if global_test is not None:
+            row["global_test"] = f"{global_test:.6f}"
+        if transfer_dir.is_dir():
+            transfer = _read_phase_avg_test_loglik(transfer_dir)
+            if transfer is not None:
+                row["transfer"] = f"{transfer:.6f}"
+            if participant_ids:
+                if verbose:
+                    print(
+                        f"[backfill] {config_key}: computing transfer_1st test loglik "
+                        f"({len(participant_ids)} participants)...",
+                        flush=True,
+                    )
+                transfer_1st_test = read_first_iteration_transfer_test_loglik(
+                    transfer_dir,
+                    dataset=dataset_alias,
+                    participant_ids=participant_ids,
+                    split_ratio=float(cli_args.get("split_ratio", 0.6)),
+                    split_seed=int(cli_args.get("split_seed", 0)),
+                    data_path=str(cli_args.get("data_path", "data")),
+                    filter_mixed_gambles=bool(cli_args.get("filter_mixed_gambles", False)),
+                    n_eval_seeds=int(cli_args.get("n_eval_seeds", 3)),
+                    psych_dataset_split=psych_dataset_split,
+                    local_dataset=cli_args.get("local_dataset"),
+                    mixed_gambles_csv=str(
+                        cli_args.get(
+                            "mixed_gambles_csv",
+                            DEFAULT_CSV_PATH,
+                        )
+                    ),
+                    progress_label=(
+                        f"{config_key} transfer_1st" if verbose else None
+                    ),
+                )
+                if transfer_1st_test is not None:
+                    row["transfer_1st"] = f"{transfer_1st_test:.6f}"
+                    if verbose:
+                        print(
+                            f"[backfill] {config_key}: transfer_1st={transfer_1st_test:.6f}",
+                            flush=True,
+                        )
+                    if write_results_cache:
+                        results_path = transfer_dir / "results.json"
+                        if results_path.is_file():
+                            transfer_payload = json.loads(
+                                results_path.read_text(encoding="utf-8")
+                            )
+                            transfer_payload["first_iteration_best_test_loglik"] = (
+                                transfer_1st_test
+                            )
+                            results_path.write_text(
+                                json.dumps(transfer_payload, indent=2) + "\n",
+                                encoding="utf-8",
+                            )
+                elif verbose:
+                    iter_metrics_path = transfer_dir / "iteration_1" / "metrics.json"
+                    program_id = ""
+                    if iter_metrics_path.is_file():
+                        program_id = str(
+                            json.loads(iter_metrics_path.read_text(encoding="utf-8")).get(
+                                "pool_best_program_id", ""
+                            )
+                        )
+                    print(
+                        f"[backfill] {config_key}: transfer_1st unavailable "
+                        f"(program_id={program_id!r}: missing source or compile failure)",
+                        flush=True,
+                    )
+        rows.append(row)
+
+    out_path = run_dir / "summary_csv" / "test_loglik.csv"
+    if datasets:
+        existing_rows = _read_run_test_loglik_rows(out_path)
+        merged = {str(r.get("dataset", "")): r for r in existing_rows}
+        for row in rows:
+            merged[str(row["dataset"])] = row
+        rows = [merged[key] for key in sorted(merged)]
+    write_run_test_loglik_summary_csv(out_path, rows)
+    return out_path
+
+
+def _read_run_test_loglik_rows(path: Path) -> List[Dict[str, Any]]:
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        if not row.get("transfer") and row.get("transfer_test") not in (None, ""):
+            row["transfer"] = row["transfer_test"]
+    return rows
 
 
 def write_transfer_summary_csv(

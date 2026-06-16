@@ -35,15 +35,18 @@ from utils.teh_transfer.config import filter_transfer_specs, load_transfer_datas
 from utils.teh_transfer.participants import resolve_participants_for_transfer
 from utils.teh_transfer.evolution import (
     build_source_contexts_for_target,
+    load_global_results_from_source_run,
     run_dataset_global_phase,
     run_global_phases_parallel,
     run_transfer_evolution_phase,
     run_transfer_phases_parallel,
     transfer_output_run_dir,
+    warn_new_run_differs_from_global_source,
     write_debug_prompts_file,
     write_transfer_summary_csv,
     write_run_train_val_summary_csv,
     write_run_test_loglik_summary_csv,
+    backfill_run_test_loglik_summary_csv,
 )
 
 
@@ -369,14 +372,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Fitness metric (loglik only for transfer).",
     )
     parser.add_argument(
+        "--global_run_dir",
+        type=str,
+        default=None,
+        help=(
+            "Path to a completed run whose global-phase best programs seed this run's "
+            "transfer phase. Creates a new run directory (unless --output_dir is set); "
+            "does not modify the source run."
+        ),
+    )
+    parser.add_argument(
         "--skip_global",
         action="store_true",
-        help="Skip global phase (load existing global results from --output_dir).",
+        help=(
+            "Skip global phase (load existing global results from --output_dir). "
+            "Mutually exclusive with --global_run_dir."
+        ),
     )
     parser.add_argument(
         "--skip_transfer",
         action="store_true",
         help="Run global phase only; skip transfer.",
+    )
+    parser.add_argument(
+        "--backfill-test-loglik-summary",
+        action="store_true",
+        help=(
+            "Rebuild summary_csv/test_loglik.csv (including transfer_1st) from an "
+            "existing run directory passed via --output_dir."
+        ),
     )
     return parser
 
@@ -394,8 +418,11 @@ def _validate_args(args: argparse.Namespace) -> bool:
     if args.fresh_n_candidates < 0 or args.fresh_n_candidates > args.n_candidates:
         print("Error: --fresh_n_candidates must satisfy 0 <= fresh_n_candidates <= n_candidates.")
         return False
-    if args.global_iters < 1:
+    if args.global_iters < 1 and not (args.skip_global or args.global_run_dir):
         print("Error: --global_iters must be >= 1.")
+        return False
+    if args.skip_global and args.global_run_dir:
+        print("Error: --skip_global and --global_run_dir are mutually exclusive.")
         return False
     if args.transfer_iters < 1:
         print("Error: --transfer_iters must be >= 1.")
@@ -475,6 +502,21 @@ def _shared_evolution_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
 def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
+    if args.backfill_test_loglik_summary:
+        if not args.output_dir:
+            print("Error: --backfill-test-loglik-summary requires --output_dir.")
+            return
+        run_dir = Path(args.output_dir)
+        if not run_dir.is_dir():
+            print(f"Error: run directory not found: {run_dir}")
+            return
+        try:
+            out_path = backfill_run_test_loglik_summary_csv(run_dir)
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            print(f"Error: backfill failed: {exc}")
+            return
+        print(f"Wrote backfilled test loglik summary -> {out_path}")
+        return
     if not _validate_args(args):
         return
 
@@ -499,28 +541,49 @@ def main() -> None:
             print(f"Error: parser not implemented for {spec.dataset_alias!r}.")
             return
 
+    global_source_dir: Optional[Path] = None
+    if args.global_run_dir:
+        global_source_dir = Path(args.global_run_dir).expanduser()
+        if not global_source_dir.is_absolute():
+            global_source_dir = (_REPO_ROOT / global_source_dir).resolve()
+        if not global_source_dir.is_dir():
+            print(f"Error: global source run not found: {global_source_dir}")
+            return
+
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-    run_dir = Path(args.output_dir) if args.output_dir else transfer_output_run_dir(timestamp)
+    if args.output_dir:
+        run_dir = Path(args.output_dir).expanduser()
+        if not run_dir.is_absolute():
+            run_dir = (_REPO_ROOT / run_dir).resolve()
+    else:
+        run_dir = transfer_output_run_dir(timestamp)
     run_dir.mkdir(parents=True, exist_ok=True)
     cmd_log = teh._write_command_line_log(run_dir)
     print(f"Saved command log -> {cmd_log}")
-    (run_dir / "transfer_config.json").write_text(
-        json.dumps(
-            {
-                "config_path": str(config_path),
-                "datasets": [
-                    {
-                        "config_key": s.config_key,
-                        "dataset_alias": s.dataset_alias,
-                        "psych_dataset_split": s.psych_dataset_split,
-                    }
-                    for s in specs
-                ],
-                "cli_args": vars(args),
-            },
-            indent=2,
+
+    dataset_entries = [
+        {
+            "config_key": s.config_key,
+            "dataset_alias": s.dataset_alias,
+            "psych_dataset_split": s.psych_dataset_split,
+        }
+        for s in specs
+    ]
+    transfer_config_payload: Dict[str, Any] = {
+        "config_path": str(config_path),
+        "datasets": dataset_entries,
+        "cli_args": vars(args),
+    }
+    if global_source_dir is not None:
+        transfer_config_payload["global_source_run_dir"] = str(global_source_dir)
+        warn_new_run_differs_from_global_source(
+            source_run_dir=global_source_dir,
+            new_cli_args=vars(args),
+            new_dataset_entries=dataset_entries,
+            repo_root=_REPO_ROOT,
         )
-        + "\n",
+    (run_dir / "transfer_config.json").write_text(
+        json.dumps(transfer_config_payload, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -577,40 +640,42 @@ def main() -> None:
             **shared,
         )
 
-    if args.skip_global:
-        from utils.teh_transfer.evolution import (
-            PopulationEvolutionResult,
-            _read_phase_avg_test_loglik,
-            _read_phase_best_loglik,
+    def _participants_for_spec(spec) -> List[int]:
+        return _resolve_participants(
+            args,
+            spec.dataset_alias,
+            spec.psych_dataset_split,
+            config_key=spec.config_key,
         )
 
-        for spec in specs:
-            dataset_output = run_dir / spec.config_key
-            global_dir = dataset_output / "global"
-            if not global_dir.is_dir():
-                global_dir = dataset_output / "global_phase"
-            if not global_dir.is_dir():
-                print(f"Error: missing global results for {spec.config_key} under {run_dir}")
-                return
-            best_loglik, program_id, code = _read_phase_best_loglik(global_dir)
-            prompts_dir = dataset_output / "prompts"
-            global_results[spec.config_key] = PopulationEvolutionResult(
-                dataset_alias=spec.dataset_alias,
-                config_key=spec.config_key,
-                psych_dataset_split=spec.psych_dataset_split,
-                output_dir=dataset_output,
-                prompts_dir=prompts_dir,
-                best_loglik=best_loglik,
-                best_program_code=code,
-                best_program_id=program_id,
-                best_test_loglik=_read_phase_avg_test_loglik(global_dir),
-                participant_ids=_resolve_participants(
-                    args,
-                    spec.dataset_alias,
-                    spec.psych_dataset_split,
-                    config_key=spec.config_key,
-                ),
+    if global_source_dir is not None:
+        try:
+            global_results = load_global_results_from_source_run(
+                source_run_dir=global_source_dir,
+                dest_run_dir=run_dir,
+                specs=specs,
+                resolve_participants_fn=_participants_for_spec,
+                copy_prompts=True,
             )
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}")
+            return
+        print(
+            f"\n[global source] Loaded {len(global_results)} dataset global result(s) "
+            f"from {global_source_dir} into {run_dir}"
+        )
+    elif args.skip_global:
+        try:
+            global_results = load_global_results_from_source_run(
+                source_run_dir=run_dir,
+                dest_run_dir=run_dir,
+                specs=specs,
+                resolve_participants_fn=_participants_for_spec,
+                copy_prompts=False,
+            )
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}")
+            return
     else:
         global_results = run_global_phases_parallel(
             specs,
@@ -688,9 +753,14 @@ def main() -> None:
                     if g.best_test_loglik is not None
                     else ""
                 ),
-                "transfer_test": (
+                "transfer": (
                     f"{t.best_test_loglik:.6f}"
                     if t and t.best_test_loglik is not None
+                    else ""
+                ),
+                "transfer_1st": (
+                    f"{t.first_iter_best_test_loglik:.6f}"
+                    if t and t.first_iter_best_test_loglik is not None
                     else ""
                 ),
             }
@@ -740,9 +810,14 @@ def main() -> None:
                     if test_row.get("global_test")
                     else None,
                     f"summary/{test_row['dataset']}/transfer_test": float(
-                        test_row["transfer_test"]
+                        test_row["transfer"]
                     )
-                    if test_row.get("transfer_test")
+                    if test_row.get("transfer")
+                    else None,
+                    f"summary/{test_row['dataset']}/transfer_1st_test": float(
+                        test_row["transfer_1st"]
+                    )
+                    if test_row.get("transfer_1st")
                     else None,
                 }
             )
