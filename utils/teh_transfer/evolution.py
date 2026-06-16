@@ -747,6 +747,9 @@ def run_transfer_evolution_phase(
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
     debug_prompt: bool = False,
+    transfer_dir: Optional[Path] = None,
+    transfer_mode: str = "multiple",
+    source_config_keys: Optional[Sequence[str]] = None,
 ) -> PopulationEvolutionResult:
     """
     Leave-one-dataset-out transfer evolution on pooled target train+val trials.
@@ -772,7 +775,10 @@ def run_transfer_evolution_phase(
         mixed_gambles_csv=mixed_gambles_csv,
     )
     transfer_suffix = build_transfer_source_suffix(sources)
-    transfer_dir = target.output_dir / "transfer"
+    if transfer_dir is None:
+        transfer_dir = target.output_dir / "transfer"
+    else:
+        transfer_dir = Path(transfer_dir)
     transfer_dir.mkdir(parents=True, exist_ok=True)
 
     seed_code = teh.load_seed_program(seed_program_path)
@@ -1061,8 +1067,11 @@ def run_transfer_evolution_phase(
         "phase": "transfer",
         "dataset": dataset,
         "config_key": target.config_key,
+        "target_dataset": target.config_key,
+        "transfer_mode": transfer_mode,
         "n_source_datasets": len(sources),
         "source_datasets": [s.dataset_alias for s in sources],
+        "source_config_keys": list(source_config_keys or []),
         "n_iterations": n_iterations,
         "n_pooled_train_trials": len(pooled_train),
         "n_pooled_val_trials": len(pooled_val),
@@ -1098,6 +1107,8 @@ def run_transfer_evolution_phase(
         )
     if first_iter_best_test_loglik is not None:
         transfer_results["first_iteration_best_test_loglik"] = first_iter_best_test_loglik
+    if transfer_mode == "single" and source_config_keys:
+        transfer_results["source_dataset"] = str(source_config_keys[0])
     (transfer_dir / "results.json").write_text(
         json.dumps(transfer_results, indent=2),
         encoding="utf-8",
@@ -1157,6 +1168,7 @@ def build_source_contexts_for_target(
     target_key: str,
     global_results: Dict[str, PopulationEvolutionResult],
     *,
+    source_keys: Optional[Sequence[str]] = None,
     split_ratio: float,
     split_seed: int,
     data_path: str,
@@ -1165,17 +1177,23 @@ def build_source_contexts_for_target(
     mixed_gambles_csv: str,
     repo_root: Path,
 ) -> List[SourceTransferContext]:
-    """Build source contexts from all datasets except the target."""
-    n_sources = sum(1 for key in global_results if key != target_key)
+    """Build source contexts from explicit keys or all datasets except the target."""
+    if source_keys is None:
+        keys_to_use = [key for key in global_results if key != target_key]
+    else:
+        keys_to_use = [
+            str(key)
+            for key in source_keys
+            if str(key) != target_key and str(key) in global_results
+        ]
     print(
         f"[transfer] Building source contexts for target={target_key} "
-        f"({n_sources} source(s))...",
+        f"({len(keys_to_use)} source(s))...",
         flush=True,
     )
     contexts: List[SourceTransferContext] = []
-    for key, result in global_results.items():
-        if key == target_key:
-            continue
+    for key in keys_to_use:
+        result = global_results[key]
         example_seed = split_seed + hash(key) % 10_000
         participants = result.participant_ids or teh.resolve_participants_for_scope(
             dataset=result.dataset_alias,

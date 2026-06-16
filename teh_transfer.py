@@ -39,7 +39,6 @@ from utils.teh_transfer.evolution import (
     run_dataset_global_phase,
     run_global_phases_parallel,
     run_transfer_evolution_phase,
-    run_transfer_phases_parallel,
     transfer_output_run_dir,
     warn_new_run_differs_from_global_source,
     write_debug_prompts_file,
@@ -47,6 +46,15 @@ from utils.teh_transfer.evolution import (
     write_run_train_val_summary_csv,
     write_run_test_loglik_summary_csv,
     backfill_run_test_loglik_summary_csv,
+)
+from utils.teh_transfer.transfer_jobs import (
+    TransferJobResult,
+    append_single_transfer_result_jsonl,
+    build_transfer_job_batches,
+    ensure_single_transfer_matrix_csvs,
+    make_transfer_job_worker,
+    run_transfer_jobs_parallel,
+    update_single_transfer_matrix_cell,
 )
 
 
@@ -349,7 +357,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--parallel_datasets",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Run datasets in parallel during global and transfer phases (default: True).",
+        help=(
+            "Run datasets in parallel during global phase and transfer jobs in "
+            "parallel during transfer phase (default: True)."
+        ),
+    )
+    parser.add_argument(
+        "--transfer_mode",
+        type=str,
+        default="multiple",
+        choices=["multiple", "single"],
+        help=(
+            "Transfer source layout: multiple=all other datasets per target (default); "
+            "single=one source dataset per transfer job (N*(N-1) jobs)."
+        ),
     )
     parser.add_argument(
         "--early_stop_iters",
@@ -435,6 +456,9 @@ def _validate_args(args: argparse.Namespace) -> bool:
         return False
     if args.elite_pool_size is not None and args.elite_pool_size < 1:
         print("Error: --elite_pool_size must be >= 1 when set.")
+        return False
+    if args.transfer_mode not in {"multiple", "single"}:
+        print(f"Error: unsupported --transfer_mode {args.transfer_mode!r}.")
         return False
     return True
 
@@ -686,48 +710,97 @@ def main() -> None:
         )
 
     transfer_results: Dict[str, Any] = {}
+    transfer_job_results: Dict[str, TransferJobResult] = {}
 
     if not args.skip_transfer:
+        dataset_keys = [spec.config_key for spec in specs]
+        job_batches = build_transfer_job_batches(dataset_keys, args.transfer_mode)
+        n_jobs = sum(len(batch) for batch in job_batches)
+        print(
+            f"\n[transfer] mode={args.transfer_mode}: {n_jobs} job(s) "
+            f"in {len(job_batches)} batch(es)"
+        )
 
-        def _transfer_worker(spec, existing_global: Dict[str, Any], candidate_workers: int):
-            target = existing_global[spec.config_key]
-            sources = build_source_contexts_for_target(
-                spec.config_key,
-                existing_global,
-                split_ratio=args.split_ratio,
-                split_seed=args.split_seed,
-                data_path=args.data_path,
-                filter_mixed_gambles=bool(args.filter_mixed_gambles),
-                local_dataset=args.local_dataset,
-                mixed_gambles_csv=args.mixed_gambles_csv,
-                repo_root=_REPO_ROOT,
+        single_test_matrix_path: Optional[Path] = None
+        single_improve_matrix_path: Optional[Path] = None
+        single_results_jsonl = run_dir / "debug" / "single_source_transfer_results.jsonl"
+        if args.transfer_mode == "single":
+            summary_dir = run_dir / "summary_csv"
+            single_test_matrix_path, single_improve_matrix_path = (
+                ensure_single_transfer_matrix_csvs(summary_dir, dataset_keys)
             )
-            print(
-                f"\n[transfer] target={spec.config_key}, sources="
-                f"{[s.dataset_alias for s in sources]}"
+            single_results_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            if single_results_jsonl.is_file():
+                single_results_jsonl.unlink()
+
+        def _on_job_complete(job_result: TransferJobResult) -> None:
+            if args.transfer_mode != "single":
+                return
+            append_single_transfer_result_jsonl(
+                single_results_jsonl,
+                job_result.to_jsonl_record(),
             )
-            seed_path = str(target.prompts_dir / "seed_program.py")
-            return run_transfer_evolution_phase(
-                target=target,
-                sources=sources,
-                client=client,
-                seed_program_path=seed_path,
-                n_iterations=args.transfer_iters,
-                n_candidates=args.n_candidates,
-                max_workers=candidate_workers,
-                max_prompt_train_trials=args.transfer_max_prompt_trials,
-                debug_prompt=args.debug_prompt,
-                **shared,
+            if (
+                job_result.status != "ok"
+                or job_result.result is None
+                or single_test_matrix_path is None
+                or single_improve_matrix_path is None
+            ):
+                return
+            source_key = job_result.job.source_keys[0]
+            target_key = job_result.job.target_key
+            test_loglik = job_result.result.best_test_loglik
+            update_single_transfer_matrix_cell(
+                single_test_matrix_path,
+                dataset_keys,
+                source_key=source_key,
+                target_key=target_key,
+                value=test_loglik,
+            )
+            global_test = global_results[target_key].best_test_loglik
+            improve = None
+            if test_loglik is not None and global_test is not None:
+                improve = float(test_loglik) - float(global_test)
+            update_single_transfer_matrix_cell(
+                single_improve_matrix_path,
+                dataset_keys,
+                source_key=source_key,
+                target_key=target_key,
+                value=improve,
             )
 
-        transfer_results = run_transfer_phases_parallel(
-            specs,
-            global_results,
-            _transfer_worker,
+        transfer_worker = make_transfer_job_worker(
+            global_results=global_results,
+            run_transfer_evolution_phase=run_transfer_evolution_phase,
+            build_source_contexts_for_target=build_source_contexts_for_target,
+            client=client,
+            evolution_kwargs=shared,
+            transfer_iters=args.transfer_iters,
+            n_candidates=args.n_candidates,
+            transfer_max_prompt_trials=args.transfer_max_prompt_trials,
+            debug_prompt=args.debug_prompt,
+            repo_root=_REPO_ROOT,
+            split_ratio=args.split_ratio,
+            split_seed=args.split_seed,
+            data_path=args.data_path,
+            filter_mixed_gambles=bool(args.filter_mixed_gambles),
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+        )
+        transfer_job_results = run_transfer_jobs_parallel(
+            job_batches,
+            transfer_worker,
             max_workers=args.max_workers,
             n_candidates=args.n_candidates,
-            parallel_datasets=args.parallel_datasets,
+            parallel_jobs=args.parallel_datasets,
+            on_job_complete=_on_job_complete,
+            batch_desc=f"Transfer ({args.transfer_mode})",
         )
+
+        if args.transfer_mode == "multiple":
+            for job_id, job_result in transfer_job_results.items():
+                if job_result.result is not None:
+                    transfer_results[job_id] = job_result.result
 
     summary_rows: List[Dict[str, Any]] = []
     test_summary_rows: List[Dict[str, Any]] = []
@@ -773,8 +846,13 @@ def main() -> None:
     write_run_test_loglik_summary_csv(test_path, test_summary_rows)
     print(f"\nWrote train+val selection summary -> {train_val_path}")
     print(f"Wrote test loglik summary -> {test_path}")
+    if args.transfer_mode == "single" and not args.skip_transfer:
+        single_dir = summary_dir / "single_transfer"
+        print(f"Wrote single-source test loglik matrix -> {single_dir / 'test_loglik.csv'}")
+        print(f"Wrote single-source improve matrix -> {single_dir / 'improve_test_loglik.csv'}")
+        print(f"Wrote single-source job log -> {run_dir / 'debug' / 'single_source_transfer_results.jsonl'}")
 
-    if args.debug_prompt:
+    if args.debug_prompt and args.transfer_mode == "multiple":
         debug_dir = run_dir / "debug"
         for spec in specs:
             g = global_results[spec.config_key]
