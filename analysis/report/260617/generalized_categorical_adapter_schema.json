@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mindsascode.local/schemas/psych101_categorical_adapter_v1.json",
+  "title": "Psych-101 categorical adapter output (offline)",
+  "description": "Canonical structured trial format produced by an offline LLM/heuristic adapter from raw Psych-101 HF rows. Consumed by TEH/PICS training and evaluation without runtime LLM calls.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "participant_id",
+    "task_type",
+    "blocks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "psych101_categorical_v1"
+    },
+    "experiment_id": {
+      "type": "string",
+      "description": "HF experiment column value, e.g. peterson2021using/exp1.csv"
+    },
+    "participant_id": {
+      "type": "string",
+      "description": "Stable participant identifier within experiment (HF row index as string is acceptable)"
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "hf_id": { "type": "string" },
+        "split": { "enum": ["train", "test"] },
+        "row_index": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "task_type": {
+      "enum": ["categorical_choice"]
+    },
+    "instruction": {
+      "type": "string",
+      "description": "Optional high-level task instruction extracted from transcript header"
+    },
+    "action_id_convention": {
+      "type": "object",
+      "description": "Documents how integer action IDs are assigned for this participant file",
+      "properties": {
+        "ordering": {
+          "enum": [
+            "adapter_declared_option_order",
+            "sorted_raw_key",
+            "transcript_first_occurrence"
+          ]
+        },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/block" }
+    },
+    "adapter_metadata": {
+      "type": "object",
+      "description": "Provenance and QA for offline adapter only",
+      "properties": {
+        "adapter_name": { "type": "string" },
+        "adapter_version": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "parse_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "option": {
+      "type": "object",
+      "required": ["action", "raw_key"],
+      "properties": {
+        "action": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Normalized integer action ID, consecutive 0..K-1 within the trial"
+        },
+        "raw_key": {
+          "type": "string",
+          "description": "Original keyboard label or numeric key from transcript, e.g. G, 3, [2,4]"
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable short label, e.g. left_arm, deck_H"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional richer option text (gamble text, direction name, door label)"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "trial": {
+      "type": "object",
+      "required": [
+        "trial_id",
+        "problem",
+        "target_action",
+        "is_prediction_target"
+      ],
+      "properties": {
+        "trial_id": {
+          "type": "string",
+          "description": "Stable ID within participant, e.g. b0_t12"
+        },
+        "problem": {
+          "type": "object",
+          "required": ["options"],
+          "properties": {
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "items": { "$ref": "#/$defs/option" },
+              "description": "Valid action set for this trial; defines K for evaluation"
+            },
+            "stimulus": {
+              "type": "object",
+              "description": "Trial-specific observables (cards, ratings, station graph, word pair, etc.)",
+              "additionalProperties": true
+            },
+            "context": {
+              "type": "object",
+              "description": "Static or slow-changing context (block_id, game_id, casino_id, phase, round_id)",
+              "additionalProperties": true
+            },
+            "schema_type": {
+              "type": "string",
+              "description": "Optional legacy schema hint: A/B/C/D or task subtype"
+            }
+          },
+          "additionalProperties": true
+        },
+        "target_action": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Observed human action as integer ID; null when is_prediction_target=false"
+        },
+        "feedback": {
+          "description": "Post-choice feedback (points, correctness, outcome dict, etc.)",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "number" },
+            { "type": "boolean" },
+            { "type": "string" },
+            { "type": "object" }
+          ]
+        },
+        "history": {
+          "type": "array",
+          "description": "Optional precomputed per-trial history for eval; if omitted, runtime builds from prior target trials in block",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": { "type": "integer", "minimum": 0 },
+              "feedback": {},
+              "problem_summary": { "type": "object", "additionalProperties": true }
+            },
+            "additionalProperties": true
+          }
+        },
+        "is_prediction_target": {
+          "type": "boolean",
+          "default": true,
+          "description": "False for instructed demos, study-only events, timeouts with no valid action"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "raw_response_text": { "type": "string" },
+            "reaction_time_ms": { "type": "number" },
+            "phase": { "type": "string" },
+            "source_line_span": { "type": "string" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "is_prediction_target": { "const": true } },
+            "required": ["is_prediction_target"]
+          },
+          "then": {
+            "required": ["target_action"],
+            "properties": {
+              "target_action": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "block": {
+      "type": "object",
+      "required": ["block_id", "trials"],
+      "properties": {
+        "block_id": { "type": "string" },
+        "problem_static": {
+          "type": "object",
+          "description": "Block-level fields merged into each trial problem at runtime",
+          "additionalProperties": true
+        },
+        "trials": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/trial" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "psych101_categorical_v1",
+      "experiment_id": "gershman2018deconstructing/exp1.csv",
+      "participant_id": "0",
+      "task_type": "categorical_choice",
+      "instruction": "Choose between two slot machines...",
+      "action_id_convention": {
+        "ordering": "adapter_declared_option_order",
+        "note": "action 0 = first listed machine key in trial options"
+      },
+      "blocks": [
+        {
+          "block_id": "b0",
+          "trials": [
+            {
+              "trial_id": "b0_t0",
+              "problem": {
+                "options": [
+                  { "action": 0, "raw_key": "U", "label": "machine_U" },
+                  { "action": 1, "raw_key": "P", "label": "machine_P" }
+                ],
+                "stimulus": {},
+                "context": { "trial_index": 0 }
+              },
+              "target_action": 1,
+              "feedback": 12.0,
+              "is_prediction_target": true,
+              "metadata": {}
+            }
+          ]
+        }
+      ],
+      "adapter_metadata": {
+        "adapter_name": "psych101_offline_adapter",
+        "adapter_version": "0.0.0",
+        "warnings": []
+      }
+    }
+  ]
+}

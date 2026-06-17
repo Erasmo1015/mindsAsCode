@@ -83,9 +83,11 @@ class TransferJobResult:
 
     def to_jsonl_record(self) -> Dict[str, Any]:
         test_loglik = None
+        first_iter_test_loglik = None
         train_val_score = None
         if self.result is not None:
             test_loglik = self.result.best_test_loglik
+            first_iter_test_loglik = self.result.first_iter_best_test_loglik
             train_val_score = self.result.best_loglik
         return {
             "transfer_mode": self.job.transfer_mode,
@@ -94,6 +96,7 @@ class TransferJobResult:
             "target_dataset": self.job.target_key,
             "score": train_val_score,
             "test_loglik": test_loglik,
+            "first_iter_test_loglik": first_iter_test_loglik,
             "best_program_path": str(self.best_program_path) if self.best_program_path else "",
             "status": self.status,
             "error": self.error or "",
@@ -255,20 +258,102 @@ def _write_transfer_matrix(
             writer.writerow([target] + [matrix[target].get(source, "") for source in keys])
 
 
-def ensure_single_transfer_matrix_csvs(
-    summary_dir: Path,
+SINGLE_TRANSFER_MATRIX_TEST_PATH = "matrix_test_loglik.csv"
+SINGLE_TRANSFER_MATRIX_IMPROVE_PATH = "matrix_improve_test_loglik.csv"
+SINGLE_TRANSFER_SUMMARY_PATH = "transfer_summary.csv"
+SINGLE_TRANSFER_1ST_ITER_SUBDIR = "transfer_1st_iter"
+
+
+def _ensure_single_transfer_matrix_pair(
+    output_dir: Path,
     dataset_keys: Sequence[str],
 ) -> Tuple[Path, Path]:
-    """Create empty source x target matrices if they do not exist yet."""
-    single_dir = summary_dir / "single_transfer"
-    test_path = single_dir / "test_loglik.csv"
-    improve_path = single_dir / "improve_test_loglik.csv"
+    test_path = output_dir / SINGLE_TRANSFER_MATRIX_TEST_PATH
+    improve_path = output_dir / SINGLE_TRANSFER_MATRIX_IMPROVE_PATH
     empty = {t: {s: "" for s in dataset_keys} for t in dataset_keys}
     if not test_path.is_file():
         _write_transfer_matrix(test_path, dataset_keys, empty)
     if not improve_path.is_file():
         _write_transfer_matrix(improve_path, dataset_keys, empty)
     return test_path, improve_path
+
+
+def ensure_single_transfer_matrix_csvs(
+    summary_dir: Path,
+    dataset_keys: Sequence[str],
+) -> Tuple[Path, Path, Path, Path]:
+    """Create empty source x target matrices for best and iteration-1 results."""
+    single_dir = summary_dir / "single_transfer"
+    test_path, improve_path = _ensure_single_transfer_matrix_pair(single_dir, dataset_keys)
+    first_iter_dir = single_dir / SINGLE_TRANSFER_1ST_ITER_SUBDIR
+    first_iter_test_path, first_iter_improve_path = _ensure_single_transfer_matrix_pair(
+        first_iter_dir,
+        dataset_keys,
+    )
+    return test_path, improve_path, first_iter_test_path, first_iter_improve_path
+
+
+def _parse_matrix_float(value: str) -> Optional[float]:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def write_single_transfer_summary_csv(
+    path: Path,
+    dataset_keys: Sequence[str],
+    *,
+    test_matrix_path: Path,
+    improve_matrix_path: Path,
+) -> None:
+    """Aggregate per-target single-source transfer stats from matrix CSVs."""
+    keys = [str(k) for k in dataset_keys]
+    test_matrix = _read_transfer_matrix(test_matrix_path, keys)
+    improve_matrix = _read_transfer_matrix(improve_matrix_path, keys)
+    metric_names = [
+        "best_single_source",
+        "best_single_source_test_loglik",
+        "best_single_source_improve_vs_global",
+        "num_sources_better_than_global",
+        "mean_single_source_improve_vs_global",
+    ]
+    rows: List[List[str]] = []
+    for target in keys:
+        improves: List[float] = []
+        best_source = ""
+        best_improve: Optional[float] = None
+        best_test: Optional[float] = None
+        for source in keys:
+            if source == target:
+                continue
+            improve = _parse_matrix_float(improve_matrix[target].get(source, ""))
+            if improve is None:
+                continue
+            improves.append(improve)
+            if best_improve is None or improve > best_improve:
+                best_improve = improve
+                best_source = source
+                best_test = _parse_matrix_float(test_matrix[target].get(source, ""))
+        num_better = sum(1 for value in improves if value > 0.0)
+        mean_improve = sum(improves) / len(improves) if improves else None
+        rows.append(
+            [
+                target,
+                best_source,
+                f"{best_test:.6f}" if best_test is not None else "",
+                f"{best_improve:.6f}" if best_improve is not None else "",
+                str(num_better),
+                f"{mean_improve:.6f}" if mean_improve is not None else "",
+            ]
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([""] + metric_names)
+        writer.writerows(rows)
 
 
 def update_single_transfer_matrix_cell(
@@ -286,6 +371,36 @@ def update_single_transfer_matrix_cell(
     else:
         matrix[str(target_key)][str(source_key)] = fmt.format(float(value))
     _write_transfer_matrix(path, dataset_keys, matrix)
+
+
+def update_single_transfer_matrix_result(
+    test_matrix_path: Path,
+    improve_matrix_path: Path,
+    dataset_keys: Sequence[str],
+    *,
+    source_key: str,
+    target_key: str,
+    test_loglik: Optional[float],
+    global_test_loglik: Optional[float],
+) -> None:
+    """Write test loglik and improve-vs-global cells for one source-target pair."""
+    update_single_transfer_matrix_cell(
+        test_matrix_path,
+        dataset_keys,
+        source_key=source_key,
+        target_key=target_key,
+        value=test_loglik,
+    )
+    improve = None
+    if test_loglik is not None and global_test_loglik is not None:
+        improve = float(test_loglik) - float(global_test_loglik)
+    update_single_transfer_matrix_cell(
+        improve_matrix_path,
+        dataset_keys,
+        source_key=source_key,
+        target_key=target_key,
+        value=improve,
+    )
 
 
 def append_single_transfer_result_jsonl(path: Path, record: Dict[str, Any]) -> None:

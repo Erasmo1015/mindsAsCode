@@ -47,6 +47,7 @@ from utils.teh_transfer.evolution import (
     write_run_test_loglik_summary_csv,
     backfill_run_test_loglik_summary_csv,
 )
+from utils.teh_transfer.single_transfer_graphs import write_single_transfer_matrix_heatmaps
 from utils.teh_transfer.transfer_jobs import (
     TransferJobResult,
     append_single_transfer_result_jsonl,
@@ -54,7 +55,12 @@ from utils.teh_transfer.transfer_jobs import (
     ensure_single_transfer_matrix_csvs,
     make_transfer_job_worker,
     run_transfer_jobs_parallel,
-    update_single_transfer_matrix_cell,
+    SINGLE_TRANSFER_MATRIX_IMPROVE_PATH,
+    SINGLE_TRANSFER_MATRIX_TEST_PATH,
+    SINGLE_TRANSFER_1ST_ITER_SUBDIR,
+    SINGLE_TRANSFER_SUMMARY_PATH,
+    update_single_transfer_matrix_result,
+    write_single_transfer_summary_csv,
 )
 
 
@@ -723,12 +729,17 @@ def main() -> None:
 
         single_test_matrix_path: Optional[Path] = None
         single_improve_matrix_path: Optional[Path] = None
+        single_first_iter_test_matrix_path: Optional[Path] = None
+        single_first_iter_improve_matrix_path: Optional[Path] = None
         single_results_jsonl = run_dir / "debug" / "single_source_transfer_results.jsonl"
         if args.transfer_mode == "single":
             summary_dir = run_dir / "summary_csv"
-            single_test_matrix_path, single_improve_matrix_path = (
-                ensure_single_transfer_matrix_csvs(summary_dir, dataset_keys)
-            )
+            (
+                single_test_matrix_path,
+                single_improve_matrix_path,
+                single_first_iter_test_matrix_path,
+                single_first_iter_improve_matrix_path,
+            ) = ensure_single_transfer_matrix_csvs(summary_dir, dataset_keys)
             single_results_jsonl.parent.mkdir(parents=True, exist_ok=True)
             if single_results_jsonl.is_file():
                 single_results_jsonl.unlink()
@@ -745,28 +756,30 @@ def main() -> None:
                 or job_result.result is None
                 or single_test_matrix_path is None
                 or single_improve_matrix_path is None
+                or single_first_iter_test_matrix_path is None
+                or single_first_iter_improve_matrix_path is None
             ):
                 return
             source_key = job_result.job.source_keys[0]
             target_key = job_result.job.target_key
-            test_loglik = job_result.result.best_test_loglik
-            update_single_transfer_matrix_cell(
-                single_test_matrix_path,
-                dataset_keys,
-                source_key=source_key,
-                target_key=target_key,
-                value=test_loglik,
-            )
             global_test = global_results[target_key].best_test_loglik
-            improve = None
-            if test_loglik is not None and global_test is not None:
-                improve = float(test_loglik) - float(global_test)
-            update_single_transfer_matrix_cell(
+            update_single_transfer_matrix_result(
+                single_test_matrix_path,
                 single_improve_matrix_path,
                 dataset_keys,
                 source_key=source_key,
                 target_key=target_key,
-                value=improve,
+                test_loglik=job_result.result.best_test_loglik,
+                global_test_loglik=global_test,
+            )
+            update_single_transfer_matrix_result(
+                single_first_iter_test_matrix_path,
+                single_first_iter_improve_matrix_path,
+                dataset_keys,
+                source_key=source_key,
+                target_key=target_key,
+                test_loglik=job_result.result.first_iter_best_test_loglik,
+                global_test_loglik=global_test,
             )
 
         transfer_worker = make_transfer_job_worker(
@@ -848,8 +861,35 @@ def main() -> None:
     print(f"Wrote test loglik summary -> {test_path}")
     if args.transfer_mode == "single" and not args.skip_transfer:
         single_dir = summary_dir / "single_transfer"
-        print(f"Wrote single-source test loglik matrix -> {single_dir / 'test_loglik.csv'}")
-        print(f"Wrote single-source improve matrix -> {single_dir / 'improve_test_loglik.csv'}")
+        first_iter_dir = single_dir / SINGLE_TRANSFER_1ST_ITER_SUBDIR
+        matrix_test_path = single_dir / SINGLE_TRANSFER_MATRIX_TEST_PATH
+        matrix_improve_path = single_dir / SINGLE_TRANSFER_MATRIX_IMPROVE_PATH
+        transfer_summary_path = single_dir / SINGLE_TRANSFER_SUMMARY_PATH
+        first_iter_matrix_test_path = first_iter_dir / SINGLE_TRANSFER_MATRIX_TEST_PATH
+        first_iter_matrix_improve_path = first_iter_dir / SINGLE_TRANSFER_MATRIX_IMPROVE_PATH
+        first_iter_transfer_summary_path = first_iter_dir / SINGLE_TRANSFER_SUMMARY_PATH
+        dataset_key_list = [spec.config_key for spec in specs]
+        write_single_transfer_summary_csv(
+            transfer_summary_path,
+            dataset_key_list,
+            test_matrix_path=matrix_test_path,
+            improve_matrix_path=matrix_improve_path,
+        )
+        write_single_transfer_summary_csv(
+            first_iter_transfer_summary_path,
+            dataset_key_list,
+            test_matrix_path=first_iter_matrix_test_path,
+            improve_matrix_path=first_iter_matrix_improve_path,
+        )
+        print(f"Wrote single-source test loglik matrix -> {matrix_test_path}")
+        print(f"Wrote single-source improve matrix -> {matrix_improve_path}")
+        print(f"Wrote single-source transfer summary -> {transfer_summary_path}")
+        print(f"Wrote single-source iteration-1 test loglik matrix -> {first_iter_matrix_test_path}")
+        print(f"Wrote single-source iteration-1 improve matrix -> {first_iter_matrix_improve_path}")
+        print(f"Wrote single-source iteration-1 transfer summary -> {first_iter_transfer_summary_path}")
+        heatmap_paths = write_single_transfer_matrix_heatmaps(run_dir)
+        for heatmap_path in heatmap_paths:
+            print(f"Wrote single-source heatmap -> {heatmap_path}")
         print(f"Wrote single-source job log -> {run_dir / 'debug' / 'single_source_transfer_results.jsonl'}")
 
     if args.debug_prompt and args.transfer_mode == "multiple":

@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mindsascode.local/schemas/psych101_parser_plan_v1.json",
+  "title": "Psych-101 LLM parser plan (Version B)",
+  "description": "Structured extraction plan produced offline by an LLM from representative HF rows. Executed by fixed Python parser engine to emit categorical adapter JSON. Not the parsed dataset itself.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "task_type",
+    "line_classifier",
+    "trial_extraction",
+    "option_normalization",
+    "validation_expectations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "psych101_parser_plan_v1"
+    },
+    "experiment_id": {
+      "type": "string"
+    },
+    "task_type": {
+      "enum": ["categorical_choice"]
+    },
+    "source_assessment": {
+      "type": "object",
+      "description": "LLM summary of raw transcript format from representative rows",
+      "properties": {
+        "raw_format_type": {
+          "enum": [
+            "nl_press_template",
+            "nl_gamble_blocks",
+            "nl_game_bandit",
+            "nl_sequential_rounds",
+            "nl_mdp_navigation",
+            "nl_study_test",
+            "nl_compressed_sequence",
+            "other"
+          ]
+        },
+        "representative_row_indices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 1,
+          "maxItems": 10
+        },
+        "instruction_boundary": {
+          "type": "string",
+          "description": "How to separate instruction header from trial body"
+        }
+      },
+      "additionalProperties": false
+    },
+    "line_classifier": {
+      "type": "object",
+      "description": "Rules for labeling transcript lines/chunks before trial assembly",
+      "required": ["line_types"],
+      "properties": {
+        "line_types": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["type_id", "detection"],
+            "properties": {
+              "type_id": {
+                "enum": [
+                  "instruction",
+                  "block_header",
+                  "trial_stimulus",
+                  "action_press",
+                  "action_say",
+                  "action_estimate",
+                  "feedback_points",
+                  "feedback_correctness",
+                  "context_only",
+                  "omit"
+                ]
+              },
+              "detection": {
+                "type": "object",
+                "description": "At least one of regex, prefix, contains must be set",
+                "properties": {
+                  "regex": { "type": "string" },
+                  "prefix": { "type": "string" },
+                  "contains": { "type": "string" },
+                  "flags": { "type": "string", "default": "i" }
+                },
+                "additionalProperties": false
+              },
+              "examples": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 3
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "multiline_chunk_join": {
+          "type": "string",
+          "description": "How to merge lines into trial candidates, e.g. blank_line_paragraphs"
+        }
+      },
+      "additionalProperties": false
+    },
+    "block_boundary_rule": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "enum": [
+            "single_block",
+            "regex_header",
+            "blank_line_paragraphs",
+            "keyword_header",
+            "fixed_chunk_count"
+          ]
+        },
+        "regex": { "type": "string" },
+        "keyword": { "type": "string" },
+        "block_id_capture_group": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "trial_extraction": {
+      "type": "object",
+      "required": ["boundary_strategy", "action_rule"],
+      "properties": {
+        "boundary_strategy": {
+          "enum": [
+            "one_press_per_trial",
+            "stimulus_then_press",
+            "round_state_machine",
+            "game_segment",
+            "study_then_test_pair"
+          ]
+        },
+        "trial_start_regex": { "type": "string" },
+        "trial_end_regex": { "type": "string" },
+        "action_rule": {
+          "type": "object",
+          "required": ["source_line_type", "capture"],
+          "properties": {
+            "source_line_type": { "const": "action_press" },
+            "capture": {
+              "type": "object",
+              "properties": {
+                "regex": { "type": "string" },
+                "group": { "type": "string", "description": "Named or numbered capture group for raw key" }
+              },
+              "required": ["regex"]
+            }
+          },
+          "additionalProperties": false
+        },
+        "feedback_rule": {
+          "type": "object",
+          "properties": {
+            "regex": { "type": "string" },
+            "value_type": { "enum": ["points", "boolean", "string", "none"] }
+          },
+          "additionalProperties": false
+        },
+        "stimulus_fields": {
+          "type": "array",
+          "description": "Field extractions into problem.stimulus",
+          "items": {
+            "type": "object",
+            "required": ["field_name", "regex"],
+            "properties": {
+              "field_name": { "type": "string" },
+              "regex": { "type": "string" },
+              "group": { "type": "string" },
+              "cast": { "enum": ["str", "int", "float", "list_int"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "context_fields": {
+          "type": "array",
+          "description": "Slow-changing fields into problem.context (game_id, casino_id, phase, round_id)",
+          "items": {
+            "type": "object",
+            "required": ["field_name", "source"],
+            "properties": {
+              "field_name": { "type": "string" },
+              "source": { "enum": ["block_header", "trial_regex", "constant"] },
+              "regex": { "type": "string" },
+              "constant": {}
+            },
+            "additionalProperties": false
+          }
+        },
+        "context_only_trial_rule": {
+          "type": "object",
+          "description": "When to set is_prediction_target=false",
+          "properties": {
+            "line_type": { "const": "context_only" },
+            "regex_any": { "type": "array", "items": { "type": "string" } },
+            "examples": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "option_normalization": {
+      "type": "object",
+      "required": ["strategy"],
+      "properties": {
+        "strategy": {
+          "enum": [
+            "fixed_keys_from_instruction",
+            "per_trial_available_keys",
+            "per_block_key_list",
+            "numeric_range_from_context"
+          ]
+        },
+        "instruction_regex": {
+          "type": "string",
+          "description": "Extract ordered raw keys from instruction, e.g. rainy/fine press keys"
+        },
+        "action_id_order": {
+          "type": "string",
+          "enum": [
+            "instruction_order",
+            "sorted_raw_key",
+            "first_seen_in_transcript"
+          ]
+        },
+        "raw_response_to_action_id_mapping": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "description": "Optional explicit map when keys are stable across participant"
+        }
+      },
+      "additionalProperties": false
+    },
+    "history_rule": {
+      "type": "object",
+      "properties": {
+        "scope": { "enum": ["block", "game", "participant"] },
+        "include_context_only": { "type": "boolean", "default": false },
+        "fields": {
+          "type": "array",
+          "items": { "enum": ["action", "feedback", "stimulus_summary"] },
+          "default": ["action", "feedback"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "state_machine": {
+      "type": "object",
+      "description": "Optional for sequential tasks (CCT, balloon, sampling)",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "state_variables": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "on_action": { "type": "string" },
+              "updates": { "type": "object", "additionalProperties": true }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "validation_expectations": {
+      "type": "object",
+      "required": ["min_options", "action_ids_consecutive", "target_action_required"],
+      "properties": {
+        "min_options": { "type": "integer", "minimum": 2 },
+        "max_options": { "type": "integer" },
+        "action_ids_consecutive": { "type": "boolean", "const": true },
+        "target_action_required": { "type": "boolean" },
+        "min_prediction_trials_per_participant": { "type": "integer", "minimum": 1 },
+        "min_blocks": { "type": "integer", "minimum": 1 },
+        "expected_press_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of You press<<>> lines that become prediction trials"
+        }
+      },
+      "additionalProperties": false
+    },
+    "uncertainty_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "human_review_required": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "additionalProperties": false
+}
