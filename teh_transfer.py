@@ -64,6 +64,17 @@ from utils.teh_transfer.transfer_jobs import (
 )
 
 
+def _make_unique_run_dir(base_dir: Path) -> Path:
+    for i in range(1000):
+        candidate = base_dir if i == 0 else Path(f"{base_dir}_{i}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Could not create unique run directory from {base_dir}")
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -585,9 +596,9 @@ def main() -> None:
         run_dir = Path(args.output_dir).expanduser()
         if not run_dir.is_absolute():
             run_dir = (_REPO_ROOT / run_dir).resolve()
+        run_dir.mkdir(parents=True, exist_ok=True)
     else:
-        run_dir = transfer_output_run_dir(timestamp)
-    run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = _make_unique_run_dir(transfer_output_run_dir(timestamp))
     cmd_log = teh._write_command_line_log(run_dir)
     print(f"Saved command log -> {cmd_log}")
 

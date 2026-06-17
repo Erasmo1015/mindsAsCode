@@ -10158,6 +10158,17 @@ def run_evolution_gridworld_ensemble(
     }
 
 
+def _make_unique_run_dir(base_dir: Path) -> Path:
+    for i in range(1000):
+        candidate = base_dir if i == 0 else Path(f"{base_dir}_{i}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Could not create unique run directory from {base_dir}")
+
+
 def _write_command_line_log(run_dir: Path) -> Path:
     """Persist interpreter + argv under run_dir/log/command.txt (path also printed for SLURM logs)."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -11032,13 +11043,15 @@ def main():
 
     base_run_dir = None
     if args.output_dir is None:
-        base_run_dir = teh_output_base_dir(
-            args.dataset,
-            timestamp,
-            psych_dataset_split=psych_dataset_split,
-            ablation=args.ablation,
+        default_run_dir = Path(
+            teh_output_base_dir(
+                args.dataset,
+                timestamp,
+                psych_dataset_split=psych_dataset_split,
+                ablation=args.ablation,
+            )
         )
-        Path(base_run_dir).mkdir(parents=True, exist_ok=True)
+        base_run_dir = str(_make_unique_run_dir(default_run_dir))
     elif len(participants_to_process) > 1:
         # Multiple participants with custom output_dir: use that as base directory
         base_run_dir = args.output_dir

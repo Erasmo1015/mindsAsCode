@@ -94,6 +94,17 @@ def _teh_psych_output_dir(timestamp: str, *, ablation: Optional[str] = None) -> 
     return root / run_name
 
 
+def _make_unique_run_dir(base_dir: Path) -> Path:
+    for i in range(1000):
+        candidate = base_dir if i == 0 else Path(f"{base_dir}_{i}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Could not create unique run directory from {base_dir}")
+
+
 def _build_client(args: argparse.Namespace) -> Optional[OpenAI]:
     if args.mode == "local":
         return OpenAI(base_url=args.llm_server_url, api_key=args.llm_api_key)
@@ -559,8 +570,11 @@ def main() -> int:
         experiment_filter = [x.strip() for x in args.experiment_ids.split(",") if x.strip()]
 
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-    run_dir = Path(args.output_dir) if args.output_dir else _teh_psych_output_dir(timestamp, ablation=args.ablation)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if args.output_dir:
+        run_dir = Path(args.output_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        run_dir = _make_unique_run_dir(_teh_psych_output_dir(timestamp, ablation=args.ablation))
     summary_dir = ensure_summary_dir(run_dir, args.prototype_summary_dir)
     _write_command_line_log(run_dir)
 
