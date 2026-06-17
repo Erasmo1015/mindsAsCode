@@ -4,7 +4,6 @@ Population-level evolution loop using categorical log-likelihood evaluation.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -56,7 +55,7 @@ def run_population_evolution(
     sampled_parents_decay: bool = True,
     elite_pool_size: Optional[int],
     model_name: str,
-    client: OpenAI,
+    client: Optional[OpenAI],
     max_prompt_train_trials: int = 1_000_000,
     max_prompt_trials_per_problem: int = 0,
     split_seed: int = 42,
@@ -138,6 +137,9 @@ def run_population_evolution(
             "pool_best_train_loglik": baseline_ll,
             "n_iterations_run": 0,
         }
+
+    if client is None:
+        raise RuntimeError("LLM client required for population evolution")
 
     for iteration in range(n_iterations):
         iteration_step = iteration + 1
@@ -293,12 +295,6 @@ def run_population_evolution(
     best_code = elite_parents[0][0] or ""
     best_path = pop_dir / BEST_PROGRAM_FILENAME
     best_path.write_text(best_code, encoding="utf-8")
-    pool_dir = pop_dir / "elite_pool"
-    pool_dir.mkdir(exist_ok=True)
-    for rank, parent in enumerate(elite_parents):
-        prog_id = str(parent[3])
-        safe = re.sub(r"[^\w.\-]+", "_", prog_id) or "program"
-        (pool_dir / f"{rank:03d}_{safe}.py").write_text(parent[0] or "", encoding="utf-8")
 
     return {
         "best_program_path": str(best_path),

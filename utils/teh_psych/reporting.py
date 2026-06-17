@@ -15,8 +15,16 @@ CSV_COLUMNS = [
     "stage_reached",
     "failure_stage",
     "failure_message",
+    "adapter_type",
+    "parse_plan_status",
+    "parse_plan_model",
+    "parse_plan_cached",
+    "parse_plan_human_review_required",
+    "parse_plan_raw_format_type",
+    "parse_plan_failure_message",
     "n_rows_total",
     "n_rows_used",
+    "n_parse_plan_rows",
     "n_parsed_trials",
     "n_prediction_trials",
     "num_actions_min",
@@ -26,6 +34,8 @@ CSV_COLUMNS = [
     "val_loglik",
     "test_loglik",
     "best_program_path",
+    "parse_plan_path",
+    "used_existing_parser_fallback",
     "notes",
 ]
 
@@ -37,8 +47,16 @@ class DatasetResult:
     stage_reached: str = "discover_experiments"
     failure_stage: str = ""
     failure_message: str = ""
+    adapter_type: str = ""
+    parse_plan_status: str = ""
+    parse_plan_model: str = ""
+    parse_plan_cached: bool = False
+    parse_plan_human_review_required: bool = False
+    parse_plan_raw_format_type: str = ""
+    parse_plan_failure_message: str = ""
     n_rows_total: int = 0
     n_rows_used: int = 0
+    n_parse_plan_rows: int = 0
     n_parsed_trials: int = 0
     n_prediction_trials: int = 0
     num_actions_min: Optional[int] = None
@@ -48,6 +66,8 @@ class DatasetResult:
     val_loglik: Optional[float] = None
     test_loglik: Optional[float] = None
     best_program_path: str = ""
+    parse_plan_path: str = ""
+    used_existing_parser_fallback: bool = False
     notes: str = ""
     traceback: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -55,13 +75,16 @@ class DatasetResult:
     def to_csv_row(self) -> Dict[str, Any]:
         row = {k: getattr(self, k, "") for k in CSV_COLUMNS}
         for key in ("train_loglik", "val_loglik", "test_loglik"):
-            val = row.get(key)
-            if val is None:
+            if row.get(key) is None:
                 row[key] = ""
-        if self.is_variable_k:
-            row["is_variable_k"] = "true"
-        else:
-            row["is_variable_k"] = "false"
+        row["is_variable_k"] = "true" if self.is_variable_k else "false"
+        row["parse_plan_cached"] = "true" if self.parse_plan_cached else "false"
+        row["parse_plan_human_review_required"] = (
+            "true" if self.parse_plan_human_review_required else "false"
+        )
+        row["used_existing_parser_fallback"] = (
+            "true" if self.used_existing_parser_fallback else "false"
+        )
         return row
 
     def to_json(self) -> Dict[str, Any]:
@@ -132,12 +155,12 @@ def write_success_summary_md(summary_dir: Path, results: List[DatasetResult]) ->
         lines.append("_No successful datasets._\n")
     else:
         lines.append(
-            "| experiment_id | n_prediction_trials | train_loglik | val_loglik | test_loglik |\n"
+            "| experiment_id | adapter | n_prediction_trials | train_loglik | val_loglik | test_loglik |\n"
         )
-        lines.append("|---|---:|---:|---:|---:|\n")
+        lines.append("|---|---|---:|---:|---:|---:|\n")
         for r in ok:
             lines.append(
-                f"| `{r.experiment_id}` | {r.n_prediction_trials} | "
+                f"| `{r.experiment_id}` | {r.adapter_type} | {r.n_prediction_trials} | "
                 f"{_fmt(r.train_loglik)} | {_fmt(r.val_loglik)} | {_fmt(r.test_loglik)} |\n"
             )
     (summary_dir / "success_summary.md").write_text("".join(lines), encoding="utf-8")

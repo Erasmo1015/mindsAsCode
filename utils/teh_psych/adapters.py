@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from data_modules.psych101_binary import (
+    experiment_to_trial_dicts,
     parse_psych101_binary_row,
-    split_psych_experiment,
 )
 
 
@@ -23,12 +23,11 @@ class ParseAdapterError(AdapterError):
 
 
 @dataclass
-class AdapterStatus:
+class ManualParserStatus:
     experiment_id: str
     alias: Optional[str]
     n_rows_attempted: int
     n_rows_parsed: int
-    n_rows_split_ok: int
     parse_errors: List[str]
 
 
@@ -40,10 +39,6 @@ def _option_dict_for_index(problem: Dict[str, Any], option_keys: List[str], idx:
         opt["gamble"] = problem["gamble_A"]
     if idx == 1 and "gamble_B" in problem:
         opt["gamble"] = problem["gamble_B"]
-    for key in ("rewards", "probs", "outcomes", "features", "ratings", "description"):
-        pk = f"{key}_{option_keys[idx]}" if idx < len(option_keys) else None
-        if pk and pk in problem:
-            opt[key] = problem[pk]
     return opt
 
 
@@ -59,29 +54,14 @@ def binary_trial_to_categorical(trial: Dict[str, Any]) -> Dict[str, Any]:
     options = [_option_dict_for_index(problem, option_keys, i) for i in range(K)]
 
     stimulus: Dict[str, Any] = {}
-    for key in (
-        "cards",
-        "weather_outcome",
-        "tree_features",
-        "ratings_A",
-        "ratings_B",
-        "features",
-        "stimulus",
-    ):
+    for key in ("cards", "weather_outcome", "tree_features", "ratings_A", "ratings_B", "features", "stimulus"):
         if key in problem:
             stimulus[key] = problem[key]
     if stimulus:
         problem["stimulus"] = stimulus
 
     context: Dict[str, Any] = {}
-    for key in (
-        "game_id",
-        "round_id",
-        "block_id",
-        "schema_type",
-        "has_feedback",
-        "machine_labels",
-    ):
+    for key in ("game_id", "round_id", "block_id", "schema_type", "has_feedback", "machine_labels"):
         if key in problem:
             context[key] = problem[key]
     if context:
@@ -89,12 +69,14 @@ def binary_trial_to_categorical(trial: Dict[str, Any]) -> Dict[str, Any]:
 
     problem["options"] = options
     action = int(trial["action"])
-    history = list(trial.get("history") or [])
     return {
         "problem": problem,
-        "history": history,
+        "history": list(trial.get("history") or []),
         "action": action,
         "target_action": action,
+        "feedback": trial.get("feedback"),
+        "is_prediction_target": True,
+        "_meta": {"adapter": "manual_fallback"},
     }
 
 
@@ -102,50 +84,38 @@ def convert_binary_trials_to_categorical(trials: List[Dict[str, Any]]) -> List[D
     return [binary_trial_to_categorical(t) for t in trials]
 
 
-def parse_row_to_binary_trials(row: Dict[str, Any], alias: str):
-    return parse_psych101_binary_row(row, alias)
-
-
-def pool_categorical_trials_from_rows(
+def pool_manual_parser_trials_from_rows(
     rows: List[Dict[str, Any]],
     *,
     alias: str,
     experiment_id: str,
-    split_ratio: float,
-    split_seed: int,
-) -> tuple[
-    List[Dict[str, Any]],
-    List[Dict[str, Any]],
-    List[Dict[str, Any]],
-    AdapterStatus,
-]:
-    train_all: List[Dict[str, Any]] = []
-    val_all: List[Dict[str, Any]] = []
-    test_all: List[Dict[str, Any]] = []
+    row_indices: Optional[List[int]] = None,
+) -> tuple[List[Dict[str, Any]], ManualParserStatus]:
+    """Optional fallback: existing manual binary parsers, no per-row HF split."""
+    indices = row_indices if row_indices is not None else list(range(len(rows)))
+    all_trials: List[Dict[str, Any]] = []
     parse_errors: List[str] = []
     n_parsed = 0
-    n_split_ok = 0
-
-    for row_idx, row in enumerate(rows):
+    for row_idx, row in zip(indices, rows):
         try:
-            exp = parse_row_to_binary_trials(row, alias)
+            exp = parse_psych101_binary_row(row, alias)
             n_parsed += 1
-            train_b, val_b, test_b, _ = split_psych_experiment(
-                exp, split_ratio=split_ratio, split_seed=split_seed
+            binary = experiment_to_trial_dicts(
+                exp, dataset_alias=alias, experiment_id=experiment_id
             )
-            n_split_ok += 1
-            train_all.extend(convert_binary_trials_to_categorical(train_b))
-            val_all.extend(convert_binary_trials_to_categorical(val_b))
-            test_all.extend(convert_binary_trials_to_categorical(test_b))
+            for t in convert_binary_trials_to_categorical(binary):
+                meta = dict(t.get("_meta") or {})
+                meta["row_index"] = row_idx
+                t["_meta"] = meta
+                all_trials.append(t)
         except Exception as exc:
             parse_errors.append(f"row {row_idx}: {type(exc).__name__}: {exc}")
 
-    status = AdapterStatus(
+    status = ManualParserStatus(
         experiment_id=experiment_id,
         alias=alias,
         n_rows_attempted=len(rows),
         n_rows_parsed=n_parsed,
-        n_rows_split_ok=n_split_ok,
         parse_errors=parse_errors,
     )
-    return train_all, val_all, test_all, status
+    return all_trials, status

@@ -6,6 +6,31 @@ from typing import Any, Dict, List, Tuple
 from utils.teh_psych.categorical_eval import valid_action_ids_from_problem
 
 
+def is_prediction_trial(trial: Dict[str, Any]) -> bool:
+    """True when trial should be used for split/evaluation (default True if flag missing)."""
+    return bool(trial.get("is_prediction_target", True))
+
+
+def partition_pooled_trials(
+    all_trials: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split pooled trials into prediction targets vs context-only."""
+    prediction_trials = [t for t in all_trials if is_prediction_trial(t)]
+    context_only_trials = [t for t in all_trials if not is_prediction_trial(t)]
+    return prediction_trials, context_only_trials
+
+
+def trial_filtering_summary(
+    all_trials: List[Dict[str, Any]],
+    prediction_trials: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    return {
+        "n_all_trials": len(all_trials),
+        "n_prediction_trials": len(prediction_trials),
+        "n_context_only_trials": len(all_trials) - len(prediction_trials),
+    }
+
+
 def summarize_trial_action_space(trials: List[Dict[str, Any]]) -> Dict[str, Any]:
     ks: List[int] = []
     for t in trials:
