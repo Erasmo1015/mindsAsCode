@@ -1,0 +1,252 @@
+You are given a dataset/task description and representative raw rows from one Psych-101 experiment.
+
+Your task is to produce a parser plan that a fixed Python parser engine can use to convert raw transcript text into structured categorical-choice trials.
+
+You will be given:
+1. A dataset/task description, if available.
+2. Several representative raw rows or transcript snippets from the experiment.
+3. Optional metadata such as experiment_id, split name, row index, participant id, or response columns.
+
+Use the dataset description to understand the task structure, but derive extraction rules from the raw rows. If the description and raw rows conflict, trust the raw rows and mention the conflict in uncertainty_notes.
+
+The parser plan is not the parsed dataset itself. It is an extraction specification.
+
+The downstream structured trials will be used by a cognitive program with this API:
+
+def choose(problem, history):
+return {0: p0, 1: p1, ..., K-1: pK}
+
+Therefore, the parser plan must identify:
+
+* trial boundaries
+* available options on each trial
+* how raw responses map to normalized integer action ids
+* the observed target action
+* feedback, if available
+* block/game/task context, if available
+* which trials should be prediction targets
+* which trials should be context-only
+
+Output only valid JSON. Do not include markdown, comments, explanations, or code fences.
+
+The JSON must follow this structure:
+
+{
+"schema_version": "psych101_parser_plan_v1",
+"experiment_id": "...",
+"task_type": "categorical_choice",
+
+"source_assessment": {
+"raw_format_type": "...",
+"representative_row_indices": [0],
+"instruction_boundary": "..."
+},
+
+"line_classifier": {
+"line_types": [
+{
+"type_id": "instruction",
+"detection": {
+"regex": "...",
+"flags": "i"
+},
+"examples": ["..."]
+}
+],
+"multiline_chunk_join": "..."
+},
+
+"block_boundary_rule": {
+"strategy": "...",
+"regex": "...",
+"keyword": "...",
+"block_id_capture_group": 1
+},
+
+"trial_extraction": {
+"boundary_strategy": "...",
+
+```
+"trial_start_regex": "...",
+"trial_end_regex": "...",
+
+"action_rule": {
+  "source_line_type": "action_press",
+  "capture": {
+    "regex": "...",
+    "group": "..."
+  }
+},
+
+"feedback_rule": {
+  "regex": "...",
+  "value_type": "points"
+},
+
+"stimulus_fields": [
+  {
+    "field_name": "...",
+    "regex": "...",
+    "group": "...",
+    "cast": "str"
+  }
+],
+
+"context_fields": [
+  {
+    "field_name": "...",
+    "source": "block_header",
+    "regex": "..."
+  }
+],
+
+"context_only_trial_rule": {
+  "line_type": "context_only",
+  "regex_any": ["..."],
+  "examples": ["..."]
+}
+```
+
+},
+
+"option_normalization": {
+"strategy": "...",
+"instruction_regex": "...",
+"action_id_order": "instruction_order",
+"raw_response_to_action_id_mapping": {}
+},
+
+"history_rule": {
+"scope": "block",
+"include_context_only": false,
+"fields": ["action", "feedback"]
+},
+
+"state_machine": {
+"enabled": false,
+"state_variables": [],
+"transitions": []
+},
+
+"validation_expectations": {
+"min_options": 2,
+"max_options": null,
+"action_ids_consecutive": true,
+"target_action_required": true,
+"min_prediction_trials_per_participant": 1,
+"min_blocks": 1,
+"expected_press_coverage": 0.9
+},
+
+"uncertainty_notes": [],
+"human_review_required": false
+}
+
+Allowed values:
+
+For `source_assessment.raw_format_type`, use one of:
+
+* "nl_press_template"
+* "nl_gamble_blocks"
+* "nl_game_bandit"
+* "nl_sequential_rounds"
+* "nl_mdp_navigation"
+* "nl_study_test"
+* "nl_compressed_sequence"
+* "other"
+
+For `line_classifier.line_types[].type_id`, use only:
+
+* "instruction"
+* "block_header"
+* "trial_stimulus"
+* "action_press"
+* "action_say"
+* "action_estimate"
+* "feedback_points"
+* "feedback_correctness"
+* "context_only"
+* "omit"
+
+For `block_boundary_rule.strategy`, use one of:
+
+* "single_block"
+* "regex_header"
+* "blank_line_paragraphs"
+* "keyword_header"
+* "fixed_chunk_count"
+
+For `trial_extraction.boundary_strategy`, use one of:
+
+* "one_press_per_trial"
+* "stimulus_then_press"
+* "round_state_machine"
+* "game_segment"
+* "study_then_test_pair"
+
+For `trial_extraction.feedback_rule.value_type`, use one of:
+
+* "points"
+* "boolean"
+* "string"
+* "none"
+
+For `stimulus_fields[].cast`, use one of:
+
+* "str"
+* "int"
+* "float"
+* "list_int"
+
+For `context_fields[].source`, use one of:
+
+* "block_header"
+* "trial_regex"
+* "constant"
+
+For `option_normalization.strategy`, use one of:
+
+* "fixed_keys_from_instruction"
+* "per_trial_available_keys"
+* "per_block_key_list"
+* "numeric_range_from_context"
+
+For `option_normalization.action_id_order`, use one of:
+
+* "instruction_order"
+* "sorted_raw_key"
+* "first_seen_in_transcript"
+
+For `history_rule.scope`, use one of:
+
+* "block"
+* "game"
+* "participant"
+
+Important rules:
+
+1. Output JSON only.
+2. Do not output parsed trials.
+3. Do not invent task details not supported by the raw examples.
+4. Prefer simple regexes that match stable transcript phrases.
+5. Every action response must map to a normalized integer action id.
+6. Action ids must be consecutive integers from 0 to K - 1.
+7. The parser should preserve original raw keys in the parsed options, but normalized action ids must be used for `target_action`.
+8. If an instructed/demonstration/context trial should not be predicted, define `context_only_trial_rule`.
+9. If the task is sequential, define a minimal `state_machine`.
+10. If options vary across trials, use `per_trial_available_keys`.
+11. If options are fixed for a participant or block, use `fixed_keys_from_instruction` or `per_block_key_list`.
+12. If the raw examples are ambiguous, set `human_review_required` to true and explain the uncertainty in `uncertainty_notes`.
+13. If the task is not a categorical choice task, still output valid JSON with `"task_type": "categorical_choice"`, set `"human_review_required": true`, and explain why it may be unsuitable in `uncertainty_notes`.
+
+Guidance for common cases:
+
+* If each trial is simply one line like “You press <<F>>”, use `boundary_strategy = "one_press_per_trial"`.
+* If each trial has stimulus lines followed by a press line, use `boundary_strategy = "stimulus_then_press"`.
+* If the transcript has games, rounds, blocks, casinos, decks, or environments, define `block_boundary_rule` and put these fields in `problem.context`.
+* If feedback appears as points, reward, win/loss, or correct/incorrect, define `feedback_rule`.
+* If the participant is told to press a specific key, do not treat that as a prediction target. Mark it context-only.
+* If options are described by key labels, preserve the raw key in each option but map it to integer action ids.
+* If choices are numeric keys such as 1 through 8, map them to actions 0 through 7 unless the instruction clearly defines another order.
+
+The final JSON should be compact but complete enough for deterministic parser execution.

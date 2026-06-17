@@ -1,0 +1,92 @@
+You are given observations of human choices in decision problems.
+
+Each problem presents a set of available options, stored in the input as `problem["options"]`.
+Each option has a normalized integer action id:
+
+* `option["action"] == 0`
+* `option["action"] == 1`
+* ...
+* `option["action"] == K - 1`
+
+The meaning of each action is described by the parsed dataset schema. Options may contain rewards, outcomes, probabilities, features, labels, states, or other task-specific values. The field names are part of the parsed dataset schema and do not necessarily mean the task is a gamble problem.
+
+You will see a short history of previous trials for the same participant, block, game, or task context, including chosen action and feedback if available.
+
+Write Python code that reproduces the observed behavior. You must generate a program implementing:
+
+def choose(problem, history):
+"""
+Evaluated by log-likelihood.
+Goal: maximize log-likelihood of the observed human choices.
+
+```
+problem: dict with keys such as
+    - options: list of option dicts. Each option has:
+        - action: int, normalized action id from 0 to K - 1
+        - additional task-specific fields, such as rewards, probabilities,
+          outcomes, features, labels, states, or descriptions
+    - stimulus: optional dict or value describing the current stimulus
+    - context: optional dict or value describing block/game/task context
+    - has_feedback: optional bool
+
+history: list of dicts with keys such as
+    - action: int, previous chosen normalized action id
+    - feedback: float, bool, str, dict, or None
+    - problem/stimulus/context summaries if available
+
+return: dict[int, float], a probability distribution over available actions.
+    - Keys must be the normalized action ids from problem["options"].
+    - Values are probabilities of choosing each action.
+    - Example for K=2: return {0: 0.35, 1: 0.65}
+    - Example for K=3: return {0: 0.20, 1: 0.50, 2: 0.30}
+"""
+```
+
+Requirements:
+
+* Pure Python, no imports, deterministic.
+* Use only the provided problem and history.
+* Do not call external APIs.
+* Do not sample or use randomness.
+* Return a dict mapping each available integer action id to a finite probability.
+* The return dict must include every action id in `problem["options"]`.
+* Do not use raw display labels as return keys. Always use integer action ids.
+* The probabilities should be nonnegative and should sum to 1.
+* If needed, clip probabilities to a safe range such as at least 1e-6, then renormalize.
+* Higher probability for an action means the participant is more likely to choose that action.
+* Avoid numerical errors such as division by zero, overflow, or invalid operations.
+* Some option fields may be missing, None, or dataset-specific.
+* Your code must handle this safely. Do not iterate over None. Do not assume probabilities, rewards, or feedback are always present.
+* If probabilities are missing, use a deterministic fallback such as equal weights over listed rewards, simple feature comparison, or history-based tendencies.
+* Do not use `pow(...)`; use `**` for exponentiation.
+* If using a logistic/sigmoid transform without imports, use:
+  `1 / (1 + 2.718281828 ** (-x))`
+  Do not use incorrect forms such as `1 / (1 + 1 / (1 + x))`.
+* Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
+* Do not rely on top-level helper functions outside `choose(...)`.
+* Ensure every variable used in expressions is defined on all branches (avoid branch-only definitions).
+
+Behavioral requirements:
+
+* Do not return constant or near-constant probabilities unless the problem and history provide no useful information.
+* Do not add small noise or artificial variation to a constant distribution.
+* The probability distribution must depend meaningfully on the problem inputs.
+* History may be used when helpful. Simple calibrated summaries such as overall action frequency, recent action frequency, inertia/switching tendency, or feedback-based adjustment can be useful.
+* Avoid blindly copying only the last action.
+* History summaries may be combined with problem-based features using weighted averages or calibrated adjustments.
+* For reward/probability features, avoid feeding raw expected-value differences directly into an unscaled sigmoid, because reward scales can make probabilities overconfident. Prefer calibrated comparisons, normalized differences, bounded mappings, or simple base probabilities.
+* The program should behave sensibly across different problems, different numbers of options, and different histories.
+* Ignore dataset-specific display labels such as P/U, A/B, safe/risky, accept/reject, deck names, or key names when deciding the return convention.
+  Always use:
+
+  * action ids from `option["action"]`
+  * return probabilities keyed by these integer action ids
+
+Generation requirements:
+
+* Prefer concise programs and avoid long repetitive helper code, but do not omit useful behavioral structure such as calibrated history summaries just to make the code shorter.
+* Keep `choose()` reasonably compact unless additional logic clearly improves behavior.
+* Produce a valid program that is meaningfully different from the parent.
+* Avoid making only superficial changes without changing behavior.
+
+Provide only the code for `choose(...)` as a complete function.
