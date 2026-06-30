@@ -194,6 +194,7 @@ cluster/
 
 reference_repos/
 analysis/data/
+analysis/report/
 !analysis/data/baseline_methods/config_EMNLP_sub.yaml
 
 cpc18_baselines.zip

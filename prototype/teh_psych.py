@@ -28,6 +28,7 @@ from teh import (
     compile_program,
     load_seed_program,
 )
+from utils.teh_psych.action_id_normalization import normalize_categorical_trials_action_ids
 from utils.teh_psych.adapters import pool_manual_parser_trials_from_rows
 from utils.teh_psych.categorical_eval import evaluate_categorical_program
 from utils.teh_psych.dataset_loop import (
@@ -270,6 +271,8 @@ def process_one_experiment(
                 )
             else:
                 raise
+
+        all_trials = normalize_categorical_trials_action_ids(all_trials)
 
         result.n_parsed_trials = len(all_trials)
         prediction_trials, context_only_trials = partition_pooled_trials(all_trials)

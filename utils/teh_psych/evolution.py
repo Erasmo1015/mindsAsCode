@@ -33,6 +33,29 @@ from utils.teh_psych.categorical_eval import evaluate_categorical_program
 EliteTuple = Tuple[Any, ...]
 
 
+def _coerce_eval_error_entry(error_entry: Any) -> Optional[Dict[str, Any]]:
+    if error_entry is None:
+        return None
+    if isinstance(error_entry, str):
+        msg = error_entry.strip()
+        if not msg:
+            return None
+        return {
+            "normalized_key": msg,
+            "error_message": msg,
+            "error_type": "EvalError",
+            "invalid_line": "",
+        }
+    if isinstance(error_entry, dict):
+        return error_entry
+    return {
+        "normalized_key": str(error_entry),
+        "error_message": str(error_entry),
+        "error_type": "EvalError",
+        "invalid_line": "",
+    }
+
+
 def _evaluate_categorical_loglik(
     choose_fn: Callable,
     trials: List[Dict[str, Any]],
@@ -234,7 +257,7 @@ def run_population_evolution(
             if train_eval.get("errors", 0) != 0:
                 _record_invalid_program_error_summary(
                     invalid_candidate_errors,
-                    train_eval.get("first_error"),
+                    _coerce_eval_error_entry(train_eval.get("first_error")),
                     iteration=iteration_step,
                     participant_id=None,
                     candidate_id=f"candidate_{idx}",

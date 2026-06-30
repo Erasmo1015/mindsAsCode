@@ -12,6 +12,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from utils.teh_psych.action_id_normalization import (
+    ActionIdNormalizationError,
+    normalize_categorical_trials_action_ids,
+    normalize_trial_action_ids,
+)
 from utils.teh_psych.adapters import binary_trial_to_categorical
 from utils.teh_psych.categorical_eval import coerce_choose_output, evaluate_categorical_program
 from utils.teh_psych.parser_plan import (
@@ -282,3 +287,130 @@ def test_binary_to_categorical_adapter():
     }
     cat = binary_trial_to_categorical(binary)
     assert cat["problem"]["options"][1]["label"] == "U"
+
+
+def test_normalize_action_ids_non_consecutive():
+    trial = {
+        "problem": {
+            "options": [
+                {"action": 18, "label": "D"},
+                {"action": 19, "label": "N"},
+            ]
+        },
+        "history": [],
+        "action": 19,
+        "target_action": 19,
+        "is_prediction_target": True,
+        "_meta": {"raw_key": "N"},
+    }
+    out = normalize_trial_action_ids(trial)
+    assert [o["action"] for o in out["problem"]["options"]] == [0, 1]
+    assert out["target_action"] == 1
+    assert out["problem"]["options"][1]["raw_action"] == 19
+
+
+def test_normalize_action_ids_offset_start():
+    trial = {
+        "problem": {
+            "options": [
+                {"action": 2, "label": "a"},
+                {"action": 3, "label": "b"},
+            ]
+        },
+        "target_action": 2,
+        "history": [{"action": 2}],
+    }
+    out = normalize_trial_action_ids(trial)
+    assert [o["action"] for o in out["problem"]["options"]] == [0, 1]
+    assert out["target_action"] == 0
+    assert out["history"][0]["action"] == 0
+
+
+def test_normalize_action_ids_unmappable_target_raises():
+    trial = {
+        "problem": {"options": [{"action": 18, "label": "D"}, {"action": 19, "label": "N"}]},
+        "target_action": 99,
+    }
+    with pytest.raises(ActionIdNormalizationError):
+        normalize_trial_action_ids(trial)
+
+
+def test_option_source_fallback_per_trial_keys():
+    plan = {
+        "schema_version": "psych101_parser_plan_v1",
+        "experiment_id": "fake/exp.csv",
+        "task_type": "categorical_choice",
+        "line_classifier": {
+            "line_types": [
+                {
+                    "type_id": "instruction",
+                    "detection": {"regex": r"Press F for left and J for right", "flags": "i"},
+                },
+                {
+                    "type_id": "action_press",
+                    "detection": {"regex": r"You press <<([A-Z])>>", "flags": "i"},
+                },
+            ]
+        },
+        "block_boundary_rule": {"strategy": "single_block"},
+        "trial_extraction": {
+            "boundary_strategy": "one_press_per_trial",
+            "action_rule": {
+                "source_line_type": "action_press",
+                "capture": {"regex": r"<<([A-Z])>>", "group": 1},
+            },
+            "context_only_trial_rule": {"line_type": "instruction"},
+        },
+        "option_normalization": {
+            "strategy": "per_trial_available_keys",
+            "instruction_regex": r"Press ([A-Z]) for left and ([A-Z]) for right",
+            "action_id_order": "instruction_order",
+        },
+        "history_rule": {"scope": "block", "fields": ["action"]},
+        "state_machine": {"enabled": False},
+        "validation_expectations": {"min_options": 2},
+    }
+    row = {
+        "text": (
+            "Press F for left and J for right.\n"
+            "Stimulus appears.\n"
+            "You press <<F>>.\n"
+            "Feedback shown.\n"
+        )
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert len(trials) == 1
+    assert trials[0]["is_prediction_target"] is True
+    labels = [o.get("raw_key", o.get("label")) for o in trials[0]["problem"]["options"]]
+    assert "F" in labels and "J" in labels
+    assert trials[0]["target_action"] == 0
+
+
+def test_multiline_transcript_produces_prediction_trial():
+    plan = _minimal_plan()
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"press\s+([A-Z])\s+and\s+([A-Z])",
+        "action_id_order": "instruction_order",
+    }
+    row = {
+        "text": (
+            "Instruction line.\n"
+            "Stimulus line.\n"
+            "You press <<F>>.\n"
+            "Feedback line.\n"
+        ),
+        "instruction": "Press F and J.",
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert len(trials) >= 1
+    assert trials[0]["is_prediction_target"] is True
+
+
+def test_evolution_coerces_string_first_error():
+    from utils.teh_psych import evolution as evo_mod
+
+    entry = evo_mod._coerce_eval_error_entry("choose() returned invalid probs")
+    assert isinstance(entry, dict)
+    assert entry.get("error_message") == "choose() returned invalid probs"
+    assert entry.get("normalized_key")

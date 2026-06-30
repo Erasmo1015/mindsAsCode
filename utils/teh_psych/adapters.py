@@ -8,6 +8,7 @@ from data_modules.psych101_binary import (
     experiment_to_trial_dicts,
     parse_psych101_binary_row,
 )
+from utils.teh_psych.action_id_normalization import normalize_categorical_trials_action_ids
 
 
 class AdapterError(Exception):
@@ -81,7 +82,9 @@ def binary_trial_to_categorical(trial: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def convert_binary_trials_to_categorical(trials: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [binary_trial_to_categorical(t) for t in trials]
+    return normalize_categorical_trials_action_ids(
+        [binary_trial_to_categorical(t) for t in trials]
+    )
 
 
 def pool_manual_parser_trials_from_rows(

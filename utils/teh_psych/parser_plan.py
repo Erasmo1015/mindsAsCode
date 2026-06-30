@@ -11,9 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from utils.teh_psych.action_id_normalization import normalize_categorical_trials_action_ids
 from utils.teh_psych.dataset_loop import safe_experiment_id_for_path
 
 SCHEMA_VERSION = "psych101_parser_plan_v1"
+DEFAULT_INSTRUCTION_KEY_REGEX = (
+    r"(?:press(?:ing)?\s+([A-Z])\s+(?:or|and)\s+([A-Z])"
+    r"|([A-Z])\s+for\s+[^,]+,\s*([A-Z])\s+for)"
+)
 CACHE_MISS_CLIENT_MSG = "LLM client required because parse plan cache was not available"
 
 
@@ -23,6 +28,14 @@ class ParsePlanError(Exception):
 
 class StateMachineNotImplementedError(ParsePlanError):
     """Raised when plan requires state_machine execution."""
+
+
+@dataclass
+class ParserExecutionStats:
+    used_option_source_fallback: int = 0
+    n_trials_recovered_by_option_source_fallback: int = 0
+    n_context_only_no_action: int = 0
+    n_instruction_lines_not_marked_context_only_due_to_action: int = 0
 
 
 @dataclass
@@ -43,6 +56,7 @@ class ParsePlanRunResult:
     n_rows_executed: int = 0
     trials: List[Dict[str, Any]] = field(default_factory=list)
     execution_errors: List[str] = field(default_factory=list)
+    execution_stats: ParserExecutionStats = field(default_factory=ParserExecutionStats)
 
 
 def _repo_root() -> Path:
@@ -246,23 +260,41 @@ def _line_matches_detection(line: str, detection: Dict[str, Any]) -> bool:
     return False
 
 
+def _split_transcript_for_classification(text: str, plan: Dict[str, Any]) -> List[str]:
+    """Split transcript on newlines; optionally split single-line blobs before presses."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) != 1:
+        return lines
+    single = lines[0]
+    te = plan.get("trial_extraction") or {}
+    action_rule = te.get("action_rule") or {}
+    press_re = action_rule.get("capture", {}).get("regex") or r"<<([A-Z])>>"
+    if not re.search(press_re, single, re.I) and not re.search(
+        r"You press\s*<<", single, re.I
+    ):
+        return lines
+    parts = re.split(r"(?=(?:You press\s*<<|(?<!\w)press\s*<<))", single, flags=re.I)
+    parts = [p.strip() for p in parts if p and p.strip()]
+    return parts if len(parts) > 1 else lines
+
+
 def classify_transcript_lines(text: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     lc = plan.get("line_classifier") or {}
     line_types = lc.get("line_types") or []
-    join_mode = lc.get("multiline_chunk_join") or "line"
-    raw_lines = text.splitlines() if join_mode == "line" else re.split(r"\n\s*\n", text)
+    raw_lines = _split_transcript_for_classification(text, plan)
     classified: List[Dict[str, Any]] = []
-    for raw in raw_lines:
-        line = raw.strip()
-        if not line:
-            continue
+    for line_no, line in enumerate(raw_lines):
         type_id = "trial_stimulus"
         for spec in line_types:
             det = spec.get("detection") or {}
             if _line_matches_detection(line, det):
                 type_id = spec.get("type_id", type_id)
                 break
-        classified.append({"line": line, "type_id": type_id})
+        if type_id == "trial_stimulus" and re.search(
+            r"You press\s*<<|press\s*<<", line, re.I
+        ):
+            type_id = "action_press"
+        classified.append({"line": line, "type_id": type_id, "line_no": line_no})
     return classified
 
 
@@ -322,20 +354,59 @@ def _capture_from_rule(line: str, capture: Dict[str, Any]) -> Optional[str]:
         return m.group(1) if m.lastindex else m.group(0)
 
 
+def _flatten_key_groups(found: List[Any]) -> List[str]:
+    keys: List[str] = []
+    for item in found:
+        if isinstance(item, tuple):
+            keys.extend(str(k) for k in item if k)
+        elif item is not None:
+            keys.append(str(item))
+    return keys
+
+
+def _keys_from_instruction_text(
+    plan: Dict[str, Any],
+    *,
+    instruction: str,
+    block_lines: List[Dict[str, Any]],
+) -> List[str]:
+    norm = plan.get("option_normalization") or {}
+    action_id_order = norm.get("action_id_order", "instruction_order")
+    instr_re = norm.get("instruction_regex") or DEFAULT_INSTRUCTION_KEY_REGEX
+    keys: List[str] = []
+    blobs = [instruction] + [item["line"] for item in block_lines]
+    for blob in blobs:
+        if not blob:
+            continue
+        blob_s = str(blob)
+        keys.extend(_flatten_key_groups(re.findall(instr_re, blob_s, re.I)))
+        keys.extend(re.findall(r"<<([A-Z])>>", blob_s))
+        keys.extend(
+            _flatten_key_groups(
+                re.findall(
+                    r"(?:by pressing|pressing)\s+([A-Z])\s+or\s+([A-Z])",
+                    blob_s,
+                    re.I,
+                )
+            )
+        )
+    return _normalize_key_list(keys, action_id_order)
+
+
 def _normalize_key_list(
     keys: List[str],
     action_id_order: str,
 ) -> List[str]:
     keys = [str(k) for k in keys if k is not None]
     if action_id_order == "sorted_raw_key":
-        return sorted(keys)
+        return sorted(dict.fromkeys(keys))
+    seen: List[str] = []
+    for k in keys:
+        if k not in seen:
+            seen.append(k)
     if action_id_order == "first_seen_in_transcript":
-        seen: List[str] = []
-        for k in keys:
-            if k not in seen:
-                seen.append(k)
         return seen
-    return keys
+    return seen
 
 
 def _option_map_from_plan(
@@ -344,18 +415,21 @@ def _option_map_from_plan(
     instruction: str,
     block_lines: List[Dict[str, Any]],
     trial_lines: List[Dict[str, Any]],
-) -> Dict[str, int]:
+    stats: Optional[ParserExecutionStats] = None,
+) -> Tuple[Dict[str, int], bool]:
     norm = plan.get("option_normalization") or {}
     strategy = norm.get("strategy", "fixed_keys_from_instruction")
     action_id_order = norm.get("action_id_order", "instruction_order")
     explicit = norm.get("raw_response_to_action_id_mapping") or {}
+    used_fallback = False
     if explicit:
-        return {str(k): int(v) for k, v in explicit.items()}
+        return {str(k): int(v) for k, v in explicit.items()}, used_fallback
 
     keys: List[str] = []
     if strategy == "fixed_keys_from_instruction":
-        instr_re = norm.get("instruction_regex") or r"press\s+([A-Z])"
-        keys = re.findall(instr_re, instruction, re.I)
+        keys = _keys_from_instruction_text(
+            plan, instruction=instruction, block_lines=block_lines
+        )
     elif strategy == "per_block_key_list":
         for item in block_lines:
             if item["type_id"] == "block_header":
@@ -370,9 +444,18 @@ def _option_map_from_plan(
         keys = [str(i) for i in range(2)]
 
     keys = _normalize_key_list(keys, action_id_order)
+    if len(keys) < 2 or (strategy == "per_trial_available_keys" and len(keys) > 2):
+        inst_keys = _keys_from_instruction_text(
+            plan, instruction=instruction, block_lines=block_lines
+        )
+        if len(inst_keys) >= 2:
+            keys = inst_keys
+            used_fallback = True
+            if stats is not None:
+                stats.used_option_source_fallback += 1
     if len(keys) < 2:
         keys = ["0", "1"]
-    return {k: i for i, k in enumerate(keys)}
+    return {k: i for i, k in enumerate(keys)}, used_fallback
 
 
 def _parse_feedback(line: str, plan: Dict[str, Any]) -> Any:
@@ -404,7 +487,19 @@ def _parse_feedback(line: str, plan: Dict[str, Any]) -> Any:
 
 
 def _is_context_only_trial(trial_lines: List[Dict[str, Any]], plan: Dict[str, Any]) -> bool:
-    rule = (plan.get("trial_extraction") or {}).get("context_only_trial_rule") or {}
+    """True only when trial has no participant press/response line."""
+    te = plan.get("trial_extraction") or {}
+    action_rule = te.get("action_rule") or {}
+    capture = action_rule.get("capture") or {"regex": r"<<([A-Z])>>", "group": 1}
+    for item in trial_lines:
+        if item.get("type_id") == action_rule.get("source_line_type", "action_press"):
+            return False
+        if _capture_from_rule(item["line"], capture) is not None:
+            return False
+        if re.search(r"<<([A-Z])>>", item["line"], re.I):
+            return False
+
+    rule = te.get("context_only_trial_rule") or {}
     regex_any = rule.get("regex_any") or []
     line_type = rule.get("line_type")
     for item in trial_lines:
@@ -474,6 +569,7 @@ def _trials_from_block(
     row_index: int,
     participant: Any,
     block_id: int,
+    stats: Optional[ParserExecutionStats] = None,
 ) -> List[Dict[str, Any]]:
     te = plan.get("trial_extraction") or {}
     boundary = te.get("boundary_strategy", "one_press_per_trial")
@@ -522,11 +618,12 @@ def _trials_from_block(
         if raw_key is None:
             continue
 
-        key_map = _option_map_from_plan(
+        key_map, used_option_fallback = _option_map_from_plan(
             plan,
             instruction=instruction,
             block_lines=block_lines,
             trial_lines=trial_lines,
+            stats=stats,
         )
         if raw_key not in key_map:
             upper = str(raw_key).upper()
@@ -539,9 +636,12 @@ def _trials_from_block(
         target_action = int(key_map[str(raw_key).upper()] if str(raw_key).upper() in key_map else key_map[raw_key])
 
         options = [
-            {"action": i, "label": k}
+            {"action": i, "label": k, "raw_key": k}
             for k, i in sorted(key_map.items(), key=lambda kv: kv[1])
         ]
+        if len(options) < 2:
+            continue
+
         stimulus = _extract_stimulus_fields(trial_lines, plan)
         feedback = None
         for item in trial_lines:
@@ -550,7 +650,17 @@ def _trials_from_block(
                 feedback = fb
 
         is_context_only = _is_context_only_trial(trial_lines, plan)
-        is_prediction = not is_context_only
+        has_valid_choice = raw_key is not None and len(options) >= 2
+        if has_valid_choice:
+            if is_context_only and stats is not None:
+                stats.n_instruction_lines_not_marked_context_only_due_to_action += 1
+            is_prediction = True
+            if used_option_fallback and stats is not None:
+                stats.n_trials_recovered_by_option_source_fallback += 1
+        else:
+            is_prediction = not is_context_only
+            if is_context_only and stats is not None:
+                stats.n_context_only_no_action += 1
 
         trial = {
             "problem": {
@@ -588,6 +698,7 @@ def execute_parser_plan_on_row(
     row: Dict[str, Any],
     *,
     row_index: int = 0,
+    stats: Optional[ParserExecutionStats] = None,
 ) -> List[Dict[str, Any]]:
     sm = plan.get("state_machine") or {}
     if isinstance(sm, dict) and sm.get("enabled"):
@@ -609,13 +720,14 @@ def execute_parser_plan_on_row(
             _trials_from_block(
                 block_lines,
                 plan,
-                instruction=instruction,
+                instruction=full_text if not instruction else instruction,
                 row_index=row_index,
                 participant=participant,
                 block_id=block_id,
+                stats=stats,
             )
         )
-    return out
+    return normalize_categorical_trials_action_ids(out)
 
 
 def execute_parser_plan_on_rows(
@@ -623,13 +735,16 @@ def execute_parser_plan_on_rows(
     rows: List[Dict[str, Any]],
     *,
     row_indices: Optional[List[int]] = None,
+    stats: Optional[ParserExecutionStats] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     indices = row_indices if row_indices is not None else list(range(len(rows)))
     all_trials: List[Dict[str, Any]] = []
     errors: List[str] = []
     for row_idx, row in zip(indices, rows):
         try:
-            trials = execute_parser_plan_on_row(plan, row, row_index=row_idx)
+            trials = execute_parser_plan_on_row(
+                plan, row, row_index=row_idx, stats=stats
+            )
             all_trials.extend(trials)
         except StateMachineNotImplementedError as exc:
             raise
@@ -752,9 +867,10 @@ def run_parse_plan_pipeline(
     result.raw_format_type = str(sa.get("raw_format_type") or "")
 
     result.failure_stage = "execute_parse_plan"
+    exec_stats = ParserExecutionStats()
     try:
         trials, exec_errors = execute_parser_plan_on_rows(
-            plan, rows, row_indices=row_indices
+            plan, rows, row_indices=row_indices, stats=exec_stats
         )
     except StateMachineNotImplementedError:
         result.status = "execute_failed"
@@ -762,7 +878,25 @@ def run_parse_plan_pipeline(
         return result
 
     result.execution_errors = exec_errors
+    result.execution_stats = exec_stats
     result.trials = trials
+    (debug_dir / "parser_execution_stats.json").write_text(
+        json.dumps(
+            {
+                "used_option_source_fallback": exec_stats.used_option_source_fallback,
+                "n_trials_recovered_by_option_source_fallback": (
+                    exec_stats.n_trials_recovered_by_option_source_fallback
+                ),
+                "n_context_only_no_action": exec_stats.n_context_only_no_action,
+                "n_instruction_lines_not_marked_context_only_due_to_action": (
+                    exec_stats.n_instruction_lines_not_marked_context_only_due_to_action
+                ),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     result.n_rows_executed = len(rows)
     if not trials:
         result.status = "execute_failed"
