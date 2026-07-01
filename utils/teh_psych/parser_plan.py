@@ -20,6 +20,19 @@ DEFAULT_INSTRUCTION_KEY_REGEX = (
     r"|([A-Z])\s+for\s+[^,]+,\s*([A-Z])\s+for)"
 )
 CACHE_MISS_CLIENT_MSG = "LLM client required because parse plan cache was not available"
+# Split single-line blobs at sentence boundaries before a new participant press.
+_PRESS_BOUNDARY_SPLIT_RE = re.compile(r"(?=\.\s+You press\s*(?:<<|nothing))", re.I)
+_STIMULUS_OPTION_PATTERNS = (
+    r"called\s+([A-Z])\s+and\s+([A-Z])",
+    r"presented with spaceships\s+([A-Z])\s+and\s+([A-Z])",
+    r"spaceships?\s+([A-Z])\s+and\s+([A-Z])",
+    r"spaceships?\s+([A-Z]+)\s+and\s+([A-Z]+)",
+    r"take\s+(?:one of\s+)?(?:the\s+)?spaceships?\s+([A-Z])\s+or\s+([A-Z])",
+    r"([A-Z])\s+or\s+([A-Z])",
+)
+_NUMERIC_CASTS = frozenset({"int", "float", "list_int"})
+_OMIT_RAW_KEYS = frozenset({"nothing", "omit", "no_response", "no response", "none"})
+_OMIT_PRESS_RE = re.compile(r"press\s+nothing\b", re.I)
 
 
 class ParsePlanError(Exception):
@@ -161,6 +174,135 @@ def extract_json_from_llm_response(text: str) -> Dict[str, Any]:
     return obj
 
 
+def _regex_capture_group_count(regex: str) -> Optional[int]:
+    if not regex:
+        return None
+    try:
+        return re.compile(regex).groups
+    except re.error:
+        return None
+
+
+def _requested_capture_group(group: Any, default: int = 1) -> int:
+    if group is None:
+        return default
+    if isinstance(group, int):
+        return group
+    text = str(group).strip()
+    if text.isdigit():
+        return int(text)
+  # Comma-separated groups (e.g. "1,2") are not valid single capture indices.
+    if "," in text:
+        raise ValueError(f"invalid capture group {group!r}")
+    return default
+
+
+def _validate_capture_group_spec(
+    regex: str,
+    group: Any,
+    field_path: str,
+    *,
+    allow_group_zero: bool = False,
+) -> Optional[str]:
+    n_groups = _regex_capture_group_count(regex)
+    if n_groups is None:
+        return f"{field_path}: invalid regex {regex!r}"
+    try:
+        g = _requested_capture_group(group)
+    except ValueError:
+        return f"{field_path}: invalid capture group {group!r}"
+    if g == 0 and allow_group_zero:
+        return None
+    if g < 1 or g > n_groups:
+        return (
+            f"{field_path}: capture group {g} invalid for regex with "
+            f"{n_groups} group(s): {regex!r}"
+        )
+    return None
+
+
+def _repair_capture_group_in_spec(spec: Dict[str, Any], field_path: str) -> Optional[str]:
+    regex = spec.get("regex")
+    if not regex:
+        return None
+    n_groups = _regex_capture_group_count(regex)
+    if n_groups is None or n_groups < 1:
+        return None
+    try:
+        g = _requested_capture_group(spec.get("group", 1))
+    except ValueError:
+        spec["group"] = 1
+        return f"{field_path}: reset invalid capture group to 1"
+    if g < 1 or g > n_groups:
+        if n_groups == 1:
+            spec["group"] = 1
+            return f"{field_path}: auto-repaired capture group {g} -> 1"
+        return None
+    return None
+
+
+def repair_parser_plan(plan: Dict[str, Any]) -> List[str]:
+    """Apply safe in-memory repairs before execution (logged as repair notes)."""
+    repairs: List[str] = []
+    te = plan.get("trial_extraction") or {}
+    for idx, spec in enumerate(te.get("stimulus_fields") or []):
+        msg = _repair_capture_group_in_spec(spec, f"trial_extraction.stimulus_fields[{idx}]")
+        if msg:
+            repairs.append(msg)
+    action_rule = te.get("action_rule") or {}
+    capture = action_rule.get("capture")
+    if isinstance(capture, dict) and capture.get("regex"):
+        msg = _repair_capture_group_in_spec(capture, "trial_extraction.action_rule.capture")
+        if msg:
+            repairs.append(msg)
+
+    norm = plan.setdefault("option_normalization", {})
+    explicit = norm.get("raw_response_to_action_id_mapping") or {}
+    if explicit and any(str(k).lower() in _OMIT_RAW_KEYS for k in explicit):
+        respond_ids = {
+            int(v)
+            for k, v in explicit.items()
+            if str(k).lower() not in _OMIT_RAW_KEYS
+        }
+        if len(respond_ids) <= 1:
+            norm["strategy"] = "respond_omit"
+            norm["raw_response_to_action_id_mapping"] = {}
+            repairs.append(
+                "option_normalization: converted nothing/respond mapping to respond_omit strategy"
+            )
+    return repairs
+
+
+def unsupported_pipeline_reason(plan: Dict[str, Any]) -> Optional[str]:
+    """Return reason when plan should not run in the categorical-choice pipeline."""
+    if plan.get("human_review_required"):
+        return "parse plan marked human_review_required=true"
+    te = plan.get("trial_extraction") or {}
+    action_rule = te.get("action_rule") or {}
+    source_type = str(action_rule.get("source_line_type") or "")
+    if source_type in ("action_say", "action_estimate"):
+        return (
+            f"trial_extraction.action_rule.source_line_type={source_type!r} "
+            "(scalar/verbal response, not categorical key press)"
+        )
+    norm = plan.get("option_normalization") or {}
+    if norm.get("strategy") == "numeric_range_from_context":
+        return "option_normalization.strategy=numeric_range_from_context (scalar estimation)"
+    uncertainty = " ".join(str(x) for x in (plan.get("uncertainty_notes") or []))
+    lowered = uncertainty.lower()
+    for phrase in (
+        "probability rating",
+        "rating bar",
+        "estimate the concentration",
+        "verbal response",
+        "not a categorical",
+        "not categorical",
+    ):
+        if phrase in lowered:
+            return f"uncertainty_notes suggest unsupported task: {phrase!r}"
+    return None
+
+
 def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     if plan.get("schema_version") != SCHEMA_VERSION:
@@ -181,15 +323,112 @@ def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
         action_rule = trial_extraction.get("action_rule")
         if not isinstance(action_rule, dict):
             errors.append("trial_extraction.action_rule required")
+        else:
+            capture = action_rule.get("capture") or {}
+            if capture.get("regex"):
+                err = _validate_capture_group_spec(
+                    capture["regex"],
+                    capture.get("group", 1),
+                    "trial_extraction.action_rule.capture",
+                )
+                if err:
+                    errors.append(err)
+        for idx, spec in enumerate(trial_extraction.get("stimulus_fields") or []):
+            regex = spec.get("regex")
+            if not regex:
+                continue
+            err = _validate_capture_group_spec(
+                regex,
+                spec.get("group", 1),
+                f"trial_extraction.stimulus_fields[{idx}]",
+            )
+            if err:
+                errors.append(err)
+        for idx, spec in enumerate(trial_extraction.get("context_fields") or []):
+            regex = spec.get("regex")
+            if not regex:
+                continue
+            err = _validate_capture_group_spec(
+                regex,
+                spec.get("group", 1),
+                f"trial_extraction.context_fields[{idx}]",
+            )
+            if err:
+                errors.append(err)
+        fb_rule = trial_extraction.get("feedback_rule") or {}
+        if fb_rule.get("regex"):
+            err = _validate_capture_group_spec(
+                fb_rule["regex"],
+                fb_rule.get("group", 1),
+                "trial_extraction.feedback_rule",
+                allow_group_zero=True,
+            )
+            if err and fb_rule.get("group") not in (None, 0, "0"):
+                errors.append(err)
     option_norm = plan.get("option_normalization")
     if not isinstance(option_norm, dict) or not option_norm.get("strategy"):
         errors.append("option_normalization.strategy required")
+    elif option_norm.get("strategy") not in (
+        "fixed_keys_from_instruction",
+        "per_trial_available_keys",
+        "per_block_key_list",
+        "numeric_range_from_context",
+        "respond_omit",
+    ):
+        errors.append(f"unknown option_normalization.strategy: {option_norm.get('strategy')!r}")
+    else:
+        explicit = option_norm.get("raw_response_to_action_id_mapping") or {}
+        if explicit:
+            seen_ids: Dict[int, List[str]] = {}
+            for raw_key, action_id in explicit.items():
+                aid = int(action_id)
+                seen_ids.setdefault(aid, []).append(str(raw_key))
+            for aid, keys in seen_ids.items():
+                if len(keys) > 1 and option_norm.get("strategy") != "respond_omit":
+                    errors.append(
+                        "option_normalization.raw_response_to_action_id_mapping maps "
+                        f"multiple keys {keys} to action id {aid}; use respond_omit for go/no-go"
+                    )
     if "validation_expectations" not in plan:
         errors.append("validation_expectations required")
     sm = plan.get("state_machine") or {}
     if isinstance(sm, dict) and sm.get("enabled"):
         errors.append("state_machine.enabled=true (not supported by engine v1)")
     return errors
+
+
+def check_parsed_trials_sanity(
+    trials: List[Dict[str, Any]],
+    *,
+    min_trials: int = 20,
+) -> List[str]:
+    """Detect degenerate parsing artifacts (e.g. all targets forced to option 0)."""
+    pred = [t for t in trials if t.get("is_prediction_target", True)]
+    if len(pred) < min_trials:
+        return []
+    targets = [int(t.get("target_action", 0)) for t in pred]
+    if len(set(targets)) != 1 or targets[0] != 0:
+        return []
+
+    second_option_presses = 0
+    for trial in pred:
+        meta = trial.get("_meta") or {}
+        raw_key = str(meta.get("raw_key") or "").upper()
+        options = (trial.get("problem") or {}).get("options") or []
+        if len(options) < 2 or not raw_key or raw_key in _OMIT_RAW_KEYS:
+            continue
+        labels = [str(opt.get("label") or opt.get("raw_key") or "").upper() for opt in options]
+        if len(labels) >= 2 and raw_key == labels[1]:
+            second_option_presses += 1
+
+    if second_option_presses > 0:
+        return [
+            "parsed trial sanity check failed: "
+            f"{second_option_presses}/{len(pred)} prediction trials pressed the "
+            "second-listed option but all target_action values are 0 "
+            "(likely multi-step transcript merged into one decision)"
+        ]
+    return []
 
 
 def parse_plan_cache_path(cache_dir: Path, experiment_id: str) -> Path:
@@ -260,22 +499,36 @@ def _line_matches_detection(line: str, detection: Dict[str, Any]) -> bool:
     return False
 
 
+def _split_line_on_press_boundaries(line: str) -> List[str]:
+    """Split a transcript line into segments, each containing at most one press."""
+    if not line or not _PRESS_BOUNDARY_SPLIT_RE.search(line):
+        return [line]
+    parts = _PRESS_BOUNDARY_SPLIT_RE.split(line)
+    segments: List[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if segments and not re.search(
+            r"(?:You press\s*(?:<<|nothing)|(?<!\w)press\s*(?:<<|nothing))",
+            part,
+            re.I,
+        ):
+            segments[-1] = f"{segments[-1]} {part}".strip()
+        else:
+            segments.append(part)
+    return segments or [line]
+
+
 def _split_transcript_for_classification(text: str, plan: Dict[str, Any]) -> List[str]:
-    """Split transcript on newlines; optionally split single-line blobs before presses."""
+    """Split transcript on newlines and further split lines with multiple presses."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) != 1:
+    if not lines:
         return lines
-    single = lines[0]
-    te = plan.get("trial_extraction") or {}
-    action_rule = te.get("action_rule") or {}
-    press_re = action_rule.get("capture", {}).get("regex") or r"<<([A-Z])>>"
-    if not re.search(press_re, single, re.I) and not re.search(
-        r"You press\s*<<", single, re.I
-    ):
-        return lines
-    parts = re.split(r"(?=(?:You press\s*<<|(?<!\w)press\s*<<))", single, flags=re.I)
-    parts = [p.strip() for p in parts if p and p.strip()]
-    return parts if len(parts) > 1 else lines
+    expanded: List[str] = []
+    for line in lines:
+        expanded.extend(_split_line_on_press_boundaries(line))
+    return expanded
 
 
 def classify_transcript_lines(text: str, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -340,18 +593,73 @@ def _capture_from_rule(line: str, capture: Dict[str, Any]) -> Optional[str]:
     regex = capture.get("regex")
     if not regex:
         return None
-    group = capture.get("group", 1)
     try:
-        group_idx = int(group) if str(group).isdigit() else 1
-    except (TypeError, ValueError):
+        group_idx = _requested_capture_group(capture.get("group", 1))
+    except ValueError:
         group_idx = 1
-    m = re.search(regex, line, _regex_flags("i"))
-    if not m:
+    matches = list(re.finditer(regex, line, _regex_flags("i")))
+    if not matches:
         return None
+    m = matches[-1]
     try:
         return m.group(group_idx)
     except IndexError:
-        return m.group(1) if m.lastindex else m.group(0)
+        return m.group(1) if m.lastindex and m.lastindex >= 1 else None
+
+
+def _capture_press_response(
+    line: str,
+    capture: Dict[str, Any],
+) -> Tuple[Optional[str], bool]:
+    """Return (raw_key, is_omit). raw_key is None for omit responses."""
+    if _OMIT_PRESS_RE.search(line):
+        return None, True
+    raw = _capture_from_rule(line, capture)
+    if raw is None:
+        m = re.search(r"<<([A-Z0-9])>>", line, re.I)
+        raw = m.group(1) if m else None
+    if raw is not None and str(raw).lower() in _OMIT_RAW_KEYS:
+        return None, True
+    return raw, False
+
+
+def _keys_from_stimulus_text(
+    stimulus_blob: str,
+    *,
+    instruction: str,
+    plan: Dict[str, Any],
+) -> List[str]:
+    norm = plan.get("option_normalization") or {}
+    action_id_order = norm.get("action_id_order", "instruction_order")
+    instr_re = norm.get("instruction_regex") or DEFAULT_INSTRUCTION_KEY_REGEX
+    keys: List[str] = []
+    for blob in (stimulus_blob, instruction):
+        if not blob:
+            continue
+        blob_s = str(blob)
+        keys.extend(_flatten_key_groups(re.findall(instr_re, blob_s, re.I)))
+        for pat in _STIMULUS_OPTION_PATTERNS:
+            keys.extend(_flatten_key_groups(re.findall(pat, blob_s, re.I)))
+    return _normalize_key_list(keys, action_id_order)
+
+
+def _trial_stimulus_blob(
+    trial_lines: List[Dict[str, Any]],
+    *,
+    source_type: str,
+    capture: Dict[str, Any],
+) -> str:
+    press_indices: List[int] = []
+    for idx, item in enumerate(trial_lines):
+        line = item["line"]
+        if item.get("type_id") == source_type:
+            press_indices.append(idx)
+        elif _capture_press_response(line, capture)[0] is not None or _OMIT_PRESS_RE.search(line):
+            press_indices.append(idx)
+    if not press_indices:
+        return "\n".join(item["line"] for item in trial_lines)
+    last_press = press_indices[-1]
+    return "\n".join(item["line"] for item in trial_lines[:last_press])
 
 
 def _flatten_key_groups(found: List[Any]) -> List[str]:
@@ -422,8 +730,20 @@ def _option_map_from_plan(
     action_id_order = norm.get("action_id_order", "instruction_order")
     explicit = norm.get("raw_response_to_action_id_mapping") or {}
     used_fallback = False
+
+    if strategy == "respond_omit":
+        return {"omit": 0, "respond": 1}, used_fallback
+
     if explicit:
         return {str(k): int(v) for k, v in explicit.items()}, used_fallback
+
+    te = plan.get("trial_extraction") or {}
+    action_rule = te.get("action_rule") or {}
+    capture = action_rule.get("capture") or {"regex": r"<<([A-Z])>>", "group": 1}
+    source_type = action_rule.get("source_line_type", "action_press")
+    stimulus_blob = _trial_stimulus_blob(
+        trial_lines, source_type=source_type, capture=capture
+    )
 
     keys: List[str] = []
     if strategy == "fixed_keys_from_instruction":
@@ -438,15 +758,16 @@ def _option_map_from_plan(
                 keys = flat
         keys = _normalize_key_list(keys, action_id_order)
     elif strategy == "per_trial_available_keys":
-        for item in trial_lines:
-            keys.extend(re.findall(r"<<([A-Z])>>", item["line"]))
+        keys = _keys_from_stimulus_text(
+            stimulus_blob, instruction=instruction, plan=plan
+        )
     elif strategy == "numeric_range_from_context":
         keys = [str(i) for i in range(2)]
 
     keys = _normalize_key_list(keys, action_id_order)
-    if len(keys) < 2 or (strategy == "per_trial_available_keys" and len(keys) > 2):
-        inst_keys = _keys_from_instruction_text(
-            plan, instruction=instruction, block_lines=block_lines
+    if len(keys) < 2:
+        inst_keys = _keys_from_stimulus_text(
+            stimulus_blob, instruction=instruction, plan=plan
         )
         if len(inst_keys) >= 2:
             keys = inst_keys
@@ -525,12 +846,18 @@ def _extract_stimulus_fields(trial_lines: List[Dict[str, Any]], plan: Dict[str, 
         m = re.search(regex, blob, _regex_flags("i"))
         if not m:
             continue
-        group = spec.get("group", 1)
-        try:
-            raw = m.group(int(group) if str(group).isdigit() else 1)
-        except (IndexError, ValueError):
-            raw = m.group(0)
         cast = spec.get("cast", "str")
+        try:
+            group_idx = _requested_capture_group(spec.get("group", 1))
+        except ValueError:
+            continue
+        n_groups = _regex_capture_group_count(regex)
+        if n_groups is None or group_idx < 1 or group_idx > n_groups:
+            continue
+        try:
+            raw = m.group(group_idx)
+        except IndexError:
+            continue
         if cast == "int":
             stimulus[name] = int(raw)
         elif cast == "float":
@@ -584,17 +911,15 @@ def _trials_from_block(
     raw_trials: List[List[Dict[str, Any]]] = []
     if boundary == "one_press_per_trial":
         for item in block_lines:
-            if item["type_id"] == source_type or re.search(
-                capture.get("regex", r"<<([A-Z])>>"), item["line"], re.I
-            ):
+            raw_key, is_omit = _capture_press_response(item["line"], capture)
+            if item["type_id"] == source_type or raw_key is not None or is_omit:
                 raw_trials.append([item])
     elif boundary == "stimulus_then_press":
         buf: List[Dict[str, Any]] = []
         for item in block_lines:
             buf.append(item)
-            if item["type_id"] == source_type or re.search(
-                capture.get("regex", r"<<([A-Z])>>"), item["line"], re.I
-            ):
+            raw_key, is_omit = _capture_press_response(item["line"], capture)
+            if item["type_id"] == source_type or raw_key is not None or is_omit:
                 raw_trials.append(buf)
                 buf = []
         if buf and raw_trials:
@@ -611,38 +936,54 @@ def _trials_from_block(
 
     for trial_lines in raw_trials:
         press_line = trial_lines[-1]["line"]
-        raw_key = _capture_from_rule(press_line, capture)
-        if raw_key is None:
-            m = re.search(r"<<([A-Z])>>", press_line)
-            raw_key = m.group(1) if m else None
-        if raw_key is None:
+        raw_key, is_omit = _capture_press_response(press_line, capture)
+        if raw_key is None and not is_omit:
             continue
 
-        key_map, used_option_fallback = _option_map_from_plan(
-            plan,
-            instruction=instruction,
-            block_lines=block_lines,
-            trial_lines=trial_lines,
-            stats=stats,
-        )
-        if raw_key not in key_map:
-            upper = str(raw_key).upper()
-            if upper in key_map:
-                raw_key = upper
-            elif str(raw_key) in key_map:
-                pass
-            else:
-                continue
-        target_action = int(key_map[str(raw_key).upper()] if str(raw_key).upper() in key_map else key_map[raw_key])
+        norm = plan.get("option_normalization") or {}
+        strategy = norm.get("strategy", "fixed_keys_from_instruction")
 
-        options = [
-            {"action": i, "label": k, "raw_key": k}
-            for k, i in sorted(key_map.items(), key=lambda kv: kv[1])
-        ]
+        if strategy == "respond_omit":
+            target_action = 0 if is_omit else 1
+            options = [
+                {"action": 0, "label": "omit", "raw_key": "nothing"},
+                {"action": 1, "label": "respond", "raw_key": "respond"},
+            ]
+            key_map = {"omit": 0, "respond": 1}
+            used_option_fallback = False
+        else:
+            key_map, used_option_fallback = _option_map_from_plan(
+                plan,
+                instruction=instruction,
+                block_lines=block_lines,
+                trial_lines=trial_lines,
+                stats=stats,
+            )
+            if is_omit:
+                continue
+            if raw_key is None:
+                continue
+            if raw_key not in key_map:
+                upper = str(raw_key).upper()
+                if upper in key_map:
+                    raw_key = upper
+                elif str(raw_key) in key_map:
+                    pass
+                else:
+                    continue
+            lookup_key = str(raw_key).upper() if str(raw_key).upper() in key_map else raw_key
+            target_action = int(key_map[lookup_key])
+
+            options = [
+                {"action": i, "label": k, "raw_key": k}
+                for k, i in sorted(key_map.items(), key=lambda kv: kv[1])
+            ]
         if len(options) < 2:
             continue
 
         stimulus = _extract_stimulus_fields(trial_lines, plan)
+        if strategy == "respond_omit" and raw_key is not None:
+            stimulus["response_key"] = str(raw_key)
         feedback = None
         for item in trial_lines:
             fb = _parse_feedback(item["line"], plan)
@@ -650,7 +991,7 @@ def _trials_from_block(
                 feedback = fb
 
         is_context_only = _is_context_only_trial(trial_lines, plan)
-        has_valid_choice = raw_key is not None and len(options) >= 2
+        has_valid_choice = (raw_key is not None or is_omit) and len(options) >= 2
         if has_valid_choice:
             if is_context_only and stats is not None:
                 stats.n_instruction_lines_not_marked_context_only_due_to_action += 1
@@ -678,7 +1019,7 @@ def _trials_from_block(
                 "row_index": row_index,
                 "participant": participant,
                 "block_id": block_id,
-                "raw_key": raw_key,
+                "raw_key": raw_key if raw_key is not None else "nothing",
             },
         }
         trials.append(trial)
@@ -805,6 +1146,7 @@ def run_parse_plan_pipeline(
     if reuse_cache and cache_dir is not None:
         cached = load_cached_parse_plan(cache_dir, experiment_id)
         if cached is not None:
+            repair_parser_plan(cached)
             cache_errors = validate_parser_plan(cached)
             if not cache_errors:
                 plan = cached
@@ -852,6 +1194,12 @@ def run_parse_plan_pipeline(
     result.plan_path = result.plan_path or str(debug_dir / "parse_plan.json")
 
     result.failure_stage = "validate_parse_plan"
+    repair_notes = repair_parser_plan(plan)
+    if repair_notes:
+        (debug_dir / "parse_plan_repairs.json").write_text(
+            json.dumps(repair_notes, indent=2) + "\n", encoding="utf-8"
+        )
+
     validation_errors = validate_parser_plan(plan)
     result.validation_errors = validation_errors
     if validation_errors:
@@ -860,6 +1208,16 @@ def run_parse_plan_pipeline(
         )
         result.status = "validation_failed"
         result.failure_message = validation_errors[0]
+        return result
+
+    unsupported_reason = unsupported_pipeline_reason(plan)
+    if unsupported_reason:
+        result.human_review_required = bool(plan.get("human_review_required"))
+        sa = plan.get("source_assessment") or {}
+        result.raw_format_type = str(sa.get("raw_format_type") or "")
+        result.status = "unsupported_current_pipeline"
+        result.failure_stage = "validate_parse_plan"
+        result.failure_message = unsupported_reason
         return result
 
     result.human_review_required = bool(plan.get("human_review_required"))
@@ -898,6 +1256,12 @@ def run_parse_plan_pipeline(
         encoding="utf-8",
     )
     result.n_rows_executed = len(rows)
+    sanity_errors = check_parsed_trials_sanity(trials)
+    if sanity_errors:
+        result.status = "execute_failed"
+        result.failure_message = sanity_errors[0]
+        result.execution_errors = list(exec_errors) + sanity_errors
+        return result
     if not trials:
         result.status = "execute_failed"
         result.failure_message = exec_errors[0] if exec_errors else "no trials parsed"

@@ -77,6 +77,7 @@ FAILURE_STAGES = frozenset({
     "generate_parse_plan",
     "validate_parse_plan",
     "execute_parse_plan",
+    "unsupported_current_pipeline",
     "validate_trials",
     "split_trials",
     "build_program_prompt",
@@ -177,6 +178,12 @@ def _trials_via_parse_plan(
         raise ParsePlanError(plan_run.failure_message or CACHE_MISS_CLIENT_MSG)
     if plan_run.status in ("validation_failed",):
         raise ParsePlanError(plan_run.failure_message or plan_run.validation_errors[0])
+    if plan_run.status in ("unsupported_current_pipeline",):
+        result.stage_reached = "unsupported_current_pipeline"
+        result.failure_stage = "unsupported_current_pipeline"
+        raise ParsePlanError(
+            f"unsupported_current_pipeline: {plan_run.failure_message}"
+        )
     if plan_run.status in ("execute_failed",):
         if plan_run.failure_message == "state_machine_not_implemented":
             raise StateMachineNotImplementedError("state_machine_not_implemented")

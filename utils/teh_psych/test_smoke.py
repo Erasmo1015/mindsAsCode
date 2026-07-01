@@ -22,9 +22,12 @@ from utils.teh_psych.categorical_eval import coerce_choose_output, evaluate_cate
 from utils.teh_psych.parser_plan import (
     CACHE_MISS_CLIENT_MSG,
     StateMachineNotImplementedError,
+    check_parsed_trials_sanity,
     execute_parser_plan_on_row,
+    repair_parser_plan,
     run_parse_plan_pipeline,
     save_parse_plan_cache,
+    unsupported_pipeline_reason,
     validate_parser_plan,
 )
 from utils.teh_psych.trial_split import split_pooled_categorical_trials
@@ -463,3 +466,198 @@ def test_simple_log_skips_candidate_files(tmp_path):
     assert not (iter_dir / "candidates").exists()
     assert (tmp_path / "population_phase" / "best_program.py").is_file()
     assert not (tmp_path / "prompt_diagnostics.jsonl").exists()
+
+
+def test_multistep_transcript_splits_decisions_and_targets_second_option():
+    plan = {
+        "schema_version": "psych101_parser_plan_v1",
+        "experiment_id": "fake/multistep.csv",
+        "task_type": "categorical_choice",
+        "line_classifier": {
+            "line_types": [
+                {
+                    "type_id": "trial_stimulus",
+                    "detection": {
+                        "regex": r"presented with two spaceships called",
+                        "flags": "i",
+                    },
+                },
+                {
+                    "type_id": "action_press",
+                    "detection": {"regex": r"You press <<", "flags": "i"},
+                },
+            ]
+        },
+        "block_boundary_rule": {"strategy": "single_block"},
+        "trial_extraction": {
+            "boundary_strategy": "stimulus_then_press",
+            "action_rule": {
+                "source_line_type": "action_press",
+                "capture": {"regex": r"<<([A-Z])>>", "group": 1},
+            },
+        },
+        "option_normalization": {
+            "strategy": "per_trial_available_keys",
+            "action_id_order": "first_seen_in_transcript",
+        },
+        "history_rule": {"scope": "block", "fields": ["action"]},
+        "state_machine": {"enabled": False},
+        "validation_expectations": {"min_options": 2},
+    }
+    row = {
+        "text": (
+            "You are presented with two spaceships called S and C. You press <<S>>. "
+            "You end up on the blue planet. You see aliens. You press <<R>>. You find junk.\n"
+            "You are presented with two spaceships called S and C. You press <<C>>. "
+            "You end up on the red planet. You see aliens. You press <<G>>. You find treasure."
+        )
+    }
+    trials = [t for t in execute_parser_plan_on_row(plan, row, row_index=0) if t["is_prediction_target"]]
+    spaceship_trials = [
+        t
+        for t in trials
+        if {o["label"] for o in t["problem"]["options"]} == {"S", "C"}
+    ]
+    assert len(spaceship_trials) == 2
+    labels = [o["label"] for o in spaceship_trials[0]["problem"]["options"]]
+    assert labels == ["S", "C"]
+    assert spaceship_trials[0]["target_action"] == 0
+    assert spaceship_trials[1]["target_action"] == 1
+    assert check_parsed_trials_sanity(trials, min_trials=2) == []
+
+
+def test_validate_parser_plan_rejects_invalid_stimulus_group():
+    plan = _minimal_plan()
+    plan["trial_extraction"]["stimulus_fields"] = [
+        {
+            "field_name": "reward",
+            "regex": r"^You press <<\\d>> and get (\\d+\\.\\d+) points\\.$",
+            "group": 2,
+            "cast": "float",
+        }
+    ]
+    errors = validate_parser_plan(plan)
+    assert any("stimulus_fields[0]" in err for err in errors)
+
+
+def test_repair_parser_plan_fixes_stimulus_group_and_schulz_row_parses():
+    plan = _minimal_plan()
+    plan["trial_extraction"] = {
+        "boundary_strategy": "one_press_per_trial",
+        "action_rule": {
+            "source_line_type": "action_press",
+            "capture": {"regex": r"<<(\d+)>>", "group": 1},
+        },
+        "stimulus_fields": [
+            {
+                "field_name": "reward",
+                "regex": r"You press <<\d>> and get (\d+\.\d+) points\.",
+                "group": 2,
+                "cast": "float",
+            }
+        ],
+    }
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"options (\d+) and (\d+)",
+        "action_id_order": "instruction_order",
+    }
+    repairs = repair_parser_plan(plan)
+    assert repairs
+    assert not validate_parser_plan(plan)
+    row = {
+        "instruction": "You can choose between options 1 and 2 by pressing the corresponding key.",
+        "text": "You press <<1>> and get 13.927462234 points.",
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert len(trials) == 1
+    assert trials[0]["problem"]["stimulus"]["reward"] == pytest.approx(13.927462234)
+
+
+def test_respond_omit_go_no_go_no_duplicate_action_ids():
+    plan = {
+        "schema_version": "psych101_parser_plan_v1",
+        "experiment_id": "fake/gonogo.csv",
+        "task_type": "categorical_choice",
+        "line_classifier": {
+            "line_types": [
+                {
+                    "type_id": "action_press",
+                    "detection": {"regex": r"You see colour", "flags": "i"},
+                }
+            ]
+        },
+        "block_boundary_rule": {"strategy": "single_block"},
+        "trial_extraction": {
+            "boundary_strategy": "one_press_per_trial",
+            "action_rule": {
+                "source_line_type": "action_press",
+                "capture": {"regex": r"press (nothing|<<([A-Z])>>)", "group": 2},
+            },
+        },
+        "option_normalization": {
+            "strategy": "respond_omit",
+            "raw_response_to_action_id_mapping": {},
+        },
+        "history_rule": {"scope": "block", "fields": ["action"]},
+        "state_machine": {"enabled": False},
+        "validation_expectations": {"min_options": 2, "max_options": 2},
+    }
+    assert not validate_parser_plan(plan)
+    row = {
+        "text": (
+            "You see colour1 and press <<X>>.\n"
+            "You see colour2 and press nothing.\n"
+        )
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert len(trials) == 2
+    assert trials[0]["target_action"] == 1
+    assert trials[0]["problem"]["stimulus"]["response_key"] == "X"
+    assert trials[1]["target_action"] == 0
+    assert [o["action"] for o in trials[0]["problem"]["options"]] == [0, 1]
+
+
+def test_repair_converts_bad_gonogo_mapping_to_respond_omit():
+    plan = _minimal_plan()
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "raw_response_to_action_id_mapping": {
+            "nothing": 0,
+            "X": 1,
+            "T": 1,
+            "V": 1,
+        },
+    }
+    repairs = repair_parser_plan(plan)
+    assert any("respond_omit" in note for note in repairs)
+    assert plan["option_normalization"]["strategy"] == "respond_omit"
+    assert not validate_parser_plan(plan)
+
+
+def test_unsupported_pipeline_reason_human_review_and_action_say():
+    plan = _minimal_plan()
+    plan["human_review_required"] = True
+    assert "human_review_required" in unsupported_pipeline_reason(plan)
+    plan["human_review_required"] = False
+    plan["trial_extraction"]["action_rule"]["source_line_type"] = "action_say"
+    assert "action_say" in unsupported_pipeline_reason(plan)
+
+
+def test_run_parse_plan_pipeline_skips_unsupported_task(tmp_path):
+    plan = _minimal_plan()
+    plan["human_review_required"] = True
+    rows = [{"text": "You press <<F>>.", "instruction": "Press F and J."}]
+    save_parse_plan_cache(tmp_path / "cache", "fake/exp.csv", plan)
+    result = run_parse_plan_pipeline(
+        client=None,
+        experiment_id="fake/exp.csv",
+        rows=rows,
+        row_indices=[0],
+        debug_dir=tmp_path / "debug",
+        template_path=_REPO_ROOT / "prompts" / "teh_psych" / "utils" / "parse_plan.txt",
+        model_name="test-model",
+        reuse_cache=True,
+        cache_dir=tmp_path / "cache",
+    )
+    assert result.status == "unsupported_current_pipeline"

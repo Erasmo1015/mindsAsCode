@@ -210,6 +210,7 @@ For `option_normalization.strategy`, use one of:
 * "per_trial_available_keys"
 * "per_block_key_list"
 * "numeric_range_from_context"
+* "respond_omit" (go/no-go: action 0=omit, action 1=press; store pressed key in stimulus.response_key)
 
 For `option_normalization.action_id_order`, use one of:
 
@@ -243,6 +244,8 @@ Guidance for common cases:
 
 * If each trial is simply one line like “You press <<F>>”, use `boundary_strategy = "one_press_per_trial"`.
 * If each trial has stimulus lines followed by a press line, use `boundary_strategy = "stimulus_then_press"`.
+* If a transcript line contains multiple `You press ...` decisions, the engine splits at sentence boundaries; each decision must use only the options available at that decision (derive options from the stimulus before that press, not from later presses in the same episode).
+* For go/no-go tasks (press vs omit/nothing), use `option_normalization.strategy = "respond_omit"` with binary actions (0=omit, 1=respond). Do not map multiple response keys to the same action id.
 * If the transcript has games, rounds, blocks, casinos, decks, or environments, define `block_boundary_rule` and put these fields in `problem.context`.
 * If feedback appears as points, reward, win/loss, or correct/incorrect, define `feedback_rule`.
 * If the participant is told to press a specific key, do not treat that as a prediction target. Mark it context-only.
