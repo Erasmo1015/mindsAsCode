@@ -126,6 +126,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--explain",
+        action="store_true",
+        default=False,
+        help=(
+            "Transfer phase only: request structured <source_rationale> + <program> output "
+            "using prompts/teh_transfer/explain_suffix.txt; save rationales and raw responses."
+        ),
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default=None,
@@ -560,6 +569,12 @@ def main() -> None:
         return
     if not _validate_args(args):
         return
+    if args.explain:
+        from utils.teh_transfer.explain_parse import DEFAULT_EXPLAIN_SUFFIX_PATH
+
+        if not DEFAULT_EXPLAIN_SUFFIX_PATH.is_file():
+            print(f"Error: explain suffix prompt not found: {DEFAULT_EXPLAIN_SUFFIX_PATH}")
+            return
 
     config_path = Path(args.transfer_config)
     if not config_path.is_absolute():
@@ -810,6 +825,7 @@ def main() -> None:
             filter_mixed_gambles=bool(args.filter_mixed_gambles),
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
+            explain=args.explain,
         )
         transfer_job_results = run_transfer_jobs_parallel(
             job_batches,

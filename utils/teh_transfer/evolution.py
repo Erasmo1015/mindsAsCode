@@ -23,6 +23,7 @@ from data_modules.psych101_binary import (
 from utils.teh.teh_runtime import setup_teh_run_prompts
 
 from utils.teh_transfer.config import TransferDatasetSpec
+from utils.teh_transfer.explain_parse import load_explain_suffix
 from utils.teh_transfer.prompts import (
     SourceTransferContext,
     build_transfer_source_suffix,
@@ -713,6 +714,53 @@ def run_dataset_global_phase(
     )
 
 
+def _record_explain_parse_failure(
+    error_store: List[Dict[str, Any]],
+    *,
+    parse_error: str,
+    iteration: int,
+    candidate_id: str,
+    history_path: Optional[Path],
+) -> None:
+    """Record structured-output parse failures in the shared error history."""
+    teh._record_invalid_program_error_summary(
+        error_store,
+        {
+            "normalized_key": f"explain_parse||{parse_error}",
+            "invalid_line": "",
+            "error_type": "ExplainParseError",
+            "error_message": parse_error,
+        },
+        iteration=iteration,
+        participant_id=None,
+        candidate_id=candidate_id,
+        history_path=history_path,
+    )
+
+
+def _save_explain_candidate_artifacts(
+    candidates_dir: Path,
+    candidate_idx: int,
+    *,
+    raw_response: str,
+    rationale: str,
+    program_code: str,
+) -> None:
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    (candidates_dir / f"candidate_{candidate_idx}_raw_response.txt").write_text(
+        raw_response,
+        encoding="utf-8",
+    )
+    (candidates_dir / f"candidate_{candidate_idx}_rationale.txt").write_text(
+        rationale,
+        encoding="utf-8",
+    )
+    (candidates_dir / f"candidate_{candidate_idx}.py").write_text(
+        program_code,
+        encoding="utf-8",
+    )
+
+
 def run_transfer_evolution_phase(
     *,
     target: PopulationEvolutionResult,
@@ -750,6 +798,7 @@ def run_transfer_evolution_phase(
     transfer_dir: Optional[Path] = None,
     transfer_mode: str = "multiple",
     source_config_keys: Optional[Sequence[str]] = None,
+    explain: bool = False,
 ) -> PopulationEvolutionResult:
     """
     Leave-one-dataset-out transfer evolution on pooled target train+val trials.
@@ -775,6 +824,9 @@ def run_transfer_evolution_phase(
         mixed_gambles_csv=mixed_gambles_csv,
     )
     transfer_suffix = build_transfer_source_suffix(sources)
+    explain_suffix_text: Optional[str] = None
+    if explain:
+        explain_suffix_text = load_explain_suffix()
     if transfer_dir is None:
         transfer_dir = target.output_dir / "transfer"
     else:
@@ -830,6 +882,7 @@ def run_transfer_evolution_phase(
     first_iter_best: Optional[float] = None
     first_iter_best_code: Optional[str] = None
     transfer_prompt_capture: Optional[str] = None
+    candidate_rationales: Dict[str, str] = {}
 
     for iteration in range(n_iterations):
         iteration_step = iteration + 1
@@ -870,6 +923,7 @@ def run_transfer_evolution_phase(
 
         gen_debug: Dict[str, Any] = {}
         capture_prompt = debug_prompt and iteration == 0
+        iteration_explain_artifacts: List[Dict[str, Any]] = []
         variant_kwargs = {
             "train_trials": pooled_train,
             "extra_prompt_trials": pooled_val if pooled_val else None,
@@ -897,6 +951,9 @@ def run_transfer_evolution_phase(
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
             "generation_debug_out": gen_debug if capture_prompt else None,
+            "explain_mode": explain,
+            "explain_suffix": explain_suffix_text,
+            "explain_artifacts_out": iteration_explain_artifacts if explain else None,
         }
         candidate_codes, candidate_sources = teh._generate_iteration_candidate_codes(
             client=client,
@@ -914,9 +971,42 @@ def run_transfer_evolution_phase(
 
         selected_results: List[Dict[str, Any]] = []
         num_invalid_candidates = 0
+        candidates_dir = iter_dir / "candidates"
         for idx, code in enumerate(candidate_codes):
-            (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "")
-            code = teh._sanitize_llm_python_candidate(code, required_markers=("def choose(",))
+            artifact = (
+                iteration_explain_artifacts[idx]
+                if explain and idx < len(iteration_explain_artifacts)
+                else {}
+            )
+            raw_response = str(artifact.get("raw_response", ""))
+            rationale = str(artifact.get("rationale", ""))
+            parse_error = str(artifact.get("parse_error", ""))
+
+            sanitized = teh._sanitize_llm_python_candidate(
+                code, required_markers=("def choose(",)
+            )
+            if explain:
+                _save_explain_candidate_artifacts(
+                    candidates_dir,
+                    idx,
+                    raw_response=raw_response,
+                    rationale=rationale,
+                    program_code=sanitized or "",
+                )
+                if parse_error and not sanitized:
+                    num_invalid_candidates += 1
+                    _record_explain_parse_failure(
+                        invalid_candidate_errors,
+                        parse_error=parse_error,
+                        iteration=iteration_step,
+                        candidate_id=f"candidate_{idx}",
+                        history_path=error_history_path,
+                    )
+                    continue
+            else:
+                (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
+
+            code = sanitized
             if not code:
                 continue
             choose_fn, compile_error = teh.compile_program_with_error(code)
@@ -985,12 +1075,16 @@ def run_transfer_evolution_phase(
             }
             if val_loglik is not None:
                 row["val_loglik"] = val_loglik
+            if explain and rationale:
+                row["rationale"] = rationale
             selected_results.append(row)
 
         if selected_results:
             selected_results.sort(key=lambda x: x["fitness"], reverse=True)
             for result in selected_results:
                 program_id = f"transfer_iteration_{iteration_step}_candidate_{result['idx']}"
+                if explain and result.get("rationale"):
+                    candidate_rationales[program_id] = str(result["rationale"])
                 elite_parents.append(
                     (
                         result["code"],
@@ -1109,6 +1203,15 @@ def run_transfer_evolution_phase(
         transfer_results["first_iteration_best_test_loglik"] = first_iter_best_test_loglik
     if transfer_mode == "single" and source_config_keys:
         transfer_results["source_dataset"] = str(source_config_keys[0])
+    if explain:
+        best_program_id = str(elite_parents[0][3])
+        best_rationale = candidate_rationales.get(best_program_id, "")
+        best_rationale_path = transfer_dir / "best_program_rationale.txt"
+        best_rationale_path.write_text(best_rationale, encoding="utf-8")
+        transfer_results["explain"] = True
+        transfer_results["best_program_rationale_path"] = str(best_rationale_path)
+        if best_rationale:
+            transfer_results["best_program_rationale"] = best_rationale
     (transfer_dir / "results.json").write_text(
         json.dumps(transfer_results, indent=2),
         encoding="utf-8",

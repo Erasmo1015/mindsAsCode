@@ -1,0 +1,38 @@
+When generating the candidate program, also provide a short source-use rationale.
+
+Output format must be exactly:
+
+<source_rationale>
+Target dataset:
+- <target dataset name>
+
+Selected source datasets:
+- <source dataset name>: <one short reason, e.g. shared task structure, shared option format, shared history effect, shared feedback logic, or useful code component>
+
+Ignored or less useful source datasets:
+- <source dataset name>: <one short reason>
+
+Inherited program traits:
+- <specific reused code pattern or behavioral assumption>
+- <specific reused code pattern or behavioral assumption>
+
+New or adapted target-specific traits:
+- <specific target-specific field, formula, or adaptation>
+- <specific target-specific field, formula, or adaptation>
+</source_rationale>
+
+<program>
+```python
+def choose(problem, history):
+    ...
+```
+</program>
+
+Rules:
+
+The rationale must be concise and evidence-based.
+Mention only source datasets that are actually used or intentionally ignored.
+Do not claim performance results unless they are shown in the prompt.
+The Python code inside <program> must be complete and executable.
+Do not put any prose inside the Python code block.
+Do not output anything outside <source_rationale> and <program>.

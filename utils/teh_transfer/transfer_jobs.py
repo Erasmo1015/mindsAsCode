@@ -427,6 +427,7 @@ def make_transfer_job_worker(
     filter_mixed_gambles: bool,
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
+    explain: bool = False,
 ) -> Callable[[TransferJob, int], TransferJobResult]:
     """Factory for the per-job worker used by ``run_transfer_jobs_parallel``."""
 
@@ -469,6 +470,7 @@ def make_transfer_job_worker(
                 transfer_dir=transfer_dir,
                 transfer_mode=job.transfer_mode,
                 source_config_keys=list(job.source_keys),
+                explain=explain,
                 **evolution_kwargs,
             )
             candidate_best = transfer_dir / teh.BEST_PROGRAM_FILENAME

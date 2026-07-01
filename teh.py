@@ -6708,6 +6708,9 @@ def generate_program_variants(
     past_invalid_program_errors: Optional[List[Dict[str, Any]]] = None,
     past_error_prompt_section: Optional[str] = None,
     max_error_prompt_chars: int = 1200,
+    explain_mode: bool = False,
+    explain_suffix: Optional[str] = None,
+    explain_artifacts_out: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -6861,7 +6864,10 @@ Provide only the code for choose(...) as a complete function body.
     from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
 
     code_template_suffix = single_code_template_prompt_suffix(code_template)
-    candidate_output_rules = f"\n{CANDIDATE_OUTPUT_RULES}\n"
+    if explain_mode and explain_suffix:
+        candidate_output_rules = f"\n{explain_suffix.strip()}\n"
+    else:
+        candidate_output_rules = f"\n{CANDIDATE_OUTPUT_RULES}\n"
     num_parents = len(parent_programs)
     parent_lengths_before = [len(p) for p in parent_programs]
     prompt_parent_programs = list(parent_programs)
@@ -6976,6 +6982,7 @@ Provide only the code for choose(...) as a complete function body.
 
     _llm_call_counter = [0]
     debug_captures: List[Dict[str, Any]] = []
+    explain_artifact_by_idx: Dict[int, Dict[str, Any]] = {}
 
     def _generate_one() -> str:
         if not prompt_text:
@@ -7025,9 +7032,29 @@ Provide only the code for choose(...) as a complete function body.
                 max_tokens=max_tokens,
             )
             raw_content = resp.choices[0].message.content or ""
-            cleaned, sanitize_reason = _sanitize_llm_python_candidate_with_reason(
-                raw_content, required_markers=("def choose(",)
-            )
+            if explain_mode:
+                from utils.teh_transfer.explain_parse import parse_explain_response
+
+                parsed = parse_explain_response(raw_content)
+                artifact: Dict[str, Any] = {
+                    "raw_response": raw_content,
+                    "rationale": parsed.rationale,
+                    "parse_ok": parsed.ok,
+                    "parse_error": "" if parsed.ok else parsed.error,
+                }
+                explain_artifact_by_idx[cand_idx] = artifact
+                if not parsed.ok:
+                    sanitize_reason = f"explain_parse:{parsed.error}"
+                    cleaned = ""
+                else:
+                    cleaned, sanitize_reason = _sanitize_llm_python_candidate_with_reason(
+                        parsed.program_text, required_markers=("def choose(",)
+                    )
+                    artifact["sanitize_reason"] = sanitize_reason
+            else:
+                cleaned, sanitize_reason = _sanitize_llm_python_candidate_with_reason(
+                    raw_content, required_markers=("def choose(",)
+                )
             if prompt_debug or generation_debug_out is not None:
                 debug_captures.append(
                     {
@@ -7057,6 +7084,20 @@ Provide only the code for choose(...) as a complete function body.
         max_workers=max_workers,
         desc="Generating candidate programs",
     )
+
+    if explain_artifacts_out is not None:
+        for i in range(n_variants):
+            explain_artifacts_out.append(
+                explain_artifact_by_idx.get(
+                    i,
+                    {
+                        "raw_response": "",
+                        "rationale": "",
+                        "parse_ok": False,
+                        "parse_error": "missing_artifact",
+                    },
+                )
+            )
 
     if generation_debug_out is not None:
         generation_debug_out.clear()
