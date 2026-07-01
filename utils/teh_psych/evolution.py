@@ -99,6 +99,7 @@ def run_population_evolution(
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     dataset_label: str = "population",
+    simple_log: bool = True,
 ) -> Dict[str, Any]:
     """
     Cross-participant population evolution on pooled categorical train trials.
@@ -168,7 +169,8 @@ def run_population_evolution(
         iteration_step = iteration + 1
         iter_dir = pop_dir / f"iteration_{iteration_step}"
         iter_dir.mkdir(parents=True, exist_ok=True)
-        (iter_dir / "candidates").mkdir(exist_ok=True)
+        if not simple_log:
+            (iter_dir / "candidates").mkdir(exist_ok=True)
 
         pool_size = len(elite_parents)
         if sample_parents and pool_size > 0:
@@ -214,7 +216,7 @@ def run_population_evolution(
             "hard_prompt_token_cap": hard_prompt_token_cap,
             "strict_prompt_budget": strict_prompt_budget,
             "prompt_token_estimator": prompt_token_estimator,
-            "prompt_diagnostics_dir": output_dir,
+            "prompt_diagnostics_dir": None if simple_log else output_dir,
             "phase": "population_evolution",
             "participant_id": None,
             "iteration": iteration_step,
@@ -237,7 +239,10 @@ def run_population_evolution(
         )
 
         for idx, code in enumerate(candidate_codes):
-            (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "", encoding="utf-8")
+            if not simple_log:
+                (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(
+                    code or "", encoding="utf-8"
+                )
             code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
             if not code:
                 continue

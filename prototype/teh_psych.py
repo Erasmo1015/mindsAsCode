@@ -354,6 +354,7 @@ def process_one_experiment(
                 output_dir=exp_run_dir,
                 run_prompts_dir=str(prompts_dir),
                 dataset_label=experiment_id,
+                simple_log=args.simple_log,
             )
         else:
             if client is None:
@@ -391,6 +392,7 @@ def process_one_experiment(
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                 dataset_label=experiment_id,
+                simple_log=args.simple_log,
             )
 
         best_path = Path(evo_out["best_program_path"])
@@ -537,6 +539,16 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--ablation", type=str, default=None)
     parser.add_argument("--no_log", action="store_true")
+    parser.add_argument(
+        "--simple_log",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Skip per-iteration candidate program files and prompt_diagnostics.jsonl; "
+            "keep per-iteration metrics.json, prompt_stats.json, summary CSVs, and "
+            "population_phase/best_program.py."
+        ),
+    )
     parser.add_argument("--evolution_selection_score", type=str, default="train_val", choices=["train", "train_val"])
     parser.add_argument("--max_prompt_train_trials", type=int, default=1_000_000)
     parser.add_argument("--max_prompt_trials_per_problem", type=int, default=0)

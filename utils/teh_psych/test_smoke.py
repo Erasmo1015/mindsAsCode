@@ -414,3 +414,52 @@ def test_evolution_coerces_string_first_error():
     assert isinstance(entry, dict)
     assert entry.get("error_message") == "choose() returned invalid probs"
     assert entry.get("normalized_key")
+
+
+def test_simple_log_skips_candidate_files(tmp_path):
+    from unittest import mock
+
+    from utils.teh_psych.evolution import run_population_evolution
+
+    seed_path = tmp_path / "seed.py"
+    seed_path.write_text(
+        "def choose(problem, history):\n    return {0: 0.5, 1: 0.5}\n",
+        encoding="utf-8",
+    )
+    trials = [
+        {
+            "problem": {"options": [{"action": 0}, {"action": 1}]},
+            "history": [],
+            "action": 0,
+            "target_action": 0,
+            "is_prediction_target": True,
+            "_meta": {"row_index": 0, "block_id": 0},
+        }
+    ]
+    cand_code = "def choose(problem, history):\n    return {0: 0.9, 1: 0.1}\n"
+    with mock.patch(
+        "utils.teh_psych.evolution._generate_iteration_candidate_codes",
+        return_value=([cand_code], None),
+    ):
+        run_population_evolution(
+            pooled_train=trials,
+            pooled_val=[],
+            seed_program_path=str(seed_path),
+            n_iterations=1,
+            n_candidates_per_iteration=2,
+            sample_size=1,
+            sample_parents=False,
+            elite_pool_size=5,
+            model_name="test-model",
+            client=mock.Mock(),
+            output_dir=tmp_path,
+            run_prompts_dir=str(tmp_path / "prompts"),
+            evolution_selection_score="train",
+            simple_log=True,
+        )
+
+    iter_dir = tmp_path / "population_phase" / "iteration_1"
+    assert (iter_dir / "metrics.json").is_file()
+    assert not (iter_dir / "candidates").exists()
+    assert (tmp_path / "population_phase" / "best_program.py").is_file()
+    assert not (tmp_path / "prompt_diagnostics.jsonl").exists()
