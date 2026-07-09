@@ -141,6 +141,7 @@ def build_parser_plan_prompt(
     template_path: Path,
     split_name: str = "train",
     task_description: str = "",
+    prior_attempt_feedback: str = "",
 ) -> str:
     template = template_path.read_text(encoding="utf-8")
     user = build_parser_plan_user_content(
@@ -150,7 +151,11 @@ def build_parser_plan_prompt(
         split_name=split_name,
         task_description=task_description,
     )
-    return f"{template}\n\n---\n\n{user}"
+    prompt = f"{template}\n\n---\n\n{user}"
+    feedback = (prior_attempt_feedback or "").strip()
+    if feedback:
+        prompt = f"{prompt}\n\n---\n\n{feedback}"
+    return prompt
 
 
 def extract_json_from_llm_response(text: str) -> Dict[str, Any]:
@@ -1115,6 +1120,7 @@ def run_parse_plan_pipeline(
     model_name: str,
     split_name: str = "train",
     task_description: str = "",
+    prior_attempt_feedback: str = "",
     reuse_cache: bool = False,
     cache_dir: Optional[Path] = None,
     parse_plan_max_tokens: int = 4000,
@@ -1134,6 +1140,7 @@ def run_parse_plan_pipeline(
             template_path=template_path,
             split_name=split_name,
             task_description=task_description,
+            prior_attempt_feedback=prior_attempt_feedback,
         )
         (debug_dir / "parse_plan_prompt.txt").write_text(result.prompt_text, encoding="utf-8")
     except Exception as exc:

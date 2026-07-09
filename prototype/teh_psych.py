@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
+import traceback
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -28,7 +31,10 @@ from teh import (
     compile_program,
     load_seed_program,
 )
-from utils.teh_psych.action_id_normalization import normalize_categorical_trials_action_ids
+from utils.teh_psych.action_id_normalization import (
+    ActionIdNormalizationError,
+    normalize_categorical_trials_action_ids,
+)
 from utils.teh_psych.adapters import pool_manual_parser_trials_from_rows
 from utils.teh_psych.categorical_eval import evaluate_categorical_program
 from utils.teh_psych.dataset_loop import (
@@ -43,6 +49,7 @@ from utils.teh_psych.evolution import run_population_evolution
 from utils.teh_psych.parser_plan import (
     CACHE_MISS_CLIENT_MSG,
     ParsePlanError,
+    ParsePlanRunResult,
     StateMachineNotImplementedError,
     default_parse_plan_prompt_path,
     run_parse_plan_pipeline,
@@ -78,7 +85,11 @@ FAILURE_STAGES = frozenset({
     "validate_parse_plan",
     "execute_parse_plan",
     "unsupported_current_pipeline",
+    "normalize_trials",
+    "partition_trials",
     "validate_trials",
+    "min_prediction_trials",
+    "action_space_summary",
     "split_trials",
     "build_program_prompt",
     "compile_program",
@@ -88,6 +99,40 @@ FAILURE_STAGES = frozenset({
     "unsupported_parser_missing",
     "unknown_error",
 })
+
+_CATEGORICAL_TRIAL_FORMAT_REMINDER = (
+    "Reminder: each prediction trial needs problem.options (>=2) with consecutive "
+    "action ids 0..K-1, a target_action in those ids, and is_prediction_target=true "
+    "for trials used in evaluation."
+)
+
+_PARSE_PLAN_DEBUG_ARTIFACTS = (
+    "parse_plan_prompt.txt",
+    "parse_plan_raw_response.txt",
+    "parse_plan.json",
+    "parse_plan_validation_errors.json",
+    "parse_plan_repairs.json",
+    "parse_plan_cache_validation_errors.json",
+    "parser_execution_stats.json",
+    "adapter_trials_preview.json",
+)
+
+
+@dataclass
+class _ParseAttemptOutcome:
+    success: bool = False
+    all_trials: List[Dict[str, Any]] = field(default_factory=list)
+    prediction_trials: List[Dict[str, Any]] = field(default_factory=list)
+    action_summary: Dict[str, Any] = field(default_factory=dict)
+    failure_stage: str = ""
+    failure_message: str = ""
+    parse_plan_status: str = ""
+    n_parsed_trials: int = 0
+    n_prediction_trials: int = 0
+    validation_errors: List[str] = field(default_factory=list)
+    non_retryable: bool = False
+    error_traceback: str = ""
+    plan_run: Optional[ParsePlanRunResult] = None
 
 
 def _teh_psych_output_dir(timestamp: str, *, ablation: Optional[str] = None) -> Path:
@@ -125,6 +170,407 @@ def _task_description_for_experiment(experiment_id: str) -> str:
     if spec:
         return str(spec.get("task_description") or "")
     return ""
+
+
+def _one_line_error_message(exc: BaseException) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text.splitlines()[0][:500]
+
+
+def _is_non_retryable_parse_failure(
+    *,
+    failure_stage: str,
+    failure_message: str,
+    parse_plan_status: str = "",
+) -> bool:
+    if failure_stage == "unsupported_current_pipeline":
+        return True
+    if parse_plan_status == "unsupported_current_pipeline":
+        return True
+    if failure_message == "state_machine_not_implemented":
+        return True
+    lowered = failure_message.lower()
+    if lowered.startswith("unsupported_current_pipeline:"):
+        return True
+    for phrase in (
+        "state_machine_not_implemented",
+        "scalar/verbal response",
+        "numeric_range_from_context",
+        "not categorical",
+        "not a categorical",
+        "human_review_required=true",
+    ):
+        if phrase in lowered:
+            return True
+    return False
+
+
+def _format_parse_attempt_feedback(
+    attempt: int,
+    outcome: _ParseAttemptOutcome,
+) -> str:
+    lines = [f"### Attempt {attempt}"]
+    lines.append(f"- failure_stage: {outcome.failure_stage or 'unknown'}")
+    if outcome.parse_plan_status:
+        lines.append(f"- parse_plan_status: {outcome.parse_plan_status}")
+    if outcome.failure_message:
+        lines.append(f"- error: {outcome.failure_message}")
+    lines.append(f"- n_parsed_trials: {outcome.n_parsed_trials}")
+    lines.append(f"- n_prediction_trials: {outcome.n_prediction_trials}")
+    if outcome.validation_errors:
+        preview = outcome.validation_errors[:5]
+        lines.append(f"- validation_errors: {preview}")
+    if outcome.action_summary:
+        summary = {
+            k: outcome.action_summary.get(k)
+            for k in ("num_actions_min", "num_actions_max", "is_variable_k", "n_trials")
+            if k in outcome.action_summary
+        }
+        if summary:
+            lines.append(f"- action_space_summary: {summary}")
+    lines.append(f"- {_CATEGORICAL_TRIAL_FORMAT_REMINDER}")
+    return "\n".join(lines)
+
+
+def _truncate_parse_plan_feedback(
+    sections: List[str],
+    *,
+    max_chars: int,
+) -> str:
+    if not sections:
+        return ""
+    header = "## Prior parse attempt feedback\n\n"
+    body = "\n\n".join(sections)
+    text = f"{header}{body}"
+    if len(text) <= max_chars:
+        return text
+    kept: List[str] = []
+    for section in reversed(sections):
+        candidate_sections = list(reversed(kept))
+        candidate_sections.insert(0, section)
+        candidate = f"{header}" + "\n\n".join(candidate_sections)
+        if len(candidate) > max_chars and kept:
+            break
+        kept.insert(0, section)
+        if len(candidate) <= max_chars:
+            continue
+        if len(kept) == 1:
+            trimmed = section[: max(0, max_chars - len(header) - 20)].rstrip()
+            kept = [trimmed + "\n... [truncated]"]
+            break
+    body = "\n\n".join(kept)
+    text = f"{header}{body}"
+    if len(text) > max_chars:
+        return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+    return text
+
+
+def _sync_parse_plan_attempt_artifacts(attempt_debug_dir: Path, debug_dir: Path) -> None:
+    for name in _PARSE_PLAN_DEBUG_ARTIFACTS:
+        src = attempt_debug_dir / name
+        if src.is_file():
+            shutil.copy2(src, debug_dir / name)
+
+
+def _apply_parse_plan_run_to_result(result: DatasetResult, plan_run: ParsePlanRunResult) -> None:
+    result.parse_plan_status = plan_run.status
+    result.parse_plan_cached = plan_run.cached
+    result.parse_plan_path = plan_run.plan_path
+    result.parse_plan_human_review_required = plan_run.human_review_required
+    result.parse_plan_raw_format_type = plan_run.raw_format_type
+    result.parse_plan_failure_message = plan_run.failure_message
+    if plan_run.failure_stage:
+        result.stage_reached = plan_run.failure_stage
+
+
+def _run_single_parse_plan_attempt(
+    *,
+    client: Optional[OpenAI],
+    experiment_id: str,
+    rows: List[Dict[str, Any]],
+    row_indices: List[int],
+    attempt_debug_dir: Path,
+    args: argparse.Namespace,
+    cache_dir: Path,
+    result: DatasetResult,
+    prior_attempt_feedback: str,
+    reuse_cache: bool,
+    min_pooled_prediction_trials: int,
+) -> _ParseAttemptOutcome:
+    outcome = _ParseAttemptOutcome()
+    attempt_debug_dir.mkdir(parents=True, exist_ok=True)
+
+    result.stage_reached = "build_parse_plan_prompt"
+    parse_plan_template = Path(args.parse_plan_prompt_path)
+    if not parse_plan_template.is_file():
+        parse_plan_template = default_parse_plan_prompt_path()
+
+    n_plan_rows = max(3, min(10, int(args.n_parse_plan_rows)))
+    result.n_parse_plan_rows = min(n_plan_rows, len(rows))
+    result.adapter_type = "parse_plan"
+    result.parse_plan_model = _parse_plan_model(args)
+
+    plan_run = run_parse_plan_pipeline(
+        client=client,
+        experiment_id=experiment_id,
+        rows=rows,
+        row_indices=row_indices,
+        debug_dir=attempt_debug_dir,
+        template_path=parse_plan_template,
+        model_name=result.parse_plan_model,
+        split_name=args.psych_dataset_split,
+        task_description=_task_description_for_experiment(experiment_id),
+        prior_attempt_feedback=prior_attempt_feedback,
+        reuse_cache=reuse_cache,
+        cache_dir=cache_dir,
+        parse_plan_max_tokens=args.parse_plan_max_tokens,
+        n_parse_plan_rows=args.n_parse_plan_rows,
+    )
+    outcome.plan_run = plan_run
+    _apply_parse_plan_run_to_result(result, plan_run)
+    outcome.parse_plan_status = plan_run.status
+
+    if plan_run.status in ("prompt_failed", "generate_failed"):
+        outcome.failure_stage = plan_run.failure_stage or "generate_parse_plan"
+        outcome.failure_message = plan_run.failure_message or CACHE_MISS_CLIENT_MSG
+        outcome.non_retryable = _is_non_retryable_parse_failure(
+            failure_stage=outcome.failure_stage,
+            failure_message=outcome.failure_message,
+            parse_plan_status=plan_run.status,
+        )
+        return outcome
+
+    if plan_run.status == "validation_failed":
+        outcome.failure_stage = "validate_parse_plan"
+        outcome.failure_message = plan_run.failure_message or (
+            plan_run.validation_errors[0] if plan_run.validation_errors else "validation_failed"
+        )
+        outcome.validation_errors = list(plan_run.validation_errors)
+        outcome.non_retryable = _is_non_retryable_parse_failure(
+            failure_stage=outcome.failure_stage,
+            failure_message=outcome.failure_message,
+            parse_plan_status=plan_run.status,
+        )
+        return outcome
+
+    if plan_run.status == "unsupported_current_pipeline":
+        outcome.failure_stage = "unsupported_current_pipeline"
+        outcome.failure_message = (
+            f"unsupported_current_pipeline: {plan_run.failure_message}"
+        )
+        outcome.non_retryable = True
+        return outcome
+
+    if plan_run.status == "execute_failed":
+        outcome.failure_stage = "execute_parse_plan"
+        outcome.failure_message = plan_run.failure_message or "execute_failed"
+        if plan_run.failure_message == "state_machine_not_implemented":
+            outcome.non_retryable = True
+            return outcome
+        outcome.non_retryable = _is_non_retryable_parse_failure(
+            failure_stage=outcome.failure_stage,
+            failure_message=outcome.failure_message,
+            parse_plan_status=plan_run.status,
+        )
+        return outcome
+
+    all_trials = list(plan_run.trials or [])
+    outcome.n_parsed_trials = len(all_trials)
+    if not all_trials:
+        outcome.failure_stage = "execute_parse_plan"
+        outcome.failure_message = plan_run.failure_message or "no trials parsed"
+        return outcome
+
+    try:
+        all_trials = normalize_categorical_trials_action_ids(all_trials)
+    except ActionIdNormalizationError as exc:
+        outcome.failure_stage = "normalize_trials"
+        outcome.failure_message = _one_line_error_message(exc)
+        outcome.error_traceback = traceback.format_exc()
+        outcome.n_parsed_trials = len(all_trials)
+        return outcome
+    except Exception as exc:
+        outcome.failure_stage = "normalize_trials"
+        outcome.failure_message = _one_line_error_message(exc)
+        outcome.error_traceback = traceback.format_exc()
+        outcome.n_parsed_trials = len(all_trials)
+        return outcome
+
+    outcome.n_parsed_trials = len(all_trials)
+    try:
+        prediction_trials, context_only_trials = partition_pooled_trials(all_trials)
+    except Exception as exc:
+        outcome.failure_stage = "partition_trials"
+        outcome.failure_message = _one_line_error_message(exc)
+        outcome.error_traceback = traceback.format_exc()
+        return outcome
+
+    outcome.n_prediction_trials = len(prediction_trials)
+    write_json(
+        attempt_debug_dir / "trial_filtering.json",
+        trial_filtering_summary(all_trials, prediction_trials),
+    )
+    if context_only_trials:
+        write_json(
+            attempt_debug_dir / "context_only_trial_preview.json",
+            context_only_trials[:8],
+        )
+
+    if not prediction_trials:
+        outcome.failure_stage = "validate_trials"
+        outcome.failure_message = "no prediction trials after partitioning"
+        return outcome
+
+    val_errors, _ = validate_categorical_trials(prediction_trials)
+    outcome.validation_errors = list(val_errors)
+    action_summary = summarize_trial_action_space(prediction_trials)
+    outcome.action_summary = action_summary
+
+    if val_errors:
+        write_json(attempt_debug_dir / "validation_errors.json", val_errors[:50])
+        outcome.failure_stage = "validate_trials"
+        outcome.failure_message = val_errors[0]
+        return outcome
+
+    if outcome.n_prediction_trials < min_pooled_prediction_trials:
+        outcome.failure_stage = "min_prediction_trials"
+        outcome.failure_message = (
+            f"Only {outcome.n_prediction_trials} prediction trials; "
+            f"need >= {min_pooled_prediction_trials}"
+        )
+        return outcome
+
+    num_actions_min = action_summary.get("num_actions_min")
+    if num_actions_min is None or int(num_actions_min) < 2:
+        outcome.failure_stage = "action_space_summary"
+        outcome.failure_message = (
+            f"invalid action-space summary: num_actions_min={num_actions_min!r}"
+        )
+        return outcome
+
+    outcome.success = True
+    outcome.all_trials = all_trials
+    outcome.prediction_trials = prediction_trials
+    return outcome
+
+
+def _attempt_record_from_outcome(attempt: int, outcome: _ParseAttemptOutcome) -> Dict[str, Any]:
+    record: Dict[str, Any] = {
+        "attempt": attempt,
+        "success": outcome.success,
+        "failure_stage": outcome.failure_stage,
+        "failure_message": outcome.failure_message,
+        "parse_plan_status": outcome.parse_plan_status,
+        "n_parsed_trials": outcome.n_parsed_trials,
+        "n_prediction_trials": outcome.n_prediction_trials,
+        "validation_errors": outcome.validation_errors[:10],
+        "action_space_summary": outcome.action_summary,
+        "non_retryable": outcome.non_retryable,
+        "feedback_for_next_attempt": _format_parse_attempt_feedback(attempt, outcome),
+    }
+    if outcome.error_traceback:
+        record["traceback"] = outcome.error_traceback
+    if outcome.plan_run is not None:
+        record["parse_plan_cached"] = outcome.plan_run.cached
+        record["parse_plan_path"] = outcome.plan_run.plan_path
+    return record
+
+
+def _trials_via_parse_plan_with_retries(
+    *,
+    client: Optional[OpenAI],
+    experiment_id: str,
+    rows: List[Dict[str, Any]],
+    row_indices: List[int],
+    debug_dir: Path,
+    args: argparse.Namespace,
+    cache_dir: Path,
+    result: DatasetResult,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    max_attempts = max(1, int(args.max_parse_plan_attempts))
+    feedback_sections: List[str] = []
+    attempt_records: List[Dict[str, Any]] = []
+    last_outcome: Optional[_ParseAttemptOutcome] = None
+
+    for attempt in range(1, max_attempts + 1):
+        attempt_debug_dir = debug_dir / f"parse_plan_attempt_{attempt}"
+        prior_feedback = _truncate_parse_plan_feedback(
+            feedback_sections,
+            max_chars=int(args.parse_plan_feedback_max_chars),
+        )
+        reuse_cache = bool(args.reuse_parse_plan_cache and attempt == 1)
+        outcome = _run_single_parse_plan_attempt(
+            client=client,
+            experiment_id=experiment_id,
+            rows=rows,
+            row_indices=row_indices,
+            attempt_debug_dir=attempt_debug_dir,
+            args=args,
+            cache_dir=cache_dir,
+            result=result,
+            prior_attempt_feedback=prior_feedback,
+            reuse_cache=reuse_cache,
+            min_pooled_prediction_trials=args.min_pooled_prediction_trials,
+        )
+        last_outcome = outcome
+        attempt_records.append(_attempt_record_from_outcome(attempt, outcome))
+
+        if outcome.success:
+            _sync_parse_plan_attempt_artifacts(attempt_debug_dir, debug_dir)
+            write_json(
+                debug_dir / "trial_filtering.json",
+                trial_filtering_summary(outcome.all_trials, outcome.prediction_trials),
+            )
+            context_preview = attempt_debug_dir / "context_only_trial_preview.json"
+            if context_preview.is_file():
+                shutil.copy2(context_preview, debug_dir / "context_only_trial_preview.json")
+            result.n_parsed_trials = outcome.n_parsed_trials
+            result.n_prediction_trials = outcome.n_prediction_trials
+            result.num_actions_min = outcome.action_summary.get("num_actions_min")
+            result.num_actions_max = outcome.action_summary.get("num_actions_max")
+            result.is_variable_k = bool(outcome.action_summary.get("is_variable_k"))
+            write_json(
+                debug_dir / "parse_plan_retry_summary.json",
+                {
+                    "experiment_id": experiment_id,
+                    "max_attempts": max_attempts,
+                    "final_outcome": "success",
+                    "successful_attempt": attempt,
+                    "attempts": attempt_records,
+                },
+            )
+            return outcome.all_trials, outcome.prediction_trials, outcome.action_summary
+
+        if outcome.non_retryable:
+            break
+        if attempt < max_attempts:
+            feedback_sections.append(_format_parse_attempt_feedback(attempt, outcome))
+
+    assert last_outcome is not None
+    write_json(
+        debug_dir / "parse_plan_retry_summary.json",
+        {
+            "experiment_id": experiment_id,
+            "max_attempts": max_attempts,
+            "final_outcome": "failed",
+            "attempts": attempt_records,
+        },
+    )
+    result.n_parsed_trials = last_outcome.n_parsed_trials
+    result.n_prediction_trials = last_outcome.n_prediction_trials
+    if last_outcome.action_summary:
+        result.num_actions_min = last_outcome.action_summary.get("num_actions_min")
+        result.num_actions_max = last_outcome.action_summary.get("num_actions_max")
+        result.is_variable_k = bool(last_outcome.action_summary.get("is_variable_k"))
+    result.parse_plan_failure_message = last_outcome.failure_message
+    result.stage_reached = last_outcome.failure_stage or result.stage_reached
+
+    if last_outcome.failure_message == "state_machine_not_implemented":
+        raise StateMachineNotImplementedError("state_machine_not_implemented")
+    if last_outcome.failure_stage == "unsupported_current_pipeline":
+        result.failure_stage = "unsupported_current_pipeline"
+        raise ParsePlanError(last_outcome.failure_message)
+    raise ParsePlanError(last_outcome.failure_message or "parse plan attempts exhausted")
 
 
 def _trials_via_parse_plan(
@@ -254,9 +700,9 @@ def process_one_experiment(
         write_json(debug_dir / "sampled_rows.json", rows[:5])
         write_json(debug_dir / "row_sampling.json", {"indices": row_indices, "note": sampling_note})
 
-        all_trials: List[Dict[str, Any]] = []
+        prediction_trials: List[Dict[str, Any]] = []
         try:
-            all_trials = _trials_via_parse_plan(
+            _all_trials, prediction_trials, _action_summary = _trials_via_parse_plan_with_retries(
                 client=client,
                 experiment_id=experiment_id,
                 rows=rows,
@@ -276,38 +722,35 @@ def process_one_experiment(
                     debug_dir=debug_dir,
                     result=result,
                 )
+                all_trials = normalize_categorical_trials_action_ids(all_trials)
+                result.n_parsed_trials = len(all_trials)
+                prediction_trials, context_only_trials = partition_pooled_trials(all_trials)
+                write_json(
+                    debug_dir / "trial_filtering.json",
+                    trial_filtering_summary(all_trials, prediction_trials),
+                )
+                if context_only_trials:
+                    write_json(
+                        debug_dir / "context_only_trial_preview.json",
+                        context_only_trials[:8],
+                    )
+                result.stage_reached = "validate_trials"
+                result.n_prediction_trials = len(prediction_trials)
+                val_errors, _ = validate_categorical_trials(prediction_trials)
+                action_summary = summarize_trial_action_space(prediction_trials)
+                result.num_actions_min = action_summary["num_actions_min"]
+                result.num_actions_max = action_summary["num_actions_max"]
+                result.is_variable_k = bool(action_summary["is_variable_k"])
+                if val_errors:
+                    write_json(debug_dir / "validation_errors.json", val_errors[:50])
+                    raise ValueError(val_errors[0])
+                if result.n_prediction_trials < args.min_pooled_prediction_trials:
+                    raise ValueError(
+                        f"Only {result.n_prediction_trials} prediction trials; "
+                        f"need >= {args.min_pooled_prediction_trials}"
+                    )
             else:
                 raise
-
-        all_trials = normalize_categorical_trials_action_ids(all_trials)
-
-        result.n_parsed_trials = len(all_trials)
-        prediction_trials, context_only_trials = partition_pooled_trials(all_trials)
-        write_json(
-            debug_dir / "trial_filtering.json",
-            trial_filtering_summary(all_trials, prediction_trials),
-        )
-        if context_only_trials:
-            write_json(
-                debug_dir / "context_only_trial_preview.json",
-                context_only_trials[:8],
-            )
-
-        result.stage_reached = "validate_trials"
-        result.n_prediction_trials = len(prediction_trials)
-        val_errors, _ = validate_categorical_trials(prediction_trials)
-        action_summary = summarize_trial_action_space(prediction_trials)
-        result.num_actions_min = action_summary["num_actions_min"]
-        result.num_actions_max = action_summary["num_actions_max"]
-        result.is_variable_k = bool(action_summary["is_variable_k"])
-        if val_errors:
-            write_json(debug_dir / "validation_errors.json", val_errors[:50])
-            raise ValueError(val_errors[0])
-        if result.n_prediction_trials < args.min_pooled_prediction_trials:
-            raise ValueError(
-                f"Only {result.n_prediction_trials} prediction trials; "
-                f"need >= {args.min_pooled_prediction_trials}"
-            )
 
         result.stage_reached = "split_trials"
         train_trials, val_trials, test_trials = split_pooled_categorical_trials(
@@ -517,6 +960,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--n_parse_plan_rows", type=int, default=5)
     parser.add_argument("--parse_plan_model_name", type=str, default=None)
     parser.add_argument("--parse_plan_max_tokens", type=int, default=4000)
+    parser.add_argument("--max_parse_plan_attempts", type=int, default=3)
+    parser.add_argument("--parse_plan_feedback_max_chars", type=int, default=4000)
     parser.add_argument(
         "--categorical_prompt_path",
         type=str,

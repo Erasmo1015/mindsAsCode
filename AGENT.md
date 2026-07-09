@@ -306,3 +306,19 @@ Short changelog of committed non-strict work (choice13k / cpc18 / mixed_gambles)
 - **Prompt budget note:** Transfer prompts are heavier than global (fixed **N−1 source program** block). **`--transfer_max_prompt_trials`** can be set high (e.g. 60); TEH truncates trials under **`--hard_prompt_token_cap`** if needed. Source trials stay **1 each** regardless of CLI.
 
 - **Cluster example:** **`cluster/teh_transfer/1.sh`** (vLLM local mode; ensure line continuations after every arg — a missing `\` drops **`--mode local`**).
+
+### `prototype/teh_psych.py` (parse-plan retry, Jul 2026)
+
+- **Role:** Population-level categorical TEH over Psych-101 **train** experiments: LLM parser plan → fixed parser engine → categorical trials → population program evolution. Main script: **`prototype/teh_psych.py`**. Cluster example: **`cluster/teh_psych/1.sh`**.
+
+- **Parse retry (on by default):** Before evolution, each experiment runs a bounded retry loop (**`--max_parse_plan_attempts`**, default **3**) over parse-plan generation, validation, execution, normalization, prediction-trial extraction, categorical validation, minimum prediction-trial count, and action-space checks. A attempt succeeds only when **all** of those pass.
+
+- **Retryable failures** (compact feedback → next LLM prompt): parse-plan prompt/generation/validation/execution errors, no or too few trials, normalization/partitioning errors, categorical validation errors, invalid action-space summary. **Non-retryable** (stop immediately): **`unsupported_current_pipeline`**, **`state_machine_not_implemented`**, and clearly unsupported scalar/verbal task types detected by the parse-plan pipeline.
+
+- **Feedback:** Cumulative structured summary per failed attempt (stage, one-line error, trial counts, first few validation errors, action-space summary, categorical-trial format reminder), hard-capped by **`--parse_plan_feedback_max_chars`** (default **4000**). Full tracebacks stay in per-attempt debug files, not in the LLM prompt.
+
+- **Cache:** **`--reuse_parse_plan_cache`** applies only on **attempt 1**; later attempts always bypass cache so a bad cached plan is not reused.
+
+- **Debug outputs:** Per attempt **`parse_plan_attempt_N/`** under the dataset debug dir; run-level **`parse_plan_retry_summary.json`** with all attempts and final outcome. Existing **`failure.json`**, summary CSV, and JSONL behavior unchanged.
+
+- **Opt out / tuning:** Use **`--max_parse_plan_attempts 1`** for old single-shot parsing. No changes required to existing cluster scripts unless you want to tune retries or disable them.

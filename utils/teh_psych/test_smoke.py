@@ -661,3 +661,137 @@ def test_run_parse_plan_pipeline_skips_unsupported_task(tmp_path):
         cache_dir=tmp_path / "cache",
     )
     assert result.status == "unsupported_current_pipeline"
+
+
+def test_parse_plan_prompt_includes_prior_feedback(tmp_path):
+    from utils.teh_psych.parser_plan import build_parser_plan_prompt
+
+    prompt = build_parser_plan_prompt(
+        "fake/exp.csv",
+        [{"text": "You press <<F>>.", "instruction": "Press F and J."}],
+        row_indices=[0],
+        template_path=_REPO_ROOT / "prompts" / "teh_psych" / "utils" / "parse_plan.txt",
+        prior_attempt_feedback="### Attempt 1\n- error: bad regex",
+    )
+    assert "Prior parse attempt feedback" not in prompt
+    assert "### Attempt 1" in prompt
+    assert "bad regex" in prompt
+
+
+def test_parse_retry_recovers_after_validation_failure(tmp_path):
+    import prototype.teh_psych as mod
+    from utils.teh_psych.parser_plan import ParsePlanRunResult
+
+    calls: list[dict] = []
+
+    def fake_run(**kwargs):
+        calls.append(kwargs)
+        attempt = len(calls)
+        if attempt == 1:
+            return ParsePlanRunResult(
+                experiment_id="fake/exp.csv",
+                status="validation_failed",
+                failure_stage="validate_parse_plan",
+                failure_message="trial_extraction.boundary_strategy required",
+                validation_errors=["trial_extraction.boundary_strategy required"],
+            )
+        return ParsePlanRunResult(
+            experiment_id="fake/exp.csv",
+            status="executed",
+            trials=[
+                {
+                    "problem": {"options": [{"action": 0}, {"action": 1}]},
+                    "history": [],
+                    "target_action": 0,
+                    "is_prediction_target": True,
+                    "_meta": {"row_index": 0, "block_id": i},
+                }
+                for i in range(6)
+            ],
+        )
+
+    args = mod.build_argparser().parse_args([
+        "--eval_only",
+        "--min_pooled_prediction_trials",
+        "1",
+        "--max_parse_plan_attempts",
+        "3",
+        "--reuse_parse_plan_cache",
+    ])
+    debug_dir = tmp_path / "debug"
+    result = mod.DatasetResult(experiment_id="fake/exp.csv")
+
+    with mock.patch.object(mod, "run_parse_plan_pipeline", side_effect=fake_run):
+        all_trials, prediction_trials, _ = mod._trials_via_parse_plan_with_retries(
+            client=object(),
+            experiment_id="fake/exp.csv",
+            rows=[{"text": "x"}],
+            row_indices=[0],
+            debug_dir=debug_dir,
+            args=args,
+            cache_dir=tmp_path / "cache",
+            result=result,
+        )
+
+    assert len(all_trials) == 6
+    assert len(prediction_trials) == 6
+    assert len(calls) == 2
+    assert calls[0]["reuse_cache"] is True
+    assert calls[1]["reuse_cache"] is False
+    assert "Attempt 1" in calls[1]["prior_attempt_feedback"]
+    summary = json.loads((debug_dir / "parse_plan_retry_summary.json").read_text(encoding="utf-8"))
+    assert summary["final_outcome"] == "success"
+    assert summary["successful_attempt"] == 2
+    assert (debug_dir / "parse_plan_attempt_1").is_dir()
+    assert (debug_dir / "parse_plan_attempt_2").is_dir()
+
+
+def test_parse_retry_stops_on_unsupported_pipeline(tmp_path):
+    import prototype.teh_psych as mod
+    from utils.teh_psych.parser_plan import ParsePlanRunResult
+
+    def fake_run(**kwargs):
+        return ParsePlanRunResult(
+            experiment_id="fake/exp.csv",
+            status="unsupported_current_pipeline",
+            failure_stage="validate_parse_plan",
+            failure_message="human_review_required",
+            human_review_required=True,
+        )
+
+    args = mod.build_argparser().parse_args([
+        "--eval_only",
+        "--max_parse_plan_attempts",
+        "3",
+    ])
+    debug_dir = tmp_path / "debug"
+    result = mod.DatasetResult(experiment_id="fake/exp.csv")
+
+    with mock.patch.object(mod, "run_parse_plan_pipeline", side_effect=fake_run):
+        with pytest.raises(mod.ParsePlanError):
+            mod._trials_via_parse_plan_with_retries(
+                client=object(),
+                experiment_id="fake/exp.csv",
+                rows=[{"text": "x"}],
+                row_indices=[0],
+                debug_dir=debug_dir,
+                args=args,
+                cache_dir=tmp_path / "cache",
+                result=result,
+            )
+
+    summary = json.loads((debug_dir / "parse_plan_retry_summary.json").read_text(encoding="utf-8"))
+    assert summary["final_outcome"] == "failed"
+    assert len(summary["attempts"]) == 1
+
+
+def test_parse_plan_feedback_truncation():
+    import prototype.teh_psych as mod
+
+    sections = [
+        f"### Attempt {i}\n- error: {'x' * 500}"
+        for i in range(1, 6)
+    ]
+    text = mod._truncate_parse_plan_feedback(sections, max_chars=1200)
+    assert len(text) <= 1200
+    assert "Attempt 5" in text
