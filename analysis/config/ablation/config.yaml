@@ -1,0 +1,22 @@
+# Ablation folder names under generated_outputs_ablation/.../teh/<dataset>/<name>/
+# Must match --ablation LABEL in cluster/old2026June/ablation/*.sh
+#
+# Script mapping:
+#   1_population.sh      -> population        (--no-global_phase)
+#   2_exploration.sh     -> 2_exploration       (explore_candidates=0)
+#   3_2_best_parent1.sh  -> 3_2_best_parent1    (--no-sample_parents)
+#   3_parent.sh          -> 3_parent            (parent sampling baseline)
+#   4_fresh_n.sh         -> 4_fresh_n           (fresh_n_candidates=0)
+#   5_refine.sh          -> 5_refine            (--no-refinement_phase)
+#   6_data_prompt.sh     -> 6_data_prompt       (alternate seed_path)
+#   7_error_feedback.sh  -> 7_error_feedback    (max_error_prompt_chars=0)
+
+ablations:
+  - population
+  - 2_exploration
+  - 3_2_best_parent1
+  - 3_parent
+  - 4_fresh_n
+  - 5_refine
+  - 6_data_prompt
+  - 7_error_feedback

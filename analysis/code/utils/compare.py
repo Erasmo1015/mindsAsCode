@@ -4,6 +4,7 @@ Before running, set up the baseline methods config file (default:
 analysis/data/baseline_methods/config.yaml; override with --config_path).
 
 Usage:
+  python analysis/code/utils/compare.py --all_in--config_path analysis/data/baseline_methods/config_EMNLP_bef_review.yaml
   python analysis/code/utils/compare.py --dataset 2plonsky2018when --psych_dataset_split train
   python analysis/code/utils/compare.py --config_path analysis/data/baseline_methods/config_old.yaml
 
