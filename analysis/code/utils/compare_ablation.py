@@ -28,7 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from utils.teh.teh_datasets import is_mixed_gambles_dataset, normalize_psych101_dataset_alias
 _DEFAULT_DATASET = "2plonsky2018when"
-_DEFAULT_BASELINE_CONFIG = "analysis/data/baseline_methods/config_EMNLP_2_bef_review.yaml"
+_DEFAULT_BASELINE_CONFIG = "analysis/data/baseline_methods/config_EMNLP_rerun1.yaml"
 _DEFAULT_ABLATION_CONFIG = "analysis/config/ablation/config.yaml"
 _GENERATED_OUTPUTS_DIR = "generated_outputs"
 _ABLATION_OUTPUTS_DIR = "generated_outputs_ablation"
