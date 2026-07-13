@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
 """
-Compare avg gated test log-likelihood across TEH ablation runs.
+Compare avg gated test log-likelihood across TEH (PICS) ablation runs.
 
 Usage:
   python analysis/code/utils/compare_ablation.py
   python analysis/code/utils/compare_ablation.py --dataset 1peterson2021using
   python analysis/code/utils/compare_ablation.py --all_in
+  python analysis/code/utils/compare_ablation.py --all_in --config_path analysis/config/ablation/config.yaml
 
-Rows are datasets; columns are base (full TEH from baseline config) then each
-ablation from analysis/config/ablation/config.yaml. Missing runs show N/A.
+Rows are datasets; columns are base (full TEH) then each ablation listed under
+``ablations:`` in the config. Paths come from ``datasets:`` in the same file
+(PICS / TEH only). Missing runs show N/A.
+
+Config shape (see analysis/config/ablation/config.yaml):
+
+  ablations:
+    - population
+    - 2_exploration
+    ...
+  datasets:
+    1peterson2021using:
+      base: generated_outputs/psych101_train/teh/.../run_*
+      population: generated_outputs_ablation/psych101_train/teh/.../population
+      ...
 """
 
 from __future__ import annotations
@@ -27,10 +41,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from utils.teh.teh_datasets import is_mixed_gambles_dataset, normalize_psych101_dataset_alias
+
 _DEFAULT_DATASET = "2plonsky2018when"
-_DEFAULT_BASELINE_CONFIG = "analysis/data/baseline_methods/config_EMNLP_rerun1.yaml"
 _DEFAULT_ABLATION_CONFIG = "analysis/config/ablation/config.yaml"
-_GENERATED_OUTPUTS_DIR = "generated_outputs"
 _ABLATION_OUTPUTS_DIR = "generated_outputs_ablation"
 _LOGLIK_CSV_NAME = "participant_details_loglik.csv"
 _GATED_LOGLIK = "gated_test_loglik"
@@ -65,9 +78,8 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _load_ablation_names(config_path: Path) -> List[str]:
-    data = _load_yaml(config_path)
-    raw = data.get("ablations")
+def _load_ablation_names(config: Mapping[str, Any], config_path: Path) -> List[str]:
+    raw = config.get("ablations")
     if not isinstance(raw, list):
         raise ValueError(f"{config_path}: expected top-level 'ablations' list")
     names: List[str] = []
@@ -88,29 +100,63 @@ def _config_dataset_key(dataset: str) -> str:
     return alias
 
 
-def _base_teh_path(
-    baseline_config: Mapping[str, Any],
+def _dataset_entry(
+    ablation_config: Mapping[str, Any],
     dataset: str,
-) -> Optional[str]:
-    datasets = baseline_config.get("datasets")
+) -> Dict[str, Any]:
+    datasets = ablation_config.get("datasets")
     if not isinstance(datasets, dict):
-        return None
+        return {}
     entry = datasets.get(_config_dataset_key(dataset))
-    if not isinstance(entry, dict):
-        return None
-    raw = entry.get("TEH")
+    return entry if isinstance(entry, dict) else {}
+
+
+def _path_from_entry(entry: Mapping[str, Any], key: str) -> Optional[str]:
+    raw = entry.get(key)
     if raw is None:
         return None
     text = str(raw).strip()
     return text or None
 
 
-def _ablation_run_dir(repo: Path, dataset: str, ablation: str) -> Path:
+def _default_ablation_run_dir(repo: Path, dataset: str, ablation: str) -> Path:
+    """Conventional layout used when config omits a path."""
     alias = normalize_psych101_dataset_alias(dataset)
     root = repo / _ABLATION_OUTPUTS_DIR
     if is_mixed_gambles_dataset(alias):
         return root / "mixed_gambles" / "teh" / ablation
     return root / "psych101_train" / "teh" / alias / ablation
+
+
+def _ablation_path(
+    repo: Path,
+    ablation_config: Mapping[str, Any],
+    dataset: str,
+    ablation: str,
+) -> Optional[str]:
+    entry = _dataset_entry(ablation_config, dataset)
+    configured = _path_from_entry(entry, ablation)
+    if configured:
+        return configured
+    run_dir = _default_ablation_run_dir(repo, dataset, ablation)
+    if run_dir.is_dir():
+        try:
+            return str(run_dir.relative_to(repo))
+        except ValueError:
+            return str(run_dir)
+    return None
+
+
+def _base_path(
+    ablation_config: Mapping[str, Any],
+    dataset: str,
+) -> Optional[str]:
+    entry = _dataset_entry(ablation_config, dataset)
+    for key in (_BASE_COL, "TEH", "PICS"):
+        configured = _path_from_entry(entry, key)
+        if configured:
+            return configured
+    return None
 
 
 def _resolve_loglik_csv(path: Path) -> Path:
@@ -157,30 +203,18 @@ def _avg_gated_from_path(repo: Path, raw_path: Optional[str]) -> str:
     return f"{statistics.mean(scores.values()):.{_LOGLIK_NDIGITS}f}"
 
 
-def _avg_gated_from_ablation(repo: Path, dataset: str, ablation: str) -> str:
-    run_dir = _ablation_run_dir(repo, dataset, ablation)
-    if not run_dir.is_dir():
-        return _NA
-    try:
-        csv_path = _resolve_loglik_csv(run_dir)
-    except FileNotFoundError:
-        return _NA
-    scores = _read_gated_loglik(csv_path)
-    if not scores:
-        return _NA
-    return f"{statistics.mean(scores.values()):.{_LOGLIK_NDIGITS}f}"
-
-
 def _build_row(
     repo: Path,
     dataset: str,
-    baseline_config: Mapping[str, Any],
+    ablation_config: Mapping[str, Any],
     ablation_names: Sequence[str],
 ) -> Dict[str, str]:
     row = {"dataset": dataset}
-    row[_BASE_COL] = _avg_gated_from_path(repo, _base_teh_path(baseline_config, dataset))
+    row[_BASE_COL] = _avg_gated_from_path(repo, _base_path(ablation_config, dataset))
     for name in ablation_names:
-        row[name] = _avg_gated_from_ablation(repo, dataset, name)
+        row[name] = _avg_gated_from_path(
+            repo, _ablation_path(repo, ablation_config, dataset, name)
+        )
     return row
 
 
@@ -238,37 +272,33 @@ def main() -> None:
         help=f"Compare all {_len_all_in()} EMNLP datasets (overrides --dataset).",
     )
     parser.add_argument(
-        "--baseline_config",
-        type=Path,
-        default=Path(_DEFAULT_BASELINE_CONFIG),
-        help=f"Baseline methods config with TEH paths (default: {_DEFAULT_BASELINE_CONFIG}).",
-    )
-    parser.add_argument(
+        "--config_path",
         "--ablation_config",
         type=Path,
         default=Path(_DEFAULT_ABLATION_CONFIG),
-        help=f"Ablation name list (default: {_DEFAULT_ABLATION_CONFIG}).",
+        dest="config_path",
+        help=(
+            "YAML with ablations list and datasets -> base / ablation TEH paths "
+            f"(default: {_DEFAULT_ABLATION_CONFIG})."
+        ),
     )
     args = parser.parse_args()
 
     repo = _REPO_ROOT
-    baseline_path = (
-        args.baseline_config.resolve()
-        if args.baseline_config.is_absolute()
-        else (repo / args.baseline_config).resolve()
+    config_path = (
+        args.config_path.resolve()
+        if args.config_path.is_absolute()
+        else (repo / args.config_path).resolve()
     )
-    ablation_path = (
-        args.ablation_config.resolve()
-        if args.ablation_config.is_absolute()
-        else (repo / args.ablation_config).resolve()
-    )
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Ablation config not found: {config_path}")
 
-    baseline_config = _load_yaml(baseline_path)
-    ablation_names = _load_ablation_names(ablation_path)
+    ablation_config = _load_yaml(config_path)
+    ablation_names = _load_ablation_names(ablation_config, config_path)
     columns = [_BASE_COL, *ablation_names]
 
     datasets = list(_ALL_IN_DATASETS) if args.all_in else [args.dataset.strip()]
-    rows = [_build_row(repo, ds, baseline_config, ablation_names) for ds in datasets]
+    rows = [_build_row(repo, ds, ablation_config, ablation_names) for ds in datasets]
     print(_format_table(rows, columns))
 
 
