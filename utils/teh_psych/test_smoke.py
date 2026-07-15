@@ -1,6 +1,7 @@
 """Lightweight smoke checks for teh_psych parser-plan + categorical pipeline."""
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from utils.teh_psych.parser_plan import (
     StateMachineNotImplementedError,
     check_parsed_trials_sanity,
     execute_parser_plan_on_row,
+    execute_parser_plan_on_rows,
     repair_parser_plan,
     run_parse_plan_pipeline,
     save_parse_plan_cache,
@@ -640,8 +642,11 @@ def test_unsupported_pipeline_reason_human_review_and_action_say():
     plan["human_review_required"] = True
     assert "human_review_required" in unsupported_pipeline_reason(plan)
     plan["human_review_required"] = False
+    # action_say is now supported via textual categorical encoding.
     plan["trial_extraction"]["action_rule"]["source_line_type"] = "action_say"
-    assert "action_say" in unsupported_pipeline_reason(plan)
+    assert unsupported_pipeline_reason(plan) is None
+    plan["option_normalization"]["strategy"] = "numeric_range_from_context"
+    assert "numeric_range_from_context" in unsupported_pipeline_reason(plan)
 
 
 def test_run_parse_plan_pipeline_skips_unsupported_task(tmp_path):
@@ -795,3 +800,162 @@ def test_parse_plan_feedback_truncation():
     text = mod._truncate_parse_plan_feedback(sections, max_chars=1200)
     assert len(text) <= 1200
     assert "Attempt 5" in text
+
+
+def test_priority_results_summaries_include_failures_and_not_started(tmp_path):
+    from utils.teh_psych.reporting import DatasetResult, write_priority_results_summaries
+
+    priority_csv = tmp_path / "priority.csv"
+    priority_csv.write_text(
+        "experiment_id,task_group\n"
+        "fake/a.csv,Risky/gamble choice\n"
+        "fake/b.csv,Categorization\n"
+        "fake/c.csv,Bandit/RL and sequential learning\n",
+        encoding="utf-8",
+    )
+    results = [
+        DatasetResult(
+            experiment_id="fake/a.csv",
+            status="success",
+            n_rows_used=50,
+            n_prediction_trials=1000,
+            parse_attempt=2,
+            test_loglik=-0.69314718056,
+        ),
+        DatasetResult(
+            experiment_id="fake/b.csv",
+            status="failed",
+            n_rows_used=50,
+            n_prediction_trials=0,
+            parse_attempt=3,
+        ),
+    ]
+    exp_path, group_path = write_priority_results_summaries(
+        tmp_path / "run",
+        results,
+        requested_experiment_ids=["fake/a.csv", "fake/b.csv", "fake/c.csv"],
+        priority_csv=priority_csv,
+    )
+    assert exp_path.name == "priority_results_summary.csv"
+    assert group_path.name == "priority_results_by_group.csv"
+    rows = list(csv.DictReader(exp_path.open(encoding="utf-8")))
+    assert [r["experiment_id"] for r in rows] == [
+        "fake/a.csv",
+        "fake/b.csv",
+        "fake/c.csv",
+    ]
+    assert rows[0]["status"] == "success"
+    assert rows[0]["task_group"] == "Risky/gamble choice"
+    assert rows[0]["test_loglik"] != "N/A"
+    assert float(rows[0]["test_loglik"]) == pytest.approx(-0.69314718056)
+    assert rows[1]["status"] == "failed"
+    assert rows[1]["test_loglik"] == "N/A"
+    assert rows[2]["status"] == "not_started"
+    assert rows[2]["parse_attempt"] == "N/A"
+    group_rows = list(csv.DictReader(group_path.open(encoding="utf-8")))
+    by_g = {r["task_group"]: r for r in group_rows}
+    assert by_g["Risky/gamble choice"]["success"] == "1"
+    assert by_g["Risky/gamble choice"]["mean_test_loglik"] == "-0.69"
+    assert by_g["Categorization"]["failed"] == "1"
+    assert by_g["Bandit/RL and sequential learning"]["incomplete"] == "1"
+
+
+def test_option_key_scoping_uses_observed_keys_not_binary_fallback():
+    plan = _minimal_plan()
+    plan["option_normalization"] = {
+        "strategy": "per_trial_available_keys",
+        "instruction_regex": r"^Option ([A-Z]+) delivers",
+        "action_id_order": "instruction_order",
+    }
+    plan["trial_extraction"]["boundary_strategy"] = "one_press_per_trial"
+    row = {
+        "text": (
+            "Option L delivers 10 points.\n"
+            "Option B delivers 5 points.\n"
+            "You press <<B>>.\n"
+            "You press <<L>>.\n"
+        )
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    pred = [t for t in trials if t["is_prediction_target"]]
+    assert len(pred) == 2
+    labels = {o["label"] for o in pred[0]["problem"]["options"]}
+    assert labels == {"B", "L"}
+    assert {t["_meta"]["raw_key"] for t in pred} == {"B", "L"}
+
+
+def test_textual_action_say_maps_to_stable_integer_ids():
+    plan = _minimal_plan()
+    plan["trial_extraction"]["action_rule"] = {
+        "source_line_type": "action_say",
+        "capture": {"regex": r"<<([^>]+)>>", "group": 1},
+    }
+    plan["option_normalization"] = {
+        "strategy": "per_trial_available_keys",
+        "action_id_order": "sorted_raw_key",
+    }
+    rows = [
+        {
+            "text": (
+                "Progladine: a lot. You say that the concentration is <<high>>.\n"
+                "Progladine: little. You say that the concentration is <<low>>.\n"
+            )
+        },
+        {
+            "text": (
+                "Progladine: average. You say that the concentration is <<normal>>.\n"
+                "Progladine: a lot. You say that the concentration is <<high>>.\n"
+            )
+        },
+    ]
+    trials, errors = execute_parser_plan_on_rows(plan, rows, row_indices=[0, 1])
+    assert not errors
+    pred = [t for t in trials if t["is_prediction_target"]]
+    assert len(pred) >= 3
+    mapping = plan.get("_textual_action_id_mapping") or {}
+    assert mapping == {"high": 0, "low": 1, "normal": 2} or set(mapping) == {
+        "high",
+        "low",
+        "normal",
+    }
+    assert pred[0]["_meta"]["textual_action_id_mapping"] == mapping
+    assert len(pred[0]["problem"]["options"]) == 3
+
+
+def test_regex_capture_group_repair_zero_groups_and_group_zero():
+    plan = _minimal_plan()
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"press\s+([A-Z])\s+and\s+([A-Z])",
+        "action_id_order": "instruction_order",
+        "raw_response_to_action_id_mapping": {},
+    }
+    plan["trial_extraction"]["context_fields"] = [
+        {
+            "field_name": "part",
+            "regex": r"Part 1",
+            "group": 1,
+        }
+    ]
+    plan["trial_extraction"]["stimulus_fields"] = [
+        {
+            "field_name": "item",
+            "regex": r"([A-Z]): ([^,]+)",
+            "group": 0,
+        }
+    ]
+    repairs = repair_parser_plan(plan)
+    assert any("context_fields[0]" in r for r in repairs)
+    assert plan["trial_extraction"]["context_fields"][0]["group"] == 0
+    assert not validate_parser_plan(plan)
+    row = {
+        "instruction": "Press B and J.",
+        "text": "Part 1\nB: prune, J: nail\nYou press <<B>>.",
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert trials
+    assert trials[0]["problem"]["context"].get("part") == "Part 1"
+    assert trials[0]["_meta"]["raw_key"] == "B"
+    # With one_press_per_trial, stimulus_fields are searched in the press trial
+    # window; presence of a valid repaired group-0 stimulus regex must not
+    # block parsing even when that window lacks the label line.

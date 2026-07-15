@@ -64,6 +64,7 @@ from utils.teh_psych.reporting import (
     finalize_summaries,
     record_failure,
     write_json,
+    write_priority_results_summaries,
 )
 from utils.teh_psych.seed_program import resolve_seed_program_path
 from utils.teh_psych.trial_split import split_pooled_categorical_trials
@@ -526,6 +527,7 @@ def _trials_via_parse_plan_with_retries(
                 shutil.copy2(context_preview, debug_dir / "context_only_trial_preview.json")
             result.n_parsed_trials = outcome.n_parsed_trials
             result.n_prediction_trials = outcome.n_prediction_trials
+            result.parse_attempt = attempt
             result.num_actions_min = outcome.action_summary.get("num_actions_min")
             result.num_actions_max = outcome.action_summary.get("num_actions_max")
             result.is_variable_k = bool(outcome.action_summary.get("is_variable_k"))
@@ -558,6 +560,7 @@ def _trials_via_parse_plan_with_retries(
     )
     result.n_parsed_trials = last_outcome.n_parsed_trials
     result.n_prediction_trials = last_outcome.n_prediction_trials
+    result.parse_attempt = int(attempt_records[-1]["attempt"]) if attempt_records else None
     if last_outcome.action_summary:
         result.num_actions_min = last_outcome.action_summary.get("num_actions_min")
         result.num_actions_max = last_outcome.action_summary.get("num_actions_max")
@@ -1077,43 +1080,56 @@ def main() -> int:
     client = _build_client(args)
     results: List[DatasetResult] = []
 
-    for ordinal, experiment_id in enumerate(experiment_ids):
-        print(f"\n{'=' * 80}\n[{ordinal + 1}/{len(experiment_ids)}] {experiment_id}\n{'=' * 80}")
-        try:
-            result = process_one_experiment(
-                experiment_id,
-                args=args,
-                run_dir=run_dir,
-                summary_dir=summary_dir,
-                train_split_ds=train_split_ds,
-                client=client,
-                parse_plan_cache_dir=parse_plan_cache_dir,
+    try:
+        for ordinal, experiment_id in enumerate(experiment_ids):
+            print(f"\n{'=' * 80}\n[{ordinal + 1}/{len(experiment_ids)}] {experiment_id}\n{'=' * 80}")
+            try:
+                result = process_one_experiment(
+                    experiment_id,
+                    args=args,
+                    run_dir=run_dir,
+                    summary_dir=summary_dir,
+                    train_split_ds=train_split_ds,
+                    client=client,
+                    parse_plan_cache_dir=parse_plan_cache_dir,
+                )
+            except Exception as exc:
+                result = DatasetResult(experiment_id=experiment_id)
+                record_failure(result, "unknown_error", str(exc), exc)
+            results.append(result)
+            append_dataset_result_csv(summary_dir, result)
+            append_dataset_result_jsonl(summary_dir, result)
+            print(
+                f"Result: {result.status} (stage={result.stage_reached}, "
+                f"adapter={result.adapter_type or '-'}, failure={result.failure_stage or '-'})"
             )
-        except Exception as exc:
-            result = DatasetResult(experiment_id=experiment_id)
-            record_failure(result, "unknown_error", str(exc), exc)
-        results.append(result)
-        append_dataset_result_csv(summary_dir, result)
-        append_dataset_result_jsonl(summary_dir, result)
-        print(
-            f"Result: {result.status} (stage={result.stage_reached}, "
-            f"adapter={result.adapter_type or '-'}, failure={result.failure_stage or '-'})"
-        )
-        if wandb is not None:
-            wandb.log(
-                {
-                    "experiment_ordinal": ordinal,
-                    "status": 1 if result.status == "success" else 0,
-                    "n_prediction_trials": result.n_prediction_trials,
-                    "train_loglik": result.train_loglik,
-                },
-                step=ordinal,
-            )
-        if result.status != "success" and not args.continue_on_error:
-            print("Stopping because --continue_on_error false.")
-            break
+            if wandb is not None:
+                wandb.log(
+                    {
+                        "experiment_ordinal": ordinal,
+                        "status": 1 if result.status == "success" else 0,
+                        "n_prediction_trials": result.n_prediction_trials,
+                        "train_loglik": result.train_loglik,
+                    },
+                    step=ordinal,
+                )
+            if result.status != "success" and not args.continue_on_error:
+                print("Stopping because --continue_on_error false.")
+                break
+    finally:
+        finalize_summaries(summary_dir, results)
+        if experiment_filter:
+            try:
+                exp_summary, group_summary = write_priority_results_summaries(
+                    run_dir,
+                    results,
+                    requested_experiment_ids=experiment_filter,
+                )
+                print(f"Priority experiment summary: {exp_summary}")
+                print(f"Priority group summary: {group_summary}")
+            except Exception as exc:
+                print(f"[teh_psych] priority summary write failed ({exc}); continuing.")
 
-    finalize_summaries(summary_dir, results)
     n_ok = sum(1 for r in results if r.status == "success")
     print(f"\nFinished: {n_ok}/{len(results)} experiments succeeded.")
     print(f"Summary: {summary_dir}")

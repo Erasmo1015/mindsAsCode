@@ -20,19 +20,33 @@ DEFAULT_INSTRUCTION_KEY_REGEX = (
     r"|([A-Z])\s+for\s+[^,]+,\s*([A-Z])\s+for)"
 )
 CACHE_MISS_CLIENT_MSG = "LLM client required because parse plan cache was not available"
-# Split single-line blobs at sentence boundaries before a new participant press.
-_PRESS_BOUNDARY_SPLIT_RE = re.compile(r"(?=\.\s+You press\s*(?:<<|nothing))", re.I)
-_STIMULUS_OPTION_PATTERNS = (
-    r"called\s+([A-Z])\s+and\s+([A-Z])",
-    r"presented with spaceships\s+([A-Z])\s+and\s+([A-Z])",
-    r"spaceships?\s+([A-Z])\s+and\s+([A-Z])",
-    r"spaceships?\s+([A-Z]+)\s+and\s+([A-Z]+)",
-    r"take\s+(?:one of\s+)?(?:the\s+)?spaceships?\s+([A-Z])\s+or\s+([A-Z])",
-    r"([A-Z])\s+or\s+([A-Z])",
+# Split single-line blobs at sentence boundaries before a new participant press/say.
+_PRESS_BOUNDARY_SPLIT_RE = re.compile(
+    r"(?=\.\s+You (?:press\s*(?:<<|nothing)|say\b))",
+    re.I,
 )
+_STIMULUS_OPTION_PATTERNS = (
+    r"called\s+((?-i:[A-Z0-9]+))\s+and\s+((?-i:[A-Z0-9]+))",
+    r"presented with spaceships\s+((?-i:[A-Z]))\s+and\s+((?-i:[A-Z]))",
+    r"spaceships?\s+((?-i:[A-Z]))\s+and\s+((?-i:[A-Z]))",
+    r"spaceships?\s+((?-i:[A-Z]+))\s+and\s+((?-i:[A-Z]+))",
+    r"take\s+(?:one of\s+)?(?:the\s+)?spaceships?\s+((?-i:[A-Z]))\s+or\s+((?-i:[A-Z]))",
+    r"Option\s+((?-i:[A-Z0-9]+))\b",
+    r"decks?(?:\s+of\s+cards)?\s+labeled\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
+    r"(?:keys?|options?|labels?)\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
+    r"assigned to the keys\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
+    r"slot machines labeled\s+((?-i:[A-Z0-9]+))\s+and\s+((?-i:[A-Z0-9]+))",
+    r"((?-i:[A-Z]))\s+or\s+((?-i:[A-Z]))",
+    r"instruction is to press\s+((?-i:[A-Z0-9]+))",
+)
+_BINARY_FALLBACK_KEYS = frozenset({"0", "1"})
 _NUMERIC_CASTS = frozenset({"int", "float", "list_int"})
 _OMIT_RAW_KEYS = frozenset({"nothing", "omit", "no_response", "no response", "none"})
 _OMIT_PRESS_RE = re.compile(r"press\s+nothing\b", re.I)
+_ANGLE_RESPONSE_RE = re.compile(r"<<([^>]+)>>")
+_TEXTUAL_ACTION_SOURCES = frozenset(
+    {"action_say", "action_estimate", "action_type", "action_verbal"}
+)
 
 
 class ParsePlanError(Exception):
@@ -216,8 +230,13 @@ def _validate_capture_group_spec(
         g = _requested_capture_group(group)
     except ValueError:
         return f"{field_path}: invalid capture group {group!r}"
-    if g == 0 and allow_group_zero:
+    if g == 0 and (allow_group_zero or n_groups == 0):
         return None
+    if n_groups == 0:
+        return (
+            f"{field_path}: capture group {g} invalid for regex with "
+            f"0 group(s): {regex!r}"
+        )
     if g < 1 or g > n_groups:
         return (
             f"{field_path}: capture group {g} invalid for regex with "
@@ -231,22 +250,93 @@ def _repair_capture_group_in_spec(spec: Dict[str, Any], field_path: str) -> Opti
     if not regex:
         return None
     n_groups = _regex_capture_group_count(regex)
-    if n_groups is None or n_groups < 1:
+    if n_groups is None:
         return None
     try:
         g = _requested_capture_group(spec.get("group", 1))
     except ValueError:
-        spec["group"] = 1
-        return f"{field_path}: reset invalid capture group to 1"
-    if g < 1 or g > n_groups:
-        if n_groups == 1:
-            spec["group"] = 1
-            return f"{field_path}: auto-repaired capture group {g} -> 1"
+        spec["group"] = 1 if n_groups >= 1 else 0
+        return f"{field_path}: reset invalid capture group to {spec['group']}"
+
+    # No capturing groups: use full-match (group 0) when a group index was requested.
+    if n_groups == 0:
+        if g != 0:
+            spec["group"] = 0
+            return (
+                f"{field_path}: auto-repaired capture group {g} -> 0 "
+                "(full match; regex has no capturing groups)"
+            )
         return None
+
+    # Explicit group 0 with capturing groups: keep as full-match.
+    if g == 0:
+        return f"{field_path}: accepting capture group 0 as full-match"
+
+    if g < 1 or g > n_groups:
+        # Prefer group 1 when available; otherwise full match.
+        new_g = 1 if n_groups >= 1 else 0
+        spec["group"] = new_g
+        return f"{field_path}: auto-repaired capture group {g} -> {new_g}"
     return None
 
 
-def repair_parser_plan(plan: Dict[str, Any]) -> List[str]:
+def _probe_capture_group_on_samples(
+    spec: Dict[str, Any],
+    field_path: str,
+    sample_lines: List[str],
+) -> Optional[str]:
+    """If configured group fails on samples but another group works, repair it."""
+    regex = spec.get("regex")
+    if not regex or not sample_lines:
+        return None
+    n_groups = _regex_capture_group_count(regex)
+    if n_groups is None:
+        return None
+    try:
+        g = _requested_capture_group(spec.get("group", 1 if n_groups >= 1 else 0))
+    except ValueError:
+        return None
+
+    def _matches(group_idx: int) -> bool:
+        try:
+            rx = re.compile(regex, re.I)
+        except re.error:
+            return False
+        for line in sample_lines:
+            m = rx.search(line)
+            if not m:
+                continue
+            try:
+                val = m.group(group_idx)
+            except IndexError:
+                continue
+            if val is not None and str(val).strip() != "":
+                return True
+        return False
+
+    if _matches(g):
+        return None
+    candidates: List[int] = []
+    if n_groups == 0:
+        candidates = [0]
+    else:
+        candidates = list(range(1, n_groups + 1)) + [0]
+    for cand in candidates:
+        if cand == g:
+            continue
+        if _matches(cand):
+            spec["group"] = cand
+            return (
+                f"{field_path}: sample-validated capture group {g} -> {cand}"
+            )
+    return None
+
+
+def repair_parser_plan(
+    plan: Dict[str, Any],
+    *,
+    sample_lines: Optional[List[str]] = None,
+) -> List[str]:
     """Apply safe in-memory repairs before execution (logged as repair notes)."""
     repairs: List[str] = []
     te = plan.get("trial_extraction") or {}
@@ -254,10 +344,39 @@ def repair_parser_plan(plan: Dict[str, Any]) -> List[str]:
         msg = _repair_capture_group_in_spec(spec, f"trial_extraction.stimulus_fields[{idx}]")
         if msg:
             repairs.append(msg)
+        if sample_lines:
+            msg = _probe_capture_group_on_samples(
+                spec, f"trial_extraction.stimulus_fields[{idx}]", sample_lines
+            )
+            if msg:
+                repairs.append(msg)
+    for idx, spec in enumerate(te.get("context_fields") or []):
+        if not isinstance(spec, dict) or not spec.get("regex"):
+            continue
+        msg = _repair_capture_group_in_spec(spec, f"trial_extraction.context_fields[{idx}]")
+        if msg:
+            repairs.append(msg)
+        if sample_lines:
+            msg = _probe_capture_group_on_samples(
+                spec, f"trial_extraction.context_fields[{idx}]", sample_lines
+            )
+            if msg:
+                repairs.append(msg)
     action_rule = te.get("action_rule") or {}
     capture = action_rule.get("capture")
     if isinstance(capture, dict) and capture.get("regex"):
         msg = _repair_capture_group_in_spec(capture, "trial_extraction.action_rule.capture")
+        if msg:
+            repairs.append(msg)
+        if sample_lines:
+            msg = _probe_capture_group_on_samples(
+                capture, "trial_extraction.action_rule.capture", sample_lines
+            )
+            if msg:
+                repairs.append(msg)
+    fb_rule = te.get("feedback_rule") or {}
+    if isinstance(fb_rule, dict) and fb_rule.get("regex"):
+        msg = _repair_capture_group_in_spec(fb_rule, "trial_extraction.feedback_rule")
         if msg:
             repairs.append(msg)
 
@@ -285,11 +404,17 @@ def unsupported_pipeline_reason(plan: Dict[str, Any]) -> Optional[str]:
     te = plan.get("trial_extraction") or {}
     action_rule = te.get("action_rule") or {}
     source_type = str(action_rule.get("source_line_type") or "")
-    if source_type in ("action_say", "action_estimate"):
-        return (
-            f"trial_extraction.action_rule.source_line_type={source_type!r} "
-            "(scalar/verbal response, not categorical key press)"
-        )
+    # action_say / verbal categorical labels are supported via textual action encoding.
+    # Reject only clearly scalar estimate ranges that are not discrete labels.
+    if source_type == "action_estimate":
+        capture = action_rule.get("capture") or {}
+        regex = str(capture.get("regex") or "")
+        # If the capture looks like free-form numeric scalar without discrete options, reject.
+        if re.search(r"\\d\+|\[0-9\]", regex) and "|" not in regex:
+            return (
+                f"trial_extraction.action_rule.source_line_type={source_type!r} "
+                "(scalar numeric estimate, not categorical)"
+            )
     norm = plan.get("option_normalization") or {}
     if norm.get("strategy") == "numeric_range_from_context":
         return "option_normalization.strategy=numeric_range_from_context (scalar estimation)"
@@ -298,12 +423,13 @@ def unsupported_pipeline_reason(plan: Dict[str, Any]) -> Optional[str]:
     for phrase in (
         "probability rating",
         "rating bar",
-        "estimate the concentration",
-        "verbal response",
         "not a categorical",
         "not categorical",
     ):
         if phrase in lowered:
+            # Allow plans that also declare discrete say/label categories.
+            if source_type in _TEXTUAL_ACTION_SOURCES:
+                continue
             return f"uncertainty_notes suggest unsupported task: {phrase!r}"
     return None
 
@@ -335,6 +461,7 @@ def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
                     capture["regex"],
                     capture.get("group", 1),
                     "trial_extraction.action_rule.capture",
+                    allow_group_zero=True,
                 )
                 if err:
                     errors.append(err)
@@ -346,6 +473,7 @@ def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
                 regex,
                 spec.get("group", 1),
                 f"trial_extraction.stimulus_fields[{idx}]",
+                allow_group_zero=True,
             )
             if err:
                 errors.append(err)
@@ -357,6 +485,7 @@ def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
                 regex,
                 spec.get("group", 1),
                 f"trial_extraction.context_fields[{idx}]",
+                allow_group_zero=True,
             )
             if err:
                 errors.append(err)
@@ -515,7 +644,7 @@ def _split_line_on_press_boundaries(line: str) -> List[str]:
         if not part:
             continue
         if segments and not re.search(
-            r"(?:You press\s*(?:<<|nothing)|(?<!\w)press\s*(?:<<|nothing))",
+            r"(?:You (?:press\s*(?:<<|nothing)|say\b)|(?<!\w)press\s*(?:<<|nothing))",
             part,
             re.I,
         ):
@@ -552,6 +681,10 @@ def classify_transcript_lines(text: str, plan: Dict[str, Any]) -> List[Dict[str,
             r"You press\s*<<|press\s*<<", line, re.I
         ):
             type_id = "action_press"
+        if type_id == "trial_stimulus" and re.search(
+            r"You say\b.*<<|say that .*<<", line, re.I
+        ):
+            type_id = "action_say"
         classified.append({"line": line, "type_id": type_id, "line_no": line_no})
     return classified
 
@@ -606,10 +739,15 @@ def _capture_from_rule(line: str, capture: Dict[str, Any]) -> Optional[str]:
     if not matches:
         return None
     m = matches[-1]
+    n_groups = m.lastindex or 0
+    if group_idx == 0:
+        return m.group(0)
     try:
         return m.group(group_idx)
     except IndexError:
-        return m.group(1) if m.lastindex and m.lastindex >= 1 else None
+        if n_groups >= 1:
+            return m.group(1)
+        return m.group(0)
 
 
 def _capture_press_response(
@@ -621,11 +759,139 @@ def _capture_press_response(
         return None, True
     raw = _capture_from_rule(line, capture)
     if raw is None:
-        m = re.search(r"<<([A-Z0-9])>>", line, re.I)
+        m = _ANGLE_RESPONSE_RE.search(line)
         raw = m.group(1) if m else None
+    if raw is not None:
+        raw = str(raw).strip()
     if raw is not None and str(raw).lower() in _OMIT_RAW_KEYS:
         return None, True
     return raw, False
+
+
+def _split_key_token_blob(token: str) -> List[str]:
+    """Split comma/and-joined key lists into individual action tokens."""
+    text = str(token).strip()
+    if not text:
+        return []
+    if re.search(r",|\band\b|&", text, re.I):
+        parts = re.split(r"\s*,\s*|\s+and\s+|\s*&\s*", text, flags=re.I)
+        return [p.strip() for p in parts if p and p.strip()]
+    return [text]
+
+
+def _flatten_key_groups(found: List[Any]) -> List[str]:
+    keys: List[str] = []
+    for item in found:
+        if isinstance(item, tuple):
+            for k in item:
+                if k:
+                    keys.extend(_split_key_token_blob(str(k)))
+        elif item is not None:
+            keys.extend(_split_key_token_blob(str(item)))
+    return keys
+
+
+_STOPWORD_ACTION_TOKENS = frozenset(
+    {
+        "and",
+        "or",
+        "by",
+        "on",
+        "to",
+        "the",
+        "you",
+        "a",
+        "an",
+        "of",
+        "for",
+        "is",
+        "in",
+        "ms",
+        "correct",
+        "incorrect",
+        "card",
+        "labeled",
+        "label",
+        "option",
+        "options",
+        "key",
+        "keys",
+        "press",
+        "pressing",
+    }
+)
+
+
+def _normalize_raw_key_token(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() in _OMIT_RAW_KEYS:
+        return None
+    if text.lower() in _STOPWORD_ACTION_TOKENS:
+        return None
+    # Preserve multi-character category labels; normalize keyboard/numeric forms.
+    if re.fullmatch(r"[A-Za-z]", text):
+        return text.upper()
+    if re.fullmatch(r"-?\d+(\.\d+)?", text):
+        # Keep integer-looking numerics as ints; drop bare floats unless they are
+        # explicit categorical codes (handled via textual encoder).
+        if "." in text:
+            return text
+        return str(int(float(text)))
+    return text
+
+
+def _filter_keys_against_observed(keys: List[str], observed: List[str]) -> List[str]:
+    """Drop obvious prose tokens and prefer observed support when available."""
+    cleaned = [k for k in keys if k and str(k).lower() not in _STOPWORD_ACTION_TOKENS]
+    if not observed:
+        return cleaned
+    obs_set = set()
+    for o in observed:
+        obs_set.update(_canonical_key_variants(o))
+    # If observations are keyboard/id-like, drop long alphabetic prose leftovers.
+    obs_unique = _normalize_key_list(observed, "instruction_order")
+    mostly_short = (
+        sum(1 for o in obs_unique if len(str(o)) <= 2 or re.fullmatch(r"-?\d+", str(o)))
+        >= max(1, int(0.8 * len(obs_unique)))
+    )
+    if mostly_short:
+        cleaned = [
+            k
+            for k in cleaned
+            if len(str(k)) <= 2
+            or re.fullmatch(r"-?\d+(\.\d+)?", str(k))
+            or any(v in obs_set for v in _canonical_key_variants(k))
+        ]
+    return cleaned
+
+
+def _canonical_key_variants(key: str) -> List[str]:
+    """Return equivalent representations for lookup (int/str/case)."""
+    variants = [key]
+    nk = _normalize_raw_key_token(key)
+    if nk and nk not in variants:
+        variants.append(nk)
+    if re.fullmatch(r"-?\d+", str(key).strip()):
+        variants.append(str(int(key)))
+    upper = str(key).upper()
+    if upper not in variants:
+        variants.append(upper)
+    lower = str(key).lower()
+    if lower not in variants:
+        variants.append(lower)
+    return variants
+
+
+def _keys_from_regex_blob(blob: str, regex: str) -> List[str]:
+    if not blob or not regex:
+        return []
+    try:
+        found = re.findall(regex, str(blob), re.I | re.M)
+    except re.error:
+        return []
+    return _flatten_key_groups(found)
 
 
 def _keys_from_stimulus_text(
@@ -642,9 +908,12 @@ def _keys_from_stimulus_text(
         if not blob:
             continue
         blob_s = str(blob)
-        keys.extend(_flatten_key_groups(re.findall(instr_re, blob_s, re.I)))
+        keys.extend(_keys_from_regex_blob(blob_s, instr_re))
         for pat in _STIMULUS_OPTION_PATTERNS:
-            keys.extend(_flatten_key_groups(re.findall(pat, blob_s, re.I)))
+            keys.extend(_keys_from_regex_blob(blob_s, pat))
+        # Do not scrape all <<responses>> from the instruction blob here; that
+        # conflates action history with available options. Observed responses are
+        # handled separately as a validation/fallback signal.
     return _normalize_key_list(keys, action_id_order)
 
 
@@ -667,16 +936,6 @@ def _trial_stimulus_blob(
     return "\n".join(item["line"] for item in trial_lines[:last_press])
 
 
-def _flatten_key_groups(found: List[Any]) -> List[str]:
-    keys: List[str] = []
-    for item in found:
-        if isinstance(item, tuple):
-            keys.extend(str(k) for k in item if k)
-        elif item is not None:
-            keys.append(str(item))
-    return keys
-
-
 def _keys_from_instruction_text(
     plan: Dict[str, Any],
     *,
@@ -687,22 +946,33 @@ def _keys_from_instruction_text(
     action_id_order = norm.get("action_id_order", "instruction_order")
     instr_re = norm.get("instruction_regex") or DEFAULT_INSTRUCTION_KEY_REGEX
     keys: List[str] = []
-    blobs = [instruction] + [item["line"] for item in block_lines]
-    for blob in blobs:
-        if not blob:
+    # Prefer the instruction field, early transcript lines, and explicit instruction
+    # classifications. Avoid rescanning every action line in long sessions.
+    blob_candidates: List[str] = []
+    if instruction:
+        blob_candidates.append(instruction)
+    for item in block_lines[:80]:
+        if item.get("type_id") in ("instruction", "block_header", "trial_stimulus"):
+            blob_candidates.append(item["line"])
+        elif len(blob_candidates) < 20:
+            blob_candidates.append(item["line"])
+    for blob_s in blob_candidates:
+        if not blob_s:
             continue
-        blob_s = str(blob)
-        keys.extend(_flatten_key_groups(re.findall(instr_re, blob_s, re.I)))
-        keys.extend(re.findall(r"<<([A-Z])>>", blob_s))
+        keys.extend(_keys_from_regex_blob(blob_s, instr_re))
+        # Only treat <<X>> in instruction-like text as option declarations, not
+        # historical responses. Prefer explicit press/option patterns below.
         keys.extend(
             _flatten_key_groups(
                 re.findall(
-                    r"(?:by pressing|pressing)\s+([A-Z])\s+or\s+([A-Z])",
+                    r"(?:by pressing|pressing|press)\s+((?-i:[A-Z0-9]+))\s+or\s+((?-i:[A-Z0-9]+))",
                     blob_s,
                     re.I,
                 )
             )
         )
+        for pat in _STIMULUS_OPTION_PATTERNS:
+            keys.extend(_keys_from_regex_blob(blob_s, pat))
     return _normalize_key_list(keys, action_id_order)
 
 
@@ -710,16 +980,95 @@ def _normalize_key_list(
     keys: List[str],
     action_id_order: str,
 ) -> List[str]:
-    keys = [str(k) for k in keys if k is not None]
-    if action_id_order == "sorted_raw_key":
-        return sorted(dict.fromkeys(keys))
-    seen: List[str] = []
+    normalized: List[str] = []
     for k in keys:
+        nk = _normalize_raw_key_token(k)
+        if nk is not None:
+            normalized.append(nk)
+    if action_id_order == "sorted_raw_key":
+        return sorted(dict.fromkeys(normalized), key=lambda x: (not x.isdigit(), x))
+    seen: List[str] = []
+    for k in normalized:
         if k not in seen:
             seen.append(k)
     if action_id_order == "first_seen_in_transcript":
         return seen
     return seen
+
+
+def _looks_like_binary_numeric_keys(keys: List[str]) -> bool:
+    normed = {_normalize_raw_key_token(k) for k in keys}
+    normed.discard(None)
+    return normed.issubset(_BINARY_FALLBACK_KEYS) and len(normed) >= 1
+
+
+def _collect_observed_raw_keys(
+    block_lines: List[Dict[str, Any]],
+    *,
+    capture: Dict[str, Any],
+    source_type: str,
+) -> List[str]:
+    observed: List[str] = []
+    for item in block_lines:
+        raw_key, is_omit = _capture_press_response(item["line"], capture)
+        if is_omit:
+            continue
+        if raw_key is None and item.get("type_id") != source_type:
+            # Fallback: any <<token>> on response-like lines.
+            if not re.search(r"\b(?:press|say|type|respond)\b", item["line"], re.I):
+                continue
+            m = _ANGLE_RESPONSE_RE.search(item["line"])
+            raw_key = m.group(1) if m else None
+        nk = _normalize_raw_key_token(raw_key)
+        if nk is not None:
+            observed.append(nk)
+    return observed
+
+
+def _coverage_ratio(keys: List[str], observed: List[str]) -> float:
+    if not observed:
+        return 1.0
+    key_set = set()
+    for k in keys:
+        key_set.update(_canonical_key_variants(k))
+    hits = 0
+    for obs in observed:
+        variants = set(_canonical_key_variants(obs))
+        if key_set.intersection(variants):
+            hits += 1
+    return hits / max(1, len(observed))
+
+
+def _build_textual_action_id_mapping(
+    labels: List[str],
+    *,
+    action_id_order: str,
+    existing: Optional[Dict[str, int]] = None,
+) -> Dict[str, int]:
+    """Deterministic text label -> integer id mapping; reject ambiguous collisions."""
+    mapping: Dict[str, int] = dict(existing or {})
+    ordered = _normalize_key_list(labels, action_id_order)
+    if action_id_order == "sorted_raw_key" or not mapping:
+        # Stable across splits: sorted unique labels when requested or starting fresh.
+        if action_id_order == "sorted_raw_key":
+            ordered = sorted(dict.fromkeys(ordered), key=lambda x: (x.lower(), x))
+            mapping = {lab: i for i, lab in enumerate(ordered)}
+            return mapping
+    for lab in ordered:
+        if lab in mapping:
+            continue
+        # Reject if a case-variant already mapped to a different identity.
+        collisions = [
+            (k, v)
+            for k, v in mapping.items()
+            if k.lower() == lab.lower() and k != lab
+        ]
+        if collisions:
+            raise ParsePlanError(
+                f"ambiguous textual action mapping for {lab!r}: collisions={collisions}"
+            )
+        mapping[lab] = len(mapping)
+    return mapping
 
 
 def _option_map_from_plan(
@@ -729,6 +1078,8 @@ def _option_map_from_plan(
     block_lines: List[Dict[str, Any]],
     trial_lines: List[Dict[str, Any]],
     stats: Optional[ParserExecutionStats] = None,
+    observed_raw_keys: Optional[List[str]] = None,
+    current_raw_key: Optional[str] = None,
 ) -> Tuple[Dict[str, int], bool]:
     norm = plan.get("option_normalization") or {}
     strategy = norm.get("strategy", "fixed_keys_from_instruction")
@@ -742,6 +1093,16 @@ def _option_map_from_plan(
     if explicit:
         return {str(k): int(v) for k, v in explicit.items()}, used_fallback
 
+    # Global textual mapping accumulated across rows (stable IDs).
+    textual_map = plan.get("_textual_action_id_mapping")
+    if isinstance(textual_map, dict) and textual_map:
+        # Prefer global textual encoder when present and covers current key.
+        cur = _normalize_raw_key_token(current_raw_key)
+        if cur is None or cur in textual_map or any(
+            cur.lower() == str(k).lower() for k in textual_map
+        ):
+            return {str(k): int(v) for k, v in textual_map.items()}, used_fallback
+
     te = plan.get("trial_extraction") or {}
     action_rule = te.get("action_rule") or {}
     capture = action_rule.get("capture") or {"regex": r"<<([A-Z])>>", "group": 1}
@@ -750,38 +1111,197 @@ def _option_map_from_plan(
         trial_lines, source_type=source_type, capture=capture
     )
 
-    keys: List[str] = []
+    # Preceding block context is often where available options are declared when
+    # boundary_strategy=one_press_per_trial leaves trial stimulus empty.
+    preceding_context = ""
+    if block_lines and trial_lines:
+        trial_line_nos = {id(x) for x in trial_lines}
+        context_lines: List[str] = []
+        for item in block_lines:
+            if id(item) in trial_line_nos:
+                break
+            context_lines.append(item["line"])
+        # Keep a local window so late trials still see recent option declarations.
+        preceding_context = "\n".join(context_lines[-40:])
+
+    candidate_sources: List[Tuple[str, List[str]]] = []
     if strategy == "fixed_keys_from_instruction":
-        keys = _keys_from_instruction_text(
-            plan, instruction=instruction, block_lines=block_lines
+        candidate_sources.append(
+            (
+                "instruction",
+                _keys_from_instruction_text(
+                    plan, instruction=instruction, block_lines=block_lines
+                ),
+            )
         )
     elif strategy == "per_block_key_list":
+        keys: List[str] = []
         for item in block_lines:
             if item["type_id"] == "block_header":
-                keys.extend(re.findall(r"<<([A-Z])>>|press\s+([A-Z])", item["line"], re.I))
-                flat = [g for pair in keys for g in pair if g]
-                keys = flat
-        keys = _normalize_key_list(keys, action_id_order)
+                keys.extend(
+                    _flatten_key_groups(
+                        re.findall(r"<<([A-Z0-9]+)>>|press\s+([A-Z0-9]+)", item["line"], re.I)
+                    )
+                )
+        candidate_sources.append(
+            ("block_header", _normalize_key_list(keys, action_id_order))
+        )
     elif strategy == "per_trial_available_keys":
-        keys = _keys_from_stimulus_text(
+        trial_keys = _keys_from_stimulus_text(
             stimulus_blob, instruction=instruction, plan=plan
+        )
+        candidate_sources.append(("trial_stimulus", trial_keys))
+        if preceding_context:
+            candidate_sources.append(
+                (
+                    "block_context",
+                    _keys_from_stimulus_text(
+                        preceding_context, instruction=instruction, plan=plan
+                    ),
+                )
+            )
+        candidate_sources.append(
+            (
+                "instruction",
+                _keys_from_instruction_text(
+                    plan, instruction=instruction, block_lines=block_lines
+                ),
+            )
         )
     elif strategy == "numeric_range_from_context":
-        keys = [str(i) for i in range(2)]
+        candidate_sources.append(("numeric_range", ["0", "1"]))
 
-    keys = _normalize_key_list(keys, action_id_order)
-    if len(keys) < 2:
-        inst_keys = _keys_from_stimulus_text(
-            stimulus_blob, instruction=instruction, plan=plan
+    observed = list(observed_raw_keys or [])
+    if current_raw_key is not None:
+        nk = _normalize_raw_key_token(current_raw_key)
+        if nk is not None:
+            observed = observed + [nk]
+
+    keys: List[str] = []
+    chosen_source = "none"
+    obs_unique = _normalize_key_list(observed, action_id_order)
+    current_norm = _normalize_raw_key_token(current_raw_key)
+    best_score: Optional[Tuple[float, float, int]] = None
+    best_name = "none"
+    best_keys: List[str] = []
+    for source_name, source_keys in candidate_sources:
+        source_keys = _normalize_key_list(
+            _filter_keys_against_observed(source_keys, observed),
+            action_id_order,
         )
-        if len(inst_keys) >= 2:
-            keys = inst_keys
+        if len(source_keys) < 2:
+            continue
+        source_map = {k: i for i, k in enumerate(source_keys)}
+        # Prefer candidates that include the current response.
+        if current_norm is not None and _lookup_action_id(source_map, current_norm) is None:
+            continue
+        cov = _coverage_ratio(source_keys, observed) if observed else 1.0
+        local_obs = [current_norm] if current_norm is not None else observed
+        local_cov = _coverage_ratio(source_keys, local_obs) if local_obs else 1.0
+        if local_obs and local_cov < 1.0:
+            continue
+        size_penalty = (
+            abs(len(source_keys) - max(2, len(set(obs_unique))))
+            if obs_unique
+            else len(source_keys)
+        )
+        score = (local_cov, cov, -size_penalty)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_name = source_name
+            best_keys = source_keys
+    if best_keys:
+        keys = best_keys
+        chosen_source = best_name
+        # If extracted space is much larger than observed support, intersect.
+        if obs_unique and len(keys) > max(4, 2 * len(set(obs_unique))):
+            key_set = set()
+            for k in keys:
+                key_set.update(_canonical_key_variants(k))
+            filtered = [
+                k for k in obs_unique if key_set.intersection(_canonical_key_variants(k))
+            ]
+            filtered = _normalize_key_list(filtered, action_id_order)
+            if len(filtered) >= 2 and (
+                current_norm is None
+                or _lookup_action_id({k: i for i, k in enumerate(filtered)}, current_norm)
+                is not None
+            ):
+                keys = filtered
+                chosen_source = f"{chosen_source}+observed_filter"
+                used_fallback = True
+                if stats is not None:
+                    stats.used_option_source_fallback += 1
+
+    needs_observed_fallback = len(keys) < 2 or (
+        current_norm is not None
+        and _lookup_action_id({k: i for i, k in enumerate(keys)}, current_norm) is None
+    )
+    if needs_observed_fallback:
+        # Observed responses are the most reliable fallback when instruction/trial
+        # extraction would discard real actions (e.g. blind {0,1}).
+        if current_norm is not None and len(obs_unique) >= 2:
+            if current_norm in obs_unique:
+                keys = obs_unique
+            else:
+                keys = _normalize_key_list(obs_unique + [current_norm], action_id_order)
+            chosen_source = "observed_responses"
             used_fallback = True
             if stats is not None:
                 stats.used_option_source_fallback += 1
+        elif len(obs_unique) >= 2:
+            keys = obs_unique
+            chosen_source = "observed_responses"
+            used_fallback = True
+            if stats is not None:
+                stats.used_option_source_fallback += 1
+        elif len(keys) < 2:
+            # Last-resort binary fallback only when observations are binary/numeric.
+            if observed and _looks_like_binary_numeric_keys(observed):
+                keys = ["0", "1"]
+                chosen_source = "binary_fallback_observed"
+            elif not observed:
+                keys = ["0", "1"]
+                chosen_source = "binary_fallback_default"
+            else:
+                # Do not invent {0,1} when observed keys are clearly non-binary.
+                keys = obs_unique if obs_unique else list(dict.fromkeys(observed))
+                chosen_source = "observed_responses_partial"
+            used_fallback = True
+            if stats is not None:
+                stats.used_option_source_fallback += 1
+
+    if stats is not None and chosen_source:
+        # Hook for debug logging via execution_stats extensions if needed later.
+        pass
+
+    keys = _normalize_key_list(keys, action_id_order)
     if len(keys) < 2:
-        keys = ["0", "1"]
+        if observed and not _looks_like_binary_numeric_keys(observed):
+            # Keep singleton/partial observed set rather than substituting {0,1}.
+            keys = _normalize_key_list(observed, action_id_order)
+            used_fallback = True
+        else:
+            keys = ["0", "1"]
+            used_fallback = True
     return {k: i for i, k in enumerate(keys)}, used_fallback
+
+
+def _lookup_action_id(key_map: Dict[str, int], raw_key: Any) -> Optional[int]:
+    if raw_key is None:
+        return None
+    text = str(raw_key)
+    if text in key_map:
+        return int(key_map[text])
+    for variant in _canonical_key_variants(text):
+        if variant in key_map:
+            return int(key_map[variant])
+    # Case-insensitive label match for multi-word categories.
+    lower = text.lower()
+    for k, v in key_map.items():
+        if str(k).lower() == lower:
+            return int(v)
+    return None
 
 
 def _parse_feedback(line: str, plan: Dict[str, Any]) -> Any:
@@ -857,12 +1377,17 @@ def _extract_stimulus_fields(trial_lines: List[Dict[str, Any]], plan: Dict[str, 
         except ValueError:
             continue
         n_groups = _regex_capture_group_count(regex)
-        if n_groups is None or group_idx < 1 or group_idx > n_groups:
+        if n_groups is None:
             continue
-        try:
-            raw = m.group(group_idx)
-        except IndexError:
+        if group_idx == 0:
+            raw = m.group(0)
+        elif group_idx < 1 or group_idx > n_groups:
             continue
+        else:
+            try:
+                raw = m.group(group_idx)
+            except IndexError:
+                continue
         if cast == "int":
             stimulus[name] = int(raw)
         elif cast == "float":
@@ -889,7 +1414,17 @@ def _extract_context_fields(block_lines: List[Dict[str, Any]], plan: Dict[str, A
         if regex:
             m = re.search(regex, blob, _regex_flags("i"))
             if m:
-                context[name] = m.group(1) if m.lastindex else m.group(0)
+                try:
+                    group_idx = _requested_capture_group(spec.get("group", 1))
+                except ValueError:
+                    group_idx = 1 if m.lastindex else 0
+                if group_idx == 0 or not m.lastindex:
+                    context[name] = m.group(0)
+                else:
+                    try:
+                        context[name] = m.group(group_idx)
+                    except IndexError:
+                        context[name] = m.group(0)
     return context
 
 
@@ -938,6 +1473,20 @@ def _trials_from_block(
     context["block_id"] = block_id
     trials: List[Dict[str, Any]] = []
     history: List[Dict[str, Any]] = []
+    observed_raw_keys = _collect_observed_raw_keys(
+        block_lines, capture=capture, source_type=source_type
+    )
+    # Cache a block-level option map once. Per-trial re-extraction is only needed
+    # when the trial stimulus itself declares a different available-key set.
+    block_key_map, block_used_fallback = _option_map_from_plan(
+        plan,
+        instruction=instruction,
+        block_lines=block_lines,
+        trial_lines=[],
+        stats=None,
+        observed_raw_keys=observed_raw_keys,
+        current_raw_key=observed_raw_keys[0] if observed_raw_keys else None,
+    )
 
     for trial_lines in raw_trials:
         press_line = trial_lines[-1]["line"]
@@ -957,27 +1506,38 @@ def _trials_from_block(
             key_map = {"omit": 0, "respond": 1}
             used_option_fallback = False
         else:
-            key_map, used_option_fallback = _option_map_from_plan(
-                plan,
-                instruction=instruction,
-                block_lines=block_lines,
-                trial_lines=trial_lines,
-                stats=stats,
+            used_option_fallback = block_used_fallback
+            key_map = block_key_map
+            # Recompute only when the block map misses the current key. Avoids
+            # O(n_trials * transcript) rescans on stimulus_then_press datasets.
+            needs_local = (
+                strategy == "per_trial_available_keys"
+                and _lookup_action_id(block_key_map, raw_key) is None
             )
+            if needs_local:
+                local_map, local_fb = _option_map_from_plan(
+                    plan,
+                    instruction=instruction,
+                    block_lines=block_lines,
+                    trial_lines=trial_lines,
+                    stats=None,
+                    observed_raw_keys=observed_raw_keys,
+                    current_raw_key=raw_key,
+                )
+                if len(local_map) >= 2 and _lookup_action_id(local_map, raw_key) is not None:
+                    key_map = local_map
+                    used_option_fallback = local_fb
+            if used_option_fallback and stats is not None:
+                stats.used_option_source_fallback += 1
             if is_omit:
                 continue
             if raw_key is None:
                 continue
-            if raw_key not in key_map:
-                upper = str(raw_key).upper()
-                if upper in key_map:
-                    raw_key = upper
-                elif str(raw_key) in key_map:
-                    pass
-                else:
-                    continue
-            lookup_key = str(raw_key).upper() if str(raw_key).upper() in key_map else raw_key
-            target_action = int(key_map[lookup_key])
+            target_action_id = _lookup_action_id(key_map, raw_key)
+            if target_action_id is None:
+                continue
+            target_action = int(target_action_id)
+            raw_key = _normalize_raw_key_token(raw_key) or str(raw_key)
 
             options = [
                 {"action": i, "label": k, "raw_key": k}
@@ -1084,6 +1644,53 @@ def execute_parser_plan_on_rows(
     stats: Optional[ParserExecutionStats] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     indices = row_indices if row_indices is not None else list(range(len(rows)))
+    # Precompute a stable textual action map when responses are category labels /
+    # action_say so train/test and participant splits share the same IDs.
+    te = plan.get("trial_extraction") or {}
+    action_rule = te.get("action_rule") or {}
+    source_type = str(action_rule.get("source_line_type") or "action_press")
+    capture = action_rule.get("capture") or {"regex": r"<<([^>]+)>>", "group": 1}
+    needs_textual = source_type in _TEXTUAL_ACTION_SOURCES
+    observed_labels: List[str] = []
+    sample_lines: List[str] = []
+    for row_idx, row in zip(indices, rows):
+        text = str(row.get("text") or "")
+        instruction = str(row.get("instruction") or "")
+        full = instruction + "\n\n" + text if instruction and instruction not in text else text
+        for line in full.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if len(sample_lines) < 40:
+                sample_lines.append(line)
+            raw_key, is_omit = _capture_press_response(line, capture)
+            if is_omit or raw_key is None:
+                m = _ANGLE_RESPONSE_RE.search(line)
+                if m and re.search(r"\b(?:say|type|respond|press)\b", line, re.I):
+                    raw_key = m.group(1)
+            nk = _normalize_raw_key_token(raw_key)
+            if nk is None:
+                continue
+            observed_labels.append(nk)
+            if not needs_textual and (
+                len(nk) > 1 and not re.fullmatch(r"-?\d+", nk)
+            ):
+                needs_textual = True
+
+    if needs_textual and observed_labels:
+        norm = plan.get("option_normalization") or {}
+        # Prefer sorted for cross-split stability unless an explicit mapping exists.
+        order = "sorted_raw_key"
+        if norm.get("raw_response_to_action_id_mapping"):
+            order = str(norm.get("action_id_order") or "instruction_order")
+        textual_map = _build_textual_action_id_mapping(
+            observed_labels,
+            action_id_order=order,
+            existing=None,
+        )
+        plan["_textual_action_id_mapping"] = textual_map
+        plan.setdefault("_parser_meta", {})["textual_action_id_mapping"] = dict(textual_map)
+
     all_trials: List[Dict[str, Any]] = []
     errors: List[str] = []
     for row_idx, row in zip(indices, rows):
@@ -1091,8 +1698,15 @@ def execute_parser_plan_on_rows(
             trials = execute_parser_plan_on_row(
                 plan, row, row_index=row_idx, stats=stats
             )
+            if plan.get("_textual_action_id_mapping"):
+                for trial in trials:
+                    meta = trial.setdefault("_meta", {})
+                    if isinstance(meta, dict):
+                        meta["textual_action_id_mapping"] = dict(
+                            plan["_textual_action_id_mapping"]
+                        )
             all_trials.extend(trials)
-        except StateMachineNotImplementedError as exc:
+        except StateMachineNotImplementedError:
             raise
         except Exception as exc:
             errors.append(f"row {row_idx}: {type(exc).__name__}: {exc}")
