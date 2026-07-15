@@ -322,3 +322,12 @@ Short changelog of committed non-strict work (choice13k / cpc18 / mixed_gambles)
 - **Debug outputs:** Per attempt **`parse_plan_attempt_N/`** under the dataset debug dir; run-level **`parse_plan_retry_summary.json`** with all attempts and final outcome. Existing **`failure.json`**, summary CSV, and JSONL behavior unchanged.
 
 - **Opt out / tuning:** Use **`--max_parse_plan_attempts 1`** for old single-shot parsing. No changes required to existing cluster scripts unless you want to tune retries or disable them.
+
+---
+
+## Short summary (Jul 2026 — test-error gating)
+
+- **Issue:** In `teh.py` explore/evolution, test runtime errors previously entered `runtime_valid` and `invalid_candidate_errors` (LLM error prompts), while test loglik was already unused for ranking.
+- **Fix (minimal):** Keep per-iteration test eval/logging; `runtime_valid` and error feedback use **train(+val) only**. CPC18 MSE validity likewise uses train only. Details: `analysis/report/260715_test_leakage_audit/minimal_fix_report.md`.
+- **Wrappers:** `teh_transfer` / `teh_psych` evolution paths were already train(+val)-only; no change required there.
+- **Reruns:** Optional for strict protocol parity; prior audits found true train-OK/test-fail exclusions were rare, so aggregate TEH tables are unlikely to shift much.

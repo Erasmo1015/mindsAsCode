@@ -7280,9 +7280,6 @@ def _run_pre_evolution_explore_phase(
             train_eval = evaluate_choice13k_program(
                 choose_fn, train_trials, n_seeds=n_eval_seeds
             )
-            test_eval = evaluate_choice13k_program(
-                choose_fn, test_trials, n_seeds=n_eval_seeds
-            )
             val_eval = (
                 evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
                 if val_trials
@@ -7300,10 +7297,22 @@ def _run_pre_evolution_explore_phase(
                 row["val_loglik"] = float("-inf")
             candidate_results.append(row)
             continue
+        try:
+            test_eval = evaluate_choice13k_program(
+                choose_fn, test_trials, n_seeds=n_eval_seeds
+            )
+        except (AssertionError, TypeError, ValueError):
+            test_eval = {
+                "accuracy": 0.0,
+                "avg_loglik": float("-inf"),
+                "errors": 1,
+                "correct": 0,
+                "total": len(test_trials),
+            }
         train_loglik = float(train_eval["avg_loglik"])
         test_loglik = float(test_eval["avg_loglik"])
         val_loglik = float(val_eval["avg_loglik"]) if val_eval is not None else None
-        runtime_valid = train_eval.get("errors", 0) == 0 and test_eval.get("errors", 0) == 0
+        runtime_valid = train_eval.get("errors", 0) == 0
         if fitness_metric == "loglik":
             selection_score = _evolution_selection_score(
                 train_loglik,
@@ -8331,7 +8340,7 @@ def run_evolution(
                 test_mse_eval = evaluate_cpc18_mse(
                     choose_fn, test_trials, test_observed_blocks, n_seeds=n_eval_seeds
                 )
-                mse_valid = train_mse_eval.get("valid", True) and test_mse_eval.get("valid", True)
+                mse_valid = bool(train_mse_eval.get("valid", True))
                 if not mse_valid:
                     candidate_results.append({
                         "idx": idx,
@@ -8339,7 +8348,7 @@ def run_evolution(
                         "train_acc": train_eval["accuracy"],
                         "test_acc": test_eval["accuracy"],
                         "train_mse": float('inf'),
-                        "test_mse": float('inf'),
+                        "test_mse": float(test_mse_eval.get("mse", float("inf"))),
                         "fitness": float('-inf'),
                         "train_correct": train_eval["correct"],
                         "test_correct": test_eval["correct"],
@@ -8413,8 +8422,6 @@ def run_evolution(
                     continue
                 try:
                     train_eval = evaluate_cpc18_split_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    # Always run test pass for runtime-valid checks; test metrics may be hidden later.
-                    test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                     val_eval = (
                         evaluate_cpc18_split_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
                         if val_trials
@@ -8448,31 +8455,28 @@ def run_evolution(
                         _fail["val_loglik"] = float("-inf")
                     candidate_results.append(_fail)
                     continue
+                try:
+                    # Per-iteration held-out metrics for logging only.
+                    test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                except (TypeError, ValueError, AssertionError):
+                    test_eval = {
+                        "accuracy": 0.0,
+                        "avg_loglik": float("-inf"),
+                        "errors": 1,
+                        "correct": 0,
+                        "total": len(test_trials),
+                    }
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
                 val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
-                runtime_valid = (train_eval.get("errors", 0) == 0) and (
-                    test_eval is None or test_eval.get("errors", 0) == 0
-                )
+                runtime_valid = train_eval.get("errors", 0) == 0
                 if train_eval.get("errors", 0) != 0:
                     num_invalid_candidates += 1
                     _record_invalid_program_error_summary(
                         invalid_candidate_errors,
                         train_eval.get("first_error"),
-                        iteration=iteration_step,
-                        participant_id=int(participant_id)
-                        if participant_id is not None
-                        else None,
-                        candidate_id=f"candidate_{idx}",
-                        history_path=error_history_path,
-                    )
-                if test_eval is not None and test_eval.get("errors", 0) != 0:
-                    num_invalid_candidates += 1
-                    _record_invalid_program_error_summary(
-                        invalid_candidate_errors,
-                        test_eval.get("first_error"),
                         iteration=iteration_step,
                         participant_id=int(participant_id)
                         if participant_id is not None
@@ -8557,8 +8561,6 @@ def run_evolution(
                     continue
                 try:
                     train_eval = evaluate_choice13k_program(choose_fn, train_trials, n_seeds=n_eval_seeds)
-                    # Always run test pass for runtime-valid checks; test metrics may be hidden later.
-                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
                     val_eval = (
                         evaluate_choice13k_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
                         if val_trials
@@ -8592,31 +8594,28 @@ def run_evolution(
                         _fail["val_loglik"] = float("-inf")
                     candidate_results.append(_fail)
                     continue
+                try:
+                    # Per-iteration held-out metrics for logging only.
+                    test_eval = evaluate_choice13k_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
+                except (AssertionError, TypeError, ValueError):
+                    test_eval = {
+                        "accuracy": 0.0,
+                        "avg_loglik": float("-inf"),
+                        "errors": 1,
+                        "correct": 0,
+                        "total": len(test_trials),
+                    }
                 train_acc = train_eval["accuracy"]
                 test_acc = test_eval["accuracy"] if test_eval is not None else None
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
                 val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
-                runtime_valid = (train_eval.get("errors", 0) == 0) and (
-                    test_eval is None or test_eval.get("errors", 0) == 0
-                )
+                runtime_valid = train_eval.get("errors", 0) == 0
                 if train_eval.get("errors", 0) != 0:
                     num_invalid_candidates += 1
                     _record_invalid_program_error_summary(
                         invalid_candidate_errors,
                         train_eval.get("first_error"),
-                        iteration=iteration_step,
-                        participant_id=int(participant_id)
-                        if participant_id is not None
-                        else None,
-                        candidate_id=f"candidate_{idx}",
-                        history_path=error_history_path,
-                    )
-                if test_eval is not None and test_eval.get("errors", 0) != 0:
-                    num_invalid_candidates += 1
-                    _record_invalid_program_error_summary(
-                        invalid_candidate_errors,
-                        test_eval.get("first_error"),
                         iteration=iteration_step,
                         participant_id=int(participant_id)
                         if participant_id is not None
