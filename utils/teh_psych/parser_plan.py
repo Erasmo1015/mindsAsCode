@@ -20,9 +20,10 @@ DEFAULT_INSTRUCTION_KEY_REGEX = (
     r"|([A-Z])\s+for\s+[^,]+,\s*([A-Z])\s+for)"
 )
 CACHE_MISS_CLIENT_MSG = "LLM client required because parse plan cache was not available"
-# Split single-line blobs at sentence boundaries before a new participant press/say.
+# Split single-line blobs after the sentence period so stimulus regexes that
+# require a trailing "\\." still match (lookahead-at-period severed the period).
 _PRESS_BOUNDARY_SPLIT_RE = re.compile(
-    r"(?=\.\s+You (?:press\s*(?:<<|nothing)|say\b))",
+    r"(?<=\.)\s+(?=You (?:press\s*(?:<<|nothing)|say\b))",
     re.I,
 )
 _STIMULUS_OPTION_PATTERNS = (
@@ -33,6 +34,8 @@ _STIMULUS_OPTION_PATTERNS = (
     r"take\s+(?:one of\s+)?(?:the\s+)?spaceships?\s+((?-i:[A-Z]))\s+or\s+((?-i:[A-Z]))",
     r"Option\s+((?-i:[A-Z0-9]+))\b",
     r"decks?(?:\s+of\s+cards)?\s+labeled\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
+    r"(?:doors?|gambles?|options?|keys?)\s+(?:are\s+)?labeled\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
+    r"The doors are labeled\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
     r"(?:keys?|options?|labels?)\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
     r"assigned to the keys\s+((?-i:[A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*(?:\s*,?\s*(?:and|&)\s*[A-Z0-9]+)?))",
     r"slot machines labeled\s+((?-i:[A-Z0-9]+))\s+and\s+((?-i:[A-Z0-9]+))",
@@ -47,6 +50,27 @@ _ANGLE_RESPONSE_RE = re.compile(r"<<([^>]+)>>")
 _TEXTUAL_ACTION_SOURCES = frozenset(
     {"action_say", "action_estimate", "action_type", "action_verbal"}
 )
+_SUPPORTED_CATEGORICAL_SOURCES = frozenset(
+    {"action_press", "action_say", "action_type", "action_verbal"}
+)
+# Stimulus field names that duplicate the captured response (label leakage).
+_RESPONSE_LEAK_FIELD_NAMES = frozenset(
+    {
+        "response_key",
+        "response",
+        "pressed_key",
+        "raw_response",
+        "action_key",
+        "chosen_key",
+    }
+)
+_SCALAR_ELICITATION_LINE_RE = re.compile(
+    r"(?:%|odds that|\bprobability\b|\bpercent(?:age)?\b)",
+    re.I,
+)
+_INFO_SEARCH_TYPE_RE = re.compile(r"\btype\s*<<([^>]+)>>", re.I)
+_NUMERIC_KEY_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_LETTER_KEY_RE = re.compile(r"^[A-Za-z]$")
 
 
 class ParsePlanError(Exception):
@@ -202,18 +226,44 @@ def _regex_capture_group_count(regex: str) -> Optional[int]:
         return None
 
 
-def _requested_capture_group(group: Any, default: int = 1) -> int:
+def _parse_capture_group_indices(group: Any, default: int = 1) -> List[int]:
+    """Parse a capture-group spec into one or more 0-based-allowed indices.
+
+    Accepts ``1``, ``\"1\"``, ``\"1,2,3\"``, or ``[1, 2, 3]``. Comma-separated
+    lists are used by LLM plans that want multiple groups (e.g. list_int).
+    """
     if group is None:
-        return default
-    if isinstance(group, int):
-        return group
-    text = str(group).strip()
-    if text.isdigit():
-        return int(text)
-  # Comma-separated groups (e.g. "1,2") are not valid single capture indices.
-    if "," in text:
+        return [default]
+    if isinstance(group, bool):
         raise ValueError(f"invalid capture group {group!r}")
-    return default
+    if isinstance(group, int):
+        return [group]
+    if isinstance(group, (list, tuple)):
+        out: List[int] = []
+        for item in group:
+            out.extend(_parse_capture_group_indices(item, default=default))
+        if not out:
+            raise ValueError(f"invalid capture group {group!r}")
+        return out
+    text = str(group).strip()
+    if not text:
+        return [default]
+    if re.fullmatch(r"-?\d+", text):
+        return [int(text)]
+    if "," in text:
+        parts = [p.strip() for p in text.split(",") if p.strip()]
+        if parts and all(re.fullmatch(r"-?\d+", p) for p in parts):
+            return [int(p) for p in parts]
+        raise ValueError(f"invalid capture group {group!r}")
+    raise ValueError(f"invalid capture group {group!r}")
+
+
+def _requested_capture_group(group: Any, default: int = 1) -> int:
+    """Return a single capture-group index (rejects multi-group specs)."""
+    indices = _parse_capture_group_indices(group, default=default)
+    if len(indices) != 1:
+        raise ValueError(f"invalid capture group {group!r}")
+    return indices[0]
 
 
 def _validate_capture_group_spec(
@@ -222,26 +272,30 @@ def _validate_capture_group_spec(
     field_path: str,
     *,
     allow_group_zero: bool = False,
+    allow_multi_group: bool = False,
 ) -> Optional[str]:
     n_groups = _regex_capture_group_count(regex)
     if n_groups is None:
         return f"{field_path}: invalid regex {regex!r}"
     try:
-        g = _requested_capture_group(group)
+        indices = _parse_capture_group_indices(group)
     except ValueError:
         return f"{field_path}: invalid capture group {group!r}"
-    if g == 0 and (allow_group_zero or n_groups == 0):
-        return None
-    if n_groups == 0:
-        return (
-            f"{field_path}: capture group {g} invalid for regex with "
-            f"0 group(s): {regex!r}"
-        )
-    if g < 1 or g > n_groups:
-        return (
-            f"{field_path}: capture group {g} invalid for regex with "
-            f"{n_groups} group(s): {regex!r}"
-        )
+    if len(indices) > 1 and not allow_multi_group:
+        return f"{field_path}: invalid capture group {group!r}"
+    for g in indices:
+        if g == 0 and (allow_group_zero or n_groups == 0):
+            continue
+        if n_groups == 0:
+            return (
+                f"{field_path}: capture group {g} invalid for regex with "
+                f"0 group(s): {regex!r}"
+            )
+        if g < 1 or g > n_groups:
+            return (
+                f"{field_path}: capture group {g} invalid for regex with "
+                f"{n_groups} group(s): {regex!r}"
+            )
     return None
 
 
@@ -253,10 +307,19 @@ def _repair_capture_group_in_spec(spec: Dict[str, Any], field_path: str) -> Opti
     if n_groups is None:
         return None
     try:
-        g = _requested_capture_group(spec.get("group", 1))
+        indices = _parse_capture_group_indices(spec.get("group", 1))
     except ValueError:
         spec["group"] = 1 if n_groups >= 1 else 0
         return f"{field_path}: reset invalid capture group to {spec['group']}"
+
+    # Multi-group specs: keep when every index is in range.
+    if len(indices) > 1:
+        if n_groups >= 1 and all(1 <= g <= n_groups for g in indices):
+            return None
+        spec["group"] = 1 if n_groups >= 1 else 0
+        return f"{field_path}: reset invalid multi capture group to {spec['group']}"
+
+    g = indices[0]
 
     # No capturing groups: use full-match (group 0) when a group index was requested.
     if n_groups == 0:
@@ -293,29 +356,41 @@ def _probe_capture_group_on_samples(
     if n_groups is None:
         return None
     try:
-        g = _requested_capture_group(spec.get("group", 1 if n_groups >= 1 else 0))
+        indices = _parse_capture_group_indices(
+            spec.get("group", 1 if n_groups >= 1 else 0)
+        )
     except ValueError:
         return None
 
-    def _matches(group_idx: int) -> bool:
+    def _matches(group_idxs: List[int]) -> bool:
         try:
-            rx = re.compile(regex, re.I)
+            rx = re.compile(regex, re.I | re.M)
         except re.error:
             return False
         for line in sample_lines:
             m = rx.search(line)
             if not m:
                 continue
-            try:
-                val = m.group(group_idx)
-            except IndexError:
-                continue
-            if val is not None and str(val).strip() != "":
+            ok = True
+            for group_idx in group_idxs:
+                try:
+                    val = m.group(group_idx)
+                except IndexError:
+                    ok = False
+                    break
+                if val is None or str(val).strip() == "":
+                    ok = False
+                    break
+            if ok:
                 return True
         return False
 
-    if _matches(g):
+    if _matches(indices):
         return None
+    # Do not auto-rewrite intentional multi-group specs via probing.
+    if len(indices) > 1:
+        return None
+    g = indices[0]
     candidates: List[int] = []
     if n_groups == 0:
         candidates = [0]
@@ -324,7 +399,7 @@ def _probe_capture_group_on_samples(
     for cand in candidates:
         if cand == g:
             continue
-        if _matches(cand):
+        if _matches([cand]):
             spec["group"] = cand
             return (
                 f"{field_path}: sample-validated capture group {g} -> {cand}"
@@ -339,7 +414,26 @@ def repair_parser_plan(
 ) -> List[str]:
     """Apply safe in-memory repairs before execution (logged as repair notes)."""
     repairs: List[str] = []
-    te = plan.get("trial_extraction") or {}
+    te = plan.setdefault("trial_extraction", {})
+    if not isinstance(te, dict):
+        return repairs
+
+    # Drop stimulus fields that mirror the captured response (label leakage).
+    stim_fields = te.get("stimulus_fields")
+    if isinstance(stim_fields, list):
+        kept: List[Dict[str, Any]] = []
+        for spec in stim_fields:
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("field_name") or "").strip().lower()
+            if name in _RESPONSE_LEAK_FIELD_NAMES:
+                repairs.append(
+                    f"stimulus_fields: dropped response-leak field {spec.get('field_name')!r}"
+                )
+                continue
+            kept.append(spec)
+        te["stimulus_fields"] = kept
+
     for idx, spec in enumerate(te.get("stimulus_fields") or []):
         msg = _repair_capture_group_in_spec(spec, f"trial_extraction.stimulus_fields[{idx}]")
         if msg:
@@ -394,16 +488,47 @@ def repair_parser_plan(
             repairs.append(
                 "option_normalization: converted nothing/respond mapping to respond_omit strategy"
             )
+
+    # LLM occasionally marks supported categorical plans for human review with
+    # empty uncertainty notes (e.g. action_say category labels). Clear that gate
+    # when the action source is already supported by this pipeline.
+    if plan.get("human_review_required"):
+        source_type = str((te.get("action_rule") or {}).get("source_line_type") or "")
+        uncertainty = " ".join(str(x) for x in (plan.get("uncertainty_notes") or [])).lower()
+        clearly_scalar = any(
+            phrase in uncertainty
+            for phrase in (
+                "probability rating",
+                "rating bar",
+                "not a categorical",
+                "not categorical",
+                "continuous",
+                "scalar",
+            )
+        )
+        if (
+            plan.get("task_type") == "categorical_choice"
+            and source_type in _SUPPORTED_CATEGORICAL_SOURCES
+            and not clearly_scalar
+            and source_type != "action_estimate"
+        ):
+            plan["human_review_required"] = False
+            repairs.append(
+                "cleared human_review_required for supported categorical "
+                f"source_line_type={source_type!r}"
+            )
     return repairs
 
 
 def unsupported_pipeline_reason(plan: Dict[str, Any]) -> Optional[str]:
     """Return reason when plan should not run in the categorical-choice pipeline."""
-    if plan.get("human_review_required"):
-        return "parse plan marked human_review_required=true"
     te = plan.get("trial_extraction") or {}
     action_rule = te.get("action_rule") or {}
     source_type = str(action_rule.get("source_line_type") or "")
+    # Bare human_review_required is cleared in repair_parser_plan for supported
+    # categorical sources. Keep a hard block only when review is still required.
+    if plan.get("human_review_required"):
+        return "parse plan marked human_review_required=true"
     # action_say / verbal categorical labels are supported via textual action encoding.
     # Reject only clearly scalar estimate ranges that are not discrete labels.
     if source_type == "action_estimate":
@@ -474,6 +599,7 @@ def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
                 spec.get("group", 1),
                 f"trial_extraction.stimulus_fields[{idx}]",
                 allow_group_zero=True,
+                allow_multi_group=True,
             )
             if err:
                 errors.append(err)
@@ -774,7 +900,12 @@ def _split_key_token_blob(token: str) -> List[str]:
     if not text:
         return []
     if re.search(r",|\band\b|&", text, re.I):
-        parts = re.split(r"\s*,\s*|\s+and\s+|\s*&\s*", text, flags=re.I)
+        # Normalize "A, B, and C" / "A and B" before splitting so "and" is not
+        # left glued to the final token.
+        normalized = re.sub(r"\s*,\s*and\s+", ", ", text, flags=re.I)
+        normalized = re.sub(r"\s+and\s+", ", ", normalized, flags=re.I)
+        normalized = re.sub(r"\s*&\s*", ", ", normalized)
+        parts = re.split(r"\s*,\s*", normalized)
         return [p.strip() for p in parts if p and p.strip()]
     return [text]
 
@@ -1010,19 +1141,58 @@ def _collect_observed_raw_keys(
 ) -> List[str]:
     observed: List[str] = []
     for item in block_lines:
-        raw_key, is_omit = _capture_press_response(item["line"], capture)
+        line = item["line"]
+        raw_key, is_omit = _capture_press_response(line, capture)
         if is_omit:
             continue
         if raw_key is None and item.get("type_id") != source_type:
             # Fallback: any <<token>> on response-like lines.
-            if not re.search(r"\b(?:press|say|type|respond)\b", item["line"], re.I):
+            if not re.search(r"\b(?:press|say|type|respond)\b", line, re.I):
                 continue
-            m = _ANGLE_RESPONSE_RE.search(item["line"])
+            m = _ANGLE_RESPONSE_RE.search(line)
             raw_key = m.group(1) if m else None
         nk = _normalize_raw_key_token(raw_key)
-        if nk is not None:
-            observed.append(nk)
+        if nk is None:
+            continue
+        # Probability / odds elicitations are scalar answers, not choice keys.
+        if _NUMERIC_KEY_RE.fullmatch(str(nk)) and _SCALAR_ELICITATION_LINE_RE.search(line):
+            continue
+        # Info-search typed colors (not "stop") are not categorical options.
+        typed = _INFO_SEARCH_TYPE_RE.search(line)
+        if typed and typed.group(1).strip().lower() != "stop":
+            # Keep the pressed key for option discovery, but skip typed color tokens.
+            if nk.lower() == typed.group(1).strip().lower():
+                continue
+        observed.append(nk)
     return observed
+
+
+def _prefer_letter_keys_when_mixed_with_scalars(keys: List[str]) -> List[str]:
+    """When letters and numeric scalars both appear, keep letter-only choice keys."""
+    letters = [k for k in keys if _LETTER_KEY_RE.fullmatch(str(k) or "")]
+    scalars = [k for k in keys if _NUMERIC_KEY_RE.fullmatch(str(k) or "")]
+    if len(letters) >= 2 and len(scalars) >= 2:
+        return letters
+    return keys
+
+
+def _is_scalar_probability_elicitation(
+    trial_lines: List[Dict[str, Any]],
+    raw_key: Any,
+) -> bool:
+    if raw_key is None or not _NUMERIC_KEY_RE.fullmatch(str(raw_key)):
+        return False
+    blob = "\n".join(item["line"] for item in trial_lines)
+    return bool(_SCALAR_ELICITATION_LINE_RE.search(blob))
+
+
+def _is_info_search_not_choice(trial_lines: List[Dict[str, Any]]) -> bool:
+    """True for compound info-check presses (type color) rather than choose/stop."""
+    blob = "\n".join(item["line"] for item in trial_lines)
+    typed = _INFO_SEARCH_TYPE_RE.search(blob)
+    if not typed:
+        return False
+    return typed.group(1).strip().lower() != "stop"
 
 
 def _coverage_ratio(keys: List[str], observed: List[str]) -> float:
@@ -1276,10 +1446,12 @@ def _option_map_from_plan(
         pass
 
     keys = _normalize_key_list(keys, action_id_order)
+    keys = _prefer_letter_keys_when_mixed_with_scalars(keys)
     if len(keys) < 2:
         if observed and not _looks_like_binary_numeric_keys(observed):
             # Keep singleton/partial observed set rather than substituting {0,1}.
             keys = _normalize_key_list(observed, action_id_order)
+            keys = _prefer_letter_keys_when_mixed_with_scalars(keys)
             used_fallback = True
         else:
             keys = ["0", "1"]
@@ -1362,40 +1534,78 @@ def _is_context_only_trial(trial_lines: List[Dict[str, Any]], plan: Dict[str, An
 def _extract_stimulus_fields(trial_lines: List[Dict[str, Any]], plan: Dict[str, Any]) -> Dict[str, Any]:
     stimulus: Dict[str, Any] = {}
     fields = (plan.get("trial_extraction") or {}).get("stimulus_fields") or []
-    blob = "\n".join(item["line"] for item in trial_lines)
+    # Prefer non-action lines so ^-anchored regexes match the stimulus sentence
+    # even when market/context headers precede it in the trial buffer.
+    te = plan.get("trial_extraction") or {}
+    source_type = str((te.get("action_rule") or {}).get("source_line_type") or "action_press")
+    stim_only = [
+        item["line"]
+        for item in trial_lines
+        if item.get("type_id") not in (source_type, "action_press", "action_say", "action_type")
+    ]
+    blobs = []
+    if stim_only:
+        blobs.append("\n".join(stim_only))
+    blobs.append("\n".join(item["line"] for item in trial_lines))
+
     for spec in fields:
         name = spec.get("field_name")
         regex = spec.get("regex")
         if not name or not regex:
             continue
-        m = re.search(regex, blob, _regex_flags("i"))
-        if not m:
+        if str(name).strip().lower() in _RESPONSE_LEAK_FIELD_NAMES:
             continue
-        cast = spec.get("cast", "str")
         try:
-            group_idx = _requested_capture_group(spec.get("group", 1))
+            indices = _parse_capture_group_indices(spec.get("group", 1))
         except ValueError:
             continue
         n_groups = _regex_capture_group_count(regex)
         if n_groups is None:
             continue
-        if group_idx == 0:
-            raw = m.group(0)
-        elif group_idx < 1 or group_idx > n_groups:
+        m = None
+        for blob in blobs:
+            m = re.search(regex, blob, _regex_flags("im"))
+            if m:
+                break
+        if not m:
             continue
-        else:
-            try:
-                raw = m.group(group_idx)
-            except IndexError:
-                continue
+        cast = spec.get("cast", "str")
+        try:
+            if len(indices) > 1:
+                raw_parts = [m.group(g) for g in indices]
+            else:
+                group_idx = indices[0]
+                if group_idx == 0:
+                    raw_parts = [m.group(0)]
+                elif group_idx < 1 or group_idx > n_groups:
+                    continue
+                else:
+                    raw_parts = [m.group(group_idx)]
+        except IndexError:
+            continue
+
         if cast == "int":
-            stimulus[name] = int(raw)
+            try:
+                stimulus[name] = int(raw_parts[0])
+            except (TypeError, ValueError):
+                continue
         elif cast == "float":
-            stimulus[name] = float(raw)
+            try:
+                stimulus[name] = float(raw_parts[0])
+            except (TypeError, ValueError):
+                continue
         elif cast == "list_int":
-            stimulus[name] = [int(x) for x in re.findall(r"-?\d+", raw)]
+            try:
+                if len(raw_parts) > 1:
+                    stimulus[name] = [int(x) for x in raw_parts]
+                else:
+                    stimulus[name] = [int(x) for x in re.findall(r"-?\d+", str(raw_parts[0]))]
+            except (TypeError, ValueError):
+                continue
+        elif cast in ("list_str", "list"):
+            stimulus[name] = [str(x) for x in raw_parts]
         else:
-            stimulus[name] = raw
+            stimulus[name] = raw_parts[0] if len(raw_parts) == 1 else raw_parts
     return stimulus
 
 
@@ -1546,6 +1756,10 @@ def _trials_from_block(
         if len(options) < 2:
             continue
 
+        # Drop probability/odds elicitations from the categorical choice stream.
+        if _is_scalar_probability_elicitation(trial_lines, raw_key):
+            continue
+
         stimulus = _extract_stimulus_fields(trial_lines, plan)
         if strategy == "respond_omit" and raw_key is not None:
             stimulus["response_key"] = str(raw_key)
@@ -1556,15 +1770,16 @@ def _trials_from_block(
                 feedback = fb
 
         is_context_only = _is_context_only_trial(trial_lines, plan)
+        info_search_only = _is_info_search_not_choice(trial_lines)
         has_valid_choice = (raw_key is not None or is_omit) and len(options) >= 2
-        if has_valid_choice:
+        if has_valid_choice and not info_search_only:
             if is_context_only and stats is not None:
                 stats.n_instruction_lines_not_marked_context_only_due_to_action += 1
             is_prediction = True
             if used_option_fallback and stats is not None:
                 stats.n_trials_recovered_by_option_source_fallback += 1
         else:
-            is_prediction = not is_context_only
+            is_prediction = False
             if is_context_only and stats is not None:
                 stats.n_context_only_no_action += 1
 
@@ -1593,7 +1808,7 @@ def _trials_from_block(
         hist_entry["action"] = target_action
         if feedback is not None:
             hist_entry["feedback"] = feedback
-        if include_context or is_prediction:
+        if include_context or is_prediction or info_search_only:
             history.append(hist_entry)
 
     return trials

@@ -190,6 +190,8 @@ generated_outputs/
 generated_outputs_ablation/
 generated_outputs_transfer/
 generated_outputs_teh_psych/
+generated_outputs_teh_psych
+generated_outputs_teh_psych_old/
 cluster/
 
 reference_repos/

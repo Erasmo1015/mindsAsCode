@@ -331,3 +331,17 @@ Short changelog of committed non-strict work (choice13k / cpc18 / mixed_gambles)
 - **Fix (minimal):** Keep per-iteration test eval/logging; `runtime_valid` and error feedback use **train(+val) only**. CPC18 MSE validity likewise uses train only. Details: `analysis/report/260715_test_leakage_audit/minimal_fix_report.md`.
 - **Wrappers:** `teh_transfer` / `teh_psych` evolution paths were already train(+val)-only; no change required there.
 - **Reruns:** Optional for strict protocol parity; prior audits found true train-OK/test-fail exclusions were rare, so aggregate TEH tables are unlikely to shift much.
+
+---
+
+## Impl notes (Jul 2026 — teh_psych parse quality)
+
+Audit of priority run **`generated_outputs_teh_psych/run_260716_111935`** (56/57 success) showed several “successes” still had bad/incomplete parses (empty stimulus → chance −0.6931; garcia 46-way letter+odds mix; collsioö exp2 blocked on `human_review_required`). Fixes landed in **`utils/teh_psych/parser_plan.py`** (+ smoke tests); **no experiment rerun in that change**.
+
+- **Press-boundary split:** keep trailing `.` on the stimulus segment so stimulus regexes still match (`badham`, etc.).
+- **Stimulus fields:** allow multi-group specs (`group: "1,2,3"`); match with multiline / non-action-line blobs (`tomov` room/resources).
+- **`human_review_required`:** clear in `repair_parser_plan` for supported categorical `action_press` / `action_say` when uncertainty notes are not scalar (`collsiöö` exp2).
+- **Choice-only / letter-only:** drop `%`/odds elicitations from prediction; prefer letter keys when mixed with numeric scalars (garcia-style).
+- **Info-search:** `type <<color>>` → non-prediction context; `type <<stop>>` → prediction (krueger-style).
+- **Leak / lists:** drop `response_key`-like stimulus fields; fix `A, B, and C` → `['A','B','C']`; doors/gambles labeled patterns.
+- **Rerun:** full priority set from scratch with same settings — `sbatch cluster/teh_psych/1.sh` (fresh plans; writes a new `generated_outputs_teh_psych/run_*`). Context: `analysis/report/260715_teh_psych/psych101_remaining_reparsing_work.md`.

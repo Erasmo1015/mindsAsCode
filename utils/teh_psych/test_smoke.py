@@ -640,9 +640,13 @@ def test_repair_converts_bad_gonogo_mapping_to_respond_omit():
 def test_unsupported_pipeline_reason_human_review_and_action_say():
     plan = _minimal_plan()
     plan["human_review_required"] = True
+    # Bare flag still blocks if left set; repair clears it for supported sources.
     assert "human_review_required" in unsupported_pipeline_reason(plan)
-    plan["human_review_required"] = False
-    # action_say is now supported via textual categorical encoding.
+    repairs = repair_parser_plan(plan)
+    assert any("human_review_required" in note for note in repairs)
+    assert plan["human_review_required"] is False
+    assert unsupported_pipeline_reason(plan) is None
+    # action_say is supported via textual categorical encoding.
     plan["trial_extraction"]["action_rule"]["source_line_type"] = "action_say"
     assert unsupported_pipeline_reason(plan) is None
     plan["option_normalization"]["strategy"] = "numeric_range_from_context"
@@ -651,7 +655,7 @@ def test_unsupported_pipeline_reason_human_review_and_action_say():
 
 def test_run_parse_plan_pipeline_skips_unsupported_task(tmp_path):
     plan = _minimal_plan()
-    plan["human_review_required"] = True
+    plan["option_normalization"]["strategy"] = "numeric_range_from_context"
     rows = [{"text": "You press <<F>>.", "instruction": "Press F and J."}]
     save_parse_plan_cache(tmp_path / "cache", "fake/exp.csv", plan)
     result = run_parse_plan_pipeline(
@@ -666,6 +670,29 @@ def test_run_parse_plan_pipeline_skips_unsupported_task(tmp_path):
         cache_dir=tmp_path / "cache",
     )
     assert result.status == "unsupported_current_pipeline"
+    assert "numeric_range_from_context" in result.failure_message
+
+
+def test_run_parse_plan_pipeline_clears_spurious_human_review(tmp_path):
+    plan = _minimal_plan()
+    plan["human_review_required"] = True
+    plan["uncertainty_notes"] = []
+    rows = [{"text": "You press <<F>>.", "instruction": "Press F and J."}]
+    save_parse_plan_cache(tmp_path / "cache", "fake/exp.csv", plan)
+    result = run_parse_plan_pipeline(
+        client=None,
+        experiment_id="fake/exp.csv",
+        rows=rows,
+        row_indices=[0],
+        debug_dir=tmp_path / "debug",
+        template_path=_REPO_ROOT / "prompts" / "teh_psych" / "utils" / "parse_plan.txt",
+        model_name="test-model",
+        reuse_cache=True,
+        cache_dir=tmp_path / "cache",
+    )
+    assert result.status == "executed"
+    assert result.plan is not None
+    assert result.plan.get("human_review_required") is False
 
 
 def test_parse_plan_prompt_includes_prior_feedback(tmp_path):
@@ -959,3 +986,247 @@ def test_regex_capture_group_repair_zero_groups_and_group_zero():
     # With one_press_per_trial, stimulus_fields are searched in the press trial
     # window; presence of a valid repaired group-0 stimulus regex must not
     # block parsing even when that window lacks the label line.
+
+
+def test_press_boundary_keeps_period_for_stimulus_regex():
+    from utils.teh_psych.parser_plan import _split_line_on_press_boundaries
+
+    line = "You see a big black square. You press <<K>>. The correct category is K."
+    parts = _split_line_on_press_boundaries(line)
+    assert parts[0].endswith(".")
+    assert parts[1].lstrip().startswith("You press")
+
+    plan = _minimal_plan()
+    plan["trial_extraction"] = {
+        "boundary_strategy": "stimulus_then_press",
+        "action_rule": {
+            "source_line_type": "action_press",
+            "capture": {"regex": r"<<([A-Z])>>", "group": 1},
+        },
+        "stimulus_fields": [
+            {
+                "field_name": "shape_size",
+                "regex": r"You see a (big|small) (black|white) (square|triangle)\.",
+                "group": 1,
+                "cast": "str",
+            },
+            {
+                "field_name": "shape_color",
+                "regex": r"You see a (big|small) (black|white) (square|triangle)\.",
+                "group": 2,
+                "cast": "str",
+            },
+            {
+                "field_name": "shape_type",
+                "regex": r"You see a (big|small) (black|white) (square|triangle)\.",
+                "group": 3,
+                "cast": "str",
+            },
+        ],
+        "feedback_rule": {
+            "regex": r"The correct category is ([A-Z])\.",
+            "value_type": "string",
+        },
+    }
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"belongs to the ([A-Z]) or ([A-Z]) category",
+        "action_id_order": "instruction_order",
+    }
+    plan["line_classifier"]["line_types"] = [
+        {
+            "type_id": "action_press",
+            "detection": {"regex": r"You press <<([A-Z])>>", "flags": "i"},
+        }
+    ]
+    row = {
+        "instruction": "Your task is to learn whether an object belongs to the E or K category.",
+        "text": (
+            "You see a big black square. You press <<K>>. The correct category is K.\n"
+            "You see a small white triangle. You press <<E>>. The correct category is E."
+        ),
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    pred = [t for t in trials if t["is_prediction_target"]]
+    assert len(pred) == 2
+    assert pred[0]["problem"]["stimulus"] == {
+        "shape_size": "big",
+        "shape_color": "black",
+        "shape_type": "square",
+    }
+    assert pred[1]["problem"]["stimulus"]["shape_type"] == "triangle"
+
+
+def test_stimulus_multi_group_list_int_and_room_anchor():
+    plan = _minimal_plan()
+    plan["trial_extraction"] = {
+        "boundary_strategy": "stimulus_then_press",
+        "action_rule": {
+            "source_line_type": "action_press",
+            "capture": {"regex": r"<<([A-Z])>>", "group": 1},
+        },
+        "stimulus_fields": [
+            {
+                "field_name": "room",
+                "regex": r"^You are in room (\d+)\.$",
+                "group": 1,
+                "cast": "int",
+            },
+            {
+                "field_name": "resources",
+                "regex": r"and you find (\d+) wood, (\d+) stone, and (\d+) iron\.",
+                "group": "1,2,3",
+                "cast": "list_int",
+            },
+        ],
+    }
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"doors are labeled ([A-Z]), ([A-Z]), and ([A-Z])",
+        "action_id_order": "instruction_order",
+    }
+    plan["block_boundary_rule"] = {
+        "strategy": "regex_header",
+        "regex": r"^The current market prices",
+    }
+    assert not validate_parser_plan(plan)
+    row = {
+        "instruction": "The doors are labeled I, P, and G.",
+        "text": (
+            "The current market prices are 1 for wood, -1 for stone, and 0 for iron.\n"
+            "You are in room 0. You press <<P>> and you find 0 wood, 0 stone, and 0 iron. "
+            "You get 0 points.\n"
+            "You are in room 2. You press <<G>> and you find 100 wood, 100 stone, and 0 iron. "
+            "You get 0 points."
+        ),
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    pred = [t for t in trials if t["is_prediction_target"]]
+    assert len(pred) >= 2
+    assert pred[0]["problem"]["stimulus"]["room"] == 0
+    assert pred[0]["problem"]["stimulus"]["resources"] == [0, 0, 0]
+    assert pred[1]["problem"]["stimulus"]["room"] == 2
+    assert pred[1]["problem"]["stimulus"]["resources"] == [100, 100, 0]
+    labels = {o["label"] for o in pred[0]["problem"]["options"]}
+    assert labels == {"I", "P", "G"}
+
+
+def test_scalar_probability_elicitation_dropped_and_letter_options_kept():
+    plan = _minimal_plan()
+    plan["trial_extraction"] = {
+        "boundary_strategy": "one_press_per_trial",
+        "action_rule": {
+            "source_line_type": "action_press",
+            "capture": {"regex": r"<<([^>]+)>>", "group": 1},
+        },
+    }
+    plan["option_normalization"] = {
+        "strategy": "per_trial_available_keys",
+        "instruction_regex": r"option ([A-Z]) and option ([A-Z])",
+        "action_id_order": "first_seen_in_transcript",
+    }
+    row = {
+        "instruction": (
+            "You can choose between option Q and option L. "
+            "You can choose between option Z and option H."
+        ),
+        "text": (
+            "You can choose between option Q and option L. You press <<Q>> and get 1.0 points.\n"
+            "What are the odds that option L gives 1.0 points? A: <<50.0>>%.\n"
+            "You can choose between option Z and option H. You press <<Z>> and get 1.0 points."
+        ),
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    pred = [t for t in trials if t["is_prediction_target"]]
+    assert len(pred) == 2
+    assert all(t["_meta"]["raw_key"] in {"Q", "Z"} for t in pred)
+    for t in pred:
+        labels = [o["label"] for o in t["problem"]["options"]]
+        assert all(str(lab).isalpha() and len(str(lab)) == 1 for lab in labels)
+        assert not any(_is_numeric_label(lab) for lab in labels)
+
+
+def _is_numeric_label(lab) -> bool:
+    text = str(lab)
+    if text.replace(".", "", 1).isdigit():
+        return True
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def test_info_search_type_color_not_prediction_target():
+    plan = _minimal_plan()
+    plan["trial_extraction"] = {
+        "boundary_strategy": "one_press_per_trial",
+        "action_rule": {
+            "source_line_type": "action_press",
+            "capture": {"regex": r"<<([A-Z])>>", "group": 1},
+        },
+    }
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"labeled: ([A-Z]), ([A-Z]), and ([A-Z])",
+        "action_id_order": "instruction_order",
+    }
+    row = {
+        "instruction": "Gambles labeled: Q, E, and H.",
+        "text": (
+            "You press <<Q>> and then type <<pink>>. The payoff for this combination would be -105 points.\n"
+            "You press <<E>> and then type <<stop>>. A maroon ball is chosen, and you earn 25 points."
+        ),
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert len(trials) == 2
+    assert trials[0]["is_prediction_target"] is False
+    assert trials[1]["is_prediction_target"] is True
+    assert trials[1]["_meta"]["raw_key"] == "E"
+    # Info-search still appears in subsequent history.
+    assert trials[1]["history"]
+    assert trials[1]["history"][0]["action"] == trials[0]["target_action"]
+
+
+def test_response_key_stimulus_field_dropped_by_repair():
+    plan = _minimal_plan()
+    plan["trial_extraction"]["stimulus_fields"] = [
+        {
+            "field_name": "instruction_key",
+            "regex": r"instruction is to press ([A-Z])",
+            "group": 1,
+            "cast": "str",
+        },
+        {
+            "field_name": "response_key",
+            "regex": r"you press <<([A-Z])>>",
+            "group": 1,
+            "cast": "str",
+        },
+    ]
+    repairs = repair_parser_plan(plan)
+    assert any("response-leak" in note for note in repairs)
+    names = [s["field_name"] for s in plan["trial_extraction"]["stimulus_fields"]]
+    assert "response_key" not in names
+    assert "instruction_key" in names
+    row = {
+        "instruction": "Press D and K.",
+        "text": "The instruction is to press D, you press <<D>> in 400 ms. That is correct.",
+    }
+    plan["option_normalization"] = {
+        "strategy": "fixed_keys_from_instruction",
+        "instruction_regex": r"Press ([A-Z]) and ([A-Z])",
+        "action_id_order": "instruction_order",
+    }
+    trials = execute_parser_plan_on_row(plan, row, row_index=0)
+    assert trials
+    assert "response_key" not in trials[0]["problem"]["stimulus"]
+    assert trials[0]["problem"]["stimulus"].get("instruction_key") == "D"
+
+
+def test_split_key_list_handles_oxford_comma_and():
+    from utils.teh_psych.parser_plan import _split_key_token_blob
+
+    assert _split_key_token_blob("I, P, and G") == ["I", "P", "G"]
+    assert _split_key_token_blob("Q, E, and H") == ["Q", "E", "H"]
+    assert _split_key_token_blob("A and B") == ["A", "B"]
