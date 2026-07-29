@@ -22,6 +22,12 @@ TRAIN_HF_ID = "marcelbinz/Psych-101"
 PSYCH_DATASET_SPLITS = frozenset({"train", "test"})
 DEFAULT_PSYCH_DATASET_SPLIT = "train"
 
+_CURRENT_PROBLEM_EXCLUDED_FIELDS = {
+    "5speekenbrink2008learning": frozenset({"weather_outcome", "was_correct"}),
+    "10frey2017risk": frozenset({"outcome_marker", "exploded"}),
+    "12badham2017deficits": frozenset({"response_key", "correct_category"}),
+}
+
 
 class ParsedTrial(NamedTuple):
     action: int
@@ -325,7 +331,14 @@ def _merge_problem(
     experiment_id: str,
 ) -> Dict[str, Any]:
     problem = dict(block.problem_static)
-    problem.update(trial.problem_fields)
+    excluded = _CURRENT_PROBLEM_EXCLUDED_FIELDS.get(dataset_alias, frozenset())
+    problem.update(
+        {
+            key: value
+            for key, value in trial.problem_fields.items()
+            if key not in excluded
+        }
+    )
     problem.setdefault("option_keys", list(block.option_keys))
     problem.setdefault("schema_type", block.schema_type)
     problem["dataset_alias"] = dataset_alias

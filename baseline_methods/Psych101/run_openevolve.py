@@ -512,6 +512,14 @@ def _compact_history(history: List[Dict[str, Any]], max_items: int = 6) -> str:
         fb = h.get("feedback")
         if fb is None:
             parts.append(f"a{int(h.get('action',0))}")
+        elif isinstance(fb, dict):
+            if "correct_category" in fb:
+                parts.append(
+                    f"a{int(h.get('action',0))},corr={fb.get('correct_category')},"
+                    f"ok={int(bool(fb.get('is_correct')))}"
+                )
+            else:
+                parts.append(f"a{int(h.get('action',0))},r{fb}")
         else:
             parts.append(f"a{int(h.get('action',0))},r{fb}")
     return "[" + ";".join(parts) + "]"
@@ -528,20 +536,24 @@ def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
             f"probe={problem.get('probe_letter')} "
             f"in_set={problem.get('probe_in_set')}"
         )
-    elif "stimulus_features" in problem and "correct_category" in problem:
+    elif "stimulus_features" in problem and (
+        problem.get("task") == "category_learning" or "correct_category" in problem
+    ):
         sf = problem.get("stimulus_features") or {}
+        keys = problem.get("option_keys") or []
         core = (
             f"stim=({sf.get('size')},{sf.get('color')},{sf.get('shape')}) "
-            f"correct={problem.get('correct_category')} "
+            f"keys={list(keys)} "
             f"rule_block={problem.get('rule_block_id')}"
         )
     elif "balloon_id" in problem and "pump_count_before" in problem:
         core = (
             f"balloon={problem.get('balloon_id')} "
             f"pump_n={problem.get('pump_count_before')} "
-            f"acc={problem.get('accumulated_points_before')} "
-            f"outcome={problem.get('outcome_marker')}"
+            f"acc={problem.get('accumulated_points_before')}"
         )
+    elif "cards" in problem:
+        core = f"cards={list(problem.get('cards') or [])} keys={list(problem.get('option_keys') or [])}"
     else:
         keys = problem.get("option_keys") or []
         core = f"keys={list(keys)}"

@@ -11,7 +11,6 @@ from data_modules.choice13k import (
     Gamble,
     _convert_to_experiment as _choice13k_convert_to_experiment,
     _extract_gamble_info,
-    _extract_has_feedback,
 )
 
 from data_modules.psych101_binary import ParsedTrial, PsychBlock, PsychExperiment
@@ -19,6 +18,11 @@ from data_modules.psych101_binary import ParsedTrial, PsychBlock, PsychExperimen
 _RE_PRESS_KEY = re.compile(r"You press <<([A-Z])>>", re.I)
 _RE_RECEIVE = re.compile(r"You receive (-?\d+\.?\d*) points", re.I)
 _RE_GAIN_LOSE = re.compile(r"and (gain|lose) (-?\d+\.?\d*) points", re.I)
+_RE_PLONSKY_COUNTERFACTUAL = re.compile(
+    r"You would have (gained|lost) (-?\d+\.?\d*) points "
+    r"had you chosen option ([A-Z])",
+    re.I,
+)
 _RE_OUTCOME_PROB = re.compile(
     r"(-?\d+\.?\d*)\s+points\s+with\s+(\d+\.?\d*)%\s+probability", re.I
 )
@@ -143,20 +147,181 @@ def _feedback_from_press_tail(tail: str) -> Optional[float]:
 
 
 def _extract_press_trials(
-    text: str, option_keys: List[str], *, require_known_key: bool = True
+    text: str, option_keys: List[str]
 ) -> List[ParsedTrial]:
     trials: List[ParsedTrial] = []
-    for m in _RE_PRESS_KEY.finditer(text):
+    press_matches = list(_RE_PRESS_KEY.finditer(text))
+    for i, m in enumerate(press_matches):
         key = m.group(1).upper()
-        if require_known_key and key not in option_keys:
-            continue
         if key not in option_keys:
-            option_keys = list(option_keys) + [key]
+            raise ValueError(
+                f"plonsky: response key {key!r} is not in recovered option mapping "
+                f"{option_keys!r}"
+            )
         action = option_keys.index(key)
-        tail = text[m.end() : m.end() + 200]
-        fb = _feedback_from_press_tail(tail)
+        event_end = press_matches[i + 1].start() if i + 1 < len(press_matches) else len(text)
+        event_tail = text[m.end() : event_end]
+        fb = _feedback_from_press_tail(event_tail)
         trials.append(ParsedTrial(action=action, feedback=fb, problem_fields={}))
     return trials
+
+
+def _signed_plonsky_outcome(verb: str, value: str) -> float:
+    amount = abs(float(value))
+    return amount if verb.lower() in {"gain", "gained"} else -amount
+
+
+def _replace_plonsky_option_labels(gamble_info: str, labels: List[str]) -> str:
+    option_index = 0
+    output_lines: List[str] = []
+    for line in gamble_info.splitlines():
+        if re.match(r"\s*Option\s+[A-Z]\s+delivers", line, re.I):
+            if option_index >= len(labels):
+                raise ValueError("plonsky: more than two option descriptions in a block")
+            line = re.sub(
+                r"(\s*Option\s+)[A-Z](\s+delivers)",
+                rf"\g<1>{labels[option_index]}\g<2>",
+                line,
+                count=1,
+                flags=re.I,
+            )
+            option_index += 1
+        output_lines.append(line)
+    if option_index != len(labels):
+        raise ValueError(
+            f"plonsky: expected {len(labels)} option descriptions, found {option_index}"
+        )
+    return "\n".join(output_lines)
+
+
+def _plonsky_candidate_matches_feedback(
+    block_str: str,
+    gamble_A: Gamble,
+    gamble_B: Gamble,
+    option_keys: List[str],
+) -> bool:
+    rewards_by_key = {
+        option_keys[0]: set(gamble_A.rewards),
+        option_keys[1]: set(gamble_B.rewards),
+    }
+    press_matches = list(_RE_PRESS_KEY.finditer(block_str))
+    feedback_events = 0
+    for i, press in enumerate(press_matches):
+        event_end = (
+            press_matches[i + 1].start() if i + 1 < len(press_matches) else len(block_str)
+        )
+        event_tail = block_str[press.end() : event_end]
+        actual = _RE_GAIN_LOSE.search(event_tail)
+        counterfactual = _RE_PLONSKY_COUNTERFACTUAL.search(event_tail)
+        if actual is None and counterfactual is None:
+            continue
+        if actual is None or counterfactual is None:
+            return False
+        feedback_events += 1
+        pressed_key = press.group(1).upper()
+        other_key = counterfactual.group(3).upper()
+        if pressed_key not in rewards_by_key or other_key not in rewards_by_key:
+            return False
+        actual_value = _signed_plonsky_outcome(actual.group(1), actual.group(2))
+        other_value = _signed_plonsky_outcome(
+            counterfactual.group(1), counterfactual.group(2)
+        )
+        if (
+            actual_value not in rewards_by_key[pressed_key]
+            or other_value not in rewards_by_key[other_key]
+        ):
+            return False
+    return feedback_events > 0
+
+
+def _recover_plonsky_gamble_info(
+    gamble_info: str,
+    block_str: str,
+    participant_option_keys: List[str],
+    *,
+    block_index: int,
+    duplicate_order: Optional[Tuple[str, str]] = None,
+) -> Tuple[Gamble, Gamble, List[str]]:
+    option_labels = [
+        m.upper()
+        for m in re.findall(r"^\s*Option\s+([A-Z])\s+delivers", gamble_info, re.I | re.M)
+    ]
+    if len(option_labels) != 2:
+        raise ValueError(
+            f"plonsky block {block_index}: expected two option descriptions, "
+            f"found {len(option_labels)}"
+        )
+    if len(set(option_labels)) == 2:
+        return _extract_gamble_info(gamble_info)
+
+    repeated_key = option_labels[0]
+    alternatives = [key for key in participant_option_keys if key != repeated_key]
+    if len(alternatives) != 1:
+        raise ValueError(
+            f"plonsky block {block_index}: duplicated option label {repeated_key!r} "
+            "and the second key is not uniquely recoverable from explicit option/"
+            "counterfactual labels"
+        )
+    other_key = alternatives[0]
+    candidates: List[Tuple[Gamble, Gamble, List[str]]] = []
+    label_orders = (
+        [list(duplicate_order)]
+        if duplicate_order is not None
+        else [[other_key, repeated_key], [repeated_key, other_key]]
+    )
+    for labels in label_orders:
+        repaired_info = _replace_plonsky_option_labels(gamble_info, list(labels))
+        candidate = _extract_gamble_info(repaired_info)
+        if _plonsky_candidate_matches_feedback(block_str, *candidate):
+            candidates.append(candidate)
+    if len(candidates) != 1:
+        raise ValueError(
+            f"plonsky block {block_index}: duplicated option label {repeated_key!r} "
+            f"has {len(candidates)} feedback-consistent repairs; expected exactly one"
+        )
+    return candidates[0]
+
+
+def _infer_plonsky_duplicate_order(
+    block_strings: List[str], participant_option_keys: List[str]
+) -> Optional[Tuple[str, str]]:
+    possible_orders: Optional[set[Tuple[str, str]]] = None
+    for block_str in block_strings:
+        if "Option " not in block_str:
+            continue
+        gamble_info = block_str.split("\nYou press")[0]
+        option_labels = [
+            m.upper()
+            for m in re.findall(
+                r"^\s*Option\s+([A-Z])\s+delivers", gamble_info, re.I | re.M
+            )
+        ]
+        if len(option_labels) != 2 or len(set(option_labels)) == 2:
+            continue
+        repeated_key = option_labels[0]
+        alternatives = [key for key in participant_option_keys if key != repeated_key]
+        if len(alternatives) != 1:
+            return None
+        other_key = alternatives[0]
+        block_orders: set[Tuple[str, str]] = set()
+        for labels in ((other_key, repeated_key), (repeated_key, other_key)):
+            repaired_info = _replace_plonsky_option_labels(gamble_info, list(labels))
+            candidate = _extract_gamble_info(repaired_info)
+            if _plonsky_candidate_matches_feedback(block_str, *candidate):
+                block_orders.add(labels)
+        possible_orders = (
+            block_orders
+            if possible_orders is None
+            else possible_orders.intersection(block_orders)
+        )
+    if possible_orders is None:
+        return None
+    if len(possible_orders) != 1:
+        raise ValueError(
+            "plonsky: duplicated option labels do not have one participant-wide "
+            f"feedback-consistent mapping; candidates={sorted(possible_orders)!r}"
+        )
+    return next(iter(possible_orders))
 
 
 def _experiment_from_choice13k_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
@@ -197,22 +362,41 @@ def _experiment_from_plonsky_row(row: Dict[str, Any], dataset_alias: str) -> Psy
     text = text.replace("\n\n\n\nOption", "\n\nOption").replace("\n\n\nOption", "\n\nOption")
     instruction = text.split("\n\nOption")[0]
     trials_str = text[len(instruction) :].lstrip()
+    participant_option_keys: List[str] = []
+    for key in re.findall(
+        r"(?:^\s*Option\s+|chosen option\s+)([A-Z])",
+        trials_str,
+        re.I | re.M,
+    ):
+        normalized = key.upper()
+        if normalized not in participant_option_keys:
+            participant_option_keys.append(normalized)
+    block_strings = trials_str.split("\n\n")
+    duplicate_order = _infer_plonsky_duplicate_order(
+        block_strings, participant_option_keys
+    )
     blocks: List[PsychBlock] = []
-    for bi, block_str in enumerate(trials_str.split("\n\n")):
+    for bi, block_str in enumerate(block_strings):
         if "Option " not in block_str:
             continue
         gamble_info = block_str.split("\nYou press")[0]
-        gamble_A, gamble_B, option_keys = _extract_gamble_info(gamble_info)
+        gamble_A, gamble_B, option_keys = _recover_plonsky_gamble_info(
+            gamble_info,
+            block_str,
+            participant_option_keys,
+            block_index=bi,
+            duplicate_order=duplicate_order,
+        )
         press_text = block_str[len(gamble_info) :]
         parsed = _extract_press_trials(press_text, list(option_keys))
         if not parsed:
-            continue
+            raise ValueError(f"plonsky block {bi}: no decisions parsed")
         static = {
             "schema_type": "A",
             "gamble_A": {"probs": gamble_A.probs, "rewards": gamble_A.rewards},
             "gamble_B": {"probs": gamble_B.probs, "rewards": gamble_B.rewards},
             "option_keys": list(option_keys),
-            "has_feedback": _extract_has_feedback(block_str),
+            "has_feedback": any(trial.feedback is not None for trial in parsed),
             "block_index": bi,
         }
         blocks.append(

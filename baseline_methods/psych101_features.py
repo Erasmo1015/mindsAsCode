@@ -22,7 +22,9 @@ def _task_kind(problem: Dict[str, Any]) -> str:
         return "gamble_cpc18"
     if "memory_set_letters" in problem and "probe_letter" in problem:
         return "memory_probe"
-    if "stimulus_features" in problem and "correct_category" in problem:
+    if "stimulus_features" in problem and (
+        problem.get("task") == "category_learning" or "correct_category" in problem
+    ):
         return "category_learning"
     if (
         "balloon_id" in problem
@@ -123,6 +125,23 @@ def _balloon_one_step_ev(problem: Dict[str, Any]) -> Tuple[float, float]:
     return ev_stop, ev_pump
 
 
+def _category_correct_from_history(
+    problem: Dict[str, Any],
+    history: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Most recent prior correct category for the same object features, else empty."""
+    stimulus = problem.get("stimulus_features") or {}
+    for entry in reversed(history or []):
+        if (entry.get("stimulus_features") or {}) != stimulus:
+            continue
+        feedback = entry.get("feedback")
+        if isinstance(feedback, dict) and feedback.get("correct_category") is not None:
+            return str(feedback["correct_category"]).upper()
+        if entry.get("correct_category") is not None:
+            return str(entry["correct_category"]).upper()
+    return ""
+
+
 def option_b_feature_diff(
     problem: Dict[str, Any],
     history: Optional[List[Dict[str, Any]]] = None,
@@ -158,11 +177,11 @@ def option_b_feature_diff(
         probe_in_set = bool(problem.get("probe_in_set", False))
         return 1.0 if probe_in_set else -1.0
     if kind == "category_learning":
-        # Binary category choice with observed correct category in trial feedback.
+        # Prefer earlier feedback for the same stimulus; never use current post-choice fields.
         keys = problem.get("option_keys") or []
         if len(keys) < 2:
             return 0.0
-        correct = str(problem.get("correct_category", "")).upper()
+        correct = _category_correct_from_history(problem, history)
         key_a = str(keys[0]).upper()
         key_b = str(keys[1]).upper()
         if correct == key_b:
@@ -298,18 +317,22 @@ def _gamble_getters_memory_probe() -> Tuple[GambleGetter, GambleGetter]:
 
 def _gamble_getters_category_learning() -> Tuple[GambleGetter, GambleGetter]:
     # option A/action=0 and option B/action=1 mapped by option_keys.
-    def opt_a(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+    def opt_a(p: Dict[str, Any], h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
         keys = p.get("option_keys") or []
         if len(keys) < 2:
             return ([0.0], [1.0])
-        correct = str(p.get("correct_category", "")).upper()
+        correct = _category_correct_from_history(p, h)
+        if not correct:
+            return ([0.0], [1.0])
         return ([1.0 if str(keys[0]).upper() == correct else -1.0], [1.0])
 
-    def opt_b(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+    def opt_b(p: Dict[str, Any], h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
         keys = p.get("option_keys") or []
         if len(keys) < 2:
             return ([0.0], [1.0])
-        correct = str(p.get("correct_category", "")).upper()
+        correct = _category_correct_from_history(p, h)
+        if not correct:
+            return ([0.0], [1.0])
         return ([1.0 if str(keys[1]).upper() == correct else -1.0], [1.0])
 
     return opt_a, opt_b

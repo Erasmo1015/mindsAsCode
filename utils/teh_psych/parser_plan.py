@@ -630,6 +630,7 @@ def validate_parser_plan(plan: Dict[str, Any]) -> List[str]:
         errors.append("option_normalization.strategy required")
     elif option_norm.get("strategy") not in (
         "fixed_keys_from_instruction",
+        "fixed_keys_from_instruction_exact",
         "per_trial_available_keys",
         "per_block_key_list",
         "numeric_range_from_context",
@@ -1107,6 +1108,47 @@ def _keys_from_instruction_text(
     return _normalize_key_list(keys, action_id_order)
 
 
+def _exact_keys_from_instruction_text(
+    plan: Dict[str, Any],
+    *,
+    instruction: str,
+    block_lines: List[Dict[str, Any]],
+) -> List[str]:
+    """Extract only keys captured by a plan's explicit instruction regex."""
+    norm = plan.get("option_normalization") or {}
+    instr_re = norm.get("instruction_regex") or ""
+    if not instr_re:
+        raise ParsePlanError(
+            "fixed_keys_from_instruction_exact requires option_normalization.instruction_regex"
+        )
+
+    blobs = [instruction] if instruction else []
+    blobs.extend(
+        item["line"]
+        for item in block_lines[:80]
+        if item.get("type_id") in ("instruction", "block_header", "trial_stimulus")
+    )
+    if not blobs:
+        blobs.extend(item["line"] for item in block_lines[:80])
+
+    for blob in blobs:
+        raw_keys = _keys_from_regex_blob(str(blob), instr_re)
+        keys: List[str] = []
+        for raw_key in raw_keys:
+            key = str(raw_key).strip()
+            if not re.fullmatch(r"[A-Za-z0-9]+", key):
+                continue
+            if re.fullmatch(r"[A-Za-z]", key):
+                key = key.upper()
+            elif re.fullmatch(r"\d+", key):
+                key = str(int(key))
+            if key not in keys:
+                keys.append(key)
+        if keys:
+            return keys
+    return []
+
+
 def _normalize_key_list(
     keys: List[str],
     action_id_order: str,
@@ -1262,6 +1304,20 @@ def _option_map_from_plan(
 
     if explicit:
         return {str(k): int(v) for k, v in explicit.items()}, used_fallback
+
+    if strategy == "fixed_keys_from_instruction_exact":
+        keys = _exact_keys_from_instruction_text(
+            plan, instruction=instruction, block_lines=block_lines
+        )
+        expected = plan.get("validation_expectations") or {}
+        min_options = int(expected.get("min_options", 2))
+        max_options = int(expected.get("max_options", max(min_options, len(keys))))
+        if not (min_options <= len(keys) <= max_options):
+            raise ParsePlanError(
+                "exact instructed option extraction produced "
+                f"{len(keys)} keys; expected {min_options}..{max_options}"
+            )
+        return {key: idx for idx, key in enumerate(keys)}, used_fallback
 
     # Global textual mapping accumulated across rows (stable IDs).
     textual_map = plan.get("_textual_action_id_mapping")

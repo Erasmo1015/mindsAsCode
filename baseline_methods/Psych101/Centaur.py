@@ -174,7 +174,9 @@ def _action_key(keys: List[str], action: int) -> str:
 def _schema_b_subtype(problem: Dict[str, Any]) -> str:
     if "memory_set_letters" in problem and "probe_letter" in problem:
         return "memory_probe"
-    if "stimulus_features" in problem and "correct_category" in problem:
+    if "stimulus_features" in problem and (
+        "correct_category" in problem or problem.get("task") == "category_learning"
+    ):
         return "category_learning"
     if "tree_features" in problem:
         return "tree"
@@ -250,7 +252,7 @@ def _weather_history_line(past_problem: Dict[str, Any], h: Dict[str, Any]) -> st
     letter = _action_key(keys, int(h["action"]))
     lines = [_weather_trial_lines(past_problem), f"You press <<{letter}>>."]
     if h.get("was_correct") is not None:
-        wo = past_problem.get("weather_outcome", "fine")
+        wo = h.get("weather_outcome", past_problem.get("weather_outcome", "fine"))
         verdict = "correct" if h.get("was_correct") else "wrong"
         lines.append(f"You are {verdict}, the weather is {wo}.")
     return "\n".join(lines)
