@@ -28,7 +28,7 @@ ablations:
 
 datasets:
   1peterson2021using:  # Choice13k
-    base: generated_outputs/psych101_train/teh/1peterson2021using/run_260706_211034
+    base: generated_outputs_old/psych101_train/teh/1peterson2021using/run_260706_211034
     population: generated_outputs_ablation/psych101_train/teh/1peterson2021using/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/1peterson2021using/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/1peterson2021using/3_2_best_parent1
@@ -39,7 +39,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/1peterson2021using/7_error_feedback_1
 
   2plonsky2018when:  # CPC18 Psych-101
-    base: generated_outputs/psych101_train/teh/2plonsky2018when/run_260706_232939
+    base: generated_outputs_old/psych101_train/teh/2plonsky2018when/run_260706_232939
     population: generated_outputs_ablation/psych101_train/teh/2plonsky2018when/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/2plonsky2018when/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/2plonsky2018when/3_2_best_parent1
@@ -50,7 +50,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/2plonsky2018when/7_error_feedback_1
 
   3frey2017cct:  # Frey CCT
-    base: generated_outputs/psych101_train/teh/3frey2017cct/run_260706_211507
+    base: generated_outputs_old/psych101_train/teh/3frey2017cct/run_260706_211507
     population: generated_outputs_ablation/psych101_train/teh/3frey2017cct/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/3frey2017cct/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/3frey2017cct/3_2_best_parent1
@@ -61,7 +61,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/3frey2017cct/7_error_feedback_1
 
   4wulff2018description:  # Wulff description
-    base: generated_outputs/psych101_train/teh/4wulff2018description/run_260706_211514
+    base: generated_outputs_old/psych101_train/teh/4wulff2018description/run_260706_211514
     population: generated_outputs_ablation/psych101_train/teh/4wulff2018description/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/4wulff2018description/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/4wulff2018description/3_2_best_parent1
@@ -72,7 +72,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/4wulff2018description/7_error_feedback_1
 
   5speekenbrink2008learning:  # Speekenbrink learning
-    base: generated_outputs/psych101_train/teh/5speekenbrink2008learning/run_260706_223004
+    base: generated_outputs_old/psych101_train/teh/5speekenbrink2008learning/run_260706_223004
     population: generated_outputs_ablation/psych101_train/teh/5speekenbrink2008learning/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/5speekenbrink2008learning/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/5speekenbrink2008learning/3_2_best_parent1
@@ -83,7 +83,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/5speekenbrink2008learning/7_error_feedback_1
 
   7hilbig2014generalized:  # Hilbig generalized
-    base: generated_outputs/psych101_train/teh/7hilbig2014generalized/run_260706_224118
+    base: generated_outputs_old/psych101_train/teh/7hilbig2014generalized/run_260706_224118
     population: generated_outputs_ablation/psych101_train/teh/7hilbig2014generalized/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/7hilbig2014generalized/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/7hilbig2014generalized/3_2_best_parent1
@@ -94,7 +94,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/7hilbig2014generalized/7_error_feedback_1
 
   10frey2017risk:  # Frey balloon risk
-    base: generated_outputs/psych101_train/teh/10frey2017risk/run_260706_224551
+    base: generated_outputs_old/psych101_train/teh/10frey2017risk/run_260706_224551
     population: generated_outputs_ablation/psych101_train/teh/10frey2017risk/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/10frey2017risk/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/10frey2017risk/3_2_best_parent1
@@ -105,7 +105,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/10frey2017risk/7_error_feedback
 
   11enkavi2019recentprobes:  # Enkavi recent probes
-    base: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/run_260706_230731
+    base: generated_outputs_old/psych101_train/teh/11enkavi2019recentprobes/run_260706_230731
     population: generated_outputs_ablation/psych101_train/teh/11enkavi2019recentprobes/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/11enkavi2019recentprobes/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/11enkavi2019recentprobes/3_2_best_parent1
@@ -116,7 +116,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/11enkavi2019recentprobes/7_error_feedback
 
   12badham2017deficits:  # Badham category learning
-    base: generated_outputs/psych101_train/teh/12badham2017deficits/run_260706_232606
+    base: generated_outputs_old/psych101_train/teh/12badham2017deficits/run_260706_232606
     population: generated_outputs_ablation/psych101_train/teh/12badham2017deficits/population
     2_exploration: generated_outputs_ablation/psych101_train/teh/12badham2017deficits/2_exploration
     3_2_best_parent1: generated_outputs_ablation/psych101_train/teh/12badham2017deficits/3_2_best_parent1
@@ -127,7 +127,7 @@ datasets:
     7_error_feedback: generated_outputs_ablation/psych101_train/teh/12badham2017deficits/7_error_feedback
 
   mixed_gambles:
-    base: generated_outputs/mixed_gambles/teh/run_260706_210650
+    base: generated_outputs_old/mixed_gambles/teh/run_260706_210650
     population: generated_outputs_ablation/mixed_gambles/teh/population
     2_exploration: generated_outputs_ablation/mixed_gambles/teh/2_exploration
     3_2_best_parent1: generated_outputs_ablation/mixed_gambles/teh/3_2_best_parent1

@@ -96,9 +96,8 @@ _EARLY_STOP_MIN_IMPROVEMENT = 0.005
 _DISABLE_REFINEMENT_FRESH_CANDIDATES = True
 MAX_ERROR_MESSAGE_CHARS = 160
 MAX_INVALID_LINE_CHARS = 160
-RECENT_ERROR_WINDOW = 3
-KEEP_TOP_FREQUENT = 3
-MAX_ERROR_ITEMS = 8
+MAX_DISTINCT_ERROR_GROUPS = 3
+_ERROR_EVAL_SPLITS_ALLOWED = frozenset({"train", "val", "compile", "unknown"})
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
@@ -157,6 +156,17 @@ def _normalize_text(text: Any, max_len: int) -> str:
     return out[: max(0, int(max_len))]
 
 
+def _normalize_error_message_for_grouping(text: Any, max_len: int) -> str:
+    """Normalize exception text for grouping; strip noisy ids, keep meaningful values."""
+    out = _normalize_text(text, max_len)
+    if not out:
+        return ""
+    # Hex addresses / object ids vary per process and should not split groups.
+    out = re.sub(r"0x[0-9a-fA-F]+", "0x?", out)
+    out = re.sub(r"<([\w.]+) object at 0x\?>", r"<\1 object>", out)
+    return out[: max(0, int(max_len))]
+
+
 def _extract_relevant_invalid_source_line(code: str, exc: BaseException) -> str:
     lines = str(code or "").splitlines()
     if isinstance(exc, SyntaxError):
@@ -190,7 +200,7 @@ def _build_invalid_program_error_entry(
     error_type = _truncate_text_for_prompt(type(exc).__name__, 80)
     error_message = _truncate_text_for_prompt(str(exc), MAX_ERROR_MESSAGE_CHARS)
     norm_type = _normalize_text(error_type, 80)
-    norm_msg = _normalize_text(error_message, MAX_ERROR_MESSAGE_CHARS)
+    norm_msg = _normalize_error_message_for_grouping(error_message, MAX_ERROR_MESSAGE_CHARS)
     norm_line = _normalize_text(line, MAX_INVALID_LINE_CHARS)
     if norm_line:
         dedup_key = (norm_type, norm_msg, norm_line)
@@ -215,6 +225,24 @@ def _append_error_history_jsonl(
         f.write(json.dumps(row, ensure_ascii=True) + "\n")
 
 
+def _normalize_error_eval_split(eval_split: Optional[str]) -> Optional[str]:
+    split = str(eval_split or "unknown").strip().lower() or "unknown"
+    if split == "test":
+        return None
+    if split not in _ERROR_EVAL_SPLITS_ALLOWED:
+        # Unknown non-test labels are kept as contextual train/val/compile-adjacent noise.
+        return "unknown"
+    return split
+
+
+def _candidate_id_sort_key(candidate_id: Optional[str]) -> Tuple[int, str]:
+    text = str(candidate_id or "")
+    match = re.search(r"(\d+)$", text)
+    if match:
+        return (int(match.group(1)), text)
+    return (10**9, text)
+
+
 def _record_invalid_program_error_summary(
     error_store: List[Dict[str, Any]],
     error_entry: Optional[Dict[str, Any]],
@@ -223,12 +251,36 @@ def _record_invalid_program_error_summary(
     participant_id: Optional[int],
     candidate_id: Optional[str],
     history_path: Optional[Path],
+    quality_score: Optional[float] = None,
+    eval_split: str = "unknown",
+    n_candidates_in_iteration: Optional[int] = None,
 ) -> None:
+    """Append one train/val/compile error event. Test-split errors are ignored."""
     if not error_entry:
+        return
+    split = _normalize_error_eval_split(eval_split)
+    if split is None:
         return
     normalized_key = str(error_entry.get("normalized_key") or "").strip()
     if not normalized_key:
-        return
+        # Rebuild key if callers only passed display fields.
+        err_type = _truncate_text_for_prompt(error_entry.get("error_type", ""), 80)
+        err_msg = _truncate_text_for_prompt(
+            error_entry.get("error_message", ""), MAX_ERROR_MESSAGE_CHARS
+        )
+        line = _truncate_text_for_prompt(
+            error_entry.get("invalid_line", ""), MAX_INVALID_LINE_CHARS
+        )
+        norm_type = _normalize_text(err_type, 80)
+        norm_msg = _normalize_error_message_for_grouping(err_msg, MAX_ERROR_MESSAGE_CHARS)
+        norm_line = _normalize_text(line, MAX_INVALID_LINE_CHARS)
+        if not norm_type and not norm_msg:
+            return
+        normalized_key = (
+            "||".join((norm_type, norm_msg, norm_line))
+            if norm_line
+            else "||".join((norm_type, norm_msg))
+        )
     invalid_line = _truncate_text_for_prompt(
         error_entry.get("invalid_line", ""), MAX_INVALID_LINE_CHARS
     )
@@ -238,32 +290,24 @@ def _record_invalid_program_error_summary(
     )
     if not error_type and not error_message:
         return
-    matched: Optional[Dict[str, Any]] = None
-    for item in error_store:
-        if item.get("normalized_key") == normalized_key:
-            matched = item
-            break
-    if matched is None:
-        matched = {
-            "normalized_key": normalized_key,
-            "invalid_line": invalid_line,
-            "error_type": error_type,
-            "error_message": error_message,
-            "count": 0,
-            "first_seen_iteration": int(iteration),
-            "last_seen_iteration": int(iteration),
-        }
-        error_store.append(matched)
-    else:
-        # Refresh with latest concise fields so recurring errors stay contextually current.
-        if invalid_line:
-            matched["invalid_line"] = invalid_line
-        if error_type:
-            matched["error_type"] = error_type
-        if error_message:
-            matched["error_message"] = error_message
-        matched["last_seen_iteration"] = int(iteration)
-    matched["count"] = int(matched.get("count", 0)) + 1
+    quality = _safe_float(quality_score)
+    n_cand = (
+        int(n_candidates_in_iteration)
+        if n_candidates_in_iteration is not None and int(n_candidates_in_iteration) > 0
+        else None
+    )
+    event = {
+        "normalized_key": normalized_key,
+        "invalid_line": invalid_line,
+        "error_type": error_type,
+        "error_message": error_message,
+        "iteration": int(iteration),
+        "candidate_id": candidate_id,
+        "quality_score": quality,
+        "eval_split": split,
+        "n_candidates_in_iteration": n_cand,
+    }
+    error_store.append(event)
     _append_error_history_jsonl(
         history_path,
         {
@@ -274,8 +318,9 @@ def _record_invalid_program_error_summary(
             "error_type": error_type,
             "error_message": error_message,
             "normalized_key": normalized_key,
-            "count": int(matched["count"]),
-            "last_seen_iteration": int(matched["last_seen_iteration"]),
+            "quality_score": quality,
+            "eval_split": split,
+            "n_candidates_in_iteration": n_cand,
         },
     )
 
@@ -289,6 +334,9 @@ def _record_invalid_program_error(
     participant_id: Optional[int],
     candidate_id: Optional[str],
     history_path: Optional[Path],
+    quality_score: Optional[float] = None,
+    eval_split: str = "unknown",
+    n_candidates_in_iteration: Optional[int] = None,
 ) -> None:
     if exc is None:
         return
@@ -300,59 +348,144 @@ def _record_invalid_program_error(
         participant_id=participant_id,
         candidate_id=candidate_id,
         history_path=history_path,
+        quality_score=quality_score,
+        eval_split=eval_split,
+        n_candidates_in_iteration=n_candidates_in_iteration,
     )
+
+
+def _group_errors_from_previous_iteration(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+    previous_n_candidates: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Group train/val/compile errors from the immediately preceding iteration only."""
+    if not error_store or iteration is None:
+        return []
+    prev_iter = int(iteration) - 1
+    if prev_iter < 1:
+        return []
+    events = [
+        item
+        for item in error_store
+        if int(item.get("iteration", -10**9)) == prev_iter
+        and str(item.get("eval_split", "unknown")).strip().lower() != "test"
+        and str(item.get("normalized_key") or "").strip()
+    ]
+    if not events:
+        return []
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for item in events:
+        key = str(item.get("normalized_key") or "").strip()
+        group = groups.get(key)
+        if group is None:
+            group = {
+                "normalized_key": key,
+                "invalid_line": str(item.get("invalid_line") or ""),
+                "error_type": str(item.get("error_type") or ""),
+                "error_message": str(item.get("error_message") or ""),
+                "candidate_ids": set(),
+                "best_quality": None,
+                "n_candidates_in_iteration": None,
+            }
+            groups[key] = group
+        cand = item.get("candidate_id")
+        if cand is not None and str(cand).strip():
+            group["candidate_ids"].add(str(cand))
+        q = _safe_float(item.get("quality_score"))
+        best = _safe_float(group.get("best_quality"))
+        if q is not None and (best is None or q > best):
+            group["best_quality"] = q
+            # Prefer display fields from the highest-quality failing candidate.
+            if item.get("invalid_line"):
+                group["invalid_line"] = str(item.get("invalid_line") or "")
+            if item.get("error_type"):
+                group["error_type"] = str(item.get("error_type") or "")
+            if item.get("error_message"):
+                group["error_message"] = str(item.get("error_message") or "")
+        n_cand = item.get("n_candidates_in_iteration")
+        if n_cand is not None:
+            try:
+                n_cand_i = int(n_cand)
+            except (TypeError, ValueError):
+                n_cand_i = 0
+            if n_cand_i > 0:
+                prev = group.get("n_candidates_in_iteration")
+                group["n_candidates_in_iteration"] = (
+                    max(int(prev), n_cand_i) if prev is not None else n_cand_i
+                )
+
+    denom_override = (
+        int(previous_n_candidates)
+        if previous_n_candidates is not None and int(previous_n_candidates) > 0
+        else None
+    )
+    grouped: List[Dict[str, Any]] = []
+    for group in groups.values():
+        candidate_ids = sorted(group["candidate_ids"], key=_candidate_id_sort_key)
+        n_hit = len(candidate_ids) if candidate_ids else 1
+        denom = denom_override or group.get("n_candidates_in_iteration")
+        if denom is None:
+            # Infer from highest candidate index when budget was not recorded.
+            max_idx = None
+            for cid in candidate_ids:
+                match = re.search(r"(\d+)$", cid)
+                if match:
+                    idx = int(match.group(1))
+                    max_idx = idx if max_idx is None else max(max_idx, idx)
+            if max_idx is not None:
+                denom = max(n_hit, max_idx + 1)
+        grouped.append(
+            {
+                "normalized_key": group["normalized_key"],
+                "invalid_line": group["invalid_line"],
+                "error_type": group["error_type"],
+                "error_message": group["error_message"],
+                "n_candidates": n_hit,
+                "n_candidates_total": int(denom) if denom is not None else None,
+                "best_quality": group["best_quality"],
+                "candidate_ids": candidate_ids,
+            }
+        )
+
+    def _rank_key(g: Dict[str, Any]) -> Tuple[float, int, str]:
+        q = _safe_float(g.get("best_quality"))
+        # Finite quality ranks above missing; higher (better) scores first.
+        q_rank = q if q is not None else float("-inf")
+        return (-q_rank, -int(g.get("n_candidates", 0)), str(g.get("normalized_key") or ""))
+
+    grouped.sort(key=_rank_key)
+    return grouped
 
 
 def _select_errors_for_prompt(
     error_store: List[Dict[str, Any]],
     *,
     iteration: Optional[int],
+    max_distinct_error_groups: int = MAX_DISTINCT_ERROR_GROUPS,
+    previous_n_candidates: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    if not error_store:
-        return []
-    if iteration is None:
-        recency_floor = -10**9
-    else:
-        recency_floor = int(iteration) - int(RECENT_ERROR_WINDOW) + 1
-    recent = [
-        item
-        for item in error_store
-        if int(item.get("last_seen_iteration", -10**9)) >= recency_floor
-    ]
-    recent.sort(
-        key=lambda x: (
-            -int(x.get("last_seen_iteration", -10**9)),
-            -int(x.get("count", 0)),
-        )
-    )
-    selected: List[Dict[str, Any]] = []
-    seen_keys: Set[str] = set()
-    for item in recent:
-        key = str(item.get("normalized_key") or "")
-        if key and key not in seen_keys:
-            selected.append(item)
-            seen_keys.add(key)
-        if len(selected) >= int(MAX_ERROR_ITEMS):
-            return selected
-    frequent = sorted(
+    grouped = _group_errors_from_previous_iteration(
         error_store,
-        key=lambda x: (
-            -int(x.get("count", 0)),
-            -int(x.get("last_seen_iteration", -10**9)),
-        ),
+        iteration=iteration,
+        previous_n_candidates=previous_n_candidates,
     )
-    keep_top = int(max(0, KEEP_TOP_FREQUENT))
-    kept = 0
-    for item in frequent:
-        key = str(item.get("normalized_key") or "")
-        if not key or key in seen_keys:
-            continue
-        selected.append(item)
-        seen_keys.add(key)
-        kept += 1
-        if kept >= keep_top or len(selected) >= int(MAX_ERROR_ITEMS):
-            break
-    return selected[: int(MAX_ERROR_ITEMS)]
+    limit = max(0, int(max_distinct_error_groups))
+    if limit <= 0:
+        return []
+    return grouped[:limit]
+
+
+def _count_previous_iteration_error_groups(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+) -> int:
+    return len(
+        _group_errors_from_previous_iteration(error_store, iteration=iteration)
+    )
 
 
 def _build_past_error_prompt_section(
@@ -360,17 +493,31 @@ def _build_past_error_prompt_section(
     *,
     iteration: Optional[int],
     max_error_prompt_chars: int,
+    max_distinct_error_groups: int = MAX_DISTINCT_ERROR_GROUPS,
+    previous_n_candidates: Optional[int] = None,
 ) -> str:
     if not error_store:
         return ""
     max_chars = int(max_error_prompt_chars)
     if max_chars <= 0:
         return ""
-    selected = _select_errors_for_prompt(error_store, iteration=iteration)
+    selected = _select_errors_for_prompt(
+        error_store,
+        iteration=iteration,
+        max_distinct_error_groups=max_distinct_error_groups,
+        previous_n_candidates=previous_n_candidates,
+    )
     if not selected:
         return ""
+    header = (
+        "Recent train/validation errors from the previous iteration "
+        "(contextual only — not every candidate must repair the same issue):\n\n"
+    )
+    header_len = len(header)
+    if header_len >= max_chars:
+        return ""
     items: List[str] = []
-    used = 0
+    used = header_len
     for entry in selected:
         line = str(entry.get("invalid_line") or "").strip()
         err_type = str(entry.get("error_type") or "").strip()
@@ -378,26 +525,34 @@ def _build_past_error_prompt_section(
         if not err_type and not err_msg:
             continue
         err = f"{err_type}: {err_msg}" if err_msg else err_type
-        if line:
-            item = f"- Line: {line}\n  Error: {err}"
+        n_hit = int(entry.get("n_candidates", 0) or 0)
+        n_tot = entry.get("n_candidates_total")
+        if n_tot is not None and int(n_tot) > 0:
+            frac = f"{n_hit}/{int(n_tot)} candidates"
         else:
-            item = f"- Error: {err}"
-        projected = used + len(item) + (2 if items else 0)
-        if projected > max_chars and items:
-            break
+            frac = f"{n_hit} candidates"
+        if line:
+            item = f"- [{frac}] Line: {line}\n  Error: {err}"
+        else:
+            item = f"- [{frac}] Error: {err}"
+        sep = 2 if items else 0
+        projected = used + len(item) + sep
         if projected > max_chars:
-            continue
+            if items:
+                break
+            # Keep a truncated first item when possible so the section is still useful.
+            remaining = max_chars - used
+            if remaining < 24:
+                continue
+            item = item[: remaining - 3].rstrip() + "..."
+            projected = used + len(item)
+            if projected > max_chars:
+                continue
         items.append(item)
         used = projected
     if not items:
         return ""
-    past_error_summary = "\n\n".join(items)
-    return (
-        "Past invalid-program errors to avoid:\n"
-        "The following are previous invalid generated-program mistakes. Do not repeat them. "
-        "Each item shows the invalid line, when available, and the error it caused.\n\n"
-        f"{past_error_summary}"
-    )
+    return header + "\n\n".join(items)
 
 
 def _write_iteration_error_prompt_file(
@@ -1992,12 +2147,16 @@ def run_global_evolution_phase(
             invalid_candidate_errors,
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
+            previous_n_candidates=n_candidates_per_iteration,
         )
         _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         error_prompt_chars_used = len(error_prompt_section)
+        num_unique_errors_available = _count_previous_iteration_error_groups(
+            invalid_candidate_errors, iteration=iteration_step
+        )
         print(
             "Error prompt summary: "
-            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"num_unique_errors_available={num_unique_errors_available}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
         variant_kwargs = {
@@ -2059,6 +2218,8 @@ def run_global_evolution_phase(
                     iteration=iteration_step,
                     participant_id=None,
                     candidate_id=f"candidate_{idx}",
+                    eval_split="compile",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 continue
@@ -2075,6 +2236,8 @@ def run_global_evolution_phase(
                     iteration=iteration_step,
                     participant_id=None,
                     candidate_id=f"candidate_{idx}",
+                    eval_split="train",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 continue
@@ -2086,6 +2249,9 @@ def run_global_evolution_phase(
                     iteration=iteration_step,
                     participant_id=None,
                     candidate_id=f"candidate_{idx}",
+                    quality_score=_safe_float(train_eval.get("avg_loglik")),
+                    eval_split="train",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 continue
@@ -2105,6 +2271,9 @@ def run_global_evolution_phase(
                         iteration=iteration_step,
                         participant_id=None,
                         candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_loglik),
+                        eval_split="val",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                     continue
@@ -2116,6 +2285,9 @@ def run_global_evolution_phase(
                         iteration=iteration_step,
                         participant_id=None,
                         candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_loglik),
+                        eval_split="val",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                     continue
@@ -2143,7 +2315,7 @@ def run_global_evolution_phase(
         print(
             "Iteration invalid summary: "
             f"num_invalid_candidates={num_invalid_candidates}, "
-            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1)}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
 
@@ -2198,7 +2370,7 @@ def run_global_evolution_phase(
                 "n_candidates": n_candidates_per_iteration,
                 "n_runtime_valid": len(selected_results),
                 "num_invalid_candidates": num_invalid_candidates,
-                "num_unique_errors_available": len(invalid_candidate_errors),
+                "num_unique_errors_available": num_unique_errors_available,
                 "error_prompt_chars_used": error_prompt_chars_used,
                 "pool_best_program_id": elite_parents[0][3],
                 "pool_best_global_train_loglik": pool_best_ll,
@@ -3387,12 +3559,16 @@ def run_loglik_refinement_phase(
             invalid_candidate_errors,
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
+            previous_n_candidates=n_candidates_per_iteration,
         )
         _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         error_prompt_chars_used = len(error_prompt_section)
+        num_unique_errors_available = _count_previous_iteration_error_groups(
+            invalid_candidate_errors, iteration=iteration_step
+        )
         print(
             "Error prompt summary: "
-            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"num_unique_errors_available={num_unique_errors_available}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
         (
@@ -3475,6 +3651,8 @@ def run_loglik_refinement_phase(
                     iteration=iteration_step,
                     participant_id=int(participant_id),
                     candidate_id=f"candidate_{idx}",
+                    eval_split="compile",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 candidate_results.append(
@@ -3504,6 +3682,8 @@ def run_loglik_refinement_phase(
                     iteration=iteration_step,
                     participant_id=int(participant_id),
                     candidate_id=f"candidate_{idx}",
+                    eval_split="train",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 candidate_results.append(
@@ -3526,6 +3706,9 @@ def run_loglik_refinement_phase(
                     iteration=iteration_step,
                     participant_id=int(participant_id),
                     candidate_id=f"candidate_{idx}",
+                    quality_score=_safe_float(train_eval.get("avg_loglik")),
+                    eval_split="train",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
             if val_eval.get("errors", 0) != 0:
@@ -3536,6 +3719,9 @@ def run_loglik_refinement_phase(
                     iteration=iteration_step,
                     participant_id=int(participant_id),
                     candidate_id=f"candidate_{idx}",
+                    quality_score=_safe_float(train_eval.get("avg_loglik")),
+                    eval_split="val",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
             train_loglik = float(train_eval["avg_loglik"])
@@ -3561,7 +3747,7 @@ def run_loglik_refinement_phase(
         print(
             "Iteration invalid summary: "
             f"num_invalid_candidates={num_invalid_candidates}, "
-            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1)}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
 
@@ -3646,7 +3832,7 @@ def run_loglik_refinement_phase(
                 "n_candidates": n_candidates_per_iteration,
                 "n_runtime_valid": len(selected_results),
                 "num_invalid_candidates": num_invalid_candidates,
-                "num_unique_errors_available": len(invalid_candidate_errors),
+                "num_unique_errors_available": num_unique_errors_available,
                 "error_prompt_chars_used": error_prompt_chars_used,
             }
             refine_header.update(
@@ -8183,12 +8369,16 @@ def run_evolution(
             invalid_candidate_errors,
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
+            previous_n_candidates=n_candidates_per_iteration,
         )
         _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         error_prompt_chars_used = len(error_prompt_section)
+        num_unique_errors_available = _count_previous_iteration_error_groups(
+            invalid_candidate_errors, iteration=iteration_step
+        )
         print(
             "Error prompt summary: "
-            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"num_unique_errors_available={num_unique_errors_available}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
         fresh_parent_train_accs = None
@@ -8403,6 +8593,8 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        eval_split="compile",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                     _fail = {
@@ -8438,6 +8630,8 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        eval_split="train",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                     _fail = {
@@ -8482,6 +8676,9 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_eval.get("avg_loglik")),
+                        eval_split="train",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                 if val_eval is not None and val_eval.get("errors", 0) != 0:
@@ -8494,6 +8691,9 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_eval.get("avg_loglik")),
+                        eval_split="val",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                 fitness, selection_score = _apply_evolution_candidate_selection_fitness(
@@ -8542,6 +8742,8 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        eval_split="compile",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                     _fail = {
@@ -8577,6 +8779,8 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        eval_split="train",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                     _fail = {
@@ -8621,6 +8825,9 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_eval.get("avg_loglik")),
+                        eval_split="train",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                 if val_eval is not None and val_eval.get("errors", 0) != 0:
@@ -8633,6 +8840,9 @@ def run_evolution(
                         if participant_id is not None
                         else None,
                         candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_eval.get("avg_loglik")),
+                        eval_split="val",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
                 fitness, selection_score = _apply_evolution_candidate_selection_fitness(
@@ -8671,7 +8881,7 @@ def run_evolution(
         print(
             "Iteration invalid summary: "
             f"num_invalid_candidates={num_invalid_candidates}, "
-            f"num_unique_errors_available={len(invalid_candidate_errors)}, "
+            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1)}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
             
@@ -9229,7 +9439,7 @@ def run_evolution(
                 ),
             )
         metrics["num_invalid_candidates"] = num_invalid_candidates
-        metrics["num_unique_errors_available"] = len(invalid_candidate_errors)
+        metrics["num_unique_errors_available"] = num_unique_errors_available
         metrics["error_prompt_chars_used"] = error_prompt_chars_used
         if save_artifacts and iter_dir is not None:
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
