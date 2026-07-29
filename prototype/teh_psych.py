@@ -54,6 +54,10 @@ from utils.teh_psych.parser_plan import (
     default_parse_plan_prompt_path,
     run_parse_plan_pipeline,
 )
+from utils.teh_psych.load_trials import (
+    CachedParsePlanError,
+    load_experiment_trials_from_parse_plan,
+)
 from utils.teh_psych.prompts import setup_experiment_prompts
 from utils.teh_psych.reporting import (
     DatasetResult,
@@ -704,56 +708,104 @@ def process_one_experiment(
         write_json(debug_dir / "row_sampling.json", {"indices": row_indices, "note": sampling_note})
 
         prediction_trials: List[Dict[str, Any]] = []
-        try:
-            _all_trials, prediction_trials, _action_summary = _trials_via_parse_plan_with_retries(
-                client=client,
-                experiment_id=experiment_id,
-                rows=rows,
-                row_indices=row_indices,
-                debug_dir=debug_dir,
-                args=args,
-                cache_dir=parse_plan_cache_dir,
-                result=result,
+        if bool(getattr(args, "require_cached_parse_plan", False)):
+            # Shared deterministic loader (also used by teh_psych baselines). Never calls LLM.
+            result.stage_reached = "load_cached_parse_plan"
+            result.adapter_type = "parse_plan"
+            try:
+                bundle = load_experiment_trials_from_parse_plan(
+                    experiment_id,
+                    parse_plan_cache_dir,
+                    require_cached=True,
+                    rows=rows,
+                    row_indices=row_indices,
+                    do_split=False,
+                    min_pooled_prediction_trials=args.min_pooled_prediction_trials,
+                )
+            except CachedParsePlanError as exc:
+                result.parse_plan_cached = False
+                raise ParsePlanError(str(exc)) from exc
+            result.parse_plan_cached = True
+            result.parse_plan_path = str(bundle.plan_path)
+            write_json(
+                debug_dir / "parse_plan.json",
+                bundle.plan,
             )
-        except (ParsePlanError, StateMachineNotImplementedError) as exc:
-            if args.allow_existing_parser_fallback and alias_for_experiment_id(experiment_id):
-                result.parse_plan_failure_message = str(exc)
-                all_trials = _trials_via_manual_fallback(
+            write_json(
+                debug_dir / "parse_plan_cache_meta.json",
+                {
+                    "parse_plan_path": str(bundle.plan_path),
+                    "parse_plan_sha256": bundle.plan_sha256,
+                    "require_cached_parse_plan": True,
+                },
+            )
+            write_json(
+                debug_dir / "trial_filtering.json",
+                trial_filtering_summary(bundle.all_trials, bundle.prediction_trials),
+            )
+            if bundle.context_only_trials:
+                write_json(
+                    debug_dir / "context_only_trial_preview.json",
+                    bundle.context_only_trials[:8],
+                )
+            prediction_trials = bundle.prediction_trials
+            result.n_parsed_trials = len(bundle.all_trials)
+            result.n_prediction_trials = len(prediction_trials)
+            result.num_actions_min = bundle.action_summary.get("num_actions_min")
+            result.num_actions_max = bundle.action_summary.get("num_actions_max")
+            result.is_variable_k = bool(bundle.action_summary.get("is_variable_k"))
+            result.stage_reached = "validate_trials"
+        else:
+            try:
+                _all_trials, prediction_trials, _action_summary = _trials_via_parse_plan_with_retries(
+                    client=client,
                     experiment_id=experiment_id,
                     rows=rows,
                     row_indices=row_indices,
                     debug_dir=debug_dir,
+                    args=args,
+                    cache_dir=parse_plan_cache_dir,
                     result=result,
                 )
-                all_trials = normalize_categorical_trials_action_ids(all_trials)
-                result.n_parsed_trials = len(all_trials)
-                prediction_trials, context_only_trials = partition_pooled_trials(all_trials)
-                write_json(
-                    debug_dir / "trial_filtering.json",
-                    trial_filtering_summary(all_trials, prediction_trials),
-                )
-                if context_only_trials:
+            except (ParsePlanError, StateMachineNotImplementedError) as exc:
+                if args.allow_existing_parser_fallback and alias_for_experiment_id(experiment_id):
+                    result.parse_plan_failure_message = str(exc)
+                    all_trials = _trials_via_manual_fallback(
+                        experiment_id=experiment_id,
+                        rows=rows,
+                        row_indices=row_indices,
+                        debug_dir=debug_dir,
+                        result=result,
+                    )
+                    all_trials = normalize_categorical_trials_action_ids(all_trials)
+                    result.n_parsed_trials = len(all_trials)
+                    prediction_trials, context_only_trials = partition_pooled_trials(all_trials)
                     write_json(
-                        debug_dir / "context_only_trial_preview.json",
-                        context_only_trials[:8],
+                        debug_dir / "trial_filtering.json",
+                        trial_filtering_summary(all_trials, prediction_trials),
                     )
-                result.stage_reached = "validate_trials"
-                result.n_prediction_trials = len(prediction_trials)
-                val_errors, _ = validate_categorical_trials(prediction_trials)
-                action_summary = summarize_trial_action_space(prediction_trials)
-                result.num_actions_min = action_summary["num_actions_min"]
-                result.num_actions_max = action_summary["num_actions_max"]
-                result.is_variable_k = bool(action_summary["is_variable_k"])
-                if val_errors:
-                    write_json(debug_dir / "validation_errors.json", val_errors[:50])
-                    raise ValueError(val_errors[0])
-                if result.n_prediction_trials < args.min_pooled_prediction_trials:
-                    raise ValueError(
-                        f"Only {result.n_prediction_trials} prediction trials; "
-                        f"need >= {args.min_pooled_prediction_trials}"
-                    )
-            else:
-                raise
+                    if context_only_trials:
+                        write_json(
+                            debug_dir / "context_only_trial_preview.json",
+                            context_only_trials[:8],
+                        )
+                    result.stage_reached = "validate_trials"
+                    result.n_prediction_trials = len(prediction_trials)
+                    val_errors, _ = validate_categorical_trials(prediction_trials)
+                    action_summary = summarize_trial_action_space(prediction_trials)
+                    result.num_actions_min = action_summary["num_actions_min"]
+                    result.num_actions_max = action_summary["num_actions_max"]
+                    result.is_variable_k = bool(action_summary["is_variable_k"])
+                    if val_errors:
+                        write_json(debug_dir / "validation_errors.json", val_errors[:50])
+                        raise ValueError(val_errors[0])
+                    if result.n_prediction_trials < args.min_pooled_prediction_trials:
+                        raise ValueError(
+                            f"Only {result.n_prediction_trials} prediction trials; "
+                            f"need >= {args.min_pooled_prediction_trials}"
+                        )
+                else:
+                    raise
 
         result.stage_reached = "split_trials"
         train_trials, val_trials, test_trials = split_pooled_categorical_trials(
@@ -960,6 +1012,12 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reuse_parse_plan_cache", action="store_true", default=False)
     parser.add_argument("--parse_plan_cache_dir", type=str, default=None)
+    parser.add_argument(
+        "--require_cached_parse_plan",
+        action="store_true",
+        default=False,
+        help="Fail if the parse plan is missing/invalid; never call the LLM for plans.",
+    )
     parser.add_argument("--n_parse_plan_rows", type=int, default=5)
     parser.add_argument("--parse_plan_model_name", type=str, default=None)
     parser.add_argument("--parse_plan_max_tokens", type=int, default=4000)

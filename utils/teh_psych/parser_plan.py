@@ -1857,8 +1857,22 @@ def execute_parser_plan_on_rows(
     *,
     row_indices: Optional[List[int]] = None,
     stats: Optional[ParserExecutionStats] = None,
+    show_progress: bool = False,
+    progress_desc: str = "parse rows",
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     indices = row_indices if row_indices is not None else list(range(len(rows)))
+    row_pairs = list(zip(indices, rows))
+
+    def _maybe_tqdm(it, *, desc: str):
+        if not show_progress:
+            return it
+        try:
+            from tqdm import tqdm
+
+            return tqdm(it, total=len(row_pairs), desc=desc, leave=False)
+        except Exception:
+            return it
+
     # Precompute a stable textual action map when responses are category labels /
     # action_say so train/test and participant splits share the same IDs.
     te = plan.get("trial_extraction") or {}
@@ -1868,7 +1882,7 @@ def execute_parser_plan_on_rows(
     needs_textual = source_type in _TEXTUAL_ACTION_SOURCES
     observed_labels: List[str] = []
     sample_lines: List[str] = []
-    for row_idx, row in zip(indices, rows):
+    for row_idx, row in _maybe_tqdm(row_pairs, desc=f"{progress_desc} (scan)"):
         text = str(row.get("text") or "")
         instruction = str(row.get("instruction") or "")
         full = instruction + "\n\n" + text if instruction and instruction not in text else text
@@ -1908,7 +1922,7 @@ def execute_parser_plan_on_rows(
 
     all_trials: List[Dict[str, Any]] = []
     errors: List[str] = []
-    for row_idx, row in zip(indices, rows):
+    for row_idx, row in _maybe_tqdm(row_pairs, desc=f"{progress_desc} (apply)"):
         try:
             trials = execute_parser_plan_on_row(
                 plan, row, row_index=row_idx, stats=stats
