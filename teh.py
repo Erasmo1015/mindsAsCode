@@ -96,6 +96,11 @@ _EARLY_STOP_MIN_IMPROVEMENT = 0.005
 _DISABLE_REFINEMENT_FRESH_CANDIDATES = True
 MAX_ERROR_MESSAGE_CHARS = 160
 MAX_INVALID_LINE_CHARS = 160
+ERROR_FEEDBACK_MODES = frozenset({"legacy", "new"})
+DEFAULT_ERROR_FEEDBACK_MODE = "legacy"
+LEGACY_RECENT_ERROR_WINDOW = 3
+LEGACY_KEEP_TOP_FREQUENT = 3
+LEGACY_MAX_ERROR_ITEMS = 8
 MAX_DISTINCT_ERROR_GROUPS = 3
 _ERROR_EVAL_SPLITS_ALLOWED = frozenset({"train", "val", "compile", "unknown"})
 
@@ -167,6 +172,34 @@ def _normalize_error_message_for_grouping(text: Any, max_len: int) -> str:
     return out[: max(0, int(max_len))]
 
 
+def _normalize_error_feedback_mode(error_feedback_mode: str) -> str:
+    mode = str(error_feedback_mode or DEFAULT_ERROR_FEEDBACK_MODE).strip().lower()
+    if mode not in ERROR_FEEDBACK_MODES:
+        raise ValueError(
+            f"error_feedback_mode must be one of {sorted(ERROR_FEEDBACK_MODES)}, got {error_feedback_mode!r}"
+        )
+    return mode
+
+
+class _ErrorFeedbackStore(list):
+    """In-memory error list carrying its run's selected storage semantics."""
+
+    def __init__(self, error_feedback_mode: str):
+        super().__init__()
+        self.error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
+
+
+def _error_feedback_mode_for_store(
+    error_store: List[Dict[str, Any]],
+    error_feedback_mode: Optional[str],
+) -> str:
+    if error_feedback_mode is not None:
+        return _normalize_error_feedback_mode(error_feedback_mode)
+    return _normalize_error_feedback_mode(
+        getattr(error_store, "error_feedback_mode", "new")
+    )
+
+
 def _extract_relevant_invalid_source_line(code: str, exc: BaseException) -> str:
     lines = str(code or "").splitlines()
     if isinstance(exc, SyntaxError):
@@ -214,6 +247,33 @@ def _build_invalid_program_error_entry(
     }
 
 
+def _build_invalid_program_error_entry_legacy(
+    *,
+    code: str,
+    exc: BaseException,
+) -> Optional[Dict[str, str]]:
+    """Exact pre-f169cb4 error-entry construction from commit 2daa9da."""
+    if exc is None:
+        return None
+    line_raw = _extract_relevant_invalid_source_line(code, exc)
+    line = _truncate_text_for_prompt(line_raw, MAX_INVALID_LINE_CHARS) if line_raw else ""
+    error_type = _truncate_text_for_prompt(type(exc).__name__, 80)
+    error_message = _truncate_text_for_prompt(str(exc), MAX_ERROR_MESSAGE_CHARS)
+    norm_type = _normalize_text(error_type, 80)
+    norm_msg = _normalize_text(error_message, MAX_ERROR_MESSAGE_CHARS)
+    norm_line = _normalize_text(line, MAX_INVALID_LINE_CHARS)
+    if norm_line:
+        dedup_key = (norm_type, norm_msg, norm_line)
+    else:
+        dedup_key = (norm_type, norm_msg)
+    return {
+        "invalid_line": line,
+        "error_type": error_type,
+        "error_message": error_message,
+        "normalized_key": "||".join(dedup_key),
+    }
+
+
 def _append_error_history_jsonl(
     history_path: Optional[Path],
     row: Dict[str, Any],
@@ -243,7 +303,7 @@ def _candidate_id_sort_key(candidate_id: Optional[str]) -> Tuple[int, str]:
     return (10**9, text)
 
 
-def _record_invalid_program_error_summary(
+def _record_invalid_program_error_summary_new(
     error_store: List[Dict[str, Any]],
     error_entry: Optional[Dict[str, Any]],
     *,
@@ -325,6 +385,137 @@ def _record_invalid_program_error_summary(
     )
 
 
+def _record_invalid_program_error_summary_legacy(
+    error_store: List[Dict[str, Any]],
+    error_entry: Optional[Dict[str, Any]],
+    *,
+    iteration: int,
+    participant_id: Optional[int],
+    candidate_id: Optional[str],
+    history_path: Optional[Path],
+) -> None:
+    """Exact pre-f169cb4 cumulative store and JSONL format from commit 2daa9da."""
+    if not error_entry:
+        return
+    normalized_key = str(error_entry.get("normalized_key") or "").strip()
+    if not normalized_key:
+        return
+    invalid_line = _truncate_text_for_prompt(
+        error_entry.get("invalid_line", ""), MAX_INVALID_LINE_CHARS
+    )
+    error_type = _truncate_text_for_prompt(error_entry.get("error_type", ""), 80)
+    error_message = _truncate_text_for_prompt(
+        error_entry.get("error_message", ""), MAX_ERROR_MESSAGE_CHARS
+    )
+    if not error_type and not error_message:
+        return
+    matched: Optional[Dict[str, Any]] = None
+    for item in error_store:
+        if item.get("normalized_key") == normalized_key:
+            matched = item
+            break
+    if matched is None:
+        matched = {
+            "normalized_key": normalized_key,
+            "invalid_line": invalid_line,
+            "error_type": error_type,
+            "error_message": error_message,
+            "count": 0,
+            "first_seen_iteration": int(iteration),
+            "last_seen_iteration": int(iteration),
+        }
+        error_store.append(matched)
+    else:
+        if invalid_line:
+            matched["invalid_line"] = invalid_line
+        if error_type:
+            matched["error_type"] = error_type
+        if error_message:
+            matched["error_message"] = error_message
+        matched["last_seen_iteration"] = int(iteration)
+    matched["count"] = int(matched.get("count", 0)) + 1
+    _append_error_history_jsonl(
+        history_path,
+        {
+            "iteration": int(iteration),
+            "participant_id": int(participant_id) if participant_id is not None else None,
+            "candidate_id": candidate_id,
+            "invalid_line": invalid_line or None,
+            "error_type": error_type,
+            "error_message": error_message,
+            "normalized_key": normalized_key,
+            "count": int(matched["count"]),
+            "last_seen_iteration": int(matched["last_seen_iteration"]),
+        },
+    )
+
+
+def _legacy_error_entry_from_display_fields(
+    error_entry: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Recreate the historical key for rich evaluator entries produced by current code."""
+    if not error_entry:
+        return None
+    invalid_line = _truncate_text_for_prompt(
+        error_entry.get("invalid_line", ""), MAX_INVALID_LINE_CHARS
+    )
+    error_type = _truncate_text_for_prompt(error_entry.get("error_type", ""), 80)
+    error_message = _truncate_text_for_prompt(
+        error_entry.get("error_message", ""), MAX_ERROR_MESSAGE_CHARS
+    )
+    norm_type = _normalize_text(error_type, 80)
+    norm_msg = _normalize_text(error_message, MAX_ERROR_MESSAGE_CHARS)
+    norm_line = _normalize_text(invalid_line, MAX_INVALID_LINE_CHARS)
+    if not norm_type and not norm_msg:
+        return None
+    parts = (norm_type, norm_msg, norm_line) if norm_line else (norm_type, norm_msg)
+    return {
+        "invalid_line": invalid_line,
+        "error_type": error_type,
+        "error_message": error_message,
+        "normalized_key": "||".join(parts),
+    }
+
+
+def _record_invalid_program_error_summary(
+    error_store: List[Dict[str, Any]],
+    error_entry: Optional[Dict[str, Any]],
+    *,
+    iteration: int,
+    participant_id: Optional[int],
+    candidate_id: Optional[str],
+    history_path: Optional[Path],
+    quality_score: Optional[float] = None,
+    eval_split: str = "unknown",
+    n_candidates_in_iteration: Optional[int] = None,
+    error_feedback_mode: Optional[str] = None,
+) -> None:
+    mode = _error_feedback_mode_for_store(error_store, error_feedback_mode)
+    if str(eval_split or "unknown").strip().lower() == "test":
+        return
+    if mode == "legacy":
+        _record_invalid_program_error_summary_legacy(
+            error_store,
+            _legacy_error_entry_from_display_fields(error_entry),
+            iteration=iteration,
+            participant_id=participant_id,
+            candidate_id=candidate_id,
+            history_path=history_path,
+        )
+        return
+    _record_invalid_program_error_summary_new(
+        error_store,
+        error_entry,
+        iteration=iteration,
+        participant_id=participant_id,
+        candidate_id=candidate_id,
+        history_path=history_path,
+        quality_score=quality_score,
+        eval_split=eval_split,
+        n_candidates_in_iteration=n_candidates_in_iteration,
+    )
+
+
 def _record_invalid_program_error(
     error_store: List[Dict[str, Any]],
     *,
@@ -337,10 +528,16 @@ def _record_invalid_program_error(
     quality_score: Optional[float] = None,
     eval_split: str = "unknown",
     n_candidates_in_iteration: Optional[int] = None,
+    error_feedback_mode: Optional[str] = None,
 ) -> None:
     if exc is None:
         return
-    entry = _build_invalid_program_error_entry(code=code, exc=exc)
+    mode = _error_feedback_mode_for_store(error_store, error_feedback_mode)
+    entry = (
+        _build_invalid_program_error_entry_legacy(code=code, exc=exc)
+        if mode == "legacy"
+        else _build_invalid_program_error_entry(code=code, exc=exc)
+    )
     _record_invalid_program_error_summary(
         error_store,
         entry,
@@ -351,6 +548,7 @@ def _record_invalid_program_error(
         quality_score=quality_score,
         eval_split=eval_split,
         n_candidates_in_iteration=n_candidates_in_iteration,
+        error_feedback_mode=mode,
     )
 
 
@@ -460,7 +658,7 @@ def _group_errors_from_previous_iteration(
     return grouped
 
 
-def _select_errors_for_prompt(
+def _select_errors_for_prompt_new(
     error_store: List[Dict[str, Any]],
     *,
     iteration: Optional[int],
@@ -478,17 +676,92 @@ def _select_errors_for_prompt(
     return grouped[:limit]
 
 
+def _select_errors_for_prompt_legacy(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Exact pre-f169cb4 selection and ordering from commit 2daa9da."""
+    if not error_store:
+        return []
+    if iteration is None:
+        recency_floor = -10**9
+    else:
+        recency_floor = int(iteration) - int(LEGACY_RECENT_ERROR_WINDOW) + 1
+    recent = [
+        item
+        for item in error_store
+        if int(item.get("last_seen_iteration", -10**9)) >= recency_floor
+    ]
+    recent.sort(
+        key=lambda x: (
+            -int(x.get("last_seen_iteration", -10**9)),
+            -int(x.get("count", 0)),
+        )
+    )
+    selected: List[Dict[str, Any]] = []
+    seen_keys: Set[str] = set()
+    for item in recent:
+        key = str(item.get("normalized_key") or "")
+        if key and key not in seen_keys:
+            selected.append(item)
+            seen_keys.add(key)
+        if len(selected) >= int(LEGACY_MAX_ERROR_ITEMS):
+            return selected
+    frequent = sorted(
+        error_store,
+        key=lambda x: (
+            -int(x.get("count", 0)),
+            -int(x.get("last_seen_iteration", -10**9)),
+        ),
+    )
+    keep_top = int(max(0, LEGACY_KEEP_TOP_FREQUENT))
+    kept = 0
+    for item in frequent:
+        key = str(item.get("normalized_key") or "")
+        if not key or key in seen_keys:
+            continue
+        selected.append(item)
+        seen_keys.add(key)
+        kept += 1
+        if kept >= keep_top or len(selected) >= int(LEGACY_MAX_ERROR_ITEMS):
+            break
+    return selected[: int(LEGACY_MAX_ERROR_ITEMS)]
+
+
+def _select_errors_for_prompt(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+    max_distinct_error_groups: int = MAX_DISTINCT_ERROR_GROUPS,
+    previous_n_candidates: Optional[int] = None,
+    error_feedback_mode: str = "new",
+) -> List[Dict[str, Any]]:
+    mode = _normalize_error_feedback_mode(error_feedback_mode)
+    if mode == "legacy":
+        return _select_errors_for_prompt_legacy(error_store, iteration=iteration)
+    return _select_errors_for_prompt_new(
+        error_store,
+        iteration=iteration,
+        max_distinct_error_groups=max_distinct_error_groups,
+        previous_n_candidates=previous_n_candidates,
+    )
+
+
 def _count_previous_iteration_error_groups(
     error_store: List[Dict[str, Any]],
     *,
     iteration: Optional[int],
+    error_feedback_mode: str = "new",
 ) -> int:
+    if _normalize_error_feedback_mode(error_feedback_mode) == "legacy":
+        return len(error_store)
     return len(
         _group_errors_from_previous_iteration(error_store, iteration=iteration)
     )
 
 
-def _build_past_error_prompt_section(
+def _build_past_error_prompt_section_new(
     error_store: List[Dict[str, Any]],
     *,
     iteration: Optional[int],
@@ -553,6 +826,77 @@ def _build_past_error_prompt_section(
     if not items:
         return ""
     return header + "\n\n".join(items)
+
+
+def _build_past_error_prompt_section_legacy(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+    max_error_prompt_chars: int,
+) -> str:
+    """Exact pre-f169cb4 prompt wording and item packing from commit 2daa9da."""
+    if not error_store:
+        return ""
+    max_chars = int(max_error_prompt_chars)
+    if max_chars <= 0:
+        return ""
+    selected = _select_errors_for_prompt_legacy(error_store, iteration=iteration)
+    if not selected:
+        return ""
+    items: List[str] = []
+    used = 0
+    for entry in selected:
+        line = str(entry.get("invalid_line") or "").strip()
+        err_type = str(entry.get("error_type") or "").strip()
+        err_msg = str(entry.get("error_message") or "").strip()
+        if not err_type and not err_msg:
+            continue
+        err = f"{err_type}: {err_msg}" if err_msg else err_type
+        if line:
+            item = f"- Line: {line}\n  Error: {err}"
+        else:
+            item = f"- Error: {err}"
+        projected = used + len(item) + (2 if items else 0)
+        if projected > max_chars and items:
+            break
+        if projected > max_chars:
+            continue
+        items.append(item)
+        used = projected
+    if not items:
+        return ""
+    past_error_summary = "\n\n".join(items)
+    return (
+        "Past invalid-program errors to avoid:\n"
+        "The following are previous invalid generated-program mistakes. Do not repeat them. "
+        "Each item shows the invalid line, when available, and the error it caused.\n\n"
+        f"{past_error_summary}"
+    )
+
+
+def _build_past_error_prompt_section(
+    error_store: List[Dict[str, Any]],
+    *,
+    iteration: Optional[int],
+    max_error_prompt_chars: int,
+    max_distinct_error_groups: int = MAX_DISTINCT_ERROR_GROUPS,
+    previous_n_candidates: Optional[int] = None,
+    error_feedback_mode: str = "new",
+) -> str:
+    mode = _normalize_error_feedback_mode(error_feedback_mode)
+    if mode == "legacy":
+        return _build_past_error_prompt_section_legacy(
+            error_store,
+            iteration=iteration,
+            max_error_prompt_chars=max_error_prompt_chars,
+        )
+    return _build_past_error_prompt_section_new(
+        error_store,
+        iteration=iteration,
+        max_error_prompt_chars=max_error_prompt_chars,
+        max_distinct_error_groups=max_distinct_error_groups,
+        previous_n_candidates=previous_n_candidates,
+    )
 
 
 def _write_iteration_error_prompt_file(
@@ -1974,12 +2318,14 @@ def run_global_evolution_phase(
     prompt_debug_exit: bool = False,
     evolution_selection_score: str = "train_val",
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
 
     Runs before per-participant evolution when ``--global_phase`` and ``--phase all``.
     """
+    error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     participant_ids = [int(p) for p in participants]
     pooled_train = _collect_pooled_train_trials_for_participants(
         dataset,
@@ -2066,7 +2412,9 @@ def run_global_evolution_phase(
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
     last_significant_best = baseline_fitness
     stagnant_iters = 0
-    invalid_candidate_errors: List[Dict[str, Any]] = []
+    invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
+        error_feedback_mode
+    )
     error_history_path = global_dir / "error_history.jsonl"
     if early_stop_patience is not None:
         print(
@@ -2148,11 +2496,14 @@ def run_global_evolution_phase(
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
             previous_n_candidates=n_candidates_per_iteration,
+            error_feedback_mode=error_feedback_mode,
         )
         _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         error_prompt_chars_used = len(error_prompt_section)
         num_unique_errors_available = _count_previous_iteration_error_groups(
-            invalid_candidate_errors, iteration=iteration_step
+            invalid_candidate_errors,
+            iteration=iteration_step,
+            error_feedback_mode=error_feedback_mode,
         )
         print(
             "Error prompt summary: "
@@ -2187,6 +2538,7 @@ def run_global_evolution_phase(
             "past_invalid_program_errors": invalid_candidate_errors,
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
+            "error_feedback_mode": error_feedback_mode,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -2315,7 +2667,7 @@ def run_global_evolution_phase(
         print(
             "Iteration invalid summary: "
             f"num_invalid_candidates={num_invalid_candidates}, "
-            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1)}, "
+            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1, error_feedback_mode=error_feedback_mode)}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
 
@@ -3365,6 +3717,7 @@ def run_loglik_refinement_phase(
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
 ) -> Optional[float]:
     """
     Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
@@ -3373,6 +3726,7 @@ def run_loglik_refinement_phase(
     evolution elite pool is copied in evolution order (no re-sort). Otherwise falls back to a
     single-program pool from ``initial_code``.
     """
+    error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     if not val_trials or not test_trials or n_iterations < 1:
         return None
 
@@ -3462,7 +3816,9 @@ def run_loglik_refinement_phase(
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
     last_significant_best = float(elite_parents[0][1])
     stagnant_iters = 0
-    invalid_candidate_errors: List[Dict[str, Any]] = []
+    invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
+        error_feedback_mode
+    )
     error_history_path = (
         (output_path / "error_history.jsonl")
         if output_path is not None
@@ -3560,11 +3916,14 @@ def run_loglik_refinement_phase(
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
             previous_n_candidates=n_candidates_per_iteration,
+            error_feedback_mode=error_feedback_mode,
         )
         _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         error_prompt_chars_used = len(error_prompt_section)
         num_unique_errors_available = _count_previous_iteration_error_groups(
-            invalid_candidate_errors, iteration=iteration_step
+            invalid_candidate_errors,
+            iteration=iteration_step,
+            error_feedback_mode=error_feedback_mode,
         )
         print(
             "Error prompt summary: "
@@ -3607,6 +3966,7 @@ def run_loglik_refinement_phase(
             "past_invalid_program_errors": invalid_candidate_errors,
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
+            "error_feedback_mode": error_feedback_mode,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -3747,7 +4107,7 @@ def run_loglik_refinement_phase(
         print(
             "Iteration invalid summary: "
             f"num_invalid_candidates={num_invalid_candidates}, "
-            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1)}, "
+            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1, error_feedback_mode=error_feedback_mode)}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
 
@@ -4254,6 +4614,7 @@ def run_loglik_refine_participant_from_checkpoint(
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -4394,6 +4755,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "strict_prompt_budget": strict_prompt_budget,
         "prompt_token_estimator": prompt_token_estimator,
         "max_error_prompt_chars": max_error_prompt_chars,
+        "error_feedback_mode": error_feedback_mode,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
         ref_parents, ref_vals = _load_evolution_elite_pool(
@@ -4483,6 +4845,7 @@ def run_loglik_refine_from_prev_experiment(
     strict_prompt_budget: bool = True,
     prompt_token_estimator: str = "char4",
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -4601,6 +4964,7 @@ def run_loglik_refine_from_prev_experiment(
             strict_prompt_budget=strict_prompt_budget,
             prompt_token_estimator=prompt_token_estimator,
             max_error_prompt_chars=max_error_prompt_chars,
+            error_feedback_mode=error_feedback_mode,
         )
         return int(participant_id), metrics
 
@@ -6894,6 +7258,7 @@ def generate_program_variants(
     past_invalid_program_errors: Optional[List[Dict[str, Any]]] = None,
     past_error_prompt_section: Optional[str] = None,
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = "new",
     explain_mode: bool = False,
     explain_suffix: Optional[str] = None,
     explain_artifacts_out: Optional[List[Dict[str, Any]]] = None,
@@ -7043,6 +7408,7 @@ Provide only the code for choose(...) as a complete function body.
             list(past_invalid_program_errors),
             iteration=iteration,
             max_error_prompt_chars=max_error_prompt_chars,
+            error_feedback_mode=error_feedback_mode,
         ).strip()
     if error_section:
         base_prompt = f"{base_prompt.rstrip()}\n\n{error_section}\n"
@@ -7684,6 +8050,7 @@ def run_evolution(
     prompt_debug_exit: bool = False,
     evolution_selection_score: str = "train_val",
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -7702,6 +8069,7 @@ def run_evolution(
         client_kwargs: Optional OpenAI client kwargs (for local vLLM server)
         output_dir: Optional output directory for saving results
     """
+    error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     if fitness_metric not in ("accuracy", "loglik"):
         raise ValueError(f"Invalid fitness_metric: {fitness_metric!r} (expected 'accuracy' or 'loglik')")
     if not is_binary_loglik_dataset(dataset):
@@ -7720,7 +8088,9 @@ def run_evolution(
         evolution_selection_score, fitness_metric
     )
     selection_warn_key = f"p{participant_id}"
-    invalid_candidate_errors: List[Dict[str, Any]] = []
+    invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
+        error_feedback_mode
+    )
 
     val_trials: List[Dict[str, Any]] = []
 
@@ -8370,11 +8740,14 @@ def run_evolution(
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
             previous_n_candidates=n_candidates_per_iteration,
+            error_feedback_mode=error_feedback_mode,
         )
         _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         error_prompt_chars_used = len(error_prompt_section)
         num_unique_errors_available = _count_previous_iteration_error_groups(
-            invalid_candidate_errors, iteration=iteration_step
+            invalid_candidate_errors,
+            iteration=iteration_step,
+            error_feedback_mode=error_feedback_mode,
         )
         print(
             "Error prompt summary: "
@@ -8418,6 +8791,7 @@ def run_evolution(
             "past_invalid_program_errors": invalid_candidate_errors,
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
+            "error_feedback_mode": error_feedback_mode,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -8881,7 +9255,7 @@ def run_evolution(
         print(
             "Iteration invalid summary: "
             f"num_invalid_candidates={num_invalid_candidates}, "
-            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1)}, "
+            f"num_unique_errors_available={_count_previous_iteration_error_groups(invalid_candidate_errors, iteration=iteration_step + 1, error_feedback_mode=error_feedback_mode)}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
             
@@ -9893,6 +10267,7 @@ def run_evolution(
             strict_prompt_budget=strict_prompt_budget,
             prompt_token_estimator=prompt_token_estimator,
             max_error_prompt_chars=max_error_prompt_chars,
+            error_feedback_mode=error_feedback_mode,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -10432,6 +10807,26 @@ def _write_command_line_log(run_dir: Path) -> Path:
     return path
 
 
+def _write_run_metadata(run_dir: Path, *, error_feedback_mode: str) -> Path:
+    """Persist resolved defaults that may be absent from command.txt."""
+    log_dir = run_dir / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "run_metadata.json"
+    path.write_text(
+        json.dumps(
+            {
+                "error_feedback_mode": _normalize_error_feedback_mode(
+                    error_feedback_mode
+                )
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _csv_fieldnames_from_rows(rows: List[Dict[str, Any]]) -> List[str]:
     """Union of dict keys across rows, preserving order from the first row then appending extras."""
     if not rows:
@@ -10918,6 +11313,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--error-feedback-mode",
+        "--error_feedback_mode",
+        dest="error_feedback_mode",
+        choices=sorted(ERROR_FEEDBACK_MODES),
+        default=DEFAULT_ERROR_FEEDBACK_MODE,
+        help=(
+            "Error feedback semantics: legacy reproduces the pre-f169cb4 cumulative "
+            "EMNLP behavior; new uses previous-iteration-only contextual groups. "
+            "Default: legacy."
+        ),
+    )
+    parser.add_argument(
         "--warn_parent_truncation_ratio",
         type=float,
         default=0.5,
@@ -11320,6 +11727,10 @@ def main():
 
     cmd_log = _write_command_line_log(Path(base_run_dir))
     print(f"Wrote full command line to {cmd_log}")
+    metadata_log = _write_run_metadata(
+        Path(base_run_dir), error_feedback_mode=args.error_feedback_mode
+    )
+    print(f"Wrote resolved run metadata to {metadata_log}")
 
     seed_program_path = _resolve_default_seed_program_path(args, 0)
 
@@ -11390,6 +11801,7 @@ def main():
             prompt_debug_exit=args.prompt_debug_exit,
             evolution_selection_score=args.evolution_selection_score,
             max_error_prompt_chars=args.max_error_prompt_chars,
+            error_feedback_mode=args.error_feedback_mode,
         )
 
     if args.phase == "refine":
@@ -11444,6 +11856,7 @@ def main():
                 strict_prompt_budget=args.strict_prompt_budget,
                 prompt_token_estimator=args.prompt_token_estimator,
                 max_error_prompt_chars=args.max_error_prompt_chars,
+                error_feedback_mode=args.error_feedback_mode,
             )
         finally:
             if wandb is not None:
@@ -11558,6 +11971,7 @@ def main():
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
+                error_feedback_mode=args.error_feedback_mode,
             )
         finally:
             if wandb is not None:
@@ -11646,6 +12060,7 @@ def main():
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
+                error_feedback_mode=args.error_feedback_mode,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -12038,6 +12453,7 @@ def main():
                         prompt_debug_exit=args.prompt_debug_exit,
                         evolution_selection_score=args.evolution_selection_score,
                         max_error_prompt_chars=args.max_error_prompt_chars,
+                        error_feedback_mode=args.error_feedback_mode,
                         ablation=args.ablation,
                     )
                 
@@ -12318,6 +12734,7 @@ def main():
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
+                error_feedback_mode=args.error_feedback_mode,
             )
 
         try:

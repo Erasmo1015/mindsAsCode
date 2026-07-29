@@ -80,6 +80,17 @@ def _clamp_prob(p: float) -> float:
     return min(max(float(p), LOGLIK_EPS), 1.0 - LOGLIK_EPS)
 
 
+def _build_eval_error_entry(source_code: Any, exc: BaseException) -> Any:
+    """Exception type + message + errored source line; falls back to the message."""
+    if not isinstance(source_code, str) or not source_code:
+        return str(exc)
+    try:
+        from teh import _build_invalid_program_error_entry
+    except Exception:
+        return str(exc)
+    return _build_invalid_program_error_entry(code=source_code, exc=exc) or str(exc)
+
+
 def evaluate_categorical_program(
     choose_fn: Callable,
     trials: List[Dict[str, Any]],
@@ -94,7 +105,8 @@ def evaluate_categorical_program(
     seed_avg_accs: List[float] = []
     total_warnings = 0
     total_errors = 0
-    first_error: Optional[str] = None
+    first_error: Optional[Any] = None
+    source_code = getattr(choose_fn, "__teh_source_code", None)
 
     def _one_pass(seed_idx: int) -> Tuple[float, float, int, int]:
         nonlocal first_error
@@ -123,7 +135,7 @@ def evaluate_categorical_program(
             except Exception as exc:
                 errors += 1
                 if first_error is None:
-                    first_error = str(exc)
+                    first_error = _build_eval_error_entry(source_code, exc)
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error: {exc}")
                 K = len(valid_ids)

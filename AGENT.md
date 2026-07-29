@@ -345,3 +345,35 @@ Audit of priority run **`generated_outputs_teh_psych/run_260716_111935`** (56/57
 - **Info-search:** `type <<color>>` → non-prediction context; `type <<stop>>` → prediction (krueger-style).
 - **Leak / lists:** drop `response_key`-like stimulus fields; fix `A, B, and C` → `['A','B','C']`; doors/gambles labeled patterns.
 - **Rerun:** full priority set from scratch with same settings — `sbatch cluster/teh_psych/1.sh` (fresh plans; writes a new `generated_outputs_teh_psych/run_*`). Context: `analysis/report/260715_teh_psych/psych101_remaining_reparsing_work.md`.
+
+---
+
+## Impl notes (Jul 29 2026 — EMNLP fairness + three teh_psych auto-parse datasets)
+
+### EMNLP manual Psych-101 (minimal fairness)
+
+Repaired only four EMNLP aliases; left Peterson, Frey CCT, Wulff, Hilbig, Enkavi, and `mixed_gambles` unchanged (with regression hashes).
+
+- **`2plonsky2018when`:** same-event feedback only (no cross-trial lookahead); recognise gain/lose; no silent key drops; recover duplicated option labels when deterministically recoverable.
+- **`5speekenbrink2008learning` / `10frey2017risk` / `12badham2017deficits`:** strip current post-choice fields from PICS `problem` via `_CURRENT_PROBLEM_EXCLUDED_FIELDS` in `data_modules/psych101_binary.py` (`weather_outcome`/`was_correct`, `outcome_marker`/`exploded`, `response_key`/`correct_category`). Feedback remains in history for later trials.
+- **Baselines:** `baseline_methods/psych101_features.py` derives Badham category features from history only; OpenEvolve compact formatting drops leaked fields. Centaur subtype detection no longer depends on current `correct_category`.
+- **Reports / tests:** `analysis/report/260715_teh_psych/0729/emnlp_minimal_fairness_repairs/`, `emnlp_remaining_baseline_repairs/`; `tests/test_emnlp_minimal_fairness_repairs.py`, `tests/test_emnlp_remaining_baseline_repairs.py`.
+
+### Automatic `teh_psych` datasets (bahrami + levering)
+
+Three genuinely new auto-parsed datasets from `safe8_deep_audit`, repaired without an LLM reparse by editing cached plans under `generated_outputs_teh_psych/run_260722_004944/parse_plan_cache/`.
+
+- **Engine:** new `option_normalization.strategy = fixed_keys_from_instruction_exact` in `utils/teh_psych/parser_plan.py` — option set comes only from the plan’s `instruction_regex` (single-letter keys kept even when the letter is `A`; no intersect with observed presses). Plain `fixed_keys_from_instruction` still drop `A` via stopword filtering and is **not** enough.
+- **`bahrami2020four/exp.csv`:** switch to exact instructed four-key regex. Pre-fix: 11/50 participants at K=3 and 297 `A` presses dropped (6986 vs 7283). Post-fix: **7283/7283**, K=4 everywhere.
+- **`levering2020revisiting/exp1.csv`:** relax `image_code` regex to exp2’s `You see the image (\d+)` (restores final-eight test stimuli) **and** exact instructed category keys (recovers participants whose labels include `A`).
+- **`levering2020revisiting/exp2.csv`:** exact instructed keys only (same `A`-drop issue; stimulus already fine). Both Levering slices: **7900/7900**, no missing `image_code`.
+- **Rerun these three only:** `--experiment_ids bahrami2020four/exp.csv,levering2020revisiting/exp1.csv,levering2020revisiting/exp2.csv` with `--reuse_parse_plan_cache --parse_plan_cache_dir generated_outputs_teh_psych/run_260722_004944/parse_plan_cache --require_cached_parse_plan`. Do **not** include Badham’s auto-parse path here (same experiment as EMNLP Badham via a different parser).
+
+---
+
+## Impl notes (Jul 29 2026 — error-feedback modes)
+
+- **CLI:** `--error-feedback-mode {legacy,new}` (also `--error_feedback_mode`) on **`teh.py`** and **`prototype/teh_psych.py`**.
+- **Default:** **`legacy`** — exact pre-redesign cumulative EMNLP error feedback (recency window, frequent-error injection, “Do not repeat them.” wording). Existing cluster scripts need no new flags.
+- **`new`:** previous-iteration-only contextual groups from the Jul 29 redesign. Pass `--error-feedback-mode new` explicitly.
+- **Metadata:** resolved mode written to `log/run_metadata.json`. Use a fresh run dir if switching modes (legacy vs new `error_history.jsonl` formats differ).

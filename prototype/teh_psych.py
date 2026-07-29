@@ -26,8 +26,11 @@ if str(_REPO_ROOT) not in sys.path:
 from data_modules.psych101_binary import DEFAULT_PSYCH_DATASET_SPLIT, hf_id_for_psych_dataset_split
 from teh import (
     BEST_PROGRAM_FILENAME,
+    DEFAULT_ERROR_FEEDBACK_MODE,
+    ERROR_FEEDBACK_MODES,
     _normalize_early_stop_iters,
     _write_command_line_log,
+    _write_run_metadata,
     compile_program,
     load_seed_program,
 )
@@ -860,6 +863,7 @@ def process_one_experiment(
                 run_prompts_dir=str(prompts_dir),
                 dataset_label=experiment_id,
                 simple_log=args.simple_log,
+                error_feedback_mode=args.error_feedback_mode,
             )
         else:
             if client is None:
@@ -894,6 +898,7 @@ def process_one_experiment(
                 prompt_debug_exit=args.prompt_debug_exit,
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
+                error_feedback_mode=args.error_feedback_mode,
                 max_parent_chars=args.max_parent_chars,
                 warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
                 dataset_label=experiment_id,
@@ -1074,6 +1079,14 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt_debug_on_no_valid", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--prompt_debug_exit", action="store_true")
     parser.add_argument("--max_error_prompt_chars", type=int, default=1200)
+    parser.add_argument(
+        "--error-feedback-mode",
+        "--error_feedback_mode",
+        dest="error_feedback_mode",
+        choices=sorted(ERROR_FEEDBACK_MODES),
+        default=DEFAULT_ERROR_FEEDBACK_MODE,
+        help="legacy reproduces cumulative EMNLP feedback; new uses previous-iteration groups",
+    )
     parser.add_argument("--max_parent_chars", type=int, default=6000)
     parser.add_argument("--warn_parent_truncation_ratio", type=float, default=0.5)
     parser.add_argument(
@@ -1105,6 +1118,7 @@ def main() -> int:
         run_dir = _make_unique_run_dir(_teh_psych_output_dir(timestamp, ablation=args.ablation))
     summary_dir = ensure_summary_dir(run_dir, args.prototype_summary_dir)
     _write_command_line_log(run_dir)
+    _write_run_metadata(run_dir, error_feedback_mode=args.error_feedback_mode)
 
     if args.parse_plan_cache_dir:
         parse_plan_cache_dir = Path(args.parse_plan_cache_dir).expanduser()

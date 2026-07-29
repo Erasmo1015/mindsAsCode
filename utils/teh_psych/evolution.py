@@ -12,18 +12,27 @@ from openai import OpenAI
 
 from teh import (
     BEST_PROGRAM_FILENAME,
+    DEFAULT_ERROR_FEEDBACK_MODE,
+    MAX_ERROR_MESSAGE_CHARS,
+    MAX_INVALID_LINE_CHARS,
     _EARLY_STOP_MIN_IMPROVEMENT,
+    _ErrorFeedbackStore,
     _build_past_error_prompt_section,
     _decayed_fresh_n_for_iteration,
     _evolution_selection_score,
     _generate_iteration_candidate_codes,
     _normalize_early_stop_iters,
+    _normalize_error_feedback_mode,
+    _normalize_error_message_for_grouping,
+    _normalize_text,
     _record_invalid_program_error,
     _record_invalid_program_error_summary,
+    _safe_float,
     _sanitize_llm_python_candidate,
     _select_parent_indices_from_elite_pool,
     _train_loglik_from_elite_tuple,
     _uses_train_val_evolution_selection,
+    _write_iteration_error_prompt_file,
     compile_program,
     compile_program_with_error,
     load_seed_program,
@@ -33,24 +42,26 @@ from utils.teh_psych.categorical_eval import evaluate_categorical_program
 EliteTuple = Tuple[Any, ...]
 
 
+def _eval_error_grouping_key(error_type: str, error_message: str, invalid_line: str) -> str:
+    """Same grouping key format as teh._build_invalid_program_error_entry."""
+    norm_type = _normalize_text(error_type, 80)
+    norm_msg = _normalize_error_message_for_grouping(error_message, MAX_ERROR_MESSAGE_CHARS)
+    norm_line = _normalize_text(invalid_line, MAX_INVALID_LINE_CHARS)
+    parts = (norm_type, norm_msg, norm_line) if norm_line else (norm_type, norm_msg)
+    return "||".join(parts)
+
+
 def _coerce_eval_error_entry(error_entry: Any) -> Optional[Dict[str, Any]]:
     if error_entry is None:
         return None
-    if isinstance(error_entry, str):
-        msg = error_entry.strip()
-        if not msg:
-            return None
-        return {
-            "normalized_key": msg,
-            "error_message": msg,
-            "error_type": "EvalError",
-            "invalid_line": "",
-        }
     if isinstance(error_entry, dict):
         return error_entry
+    msg = str(error_entry).strip()
+    if not msg:
+        return None
     return {
-        "normalized_key": str(error_entry),
-        "error_message": str(error_entry),
+        "normalized_key": _eval_error_grouping_key("EvalError", msg, ""),
+        "error_message": msg,
         "error_type": "EvalError",
         "invalid_line": "",
     }
@@ -96,6 +107,7 @@ def run_population_evolution(
     prompt_debug_exit: bool = False,
     evolution_selection_score: str = "train_val",
     max_error_prompt_chars: int = 1200,
+    error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_parent_chars: int = 6000,
     warn_parent_truncation_ratio: float = 0.5,
     dataset_label: str = "population",
@@ -104,6 +116,7 @@ def run_population_evolution(
     """
     Cross-participant population evolution on pooled categorical train trials.
     """
+    error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     if not pooled_train:
         raise ValueError("pooled_train is empty")
     evolution_selection_score = str(evolution_selection_score).strip().lower()
@@ -142,7 +155,9 @@ def run_population_evolution(
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
     last_significant_best = baseline_fitness
     stagnant_iters = 0
-    invalid_candidate_errors: List[Dict[str, Any]] = []
+    invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
+        error_feedback_mode
+    )
     error_history_path = pop_dir / "error_history.jsonl"
 
     if elite_pool_size is None:
@@ -194,7 +209,10 @@ def run_population_evolution(
             invalid_candidate_errors,
             iteration=iteration_step,
             max_error_prompt_chars=max_error_prompt_chars,
+            previous_n_candidates=n_candidates_per_iteration,
+            error_feedback_mode=error_feedback_mode,
         )
+        _write_iteration_error_prompt_file(iter_dir, error_prompt_section)
         fresh_n = _decayed_fresh_n_for_iteration(
             fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
         )
@@ -225,6 +243,7 @@ def run_population_evolution(
             "past_invalid_program_errors": invalid_candidate_errors,
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
+            "error_feedback_mode": error_feedback_mode,
         }
         candidate_codes, _ = _generate_iteration_candidate_codes(
             client=client,
@@ -255,6 +274,8 @@ def run_population_evolution(
                     iteration=iteration_step,
                     participant_id=None,
                     candidate_id=f"candidate_{idx}",
+                    eval_split="compile",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 continue
@@ -266,6 +287,9 @@ def run_population_evolution(
                     iteration=iteration_step,
                     participant_id=None,
                     candidate_id=f"candidate_{idx}",
+                    quality_score=_safe_float(train_eval.get("avg_loglik")),
+                    eval_split="train",
+                    n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
                 continue
@@ -274,6 +298,17 @@ def run_population_evolution(
             if use_train_val and pooled_val:
                 val_eval = _evaluate_categorical_loglik(choose_fn, pooled_val, n_seeds=n_eval_seeds)
                 if val_eval.get("errors", 0) != 0:
+                    _record_invalid_program_error_summary(
+                        invalid_candidate_errors,
+                        _coerce_eval_error_entry(val_eval.get("first_error")),
+                        iteration=iteration_step,
+                        participant_id=None,
+                        candidate_id=f"candidate_{idx}",
+                        quality_score=_safe_float(train_loglik),
+                        eval_split="val",
+                        n_candidates_in_iteration=n_candidates_per_iteration,
+                        history_path=error_history_path,
+                    )
                     continue
                 val_loglik = float(val_eval["avg_loglik"])
             fitness = (
@@ -304,6 +339,7 @@ def run_population_evolution(
                     "pool_best_train_loglik": pool_best_ll,
                     "pool_best_selection_score": pool_best_selection,
                     "pool_size": len(elite_parents),
+                    "error_feedback_mode": error_feedback_mode,
                 },
                 indent=2,
             ),
