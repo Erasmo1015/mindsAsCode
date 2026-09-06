@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
@@ -37,8 +38,21 @@ def _load_annotations(path: Path) -> Dict[str, Dict[str, Any]]:
     return by_id
 
 
+def _discover_trace_files(run_dir: Path) -> List[Path]:
+    """Find mem_trace.jsonl under run_dir, including symlinked participant folders."""
+    run_dir = Path(run_dir)
+    found: Set[Path] = set()
+    direct = run_dir / "mem_trace.jsonl"
+    if direct.is_file():
+        found.add(direct.resolve())
+    for root, _dirs, files in os.walk(run_dir, followlinks=True):
+        if "mem_trace.jsonl" in files:
+            found.add((Path(root) / "mem_trace.jsonl").resolve())
+    return sorted(found)
+
+
 def _iter_candidate_traces(run_dir: Path) -> Iterable[Dict[str, Any]]:
-    for path in sorted(run_dir.rglob("mem_trace.jsonl")):
+    for path in _discover_trace_files(run_dir):
         for rec in iter_jsonl_records([path]):
             if rec.get("record_type") == "candidate":
                 yield rec

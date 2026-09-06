@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -48,8 +49,17 @@ def _parse_json_payload(text: str) -> Any:
 
 
 def _discover_trace_files(run_dir: Path) -> List[Path]:
-    return sorted(run_dir.rglob("mem_trace.jsonl"))
-
+    """Find mem_trace.jsonl under run_dir, including symlinked participant folders."""
+    run_dir = Path(run_dir)
+    found: Set[Path] = set()
+    direct = run_dir / "mem_trace.jsonl"
+    if direct.is_file():
+        found.add(direct.resolve())
+    # pathlib rglob does not descend into directory symlinks; walk with followlinks.
+    for root, _dirs, files in os.walk(run_dir, followlinks=True):
+        if "mem_trace.jsonl" in files:
+            found.add((Path(root) / "mem_trace.jsonl").resolve())
+    return sorted(found)
 
 def _load_grouped_candidates(
     trace_files: Sequence[Path],
@@ -152,6 +162,11 @@ def _annotate_batch(
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
+    print(
+        f"[annotate] LLM call: n={len(batch)} ids={expected_ids} "
+        f"est_prompt_tokens~{estimate_tokens_char4(_SYSTEM_PROMPT + user_prompt)} ...",
+        flush=True,
+    )
     resp = client.chat.completions.create(
         model=model_name,
         messages=messages,
@@ -159,6 +174,7 @@ def _annotate_batch(
         max_tokens=max_tokens,
     )
     raw = resp.choices[0].message.content or ""
+    print(f"[annotate] LLM returned {len(raw)} chars", flush=True)
     try:
         payload = _parse_json_payload(raw)
     except json.JSONDecodeError as exc:
@@ -277,9 +293,18 @@ def main() -> None:
     trace_files = _discover_trace_files(run_dir)
     if not trace_files:
         raise SystemExit(f"No mem_trace.jsonl under {run_dir}")
+    print(
+        f"[annotate] Found {len(trace_files)} mem_trace file(s); "
+        f"server={args.llm_server_url}; model={args.model_name}",
+        flush=True,
+    )
 
     contexts, candidates = _load_grouped_candidates(trace_files)
     completed = _load_completed_ids(out_jsonl)
+    print(
+        f"[annotate] Groups={len(candidates)}; already_done={len(completed)}",
+        flush=True,
+    )
 
     client_kwargs: Dict[str, Any] = {}
     if args.mode == "local":
@@ -288,10 +313,12 @@ def main() -> None:
 
     base_prompt_chars = len(_SYSTEM_PROMPT) + 800
     n_written = 0
+    pending_total = 0
+    planned: List[Tuple[Tuple[Any, ...], List[Dict[str, Any]], str, List[List[Dict[str, Any]]]]] = []
     for key, cand_list in sorted(candidates.items(), key=lambda kv: kv[0]):
         ctx = contexts.get(key)
         if ctx is None:
-            print(f"Warning: missing iteration_context for {key}; skipping")
+            print(f"Warning: missing iteration_context for {key}; skipping", flush=True)
             continue
         parents = ctx.get("selected_parents") or []
         best_id = ctx.get("best_selected_parent_id")
@@ -306,7 +333,7 @@ def main() -> None:
             if scored:
                 ref = max(scored, key=lambda p: float(p["selection_score"]))
         if ref is None:
-            print(f"Warning: no reference parent for {key}; skipping")
+            print(f"Warning: no reference parent for {key}; skipping", flush=True)
             continue
         reference_code = ref.get("code") or ""
 
@@ -331,9 +358,32 @@ def main() -> None:
             max_input_tokens=int(args.max_input_tokens),
             max_candidates_per_batch=int(args.max_candidates_per_batch),
         )
+        pending_total += len(todo)
+        planned.append((key, todo, reference_code, batches))
+
+    print(
+        f"[annotate] Pending candidates={pending_total} across {len(planned)} iteration group(s). "
+        "First batch may take a long time on 32B (no print until LLM returns).",
+        flush=True,
+    )
+
+    for key, todo, reference_code, batches in planned:
         run_id, dataset, pid, phase, iteration = key
+        best_id = None
+        ctx = contexts.get(key) or {}
+        best_id = ctx.get("best_selected_parent_id")
+        print(
+            f"[annotate] Starting participant={pid} iteration={iteration}: "
+            f"{len(todo)} candidates in {len(batches)} batch(es)",
+            flush=True,
+        )
         for bi, batch in enumerate(batches):
             tag = f"r{run_id}_p{pid}_i{iteration}_b{bi}"
+            print(
+                f"[annotate] Batch {bi+1}/{len(batches)} ({tag}): "
+                f"waiting on LLM for {len(batch)} candidate(s)...",
+                flush=True,
+            )
             rows = annotate_with_splits(
                 client,
                 model_name=args.model_name,
@@ -370,9 +420,9 @@ def main() -> None:
                     f.write(json.dumps(enriched, ensure_ascii=False) + "\n")
                     completed.add(row["candidate_id"])
                     n_written += 1
-            print(f"Annotated {len(rows)} candidates ({tag})")
+            print(f"[annotate] Wrote {len(rows)} annotations ({tag}); total_new={n_written}", flush=True)
 
-    print(f"Done. Wrote {n_written} new annotations to {out_jsonl}")
+    print(f"[annotate] Done. Wrote {n_written} new annotations to {out_jsonl}", flush=True)
 
 
 if __name__ == "__main__":

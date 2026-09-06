@@ -389,3 +389,54 @@ Three genuinely new auto-parsed datasets from `safe8_deep_audit`, repaired witho
 - **Phase 4 done:** `13schulz2020finding` (Psych-101 `schulz2020finding/exp4`). Raw presses 1–8 → internal 0–7; history/split by round; `dynamicdata.csv` validation only; uniform LL ≈ log(1/8). No cond/rcond in problem/history.
 - **Phase 5 done:** `14kool2016when` (Psych-101 `kool2016when/exp2`). Dual-stage Bernoulli; continuous cross-day history; contiguous usable-day split; `groupdata.mat` validation only. Uniform LL ≈ log(0.5).
 - **Status tracker:** `analysis_2026Sep/Sep3_Datasets_decision/implementation_status.md`. All five ICLR adapters implemented (CPU validation).
+
+---
+
+## Impl notes (Sep 2026 — PICS / TEH mixed-effects MEM pipeline)
+
+Passive MEM analysis for multi-parent PICS evolution. **Does not change** generation, evaluation, ranking, randomness, prompts, or final selection. TEH/PICS = same system (EMNLP name PICS).
+
+### ΔF definition
+
+There is no single-parent ancestry. For each candidate:
+
+\[
+\Delta F = S(\text{candidate}) - S(\text{reference})
+\]
+
+- \(S\) = exact pool-selection score (`--evolution_selection_score`, default trial-weighted train+val loglik). **Never test loglik.**
+- **Normal** candidates: reference = highest-\(S\) selected parent that iteration.
+- **Fresh** candidates: reference = seed/baseline (`reference_kind=seed_baseline`).
+
+### 1) Passive trace logging (`teh.py`)
+
+- CLI: `--mem_trace` / `--no-mem-trace` (default **off**).
+- When on, appends `participant_*/mem_trace.jsonl` (UTF-8) during the **participant evolution** loop only (not global/refine).
+- Record types:
+  - `iteration_context` — after parent selection: parents (id, selection score, train/val LL, full code), best selected parent id.
+  - `candidate` — after eval + elite truncation: source `normal`|`fresh`, sanitized code, runtime_valid, train/val LL, selection score, reference id/score, `delta_f` (null if nonfinite), `survived_elite_truncation`.
+- Logs invalid candidates too; offline MEM filters them out. No test metrics in the JSONL. Logging must not alter RNG / parent order / LLM calls.
+- Helpers: `utils/mem/trace.py`.
+
+### 2) Offline LLM edit annotator
+
+- Script: `analysis/mem/annotate_edits.py`
+- Default filter: evolution phase, `source=normal`, runtime-valid, finite `delta_f`.
+- One LLM call per batch (≤10 candidates vs best reference parent); temperature 0; never exec/eval code; programs are untrusted data.
+- Token budget: char/4 estimate; default 12k; **split batches, never truncate code**. Validate JSON + motif taxonomy; one retry then recursive split. Resume via existing `candidate_id`s in `annotations.jsonl`.
+- Discovery follows directory symlinks (`os.walk(followlinks=True)`).
+- Pilot wrapper: `scripts/mem2_annotation.sh` (p0-only path + annotate → CSV → fit).
+
+### 3) Dataset + MixedLM fit
+
+- `analysis/mem/build_dataset.py` — merge traces + annotations → CSV.
+- `analysis/mem/fit_mem.py` — feasibility model:
+  - `delta_f ~ C(primary_edit) + iteration`, random intercept `participant_id` (`statsmodels` MixedLM).
+  - Warns on rare motifs / non-convergence / singular RE / &lt;2 participants (does not silently drop failures).
+  - **W&B:** default project **`teh_mem`** (auto-created on first `wandb.init`); logs scalars, coeff/motif tables, artifacts (`summary.txt`, `coefficients.csv`, input CSV). Disable with `--no_log`.
+
+### Tests / example commands
+
+- Tests: `tests/test_mem_pipeline.py` (reference parent, ΔF, no test keys, non-mutating helpers, annotation validation, batch split, dataset filters).
+- PICS with traces: add `--mem_trace` to `teh.py` (see `scripts/short_run_for_mem.sh`).
+- Annotate / CSV / fit: `bash scripts/mem2_annotation.sh` or the three `analysis/mem/*.py` CLIs documented in that script.
