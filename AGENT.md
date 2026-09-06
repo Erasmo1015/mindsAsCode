@@ -377,3 +377,15 @@ Three genuinely new auto-parsed datasets from `safe8_deep_audit`, repaired witho
 - **Default:** **`legacy`** — exact pre-redesign cumulative EMNLP error feedback (recency window, frequent-error injection, “Do not repeat them.” wording). Existing cluster scripts need no new flags.
 - **`new`:** previous-iteration-only contextual groups from the Jul 29 redesign. Pass `--error-feedback-mode new` explicitly.
 - **Metadata:** resolved mode written to `log/run_metadata.json`. Use a fresh run dir if switching modes (legacy vs new `error_history.jsonl` formats differ).
+
+---
+
+## Short summary (Sep 2026 — ICLR five-dataset TEH adapters)
+
+- **Goal:** add five ICLR datasets into individual `teh.py` / PICS with modular loaders; preserve `choose(problem, history)`; Bernoulli for binary tasks; categorical only for Steyvers (K=4) / Schulz (K=8).
+- **Phase 1 done:** `bergert_nosofsky_2007` via `data_modules/external/` + `datasets/external/bergert_nosofsky_2007/` (Michael BCM extract; provenance caveat). CPU tests + EMNLP regressions pass. Cue validities **not** participant-visible at decision time → excluded from `problem` (raw CSV kept).
+- **Phase 2 done:** `guan_2020_stopping` from author `OptimalStopping.mat` (RiskProject). Expands continue/stop; no future values; Michael CSV not used. CPU + EMNLP regressions pass.
+- **Phase 3 done:** `steyvers_2009_bandit` (first categorical). Raw choices 1–4 → internal actions 0–3; eval via existing `categorical_eval.py`; Bernoulli path unchanged. Uniform LL ≈ log(1/4).
+- **Phase 4 done:** `13schulz2020finding` (Psych-101 `schulz2020finding/exp4`). Raw presses 1–8 → internal 0–7; history/split by round; `dynamicdata.csv` validation only; uniform LL ≈ log(1/8). No cond/rcond in problem/history.
+- **Phase 5 done:** `14kool2016when` (Psych-101 `kool2016when/exp2`). Dual-stage Bernoulli; continuous cross-day history; contiguous usable-day split; `groupdata.mat` validation only. Uniform LL ≈ log(0.5).
+- **Status tracker:** `analysis_2026Sep/Sep3_Datasets_decision/implementation_status.md`. All five ICLR adapters implemented (CPU validation).

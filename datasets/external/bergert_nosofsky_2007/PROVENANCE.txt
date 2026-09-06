@@ -1,0 +1,21 @@
+Bergert & Nosofsky (2007) — local TEH/PICS copy
+
+Paper:
+  Bergert, F. B., & Nosofsky, R. M. (2007). A response-time approach to comparing
+  generalized rational and take-the-best models of decision making.
+  Journal of Experimental Psychology: Learning, Memory, and Cognition, 33, 107–129.
+  DOI: https://doi.org/10.1037/0278-7393.33.1.107
+
+Source of these CSV files:
+  Copied from mdlee/behavioralDataRepository
+  datasets/cue-based-multi-attribute/bergert-nosofsky-2007/
+  (teaching extract used in Bayesian Cognitive Modeling; exported from
+  BB2/HeuristicDecisionMaking/Old/BergertNosofsky.mat)
+
+Provenance class (audit): D — Michael repo copy with explicit caveat;
+no independent public raw archive located at audit time.
+
+Ecological cue validities (`cueValidities.csv`) are analysis metadata only.
+They are NOT exposed on choose(problem, history): participants learn cue
+usefulness rather than receiving objective validities at decision time
+(see Stojic et al. 2016 citing Bergert & Nosofsky 2007).

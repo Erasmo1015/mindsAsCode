@@ -4,7 +4,8 @@ teh.py — TEH (Template Evolution HuggingFace): Psych-101 binary cognitive data
 Evolved programs implement choose(problem, history) -> float = P(action=1) on structured trials
 parsed from Psych-101 / Psych-101-test natural-language rows (see data_modules/psych101_binary.py).
 
-Psych-101 binary aliases (e.g. peterson2021using) plus local mixed_gambles. Legacy choice13k/cpc18/
+Psych-101 binary aliases (e.g. peterson2021using) plus local mixed_gambles and
+external Bernoulli adapters (e.g. bergert_nosofsky_2007). Legacy choice13k/cpc18/
 gridworld entrypoints are not supported here (use dataset aliases instead of choice13k).
 """
 
@@ -43,6 +44,11 @@ from data_modules.mixed_gambles import (
     DEFAULT_CSV_PATH,
     load_mixed_gambles_trials,
 )
+from data_modules.external import (
+    is_external_dataset,
+    load_external_loglik_trials,
+    external_default_data_dir,
+)
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
@@ -63,7 +69,9 @@ from utils.teh.teh_datasets import (
     LOGlik_VAL_SPLIT_DATASETS,
     MIXED_GAMBLES,
     PARTICIPANT_DATASETS,
+    dataset_output_type,
     is_binary_loglik_dataset,
+    is_categorical_output_dataset,
     is_mixed_gambles_dataset,
     uses_train_val_test_loglik_split,
 )
@@ -1271,13 +1279,22 @@ def _evaluate_loglik_for_dataset(
     verbose: bool = False,
     n_seeds: int = 1,
 ) -> Dict[str, float]:
+    if is_categorical_output_dataset(dataset):
+        from utils.teh_psych.categorical_eval import evaluate_categorical_program
+
+        return evaluate_categorical_program(
+            choose_fn, trials, verbose=verbose, n_seeds=n_seeds
+        )
     return evaluate_choice13k_program(choose_fn, trials, verbose=verbose, n_seeds=n_seeds)
 
 
 def _resolve_default_seed_program_path(args: Any, participant_id: int) -> Optional[str]:
-    """Default seed path for TEH Psych-101 binary datasets."""
+    """Default seed path for TEH datasets (Bernoulli 0.5 or categorical uniform)."""
     if args.seed_path is not None:
         return args.seed_path
+    dataset = getattr(args, "dataset", None)
+    if dataset is not None and is_categorical_output_dataset(str(dataset)):
+        return str(_REPO_ROOT / "persona_code_example" / "teh" / "categorical_uniform.py")
     return str(DEFAULT_SEED_PROGRAM)
 
 
@@ -1529,6 +1546,40 @@ def _print_selected_participants_trial_summary(
                 int(pid),
                 csv_path=DEFAULT_CSV_PATH,
                 filter_gain_loss_only=False,
+                split_ratio=split_ratio,
+                split_seed=split_seed,
+            )
+            n_parsed = len(train_trials) + len(val_trials) + len(test_trials)
+            rows.append(
+                {
+                    "raw_id": int(pid),
+                    "parsed_total": n_parsed,
+                    "train": len(train_trials),
+                    "val": len(val_trials),
+                    "test": len(test_trials),
+                }
+            )
+        print("")
+        print(
+            f"Selected participants trial summary ({len(participant_ids)} ids, "
+            f"split_ratio={split_ratio:.3f}, split_seed={split_seed}):"
+        )
+        print("  raw_id | parsed_total | train | val | test")
+        for row in rows[:60]:
+            print(
+                f"  {row['raw_id']:6d} | {row['parsed_total']:12d} | "
+                f"{row['train']:5d} | {row['val']:3d} | {row['test']:4d}"
+            )
+        if len(rows) > 60:
+            print(f"  ... ({len(rows) - 60} rows omitted) ...")
+
+    elif is_external_dataset(dataset):
+        rows = []
+        for pid in participant_ids:
+            train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
+                dataset,
+                int(pid),
+                data_dir=str(_REPO_ROOT / external_default_data_dir(dataset)),
                 split_ratio=split_ratio,
                 split_seed=split_seed,
             )
@@ -1815,16 +1866,56 @@ def apply_consistency_gate_to_probability(
     return consistency * clamped + (1.0 - consistency) * 0.5
 
 
+def apply_consistency_gate_to_categorical_probs(
+    probs: Dict[int, float],
+    val_loglik: float,
+    *,
+    threshold: float = _CHOICE13K_GATE_THRESHOLD,
+) -> Dict[int, float]:
+    """Blend categorical probs toward uniform 1/K (categorical analogue of blend-to-0.5)."""
+    if not probs:
+        return probs
+    k = len(probs)
+    uniform = 1.0 / float(k)
+    if val_loglik < threshold:
+        consistency = max(0.0, 1.0 - (threshold - val_loglik))
+    else:
+        consistency = 1.0
+    return {
+        int(aid): consistency * float(p) + (1.0 - consistency) * uniform
+        for aid, p in probs.items()
+    }
+
+
 def wrap_choose_with_consistency_gate(
     choose_fn: Callable,
     val_loglik: float,
 ) -> Callable:
-    """Return choose(problem, history) that applies the external consistency gate."""
+    """Return choose(problem, history) that applies the external consistency gate (Bernoulli)."""
 
     def gated_choose(problem: Any, history: Any) -> float:
         p_raw = choose_fn(problem, history)
         raw_p = _parse_choice13k_choose_output(p_raw)
         return apply_consistency_gate_to_probability(raw_p, val_loglik)
+
+    return gated_choose
+
+
+def wrap_choose_with_categorical_consistency_gate(
+    choose_fn: Callable,
+    val_loglik: float,
+) -> Callable:
+    """Return choose(problem, history) that applies categorical consistency gate."""
+    from utils.teh_psych.categorical_eval import (
+        coerce_choose_output,
+        valid_action_ids_from_problem,
+    )
+
+    def gated_choose(problem: Any, history: Any) -> Dict[int, float]:
+        valid_ids = valid_action_ids_from_problem(problem or {})
+        raw = choose_fn(problem, history)
+        probs, _ = coerce_choose_output(raw, valid_ids)
+        return apply_consistency_gate_to_categorical_probs(probs, val_loglik)
 
     return gated_choose
 
@@ -1835,13 +1926,26 @@ def run_choice13k_gate_phase(
     test_trials: List[Dict[str, Any]],
     *,
     n_eval_seeds: int = 1,
+    dataset: str = "",
 ) -> Optional[float]:
     """Evaluate test log-likelihood with external consistency gate (source unchanged)."""
     if not test_trials:
         return None
     try:
-        gated_fn = wrap_choose_with_consistency_gate(choose_fn, float(val_loglik))
-        gated_eval = evaluate_choice13k_program(gated_fn, test_trials, n_seeds=n_eval_seeds)
+        if dataset and is_categorical_output_dataset(dataset):
+            from utils.teh_psych.categorical_eval import evaluate_categorical_program
+
+            gated_fn = wrap_choose_with_categorical_consistency_gate(
+                choose_fn, float(val_loglik)
+            )
+            gated_eval = evaluate_categorical_program(
+                gated_fn, test_trials, n_seeds=n_eval_seeds
+            )
+        else:
+            gated_fn = wrap_choose_with_consistency_gate(choose_fn, float(val_loglik))
+            gated_eval = evaluate_choice13k_program(
+                gated_fn, test_trials, n_seeds=n_eval_seeds
+            )
         return float(gated_eval["avg_loglik"])
     except Exception as e:
         print(f"Warning: gate phase failed: {e}")
@@ -4568,6 +4672,15 @@ def _trials_for_loglik_participant(
             participant_id,
             csv_path=mixed_gambles_csv,
             filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+        return train_trials, val_trials, test_trials
+    if is_external_dataset(dataset):
+        train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
+            dataset,
+            participant_id,
+            data_dir=str(_REPO_ROOT / external_default_data_dir(dataset)),
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
@@ -8143,6 +8256,22 @@ def run_evolution(
             f"(train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)}, "
             f"seed={split_seed}, ratio={split_ratio:.3f})"
         )
+    elif is_external_dataset(dataset):
+        data_dir = str(_REPO_ROOT / external_default_data_dir(dataset))
+        print(f"Loading external dataset {dataset} from {data_dir} for participant {participant_id}...")
+        train_trials, val_trials, test_trials, options = load_external_loglik_trials(
+            dataset,
+            participant_id,
+            data_dir=data_dir,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+        n_parsed = len(train_trials) + len(val_trials) + len(test_trials)
+        print(
+            f"[Load] Parsed total_trials={n_parsed} "
+            f"(train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)}, "
+            f"seed={split_seed}, ratio={split_ratio:.3f})"
+        )
     else:
         print(f"Loading Psych-101 dataset {dataset} for participant {participant_id}...")
         if choice13k_experiment is not None:
@@ -10494,6 +10623,7 @@ def run_evolution(
                 float(val_ll_for_gate),
                 test_trials,
                 n_eval_seeds=n_eval_seeds,
+                dataset=dataset,
             )
             if gated_test_loglik is not None:
                 overall_best_train["gated_test_loglik"] = gated_test_loglik
@@ -11029,8 +11159,9 @@ def main():
         default=PETERSON2021USING_ALIAS,
         choices=_teh_dataset_choices,
         help=(
-            "Psych-101 binary alias (1peterson2021using, 2plonsky2018when, ...) or mixed_gambles (local CSV). "
-            "Unprefixed legacy names (e.g. peterson2021using) are accepted and normalized."
+            "Psych-101 binary alias (1peterson2021using, ...), mixed_gambles (local CSV), "
+            "or external alias (bergert_nosofsky_2007, guan_2020_stopping, steyvers_2009_bandit). "
+            "Unprefixed legacy Psych-101 names are accepted and normalized."
         ),
     )
     parser.add_argument(

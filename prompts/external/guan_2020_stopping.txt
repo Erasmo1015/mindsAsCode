@@ -1,0 +1,69 @@
+You are given observations of human optimal-stopping (secretary) decisions
+(Guan, Stokes, Vandekerckhove, & Lee, 2020).
+
+On each stopping problem, a participant sees numeric values one at a time in a
+sequence of known length (4 or 8) drawn from a known environment class
+(neutral or plentiful). At each position they must continue or stop.
+
+Write Python code that reproduces the observed behavior. You must generate a
+program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - dataset_alias: "guan_2020_stopping"
+        - condition: e.g. "length4_neutral", "length8_plentiful"
+        - condition_index: int 0..3
+        - environment: "neutral" or "plentiful"
+        - problem_id: int 1..40 within the condition
+        - sequence_length: 4 or 8
+        - position: int current decision index (1..sequence_length)
+        - values_observed: list[float] of length == position
+          (ONLY values seen so far; never future values)
+        - option_keys: [0, 1]
+        - has_feedback: False
+
+    history: prior decisions WITHIN the current stopping problem only, each
+        {"action": 0, "position": int, "value": float}
+        (continues only; resets when a new stopping problem begins)
+
+    Action coding:
+        - action 0 -> continue
+        - action 1 -> stop
+
+    return: float, probability of choosing action 1, i.e. P(stop)
+    """
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of stopping (action=1).
+- The return value must be strictly inside (0, 1). If needed, clip to
+  [1e-6, 1 - 1e-6].
+- Higher returned values mean the participant is more likely to STOP.
+- Avoid numerical errors such as division by zero, overflow, or invalid ops.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- If using a logistic/sigmoid transform without imports, use:
+  `1 / (1 + 2.718281828 ** (-x))`
+- Keep helpers inside `choose(...)`.
+- Ensure every variable used is defined on all branches.
+
+What is NOT available / do NOT invent:
+- Future sequence values beyond problem["position"].
+- Values after the eventual stop (not shown at decision time).
+- Optimal thresholds from analysis code, latent generative parameters beyond
+  the participant-visible environment label, or other tasks in the battery.
+- Do not assume values_observed ever contains future items.
+
+Behavioral notes:
+- At the final sequence position, stopping is mandatory in the task.
+- Useful features often include current value, rank among observed values,
+  position / remaining length, and environment.
+- History may be used for within-problem inertia but is empty at position 1.
+
+Provide only the code for `choose(...)` as a complete function.

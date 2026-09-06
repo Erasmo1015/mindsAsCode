@@ -1,0 +1,87 @@
+You are given observations of human choices in a two-step sequential decision
+task (Kool, Cushman & Gershman, 2016; Daw-structure / Psych-101 exp2).
+
+Each behavioral day has up to two binary decisions handled by the SAME program:
+  stage 1 — choose a spaceship
+  stage 2 — after the planet/transition is observed, choose an alien
+
+History carries across days within a participant session (no per-day reset).
+Treasure drifts slowly; spaceship→planet tendencies are stable. Timeout days may
+omit stage 2 (or both stages).
+
+Write Python code that reproduces the observed behavior. You must generate a
+program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by Bernoulli log-likelihood: log P(observed action).
+    Goal: maximize log-likelihood of the observed human choices.
+
+    The same function is called for stage 1 and stage 2. Branch on problem["stage"].
+
+    problem: dict with keys (stage-dependent)
+        Common:
+          - dataset_alias: "14kool2016when"
+          - experiment_id: "kool2016when/exp2.csv"
+          - stage: 1 or 2
+          - presented_day: int (1..125)
+          - option_keys: [key0, key1]  # presentation order of the two options
+          - history_scope: "session_continuous"
+          - raw_key_coding: "letter_presentation_order"
+          - internal_action_coding: "0=first_presented_key,1=second_presented_key"
+          - spaceship_labels / planet_labels / planet_aliens: instruction-level labels
+
+        Stage 1 ONLY (spaceship choice):
+          - spaceship_options: same as option_keys
+          - MUST NOT contain: current planet, current aliens, current treasure
+
+        Stage 2 ONLY (alien choice; after transition):
+          - planet: observed current planet letter
+          - alien_options: same as option_keys
+          - stage1_action / stage1_option_keys / spaceship: just-made stage-1 choice
+          - MUST NOT contain: current treasure / reward
+
+    history: list of prior completed stage records in chronological order
+        Stage-1 entry (after that choice resolved):
+          {"stage": 1, "action": 0|1, "option_keys": [...], "spaceship": str, "planet": str}
+        Stage-2 entry (after treasure observed):
+          {"stage": 2, "action": 0|1, "option_keys": [...], "alien": str,
+           "planet": str, "reward": 0|1, "feedback": 0|1}
+        History is empty at the start of the session.
+        On stage 2 of the current day, history already includes that day's stage-1
+        entry (with planet) but NOT the current reward.
+
+    Action coding (INTERNAL, both stages):
+        - action 0 = first key in problem["option_keys"] (presentation order)
+        - action 1 = second key in problem["option_keys"]
+        - Raw Psych-101 keys are participant-specific letters
+
+    return: float in (0, 1) = P(action=1)
+            i.e. probability of choosing the second presented option
+    """
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of action 1.
+- Clip probabilities away from exact 0/1 if needed for numerical safety.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- Keep helpers inside `choose(...)`.
+- Ensure every variable used is defined on all branches.
+
+What is NOT available / do NOT invent:
+- Current treasure before the stage-2 choice.
+- Future days' outcomes.
+- Latent generating reward probabilities / drift parameters.
+- Common/rare transition labels as hidden experimenter annotations
+  (infer transitions only from observed spaceship→planet history).
+- Cross-participant information.
+
+Behavioral notes:
+- Use continuous history of transitions and rewards across days.
+- Stage-1 and stage-2 share one policy program; condition on problem["stage"].
+- The returned P(action=1) for the observed action determines the log-likelihood.
+
+Provide only the code for `choose(...)` as a complete function.

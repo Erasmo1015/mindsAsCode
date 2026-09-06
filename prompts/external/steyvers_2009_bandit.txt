@@ -1,0 +1,63 @@
+You are given observations of human choices in a four-armed bandit task
+(Steyvers, Lee & Wagenmakers, 2009).
+
+Each game has 15 trials. On each trial the participant selects one of four arms
+and then observes a binary reward (0/1). Games are independent: history does not
+carry across games.
+
+Write Python code that reproduces the observed behavior. You must generate a
+program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by categorical log-likelihood: log p[observed_action].
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - dataset_alias: "steyvers_2009_bandit"
+        - game: int (1..20)
+        - trial: int (1..15 within the current game)
+        - n_arms: 4
+        - options: [{"action": 0}, {"action": 1}, {"action": 2}, {"action": 3}]
+        - option_keys: [0, 1, 2, 3]
+        - has_feedback: True
+        - raw_choice_coding: "1-4"
+        - internal_action_coding: "0-3"
+
+    history: prior trials WITHIN the current game only, each
+        {"action": int in 0..3, "reward": 0 or 1}
+        History is empty on trial 1 of each game.
+
+    Action coding (INTERNAL):
+        - action 0,1,2,3 correspond to the four arms
+        - Raw dataset used 1-4; TEH normalizes with action = raw_choice - 1
+
+    return: dict[int, float] probability distribution over actions 0..3
+            Example uniform: {0: 0.25, 1: 0.25, 2: 0.25, 3: 0.25}
+    """
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a dict mapping each action id 0..3 to a non-negative probability.
+- Probabilities should sum to 1.0 (the evaluator renormalizes if needed, but
+  prefer a valid distribution).
+- Every returned probability must be finite.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- Keep helpers inside `choose(...)`.
+- Ensure every variable used is defined on all branches.
+
+What is NOT available / do NOT invent:
+- True arm reward rates / generating probabilities.
+- rewardRateChosen or gameRewardRates.
+- Future rewards or future choices.
+- Counterfactual rewards for unchosen arms.
+- Cross-game history (reset every game).
+
+Behavioral notes:
+- Use within-game history of (action, reward) pairs for exploration/exploitation.
+- The returned probability for the observed action determines the log-likelihood.
+
+Provide only the code for `choose(...)` as a complete function.
