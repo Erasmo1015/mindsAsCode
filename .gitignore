@@ -215,3 +215,12 @@ datasets/psych101_train
 # analysis 2026 Sep at 3090_GPU server
 analysis_2026Sep/
 analysis_2026Sep
+generated_outputs/
+generated_outputs
+generated_outputs_ablation/
+generated_outputs_ablation
+generated_outputs_transfer/
+generated_outputs_transfer
+generated_outputs_teh_psych/
+generated_outputs_teh_psych
+

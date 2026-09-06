@@ -59,6 +59,7 @@ baseline = [
 # Analysis notebooks/scripts under analysis/ (mostly covered by core; pytest lives in dev).
 analysis = [
   "scipy",
+  "statsmodels",
 ]
 
 # Developer / unit tests

@@ -80,6 +80,15 @@ from utils.teh.teh_runtime import (
     teh_wandb_run_name,
     valid_participant_ids_path,
 )
+from utils.mem.trace import (
+    append_mem_trace_record,
+    best_reference_parent,
+    build_candidate_record,
+    build_iteration_context_record,
+    compute_delta_f,
+    mem_trace_path,
+    parent_record_from_elite_tuple,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent
 _PARTICIPANT_DATASETS = PARTICIPANT_DATASETS
@@ -8051,6 +8060,7 @@ def run_evolution(
     evolution_selection_score: str = "train_val",
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
+    mem_trace: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -8068,8 +8078,11 @@ def run_evolution(
         model_name: LLM model name for generation
         client_kwargs: Optional OpenAI client kwargs (for local vLLM server)
         output_dir: Optional output directory for saving results
+        mem_trace: When True, append passive MEM JSONL under the participant output dir
+            (iteration_context + candidate records). Does not affect search behavior.
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
+    mem_trace_enabled = bool(mem_trace)
     if fitness_metric not in ("accuracy", "loglik"):
         raise ValueError(f"Invalid fitness_metric: {fitness_metric!r} (expected 'accuracy' or 'loglik')")
     if not is_binary_loglik_dataset(dataset):
@@ -8162,6 +8175,16 @@ def run_evolution(
     if save_artifacts:
         output_path.mkdir(parents=True, exist_ok=True)
     error_history_path = output_path / "error_history.jsonl"
+    mem_trace_file: Optional[Path] = None
+    mem_run_id = ""
+    if mem_trace_enabled and save_artifacts:
+        mem_trace_file = mem_trace_path(output_path)
+        # Prefer run folder name (parent of participant_*), else participant dir name.
+        if output_path.name.startswith("participant_"):
+            mem_run_id = output_path.parent.name
+        else:
+            mem_run_id = output_path.name
+        print(f"MEM trace logging enabled: {mem_trace_file}")
     
     # Set up local log file for wandb metrics (if wandb is enabled)
     log_file_path = None
@@ -8674,12 +8697,80 @@ def run_evolution(
                 )
         else:
             num_parents_to_use = min(sample_size, pool_size)
+            parent_idxs = list(range(num_parents_to_use))
             selected_parents = elite_parents[:num_parents_to_use]
             print(
                 f"\nUsing {num_parents_to_use} top parent(s) from elite set "
                 f"(sample_size={sample_size}, sample_parents=False):"
             )
         parent_codes = [p[0] for p in selected_parents]
+
+        mem_selected_parent_records: List[Dict[str, Any]] = []
+        mem_best_parent_rec: Optional[Dict[str, Any]] = None
+        mem_seed_selection_score: Optional[float] = None
+        if mem_trace_file is not None:
+            for local_i, parent_tuple in enumerate(selected_parents):
+                elite_j = int(parent_idxs[local_i]) if local_i < len(parent_idxs) else local_i
+                val_ll = None
+                if track_elite_val_loglik and elite_j < len(elite_val_logliks):
+                    val_ll = elite_val_logliks[elite_j]
+                train_ll = _train_loglik_from_elite_tuple(
+                    parent_tuple, evolution_selection_score=evolution_selection_score
+                )
+                mem_selected_parent_records.append(
+                    parent_record_from_elite_tuple(
+                        parent_tuple,
+                        val_loglik=val_ll,
+                        train_loglik=train_ll,
+                    )
+                )
+            mem_best_parent_rec = best_reference_parent(mem_selected_parent_records)
+            # Seed/baseline reference for fresh candidates (same selection metric).
+            for ep in elite_parents:
+                if str(ep[3]) in ("baseline", "global_baseline", "refinement_seed"):
+                    mem_seed_selection_score = float(ep[1]) if ep[1] is not None else None
+                    break
+            if mem_seed_selection_score is None:
+                # Fall back to evaluating stored seed fitness from baseline eval path:
+                # elite index-1 for the seed program when present as first pool entry.
+                mem_seed_selection_score = (
+                    float(elite_parents[0][1])
+                    if elite_parents and str(elite_parents[0][3]) == "baseline"
+                    else None
+                )
+                if mem_seed_selection_score is None and fitness_metric == "loglik":
+                    # Last resort: recompute from baseline metrics already in memory.
+                    if use_train_val_selection:
+                        mem_seed_selection_score = _evolution_selection_score(
+                            float(baseline_train_eval["avg_loglik"]),
+                            _safe_float(baseline_val_eval["avg_loglik"])
+                            if baseline_val_eval is not None
+                            else None,
+                            len(train_trials),
+                            len(val_trials),
+                            evolution_selection_score=evolution_selection_score,
+                            warn_key=None,
+                        )
+                    else:
+                        mem_seed_selection_score = float(baseline_train_eval["avg_loglik"])
+            append_mem_trace_record(
+                mem_trace_file,
+                build_iteration_context_record(
+                    dataset=dataset,
+                    participant_id=participant_id,
+                    run_id=mem_run_id,
+                    split_seed=int(split_seed),
+                    phase="evolution",
+                    iteration=iteration_step,
+                    evolution_selection_score=evolution_selection_score,
+                    selected_parents=mem_selected_parent_records,
+                    best_selected_parent_id=(
+                        str(mem_best_parent_rec["program_id"])
+                        if mem_best_parent_rec is not None
+                        else None
+                    ),
+                ),
+            )
 
         if is_cpc18_mse:
             for i, parent_tuple in enumerate(selected_parents):
@@ -9650,6 +9741,71 @@ def run_evolution(
                     exit_after_save=bool(prompt_debug and prompt_debug_exit),
                 )
         
+        # Passive MEM candidate traces (after elite truncation when candidates were added).
+        if mem_trace_file is not None:
+            elite_ids_after = {str(p[3]) for p in elite_parents}
+            ref_parent_id = (
+                str(mem_best_parent_rec["program_id"])
+                if mem_best_parent_rec is not None
+                else None
+            )
+            ref_parent_score = (
+                mem_best_parent_rec.get("selection_score")
+                if mem_best_parent_rec is not None
+                else None
+            )
+            for src_i, result in enumerate(candidate_results):
+                idx = int(result.get("idx", src_i))
+                program_id = f"iteration_{iteration_step}_candidate_{idx}"
+                source = (
+                    candidate_sources[src_i]
+                    if src_i < len(candidate_sources)
+                    else "normal"
+                )
+                if source == "fresh":
+                    reference_kind = "seed_baseline"
+                    cand_ref_id = "baseline"
+                    cand_ref_score = mem_seed_selection_score
+                else:
+                    reference_kind = "best_selected_parent"
+                    cand_ref_id = ref_parent_id
+                    cand_ref_score = ref_parent_score
+                cand_score = result.get("selection_score")
+                if cand_score is None and fitness_metric == "loglik":
+                    # Prefer explicit selection_score; else use pool fitness when valid.
+                    cand_score = result.get("fitness") if result.get("runtime_valid") else None
+                    if cand_score is not None and not use_train_val_selection:
+                        cand_score = result.get("train_loglik", cand_score)
+                train_ll = result.get("train_loglik")
+                val_ll = result.get("val_loglik") if val_trials else None
+                append_mem_trace_record(
+                    mem_trace_file,
+                    build_candidate_record(
+                        dataset=dataset,
+                        participant_id=participant_id,
+                        run_id=mem_run_id,
+                        split_seed=int(split_seed),
+                        phase="evolution",
+                        iteration=iteration_step,
+                        candidate_id=program_id,
+                        candidate_idx=idx,
+                        source=str(source),
+                        code=result.get("code") or "",
+                        runtime_valid=bool(result.get("runtime_valid", False)),
+                        train_loglik=_safe_float(train_ll),
+                        val_loglik=_safe_float(val_ll),
+                        selection_score=_safe_float(cand_score),
+                        reference_parent_id=cand_ref_id,
+                        reference_parent_score=_safe_float(cand_ref_score),
+                        reference_kind=reference_kind,
+                        delta_f=compute_delta_f(
+                            _safe_float(cand_score), _safe_float(cand_ref_score)
+                        ),
+                        survived_elite_truncation=program_id in elite_ids_after,
+                        evolution_selection_score=evolution_selection_score,
+                    ),
+                )
+
         # Save iteration results
         best_program_id = None
         if selected_results:
@@ -11152,6 +11308,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--mem_trace",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When enabled, write passive MEM traces to participant_*/mem_trace.jsonl "
+            "(iteration_context + candidate rows; no LLM calls; default: disabled)."
+        ),
+    )
+    parser.add_argument(
         "--no_log",
         action="store_true",
         help="Disable wandb logging. Default is enabled.",
@@ -11972,6 +12137,7 @@ def main():
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
+                mem_trace=args.mem_trace,
             )
         finally:
             if wandb is not None:
@@ -12061,6 +12227,7 @@ def main():
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
+                mem_trace=args.mem_trace,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -12455,6 +12622,7 @@ def main():
                         max_error_prompt_chars=args.max_error_prompt_chars,
                         error_feedback_mode=args.error_feedback_mode,
                         ablation=args.ablation,
+                        mem_trace=args.mem_trace,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -12735,6 +12903,7 @@ def main():
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
+                mem_trace=args.mem_trace,
             )
 
         try:
