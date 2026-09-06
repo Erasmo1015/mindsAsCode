@@ -1,0 +1,119 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mindsascode"
+version = "0.1.0"
+description = "Modeling others' minds as code (PICS / Template Evolution / TEH)"
+readme = "SETUP.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Research / see repository" }
+authors = [{ name = "mindsAsCode contributors" }]
+
+# ---------------------------------------------------------------------------
+# Core PICS / runtime dependencies (direct imports in repo code).
+# GPU/CUDA-sensitive packages are NOT listed here; install them via setup_env.sh
+# so torch/vllm/xformers/flash-attn come from the pinned cu124 stack.
+# ---------------------------------------------------------------------------
+dependencies = [
+  # Numerics / utilities (widely imported across TE, TEH, gridworld, data loaders)
+  "numpy==1.26.4",
+  # Pin for datasets==3.2.0 compatibility (torch/huggingface stacks may pull newer fsspec).
+  "fsspec==2024.9.0",
+  "tqdm",
+  "PyYAML",
+  "msgpack",
+  "tiktoken",
+  "rich",
+
+  # LLM client + experiment logging (TE / TEH / Template_evo* / plot_and_eval)
+  "openai",
+  "wandb",
+
+  # Hugging Face datasets API (data_modules/*, te_aggregate, te_dr, Template_evo_non_strict)
+  # NOTE: repo folder `datasets/` is data-only (no Python package); this is HF `datasets`.
+  "datasets==3.2.0",
+
+  # Gridworld / PICS JAX stack (environment*.py, gen_data, plot_and_eval, TE runners)
+  "jax==0.5.0",
+  "jaxlib==0.5.0",
+  "flax==0.10.3",
+  "optax",
+
+  # Rendering / evaluation helpers used by core runners
+  "matplotlib",
+  "seaborn",
+  "pandas",
+  "imageio",
+  "opencv-python",
+]
+
+[project.optional-dependencies]
+# Baseline-only direct deps (MLE / prospect theory / analysis helpers used by baselines).
+# Centaur (unsloth) and OpenEvolve are documented in SETUP.md (special install paths).
+baseline = [
+  "scipy",
+]
+
+# Analysis notebooks/scripts under analysis/ (mostly covered by core; pytest lives in dev).
+analysis = [
+  "scipy",
+]
+
+# Developer / unit tests
+dev = [
+  "pytest",
+]
+
+# Human web experiments (NiceWebRL apps). nicewebrl itself is installed from git; see SETUP.md.
+human = [
+  "aiofiles",
+  "nicegui",
+  "fastapi",
+  "tortoise-orm",
+]
+
+# Centaur baseline (baseline_methods/Centaur.py) — optional, large GPU model stack.
+centaur = [
+  "unsloth",
+]
+
+# Documentation-only pins for the known-working GPU stack.
+# Do NOT `pip install 'mindsascode[gpu]'` on a fresh machine: torch must come from the
+# PyTorch cu124 index, and flash-attn/xformers/vllm need the matching torch build.
+# setup_env.sh installs these explicitly.
+gpu = [
+  "torch==2.5.1",
+  "torchvision==0.20.1",
+  "torchaudio==2.5.1",
+  "vllm==0.7.3",
+  "xformers==0.0.28.post3",
+  "transformers==4.48.3",
+  "ray==2.40.0",
+  "flash-attn==2.7.0.post2",
+  "jax-cuda12-plugin==0.5.0",
+  "jax-cuda12-pjrt==0.5.0",
+]
+
+[project.urls]
+Repository = "https://github.com/KJha02/mindsAsCode"
+
+# Thin editable install of library-style packages that already have __init__.py.
+# Entrypoints under baselines/ and baseline_methods/ are still run from the repo
+# root (those trees are not setuptools packages). The top-level `datasets/`
+# directory is data-only and is intentionally excluded so it cannot shadow
+# Hugging Face `datasets`.
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+  "data_modules*",
+  "utils*",
+]
+exclude = [
+  "tests*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "utils/teh_psych"]
+python_files = ["test_*.py"]

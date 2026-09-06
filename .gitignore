@@ -212,3 +212,6 @@ analysis_plot/
 datasets/psych101_test
 datasets/psych101_train
 
+# analysis 2026 Sep at 3090_GPU server
+analysis_2026Sep/
+analysis_2026Sep
