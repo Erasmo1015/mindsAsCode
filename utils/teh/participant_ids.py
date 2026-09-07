@@ -14,6 +14,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
+from data_modules.external.bergert_nosofsky_2007 import (
+    DEFAULT_DATA_DIR as BERGERT_DEFAULT_DATA_DIR,
+    list_participant_ids as list_bergert_participant_ids,
+    load_bergert_nosofsky_2007_trials,
+)
+from data_modules.external.guan_2020_stopping import (
+    DEFAULT_DATA_DIR as GUAN_DEFAULT_DATA_DIR,
+    list_participant_ids as list_guan_participant_ids,
+    load_guan_2020_stopping_trials,
+)
+from data_modules.external.steyvers_2009_bandit import (
+    DEFAULT_DATA_DIR as STEYVERS_DEFAULT_DATA_DIR,
+    list_participant_ids as list_steyvers_participant_ids,
+    load_steyvers_2009_bandit_trials,
+)
 from tqdm import tqdm
 
 from data_modules.psych101_binary import (
@@ -29,6 +44,10 @@ from data_modules.psych101_binary import (
 )
 from utils.teh.teh_datasets import (
     MIXED_GAMBLES,
+    is_external_dataset,
+    is_bergert_nosofsky_2007_dataset,
+    is_guan_2020_stopping_dataset,
+    is_steyvers_2009_bandit_dataset,
     is_mixed_gambles_dataset,
     is_psych101_dataset,
     psych101_metadata_root,
@@ -213,6 +232,19 @@ def build_valid_participant_ids_payload(
             "split_seed": int(split_seed),
         }
         payload["id_semantics"] = "CSV column 'subject' (integer participant id)."
+    elif is_external_dataset(dataset):
+        data_dir = repo_root / "datasets" / "external" / dataset
+        try:
+            data_rel = str(data_dir.resolve().relative_to(repo_root.resolve()))
+        except ValueError:
+            data_rel = str(data_dir.resolve())
+        payload["data_source"] = {
+            "kind": "external_local",
+            "data_dir": data_rel,
+            "split_ratio": float(split_ratio),
+            "split_seed": int(split_seed),
+        }
+        payload["id_semantics"] = "CSV column 'participant' (integer participant id)."
     else:
         split = normalize_psych_dataset_split(psych_dataset_split)
         exp_id = experiment_id_for_alias(dataset)
@@ -289,6 +321,51 @@ def collect_and_write_valid_participant_ids(
         valid_ids = collect_mixed_gambles_valid_ids(
             csv_path, filter_gain_loss_only=filter_mixed_gambles
         )
+    elif is_bergert_nosofsky_2007_dataset(dataset):
+        data_dir = (repo_root / BERGERT_DEFAULT_DATA_DIR).resolve()
+        valid_ids = []
+        for pid in list_bergert_participant_ids(data_dir):
+            try:
+                train_trials, _, test_trials, _ = load_bergert_nosofsky_2007_trials(
+                    pid,
+                    data_dir=data_dir,
+                    split_ratio=split_ratio,
+                    split_seed=split_seed,
+                )
+                if train_trials and test_trials:
+                    valid_ids.append(int(pid))
+            except Exception:
+                continue
+    elif is_guan_2020_stopping_dataset(dataset):
+        data_dir = (repo_root / GUAN_DEFAULT_DATA_DIR).resolve()
+        valid_ids = []
+        for pid in list_guan_participant_ids(data_dir):
+            try:
+                train_trials, _, test_trials, _ = load_guan_2020_stopping_trials(
+                    pid,
+                    data_dir=data_dir,
+                    split_ratio=split_ratio,
+                    split_seed=split_seed,
+                )
+                if train_trials and test_trials:
+                    valid_ids.append(int(pid))
+            except Exception:
+                continue
+    elif is_steyvers_2009_bandit_dataset(dataset):
+        data_dir = (repo_root / STEYVERS_DEFAULT_DATA_DIR).resolve()
+        valid_ids = []
+        for pid in list_steyvers_participant_ids(data_dir):
+            try:
+                train_trials, _, test_trials, _ = load_steyvers_2009_bandit_trials(
+                    pid,
+                    data_dir=data_dir,
+                    split_ratio=split_ratio,
+                    split_seed=split_seed,
+                )
+                if train_trials and test_trials:
+                    valid_ids.append(int(pid))
+            except Exception:
+                continue
     elif is_psych101_dataset(dataset):
         psych_records = collect_psych101_valid_participants(
             dataset,
@@ -364,6 +441,8 @@ def _migrate_psych101_metadata_dir_if_needed(
 ) -> None:
     """Rename legacy unprefixed metadata folder to numbered alias when present."""
     if is_mixed_gambles_dataset(dataset):
+        return
+    if is_external_dataset(dataset):
         return
     canonical = normalize_psych101_dataset_alias(dataset)
     legacy = None

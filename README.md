@@ -2,19 +2,31 @@
 
 ## Setting up the environment
 
-First, setup a conda environment with Python 3.12
+For a clean GPU-server install (recommended), see **[SETUP.md](SETUP.md)**:
 
-Then, make sure you have the following packages installed
+```bash
+bash setup_env.sh
+conda activate evo310
+bash scripts/check_environment.sh
+```
+
+That path creates a minimal conda env (Python 3.12 + CUDA toolkit 12.4) and installs
+the known-working torch/vLLM stack plus direct repo dependencies from `pyproject.toml`.
+
+The historical full export lives at `env_exports/environment_original_kjha.yml` (reference only).
+
+Core scientific / LLM packages used by this repo include:
 
 ```
 flax==0.10.3
 jax==0.5.0
 jaxlib==0.5.0
-numpy
+numpy==1.26.4
 matplotlib
 imageio
-vllm
-transformers
+vllm==0.7.3
+transformers==4.48.3
+torch==2.5.1+cu124
 ```
 
 ## Setting up baselines

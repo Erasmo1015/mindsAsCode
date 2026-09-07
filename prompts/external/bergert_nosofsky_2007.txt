@@ -1,0 +1,65 @@
+You are given observations of human pairwise multi-attribute choices
+(Bergert & Nosofsky, 2007 cue-based decision task).
+
+Each trial presents two alternatives (option_A and option_B). Each alternative
+has six binary cues (cue1..cue6). Participants learn about cue usefulness from
+experience; objective cue validities are NOT provided as inputs here.
+
+Write Python code that reproduces the observed behavior. You must generate a
+program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - dataset_alias: "bergert_nosofsky_2007"
+        - problem_id: int (pairwise problem index 1..40)
+        - option_A: {"alternative_id": int, "cues": {"cue1": 0|1, ..., "cue6": 0|1}}
+        - option_B: {"alternative_id": int, "cues": {"cue1": 0|1, ..., "cue6": 0|1}}
+        - option_keys: [0, 1]
+        - has_feedback: False
+        - action_means_option_A_when_1: True
+
+    history: always [] for this dataset (no prior-trial carryover in the TEH
+    representation; each pairwise problem is an independent decision unit).
+
+    Action coding (exact CSV coding):
+        - action 0 -> choose option_B
+        - action 1 -> choose option_A
+
+    return: float, probability of choosing action 1, i.e. P(choose option_A)
+    """
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing action 1 (option_A).
+- The return value must be strictly inside (0, 1). If needed, clip to a safe
+  range such as [1e-6, 1 - 1e-6].
+- Higher returned values mean the participant is more likely to choose option_A.
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- If using a logistic/sigmoid transform without imports, use:
+  `1 / (1 + 2.718281828 ** (-x))`
+- Keep all helper logic used by `choose(...)` inside `choose(...)`.
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches.
+
+What is NOT available / do NOT invent:
+- No cue_validities / log_odds_weight fields (not shown to participants).
+- No response times.
+- No ground-truth "correct" alternative beyond the cue patterns shown.
+- No future trials; history is empty.
+- Do not assume action=1 means option_B (that convention is used by some other
+  datasets, but NOT this one).
+
+Behavioral notes:
+- Decisions depend on the binary cue patterns of option_A vs option_B.
+- The probability must depend meaningfully on those cues.
+- Do not return a constant near 0.5 unless the cues truly provide no preference.
+
+Provide only the code for `choose(...)` as a complete function.

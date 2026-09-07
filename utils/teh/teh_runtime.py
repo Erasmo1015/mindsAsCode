@@ -12,6 +12,23 @@ from typing import Any, Dict, List, Optional, Sequence
 from openai import OpenAI
 
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
+from data_modules.external import (
+    is_bergert_nosofsky_2007_dataset,
+    is_guan_2020_stopping_dataset,
+    is_steyvers_2009_bandit_dataset,
+    is_external_dataset,
+    load_external_loglik_trials,
+    external_default_data_dir,
+)
+from data_modules.external.bergert_nosofsky_2007 import (
+    TASK_DESCRIPTION as BERGERT_TASK_DESCRIPTION,
+)
+from data_modules.external.guan_2020_stopping import (
+    TASK_DESCRIPTION as GUAN_TASK_DESCRIPTION,
+)
+from data_modules.external.steyvers_2009_bandit import (
+    TASK_DESCRIPTION as STEYVERS_TASK_DESCRIPTION,
+)
 from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
     experiment_id_for_alias,
@@ -24,6 +41,7 @@ from data_modules.psych101_binary import (
 from utils.teh.prompt_sanitize import strip_embedded_choose_from_evolution_prompt
 from utils.teh.teh_datasets import (
     dataset_display_name,
+    is_categorical_output_dataset,
     is_mixed_gambles_dataset,
     teh_output_base_dir as _teh_output_base_dir,
     valid_participant_ids_path_with_filter,
@@ -107,7 +125,10 @@ def _problem_keys_from_trials(trials: List[Dict[str, Any]]) -> List[str]:
 
 
 def _build_schema_neutral_base_prompt(
-    schema_summary: str, trials: List[Dict[str, Any]]
+    schema_summary: str,
+    trials: List[Dict[str, Any]],
+    *,
+    categorical: bool = False,
 ) -> str:
     """Non-gamble base prompt: document observed problem/history keys only."""
     problem_keys = _problem_keys_from_trials(trials)
@@ -121,8 +142,47 @@ def _build_schema_neutral_base_prompt(
         "\n".join(f"        - {key}: (type/structure per parsed examples)" for key in problem_keys)
         or "        - (see parsed trial examples)"
     )
+    if categorical:
+        intro = (
+            "You are given observations of human choices in multi-action decision problems.\n"
+        )
+        return_line = (
+            "    return: dict[int, float] probabilities over every option['action'] "
+            "in problem['options']\n"
+        )
+        requirements = """Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a dict[int, float] over all action ids in problem["options"].
+- Probabilities must be finite and non-negative (prefer summing to 1.0).
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- Keep all helper logic used by `choose(...)` inside `choose(...)`.
+"""
+        behavioral = (
+            "Behavioral requirements:\n"
+            "- Do not return a near-uniform constant unless history truly provides no signal.\n"
+            "- The distribution must depend meaningfully on the problem and/or history.\n"
+            "- Respect history reset boundaries documented for this dataset.\n"
+            "- The program should behave sensibly across different problems and histories.\n\n"
+        )
+    else:
+        intro = (
+            "You are given observations of human choices in binary decision problems.\n"
+        )
+        return_line = "    return: float, probability of choosing action 1, i.e. P(action=1)\n"
+        requirements = f"{_GENERIC_PROMPT_REQUIREMENTS}\n"
+        behavioral = (
+            "Behavioral requirements:\n"
+            "- Do not return constant or near-constant probabilities, such as always close to 0.5.\n"
+            "- The probability must depend meaningfully on the problem inputs.\n"
+            "- History may be used when helpful, but do not rely only on copying past actions.\n"
+            "- The program should behave sensibly across different problems and histories.\n\n"
+        )
     return (
-        "You are given observations of human choices in binary decision problems.\n"
+        f"{intro}"
         "Each trial provides a `problem` dict and a `history` list. Use only fields "
         "present in the parsed data for this dataset.\n\n"
         "Write Python code that reproduces the observed behavior. You must generate "
@@ -135,14 +195,10 @@ def _build_schema_neutral_base_prompt(
         f"{problem_doc}\n"
         f"    history: list of dicts (keys observed: {history_note})\n"
         f"    Action semantics: {action_sem}\n"
-        "    return: float, probability of choosing action 1, i.e. P(action=1)\n"
+        f"{return_line}"
         '    """\n\n'
-        f"{_GENERIC_PROMPT_REQUIREMENTS}\n\n"
-        "Behavioral requirements:\n"
-        "- Do not return constant or near-constant probabilities, such as always close to 0.5.\n"
-        "- The probability must depend meaningfully on the problem inputs.\n"
-        "- History may be used when helpful, but do not rely only on copying past actions.\n"
-        "- The program should behave sensibly across different problems and histories.\n\n"
+        f"{requirements}\n"
+        f"{behavioral}"
         "Generation requirements:\n"
         f"- {CONCISE_PROGRAM_GUIDANCE}\n"
         "- Programs must implement choose(problem, history) as documented above.\n"
@@ -187,7 +243,11 @@ def _base_prompt_for_trials(
 ) -> str:
     if _is_gamble_ab_task(trials):
         return _choice13k_neutral_loglik_base(base_prompt_path)
-    return _build_schema_neutral_base_prompt(schema_summary, trials)
+    return _build_schema_neutral_base_prompt(
+        schema_summary,
+        trials,
+        categorical=is_categorical_output_dataset(dataset_alias),
+    )
 
 
 def _apply_gamble_neutral_wording(text: str) -> str:
@@ -334,7 +394,7 @@ def _merge_prompt_fallback(
         dataset_alias=dataset_alias,
         base_prompt_path=base_prompt_path,
     )
-    if is_mixed_gambles_dataset(dataset_alias):
+    if is_mixed_gambles_dataset(dataset_alias) or is_external_dataset(dataset_alias):
         display = dataset_display_name(dataset_alias)
         task_desc = instruction
     else:
@@ -370,7 +430,7 @@ def build_prompt_generation_llm_user_content(
         base_prompt_path=base_prompt_path,
     )
     trial_examples = _format_trials_for_prompt(sample_trials, max_trials=10)
-    if is_mixed_gambles_dataset(dataset_alias):
+    if is_mixed_gambles_dataset(dataset_alias) or is_external_dataset(dataset_alias):
         task_description = instruction
     else:
         task_description = PSYCH101_BINARY_DATASETS[
@@ -383,6 +443,32 @@ def build_prompt_generation_llm_user_content(
             "for this dataset; keep gamble field names and P(action=1)=P(action on gamble_B).\n"
         )
         base_section_title = "## Base prompt (gamble_A/gamble_B task)\n\n"
+        api_line = (
+            "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
+        )
+        safety_line = (
+            "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
+            "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
+            "variables defined on all branches.\n"
+        )
+    elif is_categorical_output_dataset(dataset_alias):
+        adapt_instructions = (
+            "- The base prompt skeleton is schema-specific (categorical multi-action). Expand it "
+            "into a complete evolution prompt using ONLY fields from the runtime schema summary.\n"
+            "- Do NOT mention gamble_A, gamble_B, or Bernoulli P(action=1).\n"
+            "- Document exact `problem` keys, history reset boundaries, and that choose() must "
+            "return a probability distribution over all action ids in problem['options'].\n"
+        )
+        base_section_title = "## Base prompt skeleton (categorical)\n\n"
+        api_line = (
+            "- Executable API: `def choose(problem, history)` returning dict[int, float] "
+            "probabilities over every option['action'] (renormalized if needed).\n"
+        )
+        safety_line = (
+            "- Preserve generic safety: pure Python, no imports, deterministic, non-negative "
+            "finite probabilities, no randomness, no pow() (use **), helpers inside choose(), "
+            "variables defined on all branches.\n"
+        )
     else:
         adapt_instructions = (
             "- The base prompt skeleton is schema-specific (non-gamble). Expand it into a "
@@ -391,6 +477,14 @@ def build_prompt_generation_llm_user_content(
             "- Document exact `problem` keys and action semantics from the schema summary.\n"
         )
         base_section_title = "## Base prompt skeleton (schema-specific)\n\n"
+        api_line = (
+            "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
+        )
+        safety_line = (
+            "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
+            "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
+            "variables defined on all branches.\n"
+        )
 
     return (
         f"Write the evolution system prompt for dataset `{dataset_alias}` ({display}).\n\n"
@@ -398,10 +492,8 @@ def build_prompt_generation_llm_user_content(
         "- Use the **Runtime schema summary** and **Parsed trial examples** sections below "
         "as the source of truth for `problem`, `history`, and action semantics.\n"
         f"{adapt_instructions}"
-        "- Executable API: `def choose(problem, history)` returning float in (0, 1) as P(action=1).\n"
-        "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
-        "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
-        "variables defined on all branches.\n"
+        f"{api_line}"
+        f"{safety_line}"
         f"- {CONCISE_PROGRAM_GUIDANCE}\n"
         "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
         "- Do NOT append a sample, reference, or complete choose() implementation.\n"
@@ -517,6 +609,48 @@ def setup_teh_run_prompts(
             "Mixed gambles: Option A is a 50/50 gamble (gain/loss); Option B is certain. "
             "action=0 gamble, action=1 certain; choose(problem, history) returns P(action=1)."
         )
+    elif is_bergert_nosofsky_2007_dataset(dataset_alias):
+        from utils.teh.participant_ids import load_valid_participant_ids
+
+        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
+        sample_pid = int(valid_ids[0])
+        train_trials, _, _, _ = load_external_loglik_trials(
+            dataset_alias,
+            sample_pid,
+            data_dir=str(REPO_ROOT / external_default_data_dir(dataset_alias)),
+        )
+        sample_trial_list = train_trials[:8]
+        instruction = BERGERT_TASK_DESCRIPTION
+    elif is_guan_2020_stopping_dataset(dataset_alias):
+        from utils.teh.participant_ids import load_valid_participant_ids
+
+        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
+        sample_pid = int(valid_ids[0])
+        train_trials, _, _, _ = load_external_loglik_trials(
+            dataset_alias,
+            sample_pid,
+            data_dir=str(REPO_ROOT / external_default_data_dir(dataset_alias)),
+        )
+        sample_trial_list = train_trials[:8]
+        instruction = GUAN_TASK_DESCRIPTION
+    elif is_steyvers_2009_bandit_dataset(dataset_alias):
+        from utils.teh.participant_ids import load_valid_participant_ids
+
+        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
+        sample_pid = int(valid_ids[0])
+        train_trials, _, _, _ = load_external_loglik_trials(
+            dataset_alias,
+            sample_pid,
+            data_dir=str(REPO_ROOT / external_default_data_dir(dataset_alias)),
+        )
+        sample_trial_list = train_trials[:8]
+        instruction = STEYVERS_TASK_DESCRIPTION
     else:
         exp = get_psych101_binary_experiment(
             dataset_alias,

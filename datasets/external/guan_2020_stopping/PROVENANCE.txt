@@ -1,0 +1,17 @@
+Guan et al. (2020) optimal stopping — local TEH/PICS copy
+
+Paper:
+  Guan, M., Stokes, R., Vandekerckhove, J., & Lee, M. D. (2020).
+  A cognitive modeling analysis of risk in sequential choice tasks.
+  Judgment and Decision Making, 15(5), 823–850.
+  DOI: https://doi.org/10.1017/s1930297500007956
+
+Authoritative source:
+  https://github.com/maimeguan/RiskProject
+  Data/OptimalStopping.mat
+
+Do NOT use mdlee/behavioralDataRepository trials.csv for this task:
+  that CSV is missing value5–value8 for sequenceLength=8.
+
+Setup:
+  python scripts/setup_external_guan_2020_stopping.py

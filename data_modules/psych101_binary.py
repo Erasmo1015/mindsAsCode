@@ -174,6 +174,31 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
             "Category learning with geometric stimuli, key/category mapping, and trial-level feedback."
         ),
     },
+    "13schulz2020finding": {
+        "experiment_id": "schulz2020finding/exp4.csv",
+        "display_name": "Schulz et al. (2020) Exp4 8-arm bandit",
+        "schema_type": "categorical_bandit",
+        "parser": "schulz_8arm_bandit",
+        "implemented": True,
+        "output_type": "categorical",
+        "n_actions": 8,
+        "task_description": (
+            "Eight-armed bandit: 30 rounds × 10 trials; choose option 1–8 and observe reward; "
+            "options reset each round. Internal actions 0–7; choose() returns categorical probs."
+        ),
+    },
+    "14kool2016when": {
+        "experiment_id": "kool2016when/exp2.csv",
+        "display_name": "Kool et al. (2016) Daw two-step (exp2)",
+        "schema_type": "kool_twostep",
+        "parser": "kool_twostep",
+        "implemented": True,
+        "output_type": "bernoulli",
+        "task_description": (
+            "Daw-structure two-step task: each day stage-1 spaceship then stage-2 alien; "
+            "same choose() for both stages (Bernoulli P(action=1)); history carries across days."
+        ),
+    },
 }
 
 # Unprefixed aliases accepted on CLI for backward compatibility.
@@ -218,9 +243,23 @@ def _parse_row(row: Dict[str, Any], dataset_alias: str) -> PsychExperiment:
             f"Parser for dataset alias {dataset_alias!r} is not implemented yet "
             f"(expected parser type: {spec.get('parser')!r})."
         )
+    parser_id = spec["parser"]
+    # Psych-101 extensions (lazy import avoids circular deps with parsers.py).
+    if parser_id == "schulz_8arm_bandit":
+        from data_modules.psych101_extensions.schulz2020_exp4 import (
+            parse_schulz2020_exp4_row,
+        )
+
+        return parse_schulz2020_exp4_row(row, alias)
+    if parser_id == "kool_twostep":
+        from data_modules.psych101_extensions.kool2016_exp2 import (
+            parse_kool2016_exp2_row,
+        )
+
+        return parse_kool2016_exp2_row(row, alias)
+
     from data_modules.psych101_parsers import PARSER_DISPATCH
 
-    parser_id = spec["parser"]
     fn = PARSER_DISPATCH.get(parser_id)
     if fn is None:
         raise NotImplementedError(f"Unknown parser id {parser_id!r} for {dataset_alias!r}")
@@ -355,8 +394,14 @@ def experiment_to_trial_dicts(
     """Convert PsychExperiment to evaluator trial dicts (schema-specific problem fields)."""
     alias = dataset_alias or exp.dataset_alias
     exp_id = experiment_id or experiment_id_for_alias(alias)
+    # Kool: continuous session history (do not use per-block history reset).
+    if PSYCH101_BINARY_DATASETS.get(alias, {}).get("parser") == "kool_twostep":
+        from data_modules.psych101_extensions.kool2016_exp2 import (
+            build_kool_decision_trials,
+        )
+
+        return build_kool_decision_trials(exp)
     all_trials: List[Dict[str, Any]] = []
-    history_accum: List[Dict[str, Any]] = []
     for block in exp.blocks:
         block_history: List[Dict[str, Any]] = []
         for trial in block.trials:
@@ -374,10 +419,19 @@ def experiment_to_trial_dicts(
             entry: Dict[str, Any] = {"action": trial.action}
             if trial.feedback is not None:
                 entry["feedback"] = trial.feedback
-            for k, v in trial.problem_fields.items():
-                if k not in entry:
-                    entry[k] = v
+            # Do not copy problem_fields into history for categorical bandits
+            # (round/trial belong on problem only; history is action+reward).
+            if PSYCH101_BINARY_DATASETS.get(alias, {}).get("output_type") != "categorical":
+                for k, v in trial.problem_fields.items():
+                    if k not in entry:
+                        entry[k] = v
             block_history.append(entry)
+    if PSYCH101_BINARY_DATASETS.get(alias, {}).get("output_type") == "categorical":
+        from data_modules.psych101_extensions.schulz2020_exp4 import (
+            finalize_schulz_categorical_trials,
+        )
+
+        return finalize_schulz_categorical_trials(all_trials)
     return all_trials
 
 
@@ -411,9 +465,10 @@ def trials_from_blocks(
             entry: Dict[str, Any] = {"action": trial.action}
             if trial.feedback is not None:
                 entry["feedback"] = trial.feedback
-            for k, v in trial.problem_fields.items():
-                if k not in entry:
-                    entry[k] = v
+            if PSYCH101_BINARY_DATASETS.get(alias, {}).get("output_type") != "categorical":
+                for k, v in trial.problem_fields.items():
+                    if k not in entry:
+                        entry[k] = v
             block_history.append(entry)
     return out
 
@@ -456,7 +511,21 @@ def split_psych_experiment(
     split_ratio: float = 0.8,
     split_seed: int = 42,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], list]:
-    """Split by block (problem/game/round); history does not cross blocks."""
+    """Split by block (problem/game/round); history does not cross blocks.
+
+    Kool two-step is special-cased: contiguous presented-day split with
+    continuous cross-day history (see kool2016_exp2 module docstring).
+    """
+    alias = normalize_psych101_dataset_alias(exp.dataset_alias)
+    if PSYCH101_BINARY_DATASETS.get(alias, {}).get("parser") == "kool_twostep":
+        from data_modules.psych101_extensions.kool2016_exp2 import (
+            split_kool2016_exp2_experiment,
+        )
+
+        return split_kool2016_exp2_experiment(
+            exp, split_ratio=split_ratio, split_seed=split_seed
+        )
+
     exp = _expand_single_block_to_pseudo_blocks(exp)
     n_blocks = len(exp.blocks)
     if n_blocks < 3:
@@ -497,6 +566,19 @@ def split_psych_experiment(
     val_trials = trials_from_blocks(exp, val_blocks)
     test_trials = trials_from_blocks(exp, test_blocks)
     options = exp.blocks[0].option_keys
+
+    # Categorical Psych-101 extensions (e.g. Schulz): reshape for categorical evaluator.
+    alias = normalize_psych101_dataset_alias(exp.dataset_alias)
+    if PSYCH101_BINARY_DATASETS.get(alias, {}).get("output_type") == "categorical":
+        from data_modules.psych101_extensions.schulz2020_exp4 import (
+            finalize_schulz_categorical_trials,
+        )
+
+        train_trials = finalize_schulz_categorical_trials(train_trials)
+        val_trials = finalize_schulz_categorical_trials(val_trials)
+        test_trials = finalize_schulz_categorical_trials(test_trials)
+        options = list(range(int(PSYCH101_BINARY_DATASETS[alias].get("n_actions", 8))))
+
     return train_trials, val_trials, test_trials, options
 
 
@@ -610,8 +692,10 @@ def summarize_runtime_schema_for_prompt(trials: List[Dict[str, Any]]) -> str:
     if option_keys_samples:
         lines.append(f"- option_keys example(s): {option_keys_samples[:3]}")
     if history_keys:
-        core_hist = sorted(k for k in history_keys if k in ("action", "feedback"))
-        extra_hist = sorted(k for k in history_keys if k not in ("action", "feedback"))
+        core_hist = sorted(k for k in history_keys if k in ("action", "feedback", "reward"))
+        extra_hist = sorted(
+            k for k in history_keys if k not in ("action", "feedback", "reward")
+        )
         if core_hist:
             lines.append(f"- history core keys: {core_hist}")
         if extra_hist:
@@ -651,7 +735,39 @@ def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
     key_lbl = _action_key_label(keys, action)
     hist = trial.get("history", [])
     hist_len = len(hist)
-    hist_fb = hist[-1].get("feedback") if hist else None
+    hist_fb = None
+    if hist:
+        last = hist[-1]
+        hist_fb = last.get("feedback", last.get("reward"))
+
+    if schema == "categorical_bandit":
+        last_reward = hist[-1].get("reward", hist[-1].get("feedback")) if hist else None
+        return (
+            f"{index}. [categorical_bandit] round={p.get('round')}; trial={p.get('trial')}; "
+            f"n_arms={p.get('n_arms', len(keys))}; option_keys={keys}; "
+            f"raw_press_coding={p.get('raw_press_coding')}; "
+            f"internal_action_coding={p.get('internal_action_coding')}; "
+            f"action={action} (internal); history_len={hist_len}"
+            + (f"; last_reward={last_reward}" if last_reward is not None else "")
+        )
+
+    if schema == "kool_twostep":
+        stage = p.get("stage")
+        if int(stage or 0) == 1:
+            return (
+                f"{index}. [kool/stage1] day={p.get('presented_day')}; "
+                f"spaceship_options={p.get('spaceship_options', keys)}; "
+                f"option_keys={keys}; action={action} "
+                f"(0=first presented spaceship, 1=second); history_len={hist_len}"
+            )
+        return (
+            f"{index}. [kool/stage2] day={p.get('presented_day')}; planet={p.get('planet')}; "
+            f"alien_options={p.get('alien_options', keys)}; "
+            f"spaceship={p.get('spaceship')}; stage1_action={p.get('stage1_action')}; "
+            f"option_keys={keys}; action={action} "
+            f"(0=first presented alien, 1=second); history_len={hist_len}"
+            + (f"; last_hist_stage={hist[-1].get('stage')}" if hist else "")
+        )
 
     if schema == "A":
         ga = p.get("gamble_A", {})

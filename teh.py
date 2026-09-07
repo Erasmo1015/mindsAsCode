@@ -4,7 +4,8 @@ teh.py — TEH (Template Evolution HuggingFace): Psych-101 binary cognitive data
 Evolved programs implement choose(problem, history) -> float = P(action=1) on structured trials
 parsed from Psych-101 / Psych-101-test natural-language rows (see data_modules/psych101_binary.py).
 
-Psych-101 binary aliases (e.g. peterson2021using) plus local mixed_gambles. Legacy choice13k/cpc18/
+Psych-101 binary aliases (e.g. peterson2021using) plus local mixed_gambles and
+external Bernoulli adapters (e.g. bergert_nosofsky_2007). Legacy choice13k/cpc18/
 gridworld entrypoints are not supported here (use dataset aliases instead of choice13k).
 """
 
@@ -43,6 +44,11 @@ from data_modules.mixed_gambles import (
     DEFAULT_CSV_PATH,
     load_mixed_gambles_trials,
 )
+from data_modules.external import (
+    is_external_dataset,
+    load_external_loglik_trials,
+    external_default_data_dir,
+)
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
@@ -63,7 +69,9 @@ from utils.teh.teh_datasets import (
     LOGlik_VAL_SPLIT_DATASETS,
     MIXED_GAMBLES,
     PARTICIPANT_DATASETS,
+    dataset_output_type,
     is_binary_loglik_dataset,
+    is_categorical_output_dataset,
     is_mixed_gambles_dataset,
     uses_train_val_test_loglik_split,
 )
@@ -79,6 +87,15 @@ from utils.teh.teh_runtime import (
     teh_output_base_dir,
     teh_wandb_run_name,
     valid_participant_ids_path,
+)
+from utils.mem.trace import (
+    append_mem_trace_record,
+    best_reference_parent,
+    build_candidate_record,
+    build_iteration_context_record,
+    compute_delta_f,
+    mem_trace_path,
+    parent_record_from_elite_tuple,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent
@@ -1262,13 +1279,22 @@ def _evaluate_loglik_for_dataset(
     verbose: bool = False,
     n_seeds: int = 1,
 ) -> Dict[str, float]:
+    if is_categorical_output_dataset(dataset):
+        from utils.teh_psych.categorical_eval import evaluate_categorical_program
+
+        return evaluate_categorical_program(
+            choose_fn, trials, verbose=verbose, n_seeds=n_seeds
+        )
     return evaluate_choice13k_program(choose_fn, trials, verbose=verbose, n_seeds=n_seeds)
 
 
 def _resolve_default_seed_program_path(args: Any, participant_id: int) -> Optional[str]:
-    """Default seed path for TEH Psych-101 binary datasets."""
+    """Default seed path for TEH datasets (Bernoulli 0.5 or categorical uniform)."""
     if args.seed_path is not None:
         return args.seed_path
+    dataset = getattr(args, "dataset", None)
+    if dataset is not None and is_categorical_output_dataset(str(dataset)):
+        return str(_REPO_ROOT / "persona_code_example" / "teh" / "categorical_uniform.py")
     return str(DEFAULT_SEED_PROGRAM)
 
 
@@ -1520,6 +1546,40 @@ def _print_selected_participants_trial_summary(
                 int(pid),
                 csv_path=DEFAULT_CSV_PATH,
                 filter_gain_loss_only=False,
+                split_ratio=split_ratio,
+                split_seed=split_seed,
+            )
+            n_parsed = len(train_trials) + len(val_trials) + len(test_trials)
+            rows.append(
+                {
+                    "raw_id": int(pid),
+                    "parsed_total": n_parsed,
+                    "train": len(train_trials),
+                    "val": len(val_trials),
+                    "test": len(test_trials),
+                }
+            )
+        print("")
+        print(
+            f"Selected participants trial summary ({len(participant_ids)} ids, "
+            f"split_ratio={split_ratio:.3f}, split_seed={split_seed}):"
+        )
+        print("  raw_id | parsed_total | train | val | test")
+        for row in rows[:60]:
+            print(
+                f"  {row['raw_id']:6d} | {row['parsed_total']:12d} | "
+                f"{row['train']:5d} | {row['val']:3d} | {row['test']:4d}"
+            )
+        if len(rows) > 60:
+            print(f"  ... ({len(rows) - 60} rows omitted) ...")
+
+    elif is_external_dataset(dataset):
+        rows = []
+        for pid in participant_ids:
+            train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
+                dataset,
+                int(pid),
+                data_dir=str(_REPO_ROOT / external_default_data_dir(dataset)),
                 split_ratio=split_ratio,
                 split_seed=split_seed,
             )
@@ -1806,16 +1866,56 @@ def apply_consistency_gate_to_probability(
     return consistency * clamped + (1.0 - consistency) * 0.5
 
 
+def apply_consistency_gate_to_categorical_probs(
+    probs: Dict[int, float],
+    val_loglik: float,
+    *,
+    threshold: float = _CHOICE13K_GATE_THRESHOLD,
+) -> Dict[int, float]:
+    """Blend categorical probs toward uniform 1/K (categorical analogue of blend-to-0.5)."""
+    if not probs:
+        return probs
+    k = len(probs)
+    uniform = 1.0 / float(k)
+    if val_loglik < threshold:
+        consistency = max(0.0, 1.0 - (threshold - val_loglik))
+    else:
+        consistency = 1.0
+    return {
+        int(aid): consistency * float(p) + (1.0 - consistency) * uniform
+        for aid, p in probs.items()
+    }
+
+
 def wrap_choose_with_consistency_gate(
     choose_fn: Callable,
     val_loglik: float,
 ) -> Callable:
-    """Return choose(problem, history) that applies the external consistency gate."""
+    """Return choose(problem, history) that applies the external consistency gate (Bernoulli)."""
 
     def gated_choose(problem: Any, history: Any) -> float:
         p_raw = choose_fn(problem, history)
         raw_p = _parse_choice13k_choose_output(p_raw)
         return apply_consistency_gate_to_probability(raw_p, val_loglik)
+
+    return gated_choose
+
+
+def wrap_choose_with_categorical_consistency_gate(
+    choose_fn: Callable,
+    val_loglik: float,
+) -> Callable:
+    """Return choose(problem, history) that applies categorical consistency gate."""
+    from utils.teh_psych.categorical_eval import (
+        coerce_choose_output,
+        valid_action_ids_from_problem,
+    )
+
+    def gated_choose(problem: Any, history: Any) -> Dict[int, float]:
+        valid_ids = valid_action_ids_from_problem(problem or {})
+        raw = choose_fn(problem, history)
+        probs, _ = coerce_choose_output(raw, valid_ids)
+        return apply_consistency_gate_to_categorical_probs(probs, val_loglik)
 
     return gated_choose
 
@@ -1826,13 +1926,26 @@ def run_choice13k_gate_phase(
     test_trials: List[Dict[str, Any]],
     *,
     n_eval_seeds: int = 1,
+    dataset: str = "",
 ) -> Optional[float]:
     """Evaluate test log-likelihood with external consistency gate (source unchanged)."""
     if not test_trials:
         return None
     try:
-        gated_fn = wrap_choose_with_consistency_gate(choose_fn, float(val_loglik))
-        gated_eval = evaluate_choice13k_program(gated_fn, test_trials, n_seeds=n_eval_seeds)
+        if dataset and is_categorical_output_dataset(dataset):
+            from utils.teh_psych.categorical_eval import evaluate_categorical_program
+
+            gated_fn = wrap_choose_with_categorical_consistency_gate(
+                choose_fn, float(val_loglik)
+            )
+            gated_eval = evaluate_categorical_program(
+                gated_fn, test_trials, n_seeds=n_eval_seeds
+            )
+        else:
+            gated_fn = wrap_choose_with_consistency_gate(choose_fn, float(val_loglik))
+            gated_eval = evaluate_choice13k_program(
+                gated_fn, test_trials, n_seeds=n_eval_seeds
+            )
         return float(gated_eval["avg_loglik"])
     except Exception as e:
         print(f"Warning: gate phase failed: {e}")
@@ -4559,6 +4672,15 @@ def _trials_for_loglik_participant(
             participant_id,
             csv_path=mixed_gambles_csv,
             filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+        return train_trials, val_trials, test_trials
+    if is_external_dataset(dataset):
+        train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
+            dataset,
+            participant_id,
+            data_dir=str(_REPO_ROOT / external_default_data_dir(dataset)),
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
@@ -8051,6 +8173,7 @@ def run_evolution(
     evolution_selection_score: str = "train_val",
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
+    mem_trace: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -8068,8 +8191,11 @@ def run_evolution(
         model_name: LLM model name for generation
         client_kwargs: Optional OpenAI client kwargs (for local vLLM server)
         output_dir: Optional output directory for saving results
+        mem_trace: When True, append passive MEM JSONL under the participant output dir
+            (iteration_context + candidate records). Does not affect search behavior.
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
+    mem_trace_enabled = bool(mem_trace)
     if fitness_metric not in ("accuracy", "loglik"):
         raise ValueError(f"Invalid fitness_metric: {fitness_metric!r} (expected 'accuracy' or 'loglik')")
     if not is_binary_loglik_dataset(dataset):
@@ -8130,6 +8256,22 @@ def run_evolution(
             f"(train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)}, "
             f"seed={split_seed}, ratio={split_ratio:.3f})"
         )
+    elif is_external_dataset(dataset):
+        data_dir = str(_REPO_ROOT / external_default_data_dir(dataset))
+        print(f"Loading external dataset {dataset} from {data_dir} for participant {participant_id}...")
+        train_trials, val_trials, test_trials, options = load_external_loglik_trials(
+            dataset,
+            participant_id,
+            data_dir=data_dir,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+        n_parsed = len(train_trials) + len(val_trials) + len(test_trials)
+        print(
+            f"[Load] Parsed total_trials={n_parsed} "
+            f"(train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)}, "
+            f"seed={split_seed}, ratio={split_ratio:.3f})"
+        )
     else:
         print(f"Loading Psych-101 dataset {dataset} for participant {participant_id}...")
         if choice13k_experiment is not None:
@@ -8162,6 +8304,16 @@ def run_evolution(
     if save_artifacts:
         output_path.mkdir(parents=True, exist_ok=True)
     error_history_path = output_path / "error_history.jsonl"
+    mem_trace_file: Optional[Path] = None
+    mem_run_id = ""
+    if mem_trace_enabled and save_artifacts:
+        mem_trace_file = mem_trace_path(output_path)
+        # Prefer run folder name (parent of participant_*), else participant dir name.
+        if output_path.name.startswith("participant_"):
+            mem_run_id = output_path.parent.name
+        else:
+            mem_run_id = output_path.name
+        print(f"MEM trace logging enabled: {mem_trace_file}")
     
     # Set up local log file for wandb metrics (if wandb is enabled)
     log_file_path = None
@@ -8674,12 +8826,80 @@ def run_evolution(
                 )
         else:
             num_parents_to_use = min(sample_size, pool_size)
+            parent_idxs = list(range(num_parents_to_use))
             selected_parents = elite_parents[:num_parents_to_use]
             print(
                 f"\nUsing {num_parents_to_use} top parent(s) from elite set "
                 f"(sample_size={sample_size}, sample_parents=False):"
             )
         parent_codes = [p[0] for p in selected_parents]
+
+        mem_selected_parent_records: List[Dict[str, Any]] = []
+        mem_best_parent_rec: Optional[Dict[str, Any]] = None
+        mem_seed_selection_score: Optional[float] = None
+        if mem_trace_file is not None:
+            for local_i, parent_tuple in enumerate(selected_parents):
+                elite_j = int(parent_idxs[local_i]) if local_i < len(parent_idxs) else local_i
+                val_ll = None
+                if track_elite_val_loglik and elite_j < len(elite_val_logliks):
+                    val_ll = elite_val_logliks[elite_j]
+                train_ll = _train_loglik_from_elite_tuple(
+                    parent_tuple, evolution_selection_score=evolution_selection_score
+                )
+                mem_selected_parent_records.append(
+                    parent_record_from_elite_tuple(
+                        parent_tuple,
+                        val_loglik=val_ll,
+                        train_loglik=train_ll,
+                    )
+                )
+            mem_best_parent_rec = best_reference_parent(mem_selected_parent_records)
+            # Seed/baseline reference for fresh candidates (same selection metric).
+            for ep in elite_parents:
+                if str(ep[3]) in ("baseline", "global_baseline", "refinement_seed"):
+                    mem_seed_selection_score = float(ep[1]) if ep[1] is not None else None
+                    break
+            if mem_seed_selection_score is None:
+                # Fall back to evaluating stored seed fitness from baseline eval path:
+                # elite index-1 for the seed program when present as first pool entry.
+                mem_seed_selection_score = (
+                    float(elite_parents[0][1])
+                    if elite_parents and str(elite_parents[0][3]) == "baseline"
+                    else None
+                )
+                if mem_seed_selection_score is None and fitness_metric == "loglik":
+                    # Last resort: recompute from baseline metrics already in memory.
+                    if use_train_val_selection:
+                        mem_seed_selection_score = _evolution_selection_score(
+                            float(baseline_train_eval["avg_loglik"]),
+                            _safe_float(baseline_val_eval["avg_loglik"])
+                            if baseline_val_eval is not None
+                            else None,
+                            len(train_trials),
+                            len(val_trials),
+                            evolution_selection_score=evolution_selection_score,
+                            warn_key=None,
+                        )
+                    else:
+                        mem_seed_selection_score = float(baseline_train_eval["avg_loglik"])
+            append_mem_trace_record(
+                mem_trace_file,
+                build_iteration_context_record(
+                    dataset=dataset,
+                    participant_id=participant_id,
+                    run_id=mem_run_id,
+                    split_seed=int(split_seed),
+                    phase="evolution",
+                    iteration=iteration_step,
+                    evolution_selection_score=evolution_selection_score,
+                    selected_parents=mem_selected_parent_records,
+                    best_selected_parent_id=(
+                        str(mem_best_parent_rec["program_id"])
+                        if mem_best_parent_rec is not None
+                        else None
+                    ),
+                ),
+            )
 
         if is_cpc18_mse:
             for i, parent_tuple in enumerate(selected_parents):
@@ -9650,6 +9870,71 @@ def run_evolution(
                     exit_after_save=bool(prompt_debug and prompt_debug_exit),
                 )
         
+        # Passive MEM candidate traces (after elite truncation when candidates were added).
+        if mem_trace_file is not None:
+            elite_ids_after = {str(p[3]) for p in elite_parents}
+            ref_parent_id = (
+                str(mem_best_parent_rec["program_id"])
+                if mem_best_parent_rec is not None
+                else None
+            )
+            ref_parent_score = (
+                mem_best_parent_rec.get("selection_score")
+                if mem_best_parent_rec is not None
+                else None
+            )
+            for src_i, result in enumerate(candidate_results):
+                idx = int(result.get("idx", src_i))
+                program_id = f"iteration_{iteration_step}_candidate_{idx}"
+                source = (
+                    candidate_sources[src_i]
+                    if src_i < len(candidate_sources)
+                    else "normal"
+                )
+                if source == "fresh":
+                    reference_kind = "seed_baseline"
+                    cand_ref_id = "baseline"
+                    cand_ref_score = mem_seed_selection_score
+                else:
+                    reference_kind = "best_selected_parent"
+                    cand_ref_id = ref_parent_id
+                    cand_ref_score = ref_parent_score
+                cand_score = result.get("selection_score")
+                if cand_score is None and fitness_metric == "loglik":
+                    # Prefer explicit selection_score; else use pool fitness when valid.
+                    cand_score = result.get("fitness") if result.get("runtime_valid") else None
+                    if cand_score is not None and not use_train_val_selection:
+                        cand_score = result.get("train_loglik", cand_score)
+                train_ll = result.get("train_loglik")
+                val_ll = result.get("val_loglik") if val_trials else None
+                append_mem_trace_record(
+                    mem_trace_file,
+                    build_candidate_record(
+                        dataset=dataset,
+                        participant_id=participant_id,
+                        run_id=mem_run_id,
+                        split_seed=int(split_seed),
+                        phase="evolution",
+                        iteration=iteration_step,
+                        candidate_id=program_id,
+                        candidate_idx=idx,
+                        source=str(source),
+                        code=result.get("code") or "",
+                        runtime_valid=bool(result.get("runtime_valid", False)),
+                        train_loglik=_safe_float(train_ll),
+                        val_loglik=_safe_float(val_ll),
+                        selection_score=_safe_float(cand_score),
+                        reference_parent_id=cand_ref_id,
+                        reference_parent_score=_safe_float(cand_ref_score),
+                        reference_kind=reference_kind,
+                        delta_f=compute_delta_f(
+                            _safe_float(cand_score), _safe_float(cand_ref_score)
+                        ),
+                        survived_elite_truncation=program_id in elite_ids_after,
+                        evolution_selection_score=evolution_selection_score,
+                    ),
+                )
+
         # Save iteration results
         best_program_id = None
         if selected_results:
@@ -10338,6 +10623,7 @@ def run_evolution(
                 float(val_ll_for_gate),
                 test_trials,
                 n_eval_seeds=n_eval_seeds,
+                dataset=dataset,
             )
             if gated_test_loglik is not None:
                 overall_best_train["gated_test_loglik"] = gated_test_loglik
@@ -10873,8 +11159,9 @@ def main():
         default=PETERSON2021USING_ALIAS,
         choices=_teh_dataset_choices,
         help=(
-            "Psych-101 binary alias (1peterson2021using, 2plonsky2018when, ...) or mixed_gambles (local CSV). "
-            "Unprefixed legacy names (e.g. peterson2021using) are accepted and normalized."
+            "Psych-101 binary alias (1peterson2021using, ...), mixed_gambles (local CSV), "
+            "or external alias (bergert_nosofsky_2007, guan_2020_stopping, steyvers_2009_bandit). "
+            "Unprefixed legacy Psych-101 names are accepted and normalized."
         ),
     )
     parser.add_argument(
@@ -11149,6 +11436,15 @@ def main():
         help=(
             "Ablation label. When set, logs are written under generated_outputs_ablation/ and "
             "the run folder uses LABEL (e.g. --ablation population -> .../teh/.../population)."
+        ),
+    )
+    parser.add_argument(
+        "--mem_trace",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When enabled, write passive MEM traces to participant_*/mem_trace.jsonl "
+            "(iteration_context + candidate rows; no LLM calls; default: disabled)."
         ),
     )
     parser.add_argument(
@@ -11972,6 +12268,7 @@ def main():
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
+                mem_trace=args.mem_trace,
             )
         finally:
             if wandb is not None:
@@ -12061,6 +12358,7 @@ def main():
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
+                mem_trace=args.mem_trace,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -12455,6 +12753,7 @@ def main():
                         max_error_prompt_chars=args.max_error_prompt_chars,
                         error_feedback_mode=args.error_feedback_mode,
                         ablation=args.ablation,
+                        mem_trace=args.mem_trace,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -12735,6 +13034,7 @@ def main():
                 evolution_selection_score=args.evolution_selection_score,
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
+                mem_trace=args.mem_trace,
             )
 
         try:

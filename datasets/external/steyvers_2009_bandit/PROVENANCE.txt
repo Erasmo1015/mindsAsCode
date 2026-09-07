@@ -1,0 +1,19 @@
+Steyvers, Lee & Wagenmakers (2009) 4-arm bandit — local TEH/PICS copy
+
+Paper:
+  Steyvers, M., Lee, M. D., & Wagenmakers, E.-J. (2009). A Bayesian analysis of
+  human decision-making on bandit problems. Journal of Mathematical Psychology,
+  53, 168–179. DOI: https://doi.org/10.1016/j.jmp.2008.11.002
+
+Source:
+  mdlee/behavioralDataRepository
+  datasets/sequential-choice/steyvers-lee-wagenmakers-2009-bandit/
+  (Lee coauthor; no independent public raw archive located at audit time)
+
+Coding:
+  Raw CSV choice ∈ {1,2,3,4}
+  Internal TEH action ∈ {0,1,2,3} with action = choice - 1
+
+Leakage:
+  gameRewardRates.csv / rewardRateChosen are NOT exposed to choose().
+  They may remain on disk as analysis metadata only.
