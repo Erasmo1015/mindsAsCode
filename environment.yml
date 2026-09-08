@@ -1,6 +1,6 @@
-# Minimal conda bootstrap for mindsAsCode (evo310).
+# Minimal conda bootstrap for mindsAsCode (evo312).
 # Heavy Python deps (torch/vllm/jax/...) are installed by setup_env.sh + pyproject.toml.
-name: evo310
+name: evo312
 
 channels:
   - nvidia

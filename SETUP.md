@@ -13,7 +13,7 @@ unrelated / transitive packages; a few pip entries that failed are commented).
 git clone <repo-url> mindsAsCode
 cd mindsAsCode
 bash setup_env.sh
-conda activate evo310
+conda activate evo312
 bash scripts/check_environment.sh
 ```
 
@@ -23,7 +23,7 @@ Optional flags:
 bash setup_env.sh --with-human      # NiceGUI / FastAPI / tortoise-orm
 bash setup_env.sh --with-centaur    # unsloth for Centaur baseline
 bash setup_env.sh --skip-flash-attn # only if flash-attn build must be deferred
-bash setup_env.sh --force-recreate  # delete and recreate evo310
+bash setup_env.sh --force-recreate  # delete and recreate evo312
 ```
 
 ## What each file does
@@ -171,7 +171,7 @@ Clone the Partnr fork separately and follow that repository’s setup (see READM
 ## Smoke checks after install
 
 ```bash
-conda activate evo310
+conda activate evo312
 bash scripts/check_environment.sh
 
 # Local vLLM server (example)

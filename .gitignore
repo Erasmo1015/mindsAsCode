@@ -224,3 +224,9 @@ generated_outputs_transfer
 generated_outputs_teh_psych/
 generated_outputs_teh_psych
 
+# origami server misc
+wandb_local_old_ignore/
+logs/
+logs
+wandb/
+wandb

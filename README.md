@@ -6,7 +6,7 @@ For a clean GPU-server install (recommended), see **[SETUP.md](SETUP.md)**:
 
 ```bash
 bash setup_env.sh
-conda activate evo310
+conda activate evo312
 bash scripts/check_environment.sh
 ```
 

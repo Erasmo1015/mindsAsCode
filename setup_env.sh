@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create / refresh the evo310 conda env and install the known-working GPU stack
+# Create / refresh the evo312 conda env and install the known-working GPU stack
 # plus mindsAsCode Python dependencies from pyproject.toml.
 #
 # Usage (from repo root):
@@ -10,7 +10,7 @@
 #   bash setup_env.sh --extras "baseline,analysis,dev"
 #
 # Then:
-#   conda activate evo310
+#   conda activate evo312
 #   bash scripts/check_environment.sh
 
 set -euo pipefail
@@ -18,7 +18,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-ENV_NAME="evo310"
+ENV_NAME="evo312"
 WITH_HUMAN=0
 WITH_CENTAUR=0
 SKIP_FLASH_ATTN=0
@@ -31,14 +31,14 @@ PIN_FSSPEC="2024.9.0"
 
 usage() {
   cat <<'EOF'
-setup_env.sh — bootstrap mindsAsCode conda env (evo310)
+setup_env.sh — bootstrap mindsAsCode conda env (evo312)
 
 Options:
   --with-human        Also install human web-experiment extras (nicegui/fastapi/...)
   --with-centaur      Also install unsloth (Centaur baseline)
   --skip-flash-attn   Skip flash-attn build/install (not recommended)
   --extras LIST       Comma-separated pyproject extras (default: baseline,analysis,dev)
-  --force-recreate    Remove existing evo310 env and recreate from environment.yml
+  --force-recreate    Remove existing evo312 env and recreate from environment.yml
   -h, --help          Show this help
 EOF
 }
@@ -144,7 +144,9 @@ else
   conda env create -n "$ENV_NAME" -f "$ROOT/environment.yml"
 fi
 
+set +u
 conda activate "$ENV_NAME"
+set -u
 
 echo "==> Python: $(python -V) @ $(which python)"
 echo "==> Ensuring pip/setuptools/wheel"
