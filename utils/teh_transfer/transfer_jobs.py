@@ -138,6 +138,25 @@ def build_transfer_jobs(
     return jobs
 
 
+def filter_transfer_jobs(
+    jobs: Sequence[TransferJob],
+    *,
+    source_keys: Optional[Sequence[str]] = None,
+    target_keys: Optional[Sequence[str]] = None,
+) -> List[TransferJob]:
+    """Keep jobs whose source/target keys match optional filters."""
+    wanted_sources = {str(k).strip() for k in (source_keys or []) if str(k).strip()}
+    wanted_targets = {str(k).strip() for k in (target_keys or []) if str(k).strip()}
+    out: List[TransferJob] = []
+    for job in jobs:
+        if wanted_targets and str(job.target_key) not in wanted_targets:
+            continue
+        if wanted_sources and not any(str(s) in wanted_sources for s in job.source_keys):
+            continue
+        out.append(job)
+    return out
+
+
 def build_transfer_job_batches(
     dataset_keys: Sequence[str],
     transfer_mode: str,
@@ -428,6 +447,7 @@ def make_transfer_job_worker(
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
     explain: bool = False,
+    max_observed_for_key: Optional[Callable[[str], Optional[int]]] = None,
 ) -> Callable[[TransferJob, int], TransferJobResult]:
     """Factory for the per-job worker used by ``run_transfer_jobs_parallel``."""
 
@@ -457,6 +477,11 @@ def make_transfer_job_worker(
             )
             transfer_dir = job.output_dir(target.output_dir)
             seed_path = str(target.prompts_dir / "seed_program.py")
+            job_evolution_kwargs = dict(evolution_kwargs)
+            if max_observed_for_key is not None:
+                job_evolution_kwargs["max_observed_trials_per_participant"] = (
+                    max_observed_for_key(job.target_key)
+                )
             result = run_transfer_evolution_phase(
                 target=target,
                 sources=sources,
@@ -471,7 +496,7 @@ def make_transfer_job_worker(
                 transfer_mode=job.transfer_mode,
                 source_config_keys=list(job.source_keys),
                 explain=explain,
-                **evolution_kwargs,
+                **job_evolution_kwargs,
             )
             candidate_best = transfer_dir / teh.BEST_PROGRAM_FILENAME
             if candidate_best.is_file():

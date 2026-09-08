@@ -228,6 +228,15 @@ def test_static_prompt_has_no_hidden_structure() -> None:
     assert "reset" in low
 
 
+def test_reference_prompt_wired_for_teh() -> None:
+    from utils.teh.teh_runtime import resolve_dataset_reference_prompt_path
+
+    path = resolve_dataset_reference_prompt_path(DATASET_ALIAS)
+    assert path is not None
+    assert path.name == "schulz2020_exp4.txt"
+    assert path.is_file()
+
+
 def test_steyvers_still_categorical_unchanged() -> None:
     assert is_categorical_output_dataset("steyvers_2009_bandit")
     assert dataset_output_type("steyvers_2009_bandit") == "categorical"

@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from openai import OpenAI
 
@@ -28,6 +28,7 @@ from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
     normalize_psych101_dataset_alias,
 )
+from utils.teh.sparse_observations import sparse_budget_for_dataset
 from utils.teh.teh_datasets import is_binary_loglik_dataset
 from utils.teh.teh_runtime import DEFAULT_SEED_PROGRAM
 
@@ -53,6 +54,7 @@ from utils.teh_transfer.transfer_jobs import (
     append_single_transfer_result_jsonl,
     build_transfer_job_batches,
     ensure_single_transfer_matrix_csvs,
+    filter_transfer_jobs,
     make_transfer_job_worker,
     run_transfer_jobs_parallel,
     SINGLE_TRANSFER_MATRIX_IMPROVE_PATH,
@@ -62,6 +64,22 @@ from utils.teh_transfer.transfer_jobs import (
     update_single_transfer_matrix_result,
     write_single_transfer_summary_csv,
 )
+
+
+def _spec_matches_keys(spec, keys: Optional[Sequence[str]]) -> bool:
+    if not keys:
+        return False
+    wanted = {str(x).strip() for x in keys if str(x).strip()}
+    return spec.config_key in wanted or spec.dataset_alias in wanted
+
+
+def _sparse_budget_for_spec(args: argparse.Namespace, spec) -> Optional[int]:
+    return sparse_budget_for_dataset(
+        dataset_alias=spec.dataset_alias,
+        config_key=spec.config_key,
+        max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+        max_observed_trials_datasets=args.max_observed_trials_datasets,
+    )
 
 
 def _make_unique_run_dir(base_dir: Path) -> Path:
@@ -312,6 +330,52 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Split subsampling seed (default: 0).",
     )
     parser.add_argument(
+        "--max_observed_trials_per_participant",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "After the train/val/test split, keep at most N train+val observations per "
+            "participant. Test is never changed. Omitted or <=0 disables the cap."
+        ),
+    )
+    parser.add_argument(
+        "--max_observed_trials_datasets",
+        nargs="+",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Config keys or dataset aliases that receive --max_observed_trials_per_participant. "
+            "When omitted, the cap applies to every dataset in this run. Use this to keep a "
+            "full-data source (e.g. 2plonsky2018when) while sparsifying only the target."
+        ),
+    )
+    parser.add_argument(
+        "--rerun_global_datasets",
+        nargs="+",
+        default=None,
+        metavar="KEY",
+        help=(
+            "With --global_run_dir: re-run global evolution for these datasets (overwriting the "
+            "copied global results) so a sparse target can be regenerated while reusing a "
+            "full-data source global program."
+        ),
+    )
+    parser.add_argument(
+        "--transfer_source_keys",
+        nargs="+",
+        default=None,
+        metavar="KEY",
+        help="Optional filter: only run transfer jobs whose sources include these config keys.",
+    )
+    parser.add_argument(
+        "--transfer_target_keys",
+        nargs="+",
+        default=None,
+        metavar="KEY",
+        help="Optional filter: only run transfer jobs for these target config keys.",
+    )
+    parser.add_argument(
         "--max_prompt_train_trials",
         type=int,
         default=40,
@@ -470,6 +534,12 @@ def _validate_args(args: argparse.Namespace) -> bool:
         return False
     if args.skip_global and args.global_run_dir:
         print("Error: --skip_global and --global_run_dir are mutually exclusive.")
+        return False
+    if args.rerun_global_datasets and not args.global_run_dir:
+        print("Error: --rerun_global_datasets requires --global_run_dir.")
+        return False
+    if args.max_observed_trials_per_participant is not None and args.max_observed_trials_per_participant < 0:
+        print("Error: --max_observed_trials_per_participant must be >= 0 when set (0 disables).")
         return False
     if args.transfer_iters < 1:
         print("Error: --transfer_iters must be >= 1.")
@@ -680,6 +750,12 @@ def main() -> None:
             f"\n[global] {spec.config_key} ({spec.dataset_alias}, split={spec.psych_dataset_split}): "
             f"{len(participants)} participant(s)"
         )
+        sparse_budget = _sparse_budget_for_spec(args, spec)
+        if sparse_budget is not None:
+            print(
+                f"[global] {spec.config_key}: sparse train+val cap="
+                f"{sparse_budget} per participant"
+            )
         return run_dataset_global_phase(
             spec,
             run_dir=run_dir,
@@ -693,6 +769,7 @@ def main() -> None:
             use_llm_prompt=not args.no_llm_prompt,
             base_prompt_path=args.base_prompt,
             debug_prompt=args.debug_prompt,
+            max_observed_trials_per_participant=sparse_budget,
             **shared,
         )
 
@@ -720,6 +797,34 @@ def main() -> None:
             f"\n[global source] Loaded {len(global_results)} dataset global result(s) "
             f"from {global_source_dir} into {run_dir}"
         )
+        if args.rerun_global_datasets:
+            rerun_specs = [s for s in specs if _spec_matches_keys(s, args.rerun_global_datasets)]
+            missing = [
+                k
+                for k in args.rerun_global_datasets
+                if str(k).strip()
+                and not any(_spec_matches_keys(s, [k]) for s in specs)
+            ]
+            if missing:
+                print(
+                    f"Error: --rerun_global_datasets did not match loaded specs: {missing}"
+                )
+                return
+            if not rerun_specs:
+                print("Error: --rerun_global_datasets matched no datasets in this run.")
+                return
+            print(
+                f"\n[global] Re-running global phase for "
+                f"{[s.config_key for s in rerun_specs]} (overwriting copied results)"
+            )
+            rerun_results = run_global_phases_parallel(
+                rerun_specs,
+                _global_worker,
+                max_workers=args.max_workers,
+                n_candidates=args.n_candidates,
+                parallel_datasets=args.parallel_datasets,
+            )
+            global_results.update(rerun_results)
     elif args.skip_global:
         try:
             global_results = load_global_results_from_source_run(
@@ -747,7 +852,23 @@ def main() -> None:
     if not args.skip_transfer:
         dataset_keys = [spec.config_key for spec in specs]
         job_batches = build_transfer_job_batches(dataset_keys, args.transfer_mode)
+        if args.transfer_source_keys or args.transfer_target_keys:
+            job_batches = [
+                filter_transfer_jobs(
+                    batch,
+                    source_keys=args.transfer_source_keys,
+                    target_keys=args.transfer_target_keys,
+                )
+                for batch in job_batches
+            ]
+            job_batches = [batch for batch in job_batches if batch]
         n_jobs = sum(len(batch) for batch in job_batches)
+        if n_jobs == 0:
+            print(
+                "Error: no transfer jobs matched --transfer_source_keys/"
+                "--transfer_target_keys (or no jobs were generated)."
+            )
+            return
         print(
             f"\n[transfer] mode={args.transfer_mode}: {n_jobs} job(s) "
             f"in {len(job_batches)} batch(es)"
@@ -826,6 +947,9 @@ def main() -> None:
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
             explain=args.explain,
+            max_observed_for_key=lambda key: _sparse_budget_for_spec(
+                args, next(s for s in specs if s.config_key == key)
+            ),
         )
         transfer_job_results = run_transfer_jobs_parallel(
             job_batches,

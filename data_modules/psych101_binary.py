@@ -186,6 +186,7 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
             "Eight-armed bandit: 30 rounds × 10 trials; choose option 1–8 and observe reward; "
             "options reset each round. Internal actions 0–7; choose() returns categorical probs."
         ),
+        "reference_prompt": "prompts/external/schulz2020_exp4.txt",
     },
     "14kool2016when": {
         "experiment_id": "kool2016when/exp2.csv",
@@ -198,6 +199,7 @@ PSYCH101_BINARY_DATASETS: Dict[str, Dict[str, Any]] = {
             "Daw-structure two-step task: each day stage-1 spaceship then stage-2 alien; "
             "same choose() for both stages (Bernoulli P(action=1)); history carries across days."
         ),
+        "reference_prompt": "prompts/external/kool2016_exp2.txt",
     },
 }
 
@@ -785,7 +787,11 @@ def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
         ob = p.get("option_B", {}) or {}
         return (
             f"{index}. [bergert] problem_id={p.get('problem_id')}; "
-            f"option_A cues={oa.get('cues')}; option_B cues={ob.get('cues')}; "
+            f"option_A={{'alternative_id': {oa.get('alternative_id')!r}, "
+            f"'cues': {oa.get('cues')}}}; "
+            f"option_B={{'alternative_id': {ob.get('alternative_id')!r}, "
+            f"'cues': {ob.get('cues')}}}; "
+            f"access cues via option_A['cues']['cue1']..cue6 (NOT option_A['cue1']); "
             f"option_keys={keys}; action={action} (1=option_A, 0=option_B); "
             f"history_len={hist_len}"
         )

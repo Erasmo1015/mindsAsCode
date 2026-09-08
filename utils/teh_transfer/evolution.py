@@ -75,6 +75,8 @@ def collect_pooled_train_val_trials(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_observed_trials_per_participant: Optional[int] = None,
+    audits_out: Optional[List] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Pooled train and val trials across participants (same splits as TEH evolution)."""
     train = teh._collect_pooled_train_trials_for_participants(
@@ -87,6 +89,8 @@ def collect_pooled_train_val_trials(
         psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        audits_out=audits_out,
     )
     val = teh._collect_pooled_split_trials_for_participants(
         dataset,
@@ -99,6 +103,7 @@ def collect_pooled_train_val_trials(
         psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
     )
     return train, val
 
@@ -447,6 +452,7 @@ def _compute_avg_test_loglik_for_program_code(
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
     progress_label: Optional[str] = None,
+    max_observed_trials_per_participant: Optional[int] = None,
 ) -> Optional[float]:
     """Average held-out test loglik for one program across participants."""
     choose_fn = teh.compile_program(program_code)
@@ -472,6 +478,7 @@ def _compute_avg_test_loglik_for_program_code(
             psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
+            max_observed_trials_per_participant=max_observed_trials_per_participant,
         )
         test_eval = teh._evaluate_loglik_for_dataset(
             dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
@@ -590,6 +597,7 @@ def run_dataset_global_phase(
     use_llm_prompt: bool,
     base_prompt_path: Optional[str],
     debug_prompt: bool = False,
+    max_observed_trials_per_participant: Optional[int] = None,
 ) -> PopulationEvolutionResult:
     """Population-level global evolution for one dataset."""
     dataset_output = run_dir / spec.config_key
@@ -623,6 +631,7 @@ def run_dataset_global_phase(
             psych_dataset_split=spec.psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
+            max_observed_trials_per_participant=max_observed_trials_per_participant,
         )
         seed_code = teh.load_seed_program(seed_path)
         gen_debug_holder: Dict[str, Any] = {}
@@ -694,6 +703,7 @@ def run_dataset_global_phase(
         prompt_debug_exit=False,
         evolution_selection_score=evolution_selection_score,
         max_error_prompt_chars=max_error_prompt_chars,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
     )
 
     global_dir = _rename_global_phase_dir(dataset_output)
@@ -799,6 +809,7 @@ def run_transfer_evolution_phase(
     transfer_mode: str = "multiple",
     source_config_keys: Optional[Sequence[str]] = None,
     explain: bool = False,
+    max_observed_trials_per_participant: Optional[int] = None,
 ) -> PopulationEvolutionResult:
     """
     Leave-one-dataset-out transfer evolution on pooled target train+val trials.
@@ -812,6 +823,7 @@ def run_transfer_evolution_phase(
         f"({len(participant_ids)} participant(s))...",
         flush=True,
     )
+    sparse_audits: List = []
     pooled_train, pooled_val = collect_pooled_train_val_trials(
         dataset,
         participant_ids,
@@ -822,6 +834,8 @@ def run_transfer_evolution_phase(
         psych_dataset_split=target.psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        audits_out=sparse_audits,
     )
     transfer_suffix = build_transfer_source_suffix(sources)
     explain_suffix_text: Optional[str] = None
@@ -832,6 +846,17 @@ def run_transfer_evolution_phase(
     else:
         transfer_dir = Path(transfer_dir)
     transfer_dir.mkdir(parents=True, exist_ok=True)
+    from utils.teh.sparse_observations import (
+        SPARSE_AUDIT_CSV_FILENAME,
+        SPARSE_AUDIT_FILENAME,
+        normalize_max_observed_trials,
+        write_sparse_audits_csv,
+        write_sparse_audits_payload,
+    )
+
+    if sparse_audits and normalize_max_observed_trials(max_observed_trials_per_participant) is not None:
+        write_sparse_audits_payload(transfer_dir / SPARSE_AUDIT_FILENAME, sparse_audits)
+        write_sparse_audits_csv(transfer_dir / SPARSE_AUDIT_CSV_FILENAME, sparse_audits)
 
     seed_code = teh.load_seed_program(seed_program_path)
     seed_fn = teh.compile_program(seed_code)
@@ -1156,6 +1181,7 @@ def run_transfer_evolution_phase(
         psych_dataset_split=target.psych_dataset_split,
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
     )
     transfer_results = {
         "phase": "transfer",
@@ -1198,6 +1224,7 @@ def run_transfer_evolution_phase(
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
             progress_label=f"{target.config_key} transfer_1st",
+            max_observed_trials_per_participant=max_observed_trials_per_participant,
         )
     if first_iter_best_test_loglik is not None:
         transfer_results["first_iteration_best_test_loglik"] = first_iter_best_test_loglik

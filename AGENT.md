@@ -453,3 +453,45 @@ First parallel smoke (`logs/five_new_datasets_small_260907_004950/`) failed; ins
 - `scripts/run_five_new_datasets_small.sh` runs the five datasets **serially** (shared vLLM).
 
 Smoke (2 participants, 2 iters, 3 cands): `bash scripts/run_five_new_datasets_small.sh` after vLLM on `:8001`. Do not commit/push for Origami until that smoke passes.
+
+---
+
+## Short update (Sep 9 2026 — sparse observations + participant transfer handoff)
+
+Default PICS/TEH behavior is unchanged when the new flags are omitted. Planned direction: full-data source **`2plonsky2018when`** → sparse target **`1peterson2021using`**. Peterson median train+val ≈ **80** (test 20); recommended budgets **10, 20, 40, full**.
+
+### Sparse target data (`--max_observed_trials_per_participant N`)
+
+- Shared helper: **`utils/teh/sparse_observations.py`**. Split **first**; **never** subsample test. Cap combined **train+val** at **N** per participant (proportional; ≥1 from each split when feasible). Uses **`--split_seed`**. Keep all if fewer than N exist.
+- Same subset for standard PICS, transfer PICS, participant evolution, **MLE**, and **Prospect Theory**. Prompts and fitness/model selection see the same sparse train/val.
+- Not a prompt-only cap, not `--split_ratio`, and not a pre-test subsample.
+- **Transfer:** source can stay full while only the target is sparse via **`--max_observed_trials_datasets 1peterson2021using`**. Source example trials stay full-data. **`--rerun_global_datasets 1peterson2021using`** (with **`--global_run_dir`**) regenerates the sparse target population while reusing a full-data source global. **`--transfer_source_keys` / `--transfer_target_keys`** restrict pairs (use **`--transfer_mode single`** for `2plonsky → 1peterson` only).
+- Audits (only when N is set): per-participant **`sparse_observations.json`**; run-level **`sparse_observations.jsonl` / `.csv`** with original vs retained counts and a subset fingerprint.
+
+### Participant init from transferred programs
+
+- **`--initial_pool_programs path1.py [path2.py ...]`** and optional **`--initial_pool_dir`** (existing `global_elite_pool/` with `pool_manifest.json`).
+- Reuses the population→participant handoff: rescore on each participant’s (sparse/full) train/val, write **`participant_*/initial_pool_from_global/`**, then explore + evolve. Vanilla **`--seed_path`** is **not** included unless listed.
+- With an initial pool, **`--explore_candidates`** generates from those program(s); the fixed budget is **split** across parents (not multiplied). Pinned IDs are not dropped before they participate. Live **`--global_phase`** explore remains seed-only (existing commands unchanged).
+- **`--initial_pool_programs` + live `--global_phase`** is rejected.
+- Three participant conditions: (1) ordinary target-population best only, (2) transfer-derived best only, (3) optional hybrid both. Primary comparison is (1) vs (2).
+
+### Old `2plonsky → 1peterson` artifacts (Stage B only)
+
+Compatible `choose(problem, history)` programs; do **not** use the old transfer model (adapted on **full** 1peterson) in the sparse-target comparison:
+
+- Ordinary target: `generated_outputs_transfer/teh_transfer/run_260616_235649/1peterson2021using/global/best_program.py`
+- Transfer-derived: `.../1peterson2021using/transfer/source=2plonsky2018when/best_program.py`
+- Also loadable as **`--initial_pool_dir`**: `.../1peterson2021using/global/global_elite_pool/`
+- Full-data 2plonsky source global for Stage C: `.../2plonsky2018when/global/best_program.py`
+
+### Cluster (do not submit from this note)
+
+`cluster/2026Sep_Sparse_Data/` (Origami vLLM workers + submitters):
+
+1. **Stage A** smoke: `bash cluster/2026Sep_Sparse_Data/submit_stage_a_smoke.sh` → `generated_outputs/psych101_train/1peterson2021using/sparse_data/stage_a/...`
+2. **Stage B** full-data handoff: `bash cluster/2026Sep_Sparse_Data/submit_stage_b_handoff.sh` (`INCLUDE_HYBRID=1` optional)
+3. **Stage C** sparse population + sparse-target transfer: `bash cluster/2026Sep_Sparse_Data/submit_stage_c_sparse_population.sh` → `generated_outputs_transfer/teh_transfer/sparse_data/stage_c/budget_<B>/job_<JOBID>/`
+4. **Stage D** participant PICS comparison (after C): `bash cluster/2026Sep_Sparse_Data/submit_stage_d_sparse_pics.sh`
+
+Records: `cluster/record/2026Sep_Sparse_Data.tsv`. Tests: `tests/test_sparse_observations.py`, `tests/test_initial_pool_programs.py`.

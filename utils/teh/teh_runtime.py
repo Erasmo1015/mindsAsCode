@@ -19,6 +19,7 @@ from data_modules.external import (
     is_external_dataset,
     load_external_loglik_trials,
     external_default_data_dir,
+    external_reference_prompt_path,
 )
 from data_modules.external.bergert_nosofsky_2007 import (
     TASK_DESCRIPTION as BERGERT_TASK_DESCRIPTION,
@@ -62,6 +63,31 @@ def resolve_base_loglik_prompt_path(base_prompt_path: Optional[Path | str] = Non
     if not p.is_absolute():
         p = REPO_ROOT / p
     return p.resolve()
+
+
+def resolve_dataset_reference_prompt_path(dataset_alias: str) -> Optional[Path]:
+    """
+    Hand-written evolution prompt for a dataset, if registered.
+
+    External datasets use EXTERNAL_DATASET_META['reference_prompt'].
+    Psych-101 extensions (Schulz / Kool) use PSYCH101_BINARY_DATASETS['reference_prompt'].
+    """
+    rel: Optional[str] = None
+    if is_external_dataset(dataset_alias):
+        rel = external_reference_prompt_path(dataset_alias)
+    else:
+        try:
+            alias = normalize_psych101_dataset_alias(dataset_alias)
+            rel = PSYCH101_BINARY_DATASETS.get(alias, {}).get("reference_prompt")
+        except Exception:
+            rel = None
+    if not rel:
+        return None
+    path = Path(str(rel)).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    path = path.resolve()
+    return path if path.is_file() else None
 
 
 BASE_REFINE_PROMPT = (
@@ -667,7 +693,17 @@ def setup_teh_run_prompts(
 
     infer_path = prompts_dir / "infer_single_choice.txt"
     generated = False
-    if use_llm and client is not None:
+    used_reference = False
+    reference_prompt = resolve_dataset_reference_prompt_path(dataset_alias)
+    if reference_prompt is not None:
+        text = strip_embedded_choose_from_evolution_prompt(
+            reference_prompt.read_text(encoding="utf-8")
+        )
+        infer_path.write_text(text, encoding="utf-8")
+        used_reference = True
+        print(f"[TEH] Wrote hand-written reference prompt -> {infer_path}")
+        print(f"[TEH]   source: {reference_prompt}")
+    elif use_llm and client is not None:
         try:
             infer_text = _generate_prompt_via_llm(
                 client,
@@ -686,7 +722,7 @@ def setup_teh_run_prompts(
         except Exception as e:
             print(f"[TEH] LLM prompt generation failed ({e}); using merge fallback.")
 
-    if not generated:
+    if not generated and not used_reference:
         merged = _merge_prompt_fallback(
             dataset_alias,
             instruction,
@@ -708,6 +744,8 @@ def setup_teh_run_prompts(
     meta: Dict[str, Any] = {
         "dataset_alias": dataset_alias,
         "llm_generated": generated,
+        "used_reference_prompt": used_reference,
+        "reference_prompt_source": str(reference_prompt) if used_reference else None,
         "seed_program_source": str(seed_src),
         "base_prompt_path": str(resolved_base_prompt),
     }

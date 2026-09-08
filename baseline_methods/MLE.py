@@ -46,6 +46,16 @@ from data_modules.psych101_binary import (
     split_psych_experiment,
 )
 from utils.teh.participant_ids import load_valid_participant_ids
+from utils.teh.sparse_observations import (
+    SPARSE_AUDIT_CSV_FILENAME,
+    SPARSE_AUDIT_FILENAME,
+    SparseObservationAudit,
+    apply_max_observed_trials,
+    should_persist_sparse_audit,
+    write_sparse_audit,
+    write_sparse_audits_csv,
+    write_sparse_audits_payload,
+)
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
     is_binary_loglik_dataset,
@@ -186,7 +196,9 @@ def trials_for_participant(
     psych_dataset_split: str,
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    max_observed_trials_per_participant: Optional[int] = None,
+    return_audit: bool = False,
+):
     """Train/val/test trials for one participant (TEH split conventions)."""
     if is_mixed_gambles_dataset(dataset):
         csv_path = mixed_gambles_csv or DEFAULT_CSV_PATH
@@ -197,18 +209,29 @@ def trials_for_participant(
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
-        return train_trials, val_trials, test_trials
-    if not is_psych101_dataset(dataset):
+    elif not is_psych101_dataset(dataset):
         raise ValueError(f"Unsupported dataset: {dataset!r}")
-    exp = get_psych101_binary_experiment(
-        dataset,
-        int(participant_id),
-        split=psych_dataset_split,
-        local_dataset=local_dataset,
+    else:
+        exp = get_psych101_binary_experiment(
+            dataset,
+            int(participant_id),
+            split=psych_dataset_split,
+            local_dataset=local_dataset,
+        )
+        train_trials, val_trials, test_trials, _ = split_psych_experiment(
+            exp, split_ratio=split_ratio, split_seed=split_seed
+        )
+    train_trials, val_trials, test_trials, audit = apply_max_observed_trials(
+        train_trials,
+        val_trials,
+        test_trials,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        dataset=dataset,
+        participant_id=int(participant_id),
+        split_seed=int(split_seed),
     )
-    train_trials, val_trials, test_trials, _ = split_psych_experiment(
-        exp, split_ratio=split_ratio, split_seed=split_seed
-    )
+    if return_audit:
+        return train_trials, val_trials, test_trials, audit
     return train_trials, val_trials, test_trials
 
 
@@ -589,6 +612,11 @@ def _add_te_compat_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--global_iters", type=int, default=10, help=argparse.SUPPRESS)
     parser.add_argument("--prev_exp_path", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--cpc18_official_mse", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--initial_pool_programs", nargs="+", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--initial_pool_dir", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--max_observed_trials_datasets", nargs="+", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--explore_candidates", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--fresh_n_candidates", type=int, default=0, help=argparse.SUPPRESS)
 
 
 def main() -> None:
@@ -706,6 +734,17 @@ def main() -> None:
         help="Seed for deterministic splitting (default: 0).",
     )
     parser.add_argument(
+        "--max_observed_trials_per_participant",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "After the train/val/test split, keep at most N train+val observations per "
+            "participant (sampled proportionally from train and val; test is never changed). "
+            "Omitted or <=0 disables the cap (full data). Uses --split_seed."
+        ),
+    )
+    parser.add_argument(
         "--fitness_metric",
         type=str,
         default="loglik",
@@ -735,6 +774,18 @@ def main() -> None:
         sys.exit(1)
     if not (0.0 < args.split_ratio < 1.0):
         print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
+        sys.exit(1)
+    if args.max_observed_trials_per_participant is not None and args.max_observed_trials_per_participant < 0:
+        print("Error: --max_observed_trials_per_participant must be >= 0 when set (0 disables).")
+        sys.exit(1)
+    if (
+        args.split_mode == "across_participants"
+        and args.max_observed_trials_per_participant is not None
+        and args.max_observed_trials_per_participant > 0
+    ):
+        print(
+            "Error: --max_observed_trials_per_participant requires --split_mode within_participant."
+        )
         sys.exit(1)
     if args.split_mode == "across_participants" and not is_psych101_dataset(args.dataset):
         print(
@@ -860,6 +911,11 @@ def main() -> None:
     print(
         f"MLE split settings: dataset={args.dataset}, split_mode={args.split_mode}, "
         f"split_ratio={args.split_ratio:.3f}, split_seed={args.split_seed}"
+        + (
+            f", max_observed_trials_per_participant={args.max_observed_trials_per_participant}"
+            if args.max_observed_trials_per_participant
+            else ""
+        )
     )
 
     base_run_dir = args.output_dir
@@ -869,9 +925,10 @@ def main() -> None:
 
     participant_details_loglik: List[Dict[str, Any]] = []
     participants_summary: List[Dict[str, Any]] = []
+    sparse_audits: List[SparseObservationAudit] = []
 
     for participant_id in tqdm(participants_to_process, desc="Participants"):
-        train_trials, val_trials, test_trials = trials_for_participant(
+        train_trials, val_trials, test_trials, audit = trials_for_participant(
             args.dataset,
             participant_id,
             split_ratio=args.split_ratio,
@@ -880,6 +937,8 @@ def main() -> None:
             psych_dataset_split=psych_dataset_split,
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            return_audit=True,
         )
         results = _fit_and_evaluate_participant(
             args.dataset,
@@ -903,6 +962,13 @@ def main() -> None:
         participant_output_dir = os.path.join(base_run_dir, f"participant_{participant_id}")
         Path(participant_output_dir).mkdir(parents=True, exist_ok=True)
         (Path(participant_output_dir) / "results.json").write_text(json.dumps(results, indent=2))
+        if should_persist_sparse_audit(audit):
+            write_sparse_audit(Path(participant_output_dir) / SPARSE_AUDIT_FILENAME, audit)
+            sparse_audits.append(audit)
+
+    if sparse_audits:
+        write_sparse_audits_payload(Path(base_run_dir) / SPARSE_AUDIT_FILENAME, sparse_audits)
+        write_sparse_audits_csv(Path(base_run_dir) / SPARSE_AUDIT_CSV_FILENAME, sparse_audits)
 
     _write_experiment_loglik_csvs(base_run_dir, participant_details_loglik)
     _print_within_summary(args, participants_summary, participants_to_process, base_run_dir)

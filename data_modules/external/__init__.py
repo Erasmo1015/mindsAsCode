@@ -77,6 +77,13 @@ def external_default_data_dir(dataset: str) -> str:
     return str(EXTERNAL_DATASET_META[dataset]["default_data_dir"])
 
 
+def external_reference_prompt_path(dataset: str) -> Optional[str]:
+    """Repo-relative hand-written evolution prompt, if registered."""
+    meta = EXTERNAL_DATASET_META.get(dataset) or {}
+    path = meta.get("reference_prompt")
+    return str(path) if path else None
+
+
 def load_external_loglik_trials(
     dataset: str,
     participant_id: int,
