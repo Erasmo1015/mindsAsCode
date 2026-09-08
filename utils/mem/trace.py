@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# Schema v1 flat taxonomy (legacy annotations only). Prefer utils.mem.schema_v2.
 MOTIF_TAXONOMY = (
     "value_or_expected_value",
     "probability_or_risk",
@@ -23,6 +24,14 @@ MOTIF_TAXONOMY = (
 )
 
 _MOTIF_SET = frozenset(MOTIF_TAXONOMY)
+
+# Re-export schema v2 constants for convenience.
+from utils.mem.schema_v2 import (  # noqa: E402
+    BEHAVIORAL_MOTIFS_V2,
+    SCHEMA_VERSION,
+    STRUCTURAL_OPERATIONS_V2,
+    validate_annotation_response_v2,
+)
 _TEST_METRIC_KEYS = frozenset(
     {
         "test_loglik",

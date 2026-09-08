@@ -170,6 +170,7 @@ def test_json_safe_nonfinite():
 
 
 def test_validate_annotation_response_ok_and_errors():
+    """Legacy schema-v1 validator still works for old artifacts."""
     expected = ["c1", "c2"]
     payload = [
         {
@@ -223,7 +224,6 @@ def test_split_annotation_batches_no_code_truncation():
         {"candidate_id": "b", "code": "CODE_B_" + ("b" * 200)},
         {"candidate_id": "c", "code": "CODE_C_" + ("c" * 200)},
     ]
-    # Budget fits at most ~1-2 candidates: force splitting without truncating code.
     one_plus_ref = estimate_tokens_char4(
         "x" * 50
         + json.dumps(
@@ -326,15 +326,19 @@ def test_build_dataset_filters(tmp_path: Path):
 
     annotations = {
         "iteration_1_candidate_0": {
+            "schema_version": 2,
             "candidate_id": "iteration_1_candidate_0",
-            "primary_edit": "history_or_memory",
+            "participant_id": 0,
             "confidence": 0.9,
-            "added_motifs": ["history_or_memory"],
+            "added_motifs": ["history"],
             "removed_motifs": [],
             "modified_motifs": [],
+            "structural_operations": [],
+            "no_meaningful_change": False,
         }
     }
     out = build_rows(run_dir=run_dir, annotations=annotations)
     assert len(out) == 1
     assert out[0]["candidate_id"] == "iteration_1_candidate_0"
-    assert out[0]["primary_edit"] == "history_or_memory"
+    assert out[0]["history_added"] == 1
+    assert "primary_edit" not in out[0]
