@@ -615,6 +615,29 @@ def _schema_b_subtype(problem: Dict[str, Any]) -> str:
 def _action_semantics_for_schema(
     keys: List[str], schema: str, problem: Dict[str, Any], *, is_gamble: bool
 ) -> str:
+    if schema == "categorical_bandit" or len(keys) > 2:
+        n_arms = int(problem.get("n_arms") or len(keys))
+        return (
+            f"K={n_arms} categorical actions over option_keys={list(keys)!r}; "
+            "return a dict mapping each internal action index -> probability "
+            "(non-negative, sum to 1). Do NOT return a Bernoulli P(action=1) float."
+        )
+    if schema == "kool_twostep":
+        return (
+            "Two-stage Bernoulli trials: stage 1 action=0/1 selects first/second "
+            "presented spaceship; stage 2 action=0/1 selects first/second presented "
+            "alien; return P(action=1)."
+        )
+    if schema == "bergert_pairwise":
+        return (
+            "Pairwise choice: action=1 selects option_A; action=0 selects option_B "
+            "(action_means_option_A_when_1); return P(action=1)."
+        )
+    if schema == "guan_stopping":
+        return (
+            "Sequential stopping: action=0 continue, action=1 stop; "
+            "return P(action=1)=P(stop). Only values_observed so far are visible."
+        )
     if len(keys) < 2:
         return "action=0 is first option; action=1 is second; return P(action=1)."
     k0, k1 = keys[0], keys[1]
@@ -742,13 +765,38 @@ def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
 
     if schema == "categorical_bandit":
         last_reward = hist[-1].get("reward", hist[-1].get("feedback")) if hist else None
+        loc = (
+            f"game={p.get('game')}"
+            if p.get("game") is not None
+            else f"round={p.get('round')}"
+        )
+        raw_coding = p.get("raw_press_coding", p.get("raw_choice_coding"))
         return (
-            f"{index}. [categorical_bandit] round={p.get('round')}; trial={p.get('trial')}; "
+            f"{index}. [categorical_bandit] {loc}; trial={p.get('trial')}; "
             f"n_arms={p.get('n_arms', len(keys))}; option_keys={keys}; "
-            f"raw_press_coding={p.get('raw_press_coding')}; "
+            f"raw_coding={raw_coding}; "
             f"internal_action_coding={p.get('internal_action_coding')}; "
             f"action={action} (internal); history_len={hist_len}"
             + (f"; last_reward={last_reward}" if last_reward is not None else "")
+        )
+
+    if schema == "bergert_pairwise":
+        oa = p.get("option_A", {}) or {}
+        ob = p.get("option_B", {}) or {}
+        return (
+            f"{index}. [bergert] problem_id={p.get('problem_id')}; "
+            f"option_A cues={oa.get('cues')}; option_B cues={ob.get('cues')}; "
+            f"option_keys={keys}; action={action} (1=option_A, 0=option_B); "
+            f"history_len={hist_len}"
+        )
+
+    if schema == "guan_stopping":
+        return (
+            f"{index}. [guan/stopping] condition={p.get('condition')}; "
+            f"environment={p.get('environment')}; problem_id={p.get('problem_id')}; "
+            f"sequence_length={p.get('sequence_length')}; position={p.get('position')}; "
+            f"values_observed={p.get('values_observed')}; option_keys={keys}; "
+            f"action={action} (0=continue, 1=stop); history_len={hist_len}"
         )
 
     if schema == "kool_twostep":

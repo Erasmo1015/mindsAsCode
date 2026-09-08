@@ -714,6 +714,10 @@ def setup_teh_run_prompts(
     if is_mixed_gambles_dataset(dataset_alias):
         meta["mixed_gambles_csv"] = mixed_gambles_csv
         meta["filter_mixed_gambles"] = filter_mixed_gambles
+    elif is_external_dataset(dataset_alias):
+        meta["experiment_id"] = None
+        meta["execution_source"] = "external"
+        meta["default_data_dir"] = external_default_data_dir(dataset_alias)
     else:
         meta["experiment_id"] = experiment_id_for_alias(dataset_alias)
     (prompts_dir / "prompt_meta.json").write_text(

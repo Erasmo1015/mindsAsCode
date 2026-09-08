@@ -186,6 +186,7 @@ def expand_stopping_problem(
         action = 1 if t == S else 0
         problem = {
             "dataset_alias": DATASET_ALIAS,
+            "schema_type": "guan_stopping",
             "condition": condition,
             "condition_index": int(condition_index),
             "environment": env,

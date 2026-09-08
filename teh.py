@@ -11947,6 +11947,11 @@ def main():
             wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
 
     if args.dataset in _PARTICIPANT_DATASETS:
+        _valid_ids_path = valid_participant_ids_path(
+            args.dataset,
+            filter_mixed_gambles=bool(getattr(args, "filter_mixed_gambles", False)),
+            psych_dataset_split=psych_dataset_split,
+        )
         if args.participant_scope == "single":
             print(
                 f"Participant scope: single -> using raw participant id "
@@ -11956,13 +11961,12 @@ def main():
             print(
                 "Participant scope: range -> using inclusive ordinal slice "
                 f"[{args.range_start_ordinal}, {args.range_end_ordinal}] from "
-                f"datasets/psych101_{psych_dataset_split}/{args.dataset}/valid_participant_ids.json."
+                f"{_valid_ids_path}."
             )
         elif args.participant_scope == "ordinals":
             print(
                 "Participant scope: ordinals -> using raw participant ids at 0-based ordinals "
-                f"{list(args.ordinals)} from "
-                f"datasets/psych101_{psych_dataset_split}/{args.dataset}/valid_participant_ids.json "
+                f"{list(args.ordinals)} from {_valid_ids_path} "
                 "(duplicate ordinals collapse to one id; order follows first occurrence)."
             )
         else:
@@ -11972,8 +11976,7 @@ def main():
                 else "all valid ids"
             )
             print(
-                f"Participant scope: all -> using {cap_text} from "
-                f"datasets/psych101_{psych_dataset_split}/{args.dataset}/valid_participant_ids.json."
+                f"Participant scope: all -> using {cap_text} from {_valid_ids_path}."
             )
     if is_psych101_dataset(args.dataset):
         print(

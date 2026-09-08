@@ -111,6 +111,7 @@ def load_participant_raw_trials(
                 raise ValueError(f"reward must be 0/1, got {reward}")
             problem = {
                 "dataset_alias": DATASET_ALIAS,
+                "schema_type": "categorical_bandit",
                 "game": int(game),
                 "trial": int(trial_idx),
                 "n_arms": N_ACTIONS,

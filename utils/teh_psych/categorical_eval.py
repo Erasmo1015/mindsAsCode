@@ -162,11 +162,17 @@ def evaluate_categorical_program(
         total_warnings += warns
 
     n_seeds_used = max(1, n_seeds)
+    avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
+    correct = int(round(avg_acc * total)) if total > 0 else 0
+    # TEH Bernoulli path expects accuracy/correct/total; keep avg_accuracy/n_trials aliases.
     return {
         "avg_loglik": float(np.mean(seed_avg_logliks)),
-        "avg_accuracy": float(np.mean(seed_avg_accs)),
+        "accuracy": avg_acc,
+        "avg_accuracy": avg_acc,
+        "correct": correct,
+        "total": total,
+        "n_trials": total,
         "errors": total_errors // n_seeds_used,
         "warnings": total_warnings // n_seeds_used,
-        "n_trials": total,
         "first_error": first_error,
     }

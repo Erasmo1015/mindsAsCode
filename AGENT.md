@@ -440,3 +440,16 @@ There is no single-parent ancestry. For each candidate:
 - Tests: `tests/test_mem_pipeline.py` (reference parent, ΔF, no test keys, non-mutating helpers, annotation validation, batch split, dataset filters).
 - PICS with traces: add `--mem_trace` to `teh.py` (see `scripts/short_run_for_mem.sh`).
 - Annotate / CSV / fit: `bash scripts/mem2_annotation.sh` or the three `analysis/mem/*.py` CLIs documented in that script.
+
+---
+
+## Short update (Sep 8 2026 — five-dataset small-run bugfixes)
+
+First parallel smoke (`logs/five_new_datasets_small_260907_004950/`) failed; inspect report: `analysis_2026Sep/Sep8_datasets_bug/README.md`. Fixes now in tree (adaptive prompts kept; loaders unchanged):
+
+- External `experiment_id_for_alias` crash in `teh_runtime` prompt meta.
+- Categorical eval returns TEH keys `accuracy`/`correct`/`total` (plus legacy aliases).
+- Categorical action semantics no longer default to Bernoulli `P(action=1)`; external trials get real formatters via `schema_type` (`bergert_pairwise`, `guan_stopping`, `categorical_bandit`).
+- `scripts/run_five_new_datasets_small.sh` runs the five datasets **serially** (shared vLLM).
+
+Smoke (2 participants, 2 iters, 3 cands): `bash scripts/run_five_new_datasets_small.sh` after vLLM on `:8001`. Do not commit/push for Origami until that smoke passes.

@@ -147,6 +147,7 @@ def build_trial_dict(
     option_keys = [0, 1]
     problem = {
         "dataset_alias": DATASET_ALIAS,
+        "schema_type": "bergert_pairwise",
         "problem_id": int(problem_id),
         "option_A": _option_payload(alternative_a, alternatives[alternative_a]),
         "option_B": _option_payload(alternative_b, alternatives[alternative_b]),
