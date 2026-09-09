@@ -598,6 +598,7 @@ def run_dataset_global_phase(
     base_prompt_path: Optional[str],
     debug_prompt: bool = False,
     max_observed_trials_per_participant: Optional[int] = None,
+    mdl_lambda: float = 0.0,
 ) -> PopulationEvolutionResult:
     """Population-level global evolution for one dataset."""
     dataset_output = run_dir / spec.config_key
@@ -704,6 +705,7 @@ def run_dataset_global_phase(
         evolution_selection_score=evolution_selection_score,
         max_error_prompt_chars=max_error_prompt_chars,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
+        mdl_lambda=mdl_lambda,
     )
 
     global_dir = _rename_global_phase_dir(dataset_output)
@@ -810,12 +812,14 @@ def run_transfer_evolution_phase(
     source_config_keys: Optional[Sequence[str]] = None,
     explain: bool = False,
     max_observed_trials_per_participant: Optional[int] = None,
+    mdl_lambda: float = 0.0,
 ) -> PopulationEvolutionResult:
     """
     Leave-one-dataset-out transfer evolution on pooled target train+val trials.
 
     Source dataset programs and metadata are injected via ``prompt_suffix``.
     """
+    mdl_lambda = teh.normalize_mdl_lambda(mdl_lambda)
     dataset = target.dataset_alias
     participant_ids = target.participant_ids or []
     print(
@@ -888,14 +892,25 @@ def run_transfer_evolution_phase(
         else baseline_ll
     )
     elite_parents: List[Tuple[Any, ...]] = [
-        (
-            seed_code,
-            baseline_fitness,
-            None,
-            "transfer_baseline",
-            None,
-            None,
-            baseline_ll if use_train_val else baseline_ll,
+        teh.apply_mdl_to_scored_elite(
+            (
+                seed_code,
+                baseline_fitness,
+                None,
+                "transfer_baseline",
+                None,
+                None,
+                baseline_ll if use_train_val else baseline_ll,
+            ),
+            selection_score=float(baseline_fitness),
+            n=teh._mdl_n_for_score(
+                evolution_selection_score,
+                len(pooled_train),
+                len(pooled_val),
+                baseline_val_ll,
+            ),
+            mdl_lambda=mdl_lambda,
+            runtime_valid=True,
         )
     ]
 
@@ -1097,32 +1112,44 @@ def run_transfer_evolution_phase(
                 "train_loglik": train_loglik,
                 "fitness": fitness,
                 "selection_score": selection_score,
+                "runtime_valid": True,
             }
             if val_loglik is not None:
                 row["val_loglik"] = val_loglik
             if explain and rationale:
                 row["rationale"] = rationale
+            teh._attach_mdl_to_candidate(
+                row,
+                mdl_lambda=mdl_lambda,
+                n=teh._mdl_n_for_score(
+                    evolution_selection_score,
+                    len(pooled_train),
+                    len(pooled_val),
+                    val_loglik,
+                ),
+                selection_score=selection_score,
+            )
             selected_results.append(row)
 
         if selected_results:
-            selected_results.sort(key=lambda x: x["fitness"], reverse=True)
+            teh.sort_candidates(selected_results, mdl_lambda)
             for result in selected_results:
                 program_id = f"transfer_iteration_{iteration_step}_candidate_{result['idx']}"
                 if explain and result.get("rationale"):
                     candidate_rationales[program_id] = str(result["rationale"])
                 elite_parents.append(
-                    (
+                    teh._elite_tuple_for_ranking(
                         result["code"],
                         result["fitness"],
                         None,
                         program_id,
-                        None,
-                        None,
                         result["train_loglik"],
+                        mdl_lambda=mdl_lambda,
+                        mdl_score=result.get("mdl_score"),
                     )
                 )
 
-        elite_parents.sort(key=lambda x: x[1], reverse=True)
+        teh.sort_elites(elite_parents, mdl_lambda)
         elite_cap = teh._elite_pool_capacity(sample_size, elite_pool_size)
         elite_parents = elite_parents[:elite_cap]
         pool_best_selection = float(elite_parents[0][1])
@@ -1140,6 +1167,32 @@ def run_transfer_evolution_phase(
             "pool_best_selection_score": pool_best_selection,
             "evolution_selection_score": evolution_selection_score,
         }
+        if teh.mdl_enabled(mdl_lambda):
+            metrics["mdl_lambda"] = float(mdl_lambda)
+            metrics.update(
+                {
+                    f"pool_best_{k}": v
+                    for k, v in teh._elite_mdl_manifest_fields(
+                        elite_parents[0],
+                        mdl_lambda=mdl_lambda,
+                        n=teh._mdl_n_for_score(
+                            evolution_selection_score,
+                            len(pooled_train),
+                            len(pooled_val),
+                            0.0 if pooled_val else None,
+                        ),
+                        selection_score=pool_best_selection,
+                    ).items()
+                }
+            )
+            metrics["iter_candidate_mdl"] = [
+                {
+                    "idx": r["idx"],
+                    "selection_score": r.get("selection_score"),
+                    **teh._candidate_mdl_log_fields(r),
+                }
+                for r in selected_results
+            ]
         metrics.update(
             teh._iteration_candidate_source_header(
                 fresh_n_candidates,

@@ -65,6 +65,10 @@ def _init_wandb(
     return wandb.init(project=project, name=name, config=config)
 
 
+def _wandb_safe_key(name: str) -> str:
+    return str(name).replace("[", "_").replace("]", "_").replace(".", "_")
+
+
 def _parse_column_list(raw: Optional[str]) -> List[str]:
     if raw is None or not str(raw).strip():
         return []
@@ -258,6 +262,17 @@ def main() -> None:
     )
     parser.add_argument("--wandb_project", type=str, default="teh_mem")
     parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument(
+        "--wandb_detail_level",
+        type=str,
+        default="final_only",
+        choices=["final_only", "full"],
+        help=(
+            "How much to upload to Weights & Biases. "
+            "'final_only' logs only compact end-of-fit summary metrics; "
+            "'full' also uploads per-term coefficients, tables, and artifacts."
+        ),
+    )
     parser.add_argument("--no_log", action="store_true")
     args = parser.parse_args()
 
@@ -368,7 +383,8 @@ def main() -> None:
         if wb is not None:
             import wandb
 
-            wandb.log({"fit_failed": 1, "fit_error": fit_error})
+            wandb.summary["fit_failed"] = 1
+            wandb.summary["fit_error"] = fit_error
             wandb.finish(exit_code=1)
         raise SystemExit(1) from exc
 
@@ -413,7 +429,7 @@ def main() -> None:
     if wb is not None:
         import wandb
 
-        scalars: Dict[str, Any] = {
+        final_summary: Dict[str, Any] = {
             "fit_failed": 0,
             "schema_version": SCHEMA_VERSION,
             "n_rows": int(len(df)),
@@ -430,39 +446,52 @@ def main() -> None:
             import numpy as np
 
             if cov_re is not None:
-                scalars["group_var"] = float(np.asarray(cov_re, dtype=float).reshape(-1)[0])
+                final_summary["group_var"] = float(
+                    np.asarray(cov_re, dtype=float).reshape(-1)[0]
+                )
         except Exception:
             pass
-        for name, row in coef.iterrows():
-            key = str(name).replace("[", "_").replace("]", "_").replace(".", "_")
-            scalars[f"coef/{key}"] = float(row["coef"])
-            if "pvalue" in row and pd.notna(row["pvalue"]):
-                scalars[f"pvalue/{key}"] = float(row["pvalue"])
-
-        wandb.log(scalars)
-        wandb.log(
-            {
-                "coefficients": wandb.Table(
-                    dataframe=coef.reset_index().rename(columns={"index": "term"})
-                ),
-                "predictor_report": wandb.Table(dataframe=pd.DataFrame(reports)),
-            }
-        )
-        art = wandb.Artifact(
-            name=f"mem_fit_v2_{wb.id}",
-            type="mem_fit",
-            metadata={
-                "schema_version": SCHEMA_VERSION,
-                "n_rows": int(len(df)),
-                "n_participants": n_participants,
-            },
-        )
-        art.add_file(str(summary_path))
-        art.add_file(str(coef_path))
-        art.add_file(str(report_path))
-        art.add_file(str(Path(args.input_csv).resolve()))
-        wb.log_artifact(art)
+        wandb.log(final_summary)
+        for key, value in final_summary.items():
+            wandb.summary[_wandb_safe_key(key)] = value
+        wandb.summary["formula"] = formula
+        wandb.summary["input_csv"] = str(Path(args.input_csv).resolve())
+        wandb.summary["summary_path"] = str(summary_path.resolve())
+        wandb.summary["coefficients_path"] = str(coef_path.resolve())
+        wandb.summary["predictor_report_path"] = str(report_path.resolve())
         wandb.summary["model_summary"] = summary_text[:8000]
+
+        if args.wandb_detail_level == "full":
+            detailed_scalars: Dict[str, Any] = {}
+            for name, row in coef.iterrows():
+                key = _wandb_safe_key(name)
+                detailed_scalars[f"coef/{key}"] = float(row["coef"])
+                if "pvalue" in row and pd.notna(row["pvalue"]):
+                    detailed_scalars[f"pvalue/{key}"] = float(row["pvalue"])
+            if detailed_scalars:
+                wandb.log(detailed_scalars)
+            wandb.log(
+                {
+                    "coefficients": wandb.Table(
+                        dataframe=coef.reset_index().rename(columns={"index": "term"})
+                    ),
+                    "predictor_report": wandb.Table(dataframe=pd.DataFrame(reports)),
+                }
+            )
+            art = wandb.Artifact(
+                name=f"mem_fit_v2_{wb.id}",
+                type="mem_fit",
+                metadata={
+                    "schema_version": SCHEMA_VERSION,
+                    "n_rows": int(len(df)),
+                    "n_participants": n_participants,
+                },
+            )
+            art.add_file(str(summary_path))
+            art.add_file(str(coef_path))
+            art.add_file(str(report_path))
+            art.add_file(str(Path(args.input_csv).resolve()))
+            wb.log_artifact(art)
         print(
             f"[wandb] Logged to project={args.wandb_project} run={wb.name} url={wb.url}",
             flush=True,

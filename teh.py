@@ -104,6 +104,18 @@ from utils.teh.sparse_observations import (
     write_sparse_audits_csv,
     write_sparse_audits_payload,
 )
+from utils.teh.mdl_selection import (
+    apply_mdl_to_scored_elite,
+    attach_mdl_fields,
+    mdl_enabled,
+    normalize_mdl_lambda,
+    selection_trial_count,
+    selection_used_val,
+    sort_candidates,
+    sort_elite_pairs,
+    sort_elites,
+    with_elite_mdl_score,
+)
 from utils.mem.trace import (
     append_mem_trace_record,
     best_reference_parent,
@@ -159,6 +171,7 @@ def _cap_elite_preserving_program_ids(
     elite_cap: int,
     pinned_ids: Sequence[str],
     track_elite_val_loglik: bool,
+    mdl_lambda: float = 0.0,
 ) -> None:
     """Sort/cap the elite pool but never drop ``pinned_ids`` (may exceed cap)."""
     pinned_set = {str(x) for x in pinned_ids}
@@ -168,19 +181,19 @@ def _cap_elite_preserving_program_ids(
         paired = list(zip(elite_parents, elite_val_logliks))
         pinned = [row for row in paired if str(row[0][3]) in pinned_set]
         others = [row for row in paired if str(row[0][3]) not in pinned_set]
-        others.sort(key=lambda row: row[0][1], reverse=True)
+        sort_elite_pairs(others, mdl_lambda)
         keep_others = max(0, int(elite_cap) - len(pinned))
         kept = pinned + others[:keep_others]
-        kept.sort(key=lambda row: row[0][1], reverse=True)
+        sort_elite_pairs(kept, mdl_lambda)
         elite_parents[:] = [row[0] for row in kept]
         elite_val_logliks[:] = [row[1] for row in kept]
         return
     pinned = [p for p in elite_parents if str(p[3]) in pinned_set]
     others = [p for p in elite_parents if str(p[3]) not in pinned_set]
-    others.sort(key=lambda p: p[1], reverse=True)
+    sort_elites(others, mdl_lambda)
     keep_others = max(0, int(elite_cap) - len(pinned))
     kept = pinned + others[:keep_others]
-    kept.sort(key=lambda p: p[1], reverse=True)
+    sort_elites(kept, mdl_lambda)
     elite_parents[:] = kept
 
 
@@ -2153,6 +2166,120 @@ def _apply_evolution_candidate_selection_fitness(
     return fitness, selection_score
 
 
+def _mdl_n_for_score(
+    evolution_selection_score: str,
+    n_train: int,
+    n_val: int,
+    val_loglik: Optional[float],
+) -> int:
+    return selection_trial_count(
+        evolution_selection_score,
+        n_train,
+        n_val,
+        val_used=selection_used_val(evolution_selection_score, n_val, val_loglik),
+    )
+
+
+def _attach_mdl_to_candidate(
+    result: Dict[str, Any],
+    *,
+    mdl_lambda: float,
+    n: int,
+    selection_score: Optional[float],
+) -> None:
+    if selection_score is None:
+        return
+    attach_mdl_fields(
+        result,
+        code=str(result.get("code") or ""),
+        selection_score=float(selection_score),
+        n=int(n),
+        mdl_lambda=float(mdl_lambda),
+        runtime_valid=bool(result.get("runtime_valid", True)),
+    )
+
+
+def _elite_tuple_for_ranking(
+    code: Any,
+    fitness: float,
+    test_acc: Any,
+    program_id: str,
+    idx6: Any,
+    *,
+    mdl_lambda: float,
+    mdl_score: Optional[float] = None,
+) -> Tuple[Any, ...]:
+    parent = (code, fitness, test_acc, program_id, None, None, idx6)
+    return with_elite_mdl_score(parent, mdl_score, mdl_lambda)
+
+
+_MDL_LOG_KEYS = (
+    "mdl_n",
+    "mdl_total_loglik",
+    "program_ast_size",
+    "mdl_complexity_penalty",
+    "mdl_score",
+)
+
+
+def _candidate_mdl_log_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    if result.get("mdl_score") is None:
+        return {}
+    return {k: result[k] for k in _MDL_LOG_KEYS if k in result}
+
+
+def _elite_mdl_manifest_fields(
+    parent: Sequence[Any],
+    *,
+    mdl_lambda: float,
+    n: int,
+    selection_score: Optional[float] = None,
+) -> Dict[str, Any]:
+    if not mdl_enabled(mdl_lambda):
+        return {}
+    sel = float(selection_score) if selection_score is not None else float(parent[1])
+    row: Dict[str, Any] = {}
+    attach_mdl_fields(
+        row,
+        code=str(parent[0] or ""),
+        selection_score=sel,
+        n=int(n),
+        mdl_lambda=float(mdl_lambda),
+        runtime_valid=True,
+    )
+    return _candidate_mdl_log_fields(row)
+
+
+def _refinement_mdl_n(n_train: int, n_val: int) -> int:
+    n_tr = max(0, int(n_train))
+    n_vl = max(0, int(n_val))
+    if n_vl > 0:
+        return n_tr + n_vl
+    return n_tr
+
+
+def _apply_mdl_to_refinement_pool(
+    elite_parents: List[Tuple[Any, ...]],
+    *,
+    mdl_lambda: float,
+    n_train: int,
+    n_val: int,
+) -> List[Tuple[Any, ...]]:
+    if not mdl_enabled(mdl_lambda):
+        return [tuple(p[:7]) for p in elite_parents]
+    n = _refinement_mdl_n(n_train, n_val)
+    return [
+        apply_mdl_to_scored_elite(
+            parent,
+            selection_score=float(parent[1]),
+            n=n,
+            mdl_lambda=mdl_lambda,
+            runtime_valid=True,
+        )
+        for parent in elite_parents
+    ]
+
+
 def _train_loglik_from_elite_tuple(
     parent_tuple: Tuple[Any, ...],
     *,
@@ -2179,6 +2306,9 @@ def _evolution_elite_to_refinement_pool(
     *,
     split_ratio: float,
     evolution_selection_score: str = "train",
+    mdl_lambda: float = 0.0,
+    n_train: int = 0,
+    n_val: int = 0,
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Copy evolution elite pool into refinement format; preserve evolution order (no sort)."""
     refine_parents: List[Tuple[Any, ...]] = []
@@ -2198,6 +2328,12 @@ def _evolution_elite_to_refinement_pool(
             (parent[0], combined, None, program_id, None, None, train_ll)
         )
         refine_vals.append(val_ll_f)
+    refine_parents = _apply_mdl_to_refinement_pool(
+        refine_parents,
+        mdl_lambda=mdl_lambda,
+        n_train=n_train,
+        n_val=n_val,
+    )
     return refine_parents, refine_vals
 
 
@@ -2210,12 +2346,14 @@ def _save_evolution_elite_pool(
     n_train: int,
     n_val: int,
     evolution_selection_score: str = "train_val",
+    mdl_lambda: float = 0.0,
 ) -> Path:
     """Persist evolution-phase elite pool programs and manifest (evolution sort order)."""
     pool_dir = output_path / "evolution_elite_pool"
     pool_dir.mkdir(parents=True, exist_ok=True)
     manifest: List[Dict[str, Any]] = []
     mode = _normalize_evolution_selection_score(evolution_selection_score)
+    mdl_on = mdl_enabled(mdl_lambda)
     for rank, (parent, val_ll) in enumerate(zip(elite_parents, elite_val_logliks)):
         program_id = str(parent[3])
         train_ll = _train_loglik_from_elite_tuple(
@@ -2238,28 +2376,39 @@ def _save_evolution_elite_pool(
         safe_name = re.sub(r"[^\w.\-]+", "_", program_id) or "program"
         filename = f"{rank:03d}_{safe_name}.py"
         (pool_dir / filename).write_text(parent[0] or "", encoding="utf-8")
-        manifest.append(
-            {
-                "rank": rank,
-                "program_id": program_id,
-                "filename": filename,
-                "train_loglik": train_ll,
-                "val_loglik": val_ll_f,
-                "selection_score": selection_score,
-                "train_val_loglik": combined,
-                "evolution_fitness": _safe_float(parent[1]),
-                "evolution_selection_score": mode,
-            }
-        )
+        entry: Dict[str, Any] = {
+            "rank": rank,
+            "program_id": program_id,
+            "filename": filename,
+            "train_loglik": train_ll,
+            "val_loglik": val_ll_f,
+            "selection_score": selection_score,
+            "train_val_loglik": combined,
+            "evolution_fitness": _safe_float(parent[1]),
+            "evolution_selection_score": mode,
+        }
+        if mdl_on:
+            n_sel = _mdl_n_for_score(
+                evolution_selection_score, n_train, n_val, val_ll_f
+            )
+            entry.update(
+                _elite_mdl_manifest_fields(
+                    parent,
+                    mdl_lambda=mdl_lambda,
+                    n=n_sel,
+                    selection_score=selection_score,
+                )
+            )
+        manifest.append(entry)
+    payload: Dict[str, Any] = {
+        "n_programs": len(manifest),
+        "evolution_selection_score": mode,
+        "programs": manifest,
+    }
+    if mdl_on:
+        payload["mdl_lambda"] = float(mdl_lambda)
     (pool_dir / "pool_manifest.json").write_text(
-        json.dumps(
-            {
-                "n_programs": len(manifest),
-                "evolution_selection_score": mode,
-                "programs": manifest,
-            },
-            indent=2,
-        ),
+        json.dumps(payload, indent=2),
         encoding="utf-8",
     )
     return pool_dir
@@ -2297,9 +2446,19 @@ def _load_evolution_elite_pool(
             combined = train_ll
         program_id = str(entry.get("program_id", filename))
         idx6 = train_ll if _uses_train_val_evolution_selection(pool_mode, "loglik") else None
-        elite_parents.append(
-            (code, combined, None, program_id, None, None, idx6 if idx6 is not None else train_ll)
+        parent: Tuple[Any, ...] = (
+            code,
+            combined,
+            None,
+            program_id,
+            None,
+            None,
+            idx6 if idx6 is not None else train_ll,
         )
+        mdl_score = entry.get("mdl_score")
+        if mdl_score is not None:
+            parent = parent + (float(mdl_score),)
+        elite_parents.append(parent)
         elite_val_logliks.append(val_ll)
     return elite_parents, elite_val_logliks
 
@@ -2378,9 +2537,22 @@ def _collect_pooled_train_trials_for_participants(
 def _save_global_elite_pool(
     global_dir: Path,
     elite_parents: List[Tuple[Any, ...]],
+    *,
+    mdl_lambda: float = 0.0,
+    n: Optional[int] = None,
 ) -> Path:
     """Persist global-phase elite pool (global sort order)."""
-    pool_dir = _write_elite_pool_dir(Path(global_dir) / "global_elite_pool", elite_parents)
+    extra = None
+    if mdl_enabled(mdl_lambda) and n is not None:
+        extra = [
+            _elite_mdl_manifest_fields(parent, mdl_lambda=mdl_lambda, n=int(n)) or None
+            for parent in elite_parents
+        ]
+    pool_dir = _write_elite_pool_dir(
+        Path(global_dir) / "global_elite_pool",
+        elite_parents,
+        extra_manifest_fields=extra,
+    )
     if elite_parents:
         (Path(global_dir) / BEST_PROGRAM_FILENAME).write_text(
             elite_parents[0][0] or "", encoding="utf-8"
@@ -2469,6 +2641,7 @@ def _global_elite_to_participant_elite(
     n_eval_seeds: int,
     evolution_selection_score: str = "train",
     selection_warn_key: Optional[str] = None,
+    mdl_lambda: float = 0.0,
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Map global pool into participant elite tuples; preserve global order (no sort)."""
     elite_parents: List[Tuple[Any, ...]] = []
@@ -2477,6 +2650,7 @@ def _global_elite_to_participant_elite(
     n_train = len(train_trials)
     n_val = len(val_trials)
     warn_key = selection_warn_key or f"global_handoff_{dataset}"
+    mdl_lambda = normalize_mdl_lambda(mdl_lambda)
     for parent in global_parents:
         code = parent[0]
         src_id = str(parent[3])
@@ -2485,6 +2659,7 @@ def _global_elite_to_participant_elite(
         val_ll: Optional[float] = None
         test_acc = 0.0
         train_acc = 0.0
+        runtime_valid = False
         choose_fn = compile_program(code)
         if choose_fn is not None:
             train_eval = _evaluate_loglik_for_dataset(
@@ -2493,11 +2668,13 @@ def _global_elite_to_participant_elite(
             train_ll = float(train_eval["avg_loglik"])
             train_acc = float(train_eval["accuracy"])
             test_acc = train_acc
+            runtime_valid = int(train_eval.get("errors", 0) or 0) == 0
             if val_trials:
                 val_eval = _evaluate_loglik_for_dataset(
                     dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
                 )
                 val_ll = float(val_eval["avg_loglik"])
+                runtime_valid = runtime_valid and int(val_eval.get("errors", 0) or 0) == 0
         pool_fitness = (
             _evolution_selection_score(
                 train_ll,
@@ -2511,10 +2688,22 @@ def _global_elite_to_participant_elite(
             else train_ll
         )
         idx6 = train_ll if use_train_val else train_acc
+        n_sel = _mdl_n_for_score(evolution_selection_score, n_train, n_val, val_ll)
         elite_parents.append(
-            (code, pool_fitness, test_acc, program_id, None, None, idx6)
+            apply_mdl_to_scored_elite(
+                (code, pool_fitness, test_acc, program_id, None, None, idx6),
+                selection_score=float(pool_fitness),
+                n=n_sel,
+                mdl_lambda=mdl_lambda,
+                runtime_valid=runtime_valid,
+            )
         )
         elite_val_logliks.append(val_ll)
+    if mdl_enabled(mdl_lambda):
+        paired = list(zip(elite_parents, elite_val_logliks))
+        sort_elite_pairs(paired, mdl_lambda)
+        elite_parents = [p[0] for p in paired]
+        elite_val_logliks = [p[1] for p in paired]
     return elite_parents, elite_val_logliks
 
 
@@ -2561,6 +2750,7 @@ def run_global_evolution_phase(
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_observed_trials_per_participant: Optional[int] = None,
+    mdl_lambda: float = 0.0,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -2568,6 +2758,7 @@ def run_global_evolution_phase(
     Runs before per-participant evolution when ``--global_phase`` and ``--phase all``.
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
+    mdl_lambda = normalize_mdl_lambda(mdl_lambda)
     participant_ids = [int(p) for p in participants]
     sparse_audits: List[SparseObservationAudit] = []
     pooled_train = _collect_pooled_train_trials_for_participants(
@@ -2650,14 +2841,25 @@ def run_global_evolution_phase(
         else baseline_ll
     )
     elite_parents: List[Tuple[Any, ...]] = [
-        (
-            seed_code,
-            baseline_fitness,
-            None,
-            "global_baseline",
-            None,
-            None,
-            baseline_ll if use_train_val else baseline_ll,
+        apply_mdl_to_scored_elite(
+            (
+                seed_code,
+                baseline_fitness,
+                None,
+                "global_baseline",
+                None,
+                None,
+                baseline_ll if use_train_val else baseline_ll,
+            ),
+            selection_score=float(baseline_fitness),
+            n=_mdl_n_for_score(
+                evolution_selection_score,
+                len(pooled_train),
+                len(pooled_val),
+                baseline_val_ll,
+            ),
+            mdl_lambda=mdl_lambda,
+            runtime_valid=True,
         )
     ]
     print(f"Global baseline train loglik: {baseline_ll:.6f}")
@@ -2918,9 +3120,21 @@ def run_global_evolution_phase(
                 "train_loglik": train_loglik,
                 "fitness": fitness,
                 "selection_score": selection_score,
+                "runtime_valid": True,
             }
             if val_loglik is not None:
                 row["val_loglik"] = val_loglik
+            _attach_mdl_to_candidate(
+                row,
+                mdl_lambda=mdl_lambda,
+                n=_mdl_n_for_score(
+                    evolution_selection_score,
+                    len(pooled_train),
+                    len(pooled_val),
+                    val_loglik,
+                ),
+                selection_score=selection_score,
+            )
             selected_results.append(row)
 
         print(
@@ -2933,7 +3147,7 @@ def run_global_evolution_phase(
         if not selected_results:
             print("Warning: No runtime-valid global candidates; keeping elite pool.")
         else:
-            selected_results.sort(key=lambda x: x["fitness"], reverse=True)
+            sort_candidates(selected_results, mdl_lambda)
             best = selected_results[0]
             print(
                 f"  Best global candidate {best['idx']}: "
@@ -2947,18 +3161,18 @@ def run_global_evolution_phase(
             for result in selected_results:
                 program_id = f"global_iteration_{iteration_step}_candidate_{result['idx']}"
                 elite_parents.append(
-                    (
+                    _elite_tuple_for_ranking(
                         result["code"],
                         result["fitness"],
                         None,
                         program_id,
-                        None,
-                        None,
                         result["train_loglik"],
+                        mdl_lambda=mdl_lambda,
+                        mdl_score=result.get("mdl_score"),
                     )
                 )
 
-        elite_parents.sort(key=lambda x: x[1], reverse=True)
+        sort_elites(elite_parents, mdl_lambda)
         elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
         elite_parents = elite_parents[:elite_cap]
         pool_best_ll = _train_loglik_from_elite_tuple(
@@ -2989,6 +3203,33 @@ def run_global_evolution_phase(
             }
             if use_train_val:
                 metrics["pool_best_selection_score"] = pool_best_selection
+            if mdl_enabled(mdl_lambda):
+                metrics["mdl_lambda"] = float(mdl_lambda)
+                metrics.update(
+                    {
+                        f"pool_best_{k}": v
+                        for k, v in _elite_mdl_manifest_fields(
+                            elite_parents[0],
+                            mdl_lambda=mdl_lambda,
+                            n=_mdl_n_for_score(
+                                evolution_selection_score,
+                                len(pooled_train),
+                                len(pooled_val),
+                                0.0 if pooled_val else None,
+                            ),
+                            selection_score=pool_best_selection,
+                        ).items()
+                    }
+                )
+                if selected_results:
+                    metrics["iter_candidate_mdl"] = [
+                        {
+                            "idx": r["idx"],
+                            "selection_score": r.get("selection_score"),
+                            **_candidate_mdl_log_fields(r),
+                        }
+                        for r in selected_results
+                    ]
             metrics.update(
                 _iteration_candidate_source_header(
                     fresh_n_candidates,
@@ -3034,7 +3275,17 @@ def run_global_evolution_phase(
                     break
 
     if save_artifacts:
-        pool_dir = _save_global_elite_pool(global_dir, elite_parents)
+        pool_dir = _save_global_elite_pool(
+            global_dir,
+            elite_parents,
+            mdl_lambda=mdl_lambda,
+            n=_mdl_n_for_score(
+                evolution_selection_score,
+                len(pooled_train),
+                len(pooled_val),
+                baseline_val_ll,
+            ),
+        )
         print(f"Saved global elite pool ({len(elite_parents)} programs) -> {pool_dir}")
         print(f"Saved best program -> {global_dir / BEST_PROGRAM_FILENAME}")
         pool_best_code = elite_parents[0][0]
@@ -3073,6 +3324,21 @@ def run_global_evolution_phase(
             "evolution_selection_score": evolution_selection_score,
             "baseline_global_train_loglik": baseline_ll,
         }
+        if mdl_enabled(mdl_lambda):
+            global_results["mdl_lambda"] = float(mdl_lambda)
+            global_results.update(
+                _elite_mdl_manifest_fields(
+                    elite_parents[0],
+                    mdl_lambda=mdl_lambda,
+                    n=_mdl_n_for_score(
+                        evolution_selection_score,
+                        len(pooled_train),
+                        len(pooled_val),
+                        baseline_val_ll,
+                    ),
+                    selection_score=pool_best_selection_score,
+                )
+            )
         summary_csv_path = global_dir / "summary_loglik.csv"
         if summary_csv_path.is_file():
             with summary_csv_path.open(newline="", encoding="utf-8") as f:
@@ -3980,6 +4246,7 @@ def run_loglik_refinement_phase(
     prompt_token_estimator: str = "char4",
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
+    mdl_lambda: float = 0.0,
 ) -> Optional[float]:
     """
     Refinement: val trials in prompt; pool sorted by train_val_loglik only after iteration 1+.
@@ -3989,6 +4256,7 @@ def run_loglik_refinement_phase(
     single-program pool from ``initial_code``.
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
+    mdl_lambda = normalize_mdl_lambda(mdl_lambda)
     if not val_trials or not test_trials or n_iterations < 1:
         return None
 
@@ -4026,6 +4294,12 @@ def run_loglik_refinement_phase(
             f"Refinement initial pool: {len(elite_parents)} program(s) copied from evolution "
             f"(evolution order preserved; sort by train_val_loglik starts after iteration 1)."
         )
+        elite_parents = _apply_mdl_to_refinement_pool(
+            elite_parents,
+            mdl_lambda=mdl_lambda,
+            n_train=len(train_trials),
+            n_val=len(val_trials),
+        )
         seed_test_loglik: Optional[float] = None
         top_fn = compile_program(elite_parents[0][0])
         if top_fn is not None:
@@ -4052,6 +4326,12 @@ def run_loglik_refinement_phase(
                 float(initial_train_loglik),
             )
         ]
+        elite_parents = _apply_mdl_to_refinement_pool(
+            elite_parents,
+            mdl_lambda=mdl_lambda,
+            n_train=len(train_trials),
+            n_val=len(val_trials),
+        )
         elite_val_logliks = [float(initial_val_loglik)]
         seed_test_loglik = None
         seed_fn = compile_program(initial_code)
@@ -4355,16 +4635,22 @@ def run_loglik_refinement_phase(
                 if runtime_valid
                 else float("-inf")
             )
-            candidate_results.append(
-                {
-                    "idx": idx,
-                    "code": code,
-                    "train_val_loglik": train_val_loglik,
-                    "train_loglik": train_loglik,
-                    "val_loglik": val_loglik,
-                    "runtime_valid": runtime_valid,
-                }
-            )
+            row = {
+                "idx": idx,
+                "code": code,
+                "train_val_loglik": train_val_loglik,
+                "train_loglik": train_loglik,
+                "val_loglik": val_loglik,
+                "runtime_valid": runtime_valid,
+            }
+            if runtime_valid:
+                _attach_mdl_to_candidate(
+                    row,
+                    mdl_lambda=mdl_lambda,
+                    n=_refinement_mdl_n(len(train_trials), len(val_trials)),
+                    selection_score=train_val_loglik,
+                )
+            candidate_results.append(row)
 
         print(
             "Iteration invalid summary: "
@@ -4381,7 +4667,7 @@ def run_loglik_refinement_phase(
                 f"{participant_id} at iteration {iteration_step}; keeping elite pool."
             )
         else:
-            selected_results.sort(key=lambda x: x["train_val_loglik"], reverse=True)
+            sort_candidates(selected_results, mdl_lambda, score_key="train_val_loglik")
             iter_best_result = selected_results[0]
             _tr, _vr = _refinement_train_val_ratios(split_ratio)
             print(
@@ -4394,21 +4680,21 @@ def run_loglik_refinement_phase(
             for result in selected_results:
                 program_id = f"refinement_{iteration_step}_candidate_{result['idx']}"
                 elite_parents.append(
-                    (
+                    _elite_tuple_for_ranking(
                         result["code"],
                         result["train_val_loglik"],
                         None,
                         program_id,
-                        None,
-                        None,
                         result["train_loglik"],
+                        mdl_lambda=mdl_lambda,
+                        mdl_score=result.get("mdl_score"),
                     )
                 )
                 elite_val_logliks.append(result.get("val_loglik"))
 
         paired = list(zip(elite_parents, elite_val_logliks))
         if iteration_step >= 1:
-            paired.sort(key=lambda x: x[0][1], reverse=True)
+            sort_elite_pairs(paired, mdl_lambda)
         elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
         paired = paired[:elite_cap]
         elite_parents = [p[0] for p in paired]
@@ -4457,6 +4743,10 @@ def run_loglik_refinement_phase(
                 "num_unique_errors_available": num_unique_errors_available,
                 "error_prompt_chars_used": error_prompt_chars_used,
             }
+            if mdl_enabled(mdl_lambda):
+                refine_header["mdl_lambda"] = float(mdl_lambda)
+            if iter_best_result is not None:
+                best_fields.update(_candidate_mdl_log_fields(iter_best_result))
             refine_header.update(
                 _iteration_candidate_source_header(
                     fresh_n_candidates,
@@ -4479,6 +4769,7 @@ def run_loglik_refinement_phase(
                             "val_loglik": r.get("val_loglik"),
                             "train_val_loglik": r.get("train_val_loglik"),
                             "runtime_valid": r.get("runtime_valid", False),
+                            **_candidate_mdl_log_fields(r),
                         }
                         for r in candidate_results
                     ],
@@ -4902,6 +5193,7 @@ def run_loglik_refine_participant_from_checkpoint(
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_observed_trials_per_participant: Optional[int] = None,
+    mdl_lambda: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Refinement-only for one participant: load best_program.py from a prior run, refine, return metrics.
@@ -5047,6 +5339,7 @@ def run_loglik_refine_participant_from_checkpoint(
         "prompt_token_estimator": prompt_token_estimator,
         "max_error_prompt_chars": max_error_prompt_chars,
         "error_feedback_mode": error_feedback_mode,
+        "mdl_lambda": mdl_lambda,
     }
     if evolution_pool_dir.is_dir() and (evolution_pool_dir / "pool_manifest.json").exists():
         ref_parents, ref_vals = _load_evolution_elite_pool(
@@ -5138,6 +5431,7 @@ def run_loglik_refine_from_prev_experiment(
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_observed_trials_per_participant: Optional[int] = None,
+    mdl_lambda: float = 0.0,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
     prev_exp_path = prev_exp_path.resolve()
@@ -5258,6 +5552,7 @@ def run_loglik_refine_from_prev_experiment(
             max_error_prompt_chars=max_error_prompt_chars,
             error_feedback_mode=error_feedback_mode,
             max_observed_trials_per_participant=max_observed_trials_per_participant,
+            mdl_lambda=mdl_lambda,
         )
         return int(participant_id), metrics
 
@@ -8015,6 +8310,7 @@ def _run_pre_evolution_explore_phase(
     mem_run_id: str = "",
     baseline_selection_score: Optional[float] = None,
     baseline_val_loglik: Optional[float] = None,
+    mdl_lambda: float = 0.0,
 ) -> None:
     """
     One-shot candidate generation before the evolution loop.
@@ -8027,6 +8323,7 @@ def _run_pre_evolution_explore_phase(
     n_explore = int(explore_candidates)
     if n_explore <= 0:
         return
+    mdl_lambda = normalize_mdl_lambda(mdl_lambda)
 
     use_train_val = _uses_train_val_evolution_selection(evolution_selection_score, fitness_metric)
     n_train = len(train_trials)
@@ -8228,21 +8525,30 @@ def _run_pre_evolution_explore_phase(
             row["selection_score"] = selection_score
         if val_eval is not None:
             row["val_loglik"] = val_loglik
+        if fitness_metric == "loglik" and selection_score is not None:
+            _attach_mdl_to_candidate(
+                row,
+                mdl_lambda=mdl_lambda,
+                n=_mdl_n_for_score(
+                    evolution_selection_score, n_train, n_val, val_loglik
+                ),
+                selection_score=selection_score,
+            )
         candidate_results.append(row)
 
     selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
-    selected_results.sort(key=lambda r: r["fitness"], reverse=True)
+    sort_candidates(selected_results, mdl_lambda)
     for result in selected_results:
         program_id = f"explore_candidate_{result['idx']}"
         elite_parents.append(
-            (
+            _elite_tuple_for_ranking(
                 result["code"],
                 result["fitness"],
                 result["test_acc"],
                 program_id,
-                None,
-                None,
                 result["train_loglik"] if use_train_val else result["train_acc"],
+                mdl_lambda=mdl_lambda,
+                mdl_score=result.get("mdl_score"),
             )
         )
         if track_elite_val_loglik:
@@ -8256,15 +8562,16 @@ def _run_pre_evolution_explore_phase(
             elite_cap=elite_cap,
             pinned_ids=pin_program_ids,
             track_elite_val_loglik=track_elite_val_loglik,
+            mdl_lambda=mdl_lambda,
         )
     elif track_elite_val_loglik:
         paired = list(zip(elite_parents, elite_val_logliks))
-        paired.sort(key=lambda x: x[0][1], reverse=True)
+        sort_elite_pairs(paired, mdl_lambda)
         paired = paired[:elite_cap]
         elite_parents[:] = [p[0] for p in paired]
         elite_val_logliks[:] = [p[1] for p in paired]
     else:
-        elite_parents.sort(key=lambda x: x[1], reverse=True)
+        sort_elites(elite_parents, mdl_lambda)
         elite_parents[:] = elite_parents[:elite_cap]
 
     best_explore_score: Optional[float] = None
@@ -8312,10 +8619,13 @@ def _run_pre_evolution_explore_phase(
                         if r["idx"] < len(candidate_prompt_parent_ids)
                         else None
                     ),
+                    **_candidate_mdl_log_fields(r),
                 }
                 for r in candidate_results
             ],
         }
+        if mdl_enabled(mdl_lambda):
+            metrics["mdl_lambda"] = float(mdl_lambda)
         if initial_pool_from_global:
             metrics["initial_pool_from_global"] = True
             metrics["initial_pool_size_before_explore"] = (
@@ -8331,6 +8641,8 @@ def _run_pre_evolution_explore_phase(
                     metrics["best_explore_selection_score"] = selected_results[0].get(
                         "selection_score"
                     )
+                if selected_results[0].get("mdl_score") is not None:
+                    metrics["best_explore_mdl_score"] = selected_results[0].get("mdl_score")
             else:
                 metrics["best_explore_train_acc"] = selected_results[0].get("train_acc")
         (explore_dir / "metrics.json").write_text(
@@ -8496,6 +8808,7 @@ def run_evolution(
     mem_trace: bool = False,
     max_observed_trials_per_participant: Optional[int] = None,
     explore_from_handoff_parents: bool = False,
+    mdl_lambda: float = 0.0,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -8532,6 +8845,7 @@ def run_evolution(
     evolution_selection_score = _normalize_evolution_selection_score(
         evolution_selection_score
     )
+    mdl_lambda = normalize_mdl_lambda(mdl_lambda)
     use_train_val_selection = _uses_train_val_evolution_selection(
         evolution_selection_score, fitness_metric
     )
@@ -8979,12 +9293,12 @@ def run_evolution(
                 if fitness_metric == "loglik"
                 else baseline_train_eval["accuracy"]
             )
+            val_ll = (
+                _safe_float(baseline_val_eval["avg_loglik"])
+                if baseline_val_eval is not None
+                else None
+            )
             if use_train_val_selection and train_ll is not None:
-                val_ll = (
-                    _safe_float(baseline_val_eval["avg_loglik"])
-                    if baseline_val_eval is not None
-                    else None
-                )
                 _baseline_fit = _evolution_selection_score(
                     train_ll,
                     val_ll,
@@ -8998,14 +9312,25 @@ def run_evolution(
                 if use_train_val_selection and fitness_metric == "loglik"
                 else baseline_train_eval["accuracy"]
             )
-            elite_parents = [(
-                seed_code,
-                _baseline_fit,
-                baseline_test_eval["accuracy"],
-                "baseline",
-                None,
-                None,
-                idx6,
+            elite_parents = [apply_mdl_to_scored_elite(
+                (
+                    seed_code,
+                    _baseline_fit,
+                    baseline_test_eval["accuracy"],
+                    "baseline",
+                    None,
+                    None,
+                    idx6,
+                ),
+                selection_score=float(_baseline_fit),
+                n=_mdl_n_for_score(
+                    evolution_selection_score,
+                    len(train_trials),
+                    len(val_trials),
+                    val_ll,
+                ),
+                mdl_lambda=mdl_lambda,
+                runtime_valid=True,
             )]
         else:
             elite_parents = [(
@@ -9034,6 +9359,7 @@ def run_evolution(
             n_eval_seeds=n_eval_seeds,
             evolution_selection_score=evolution_selection_score,
             selection_warn_key=selection_warn_key,
+            mdl_lambda=mdl_lambda,
         )
         global_pool_handoff = True
         print(
@@ -9044,7 +9370,28 @@ def run_evolution(
             dst_pool = output_path / "initial_pool_from_global"
             if dst_pool.exists():
                 shutil.rmtree(dst_pool)
-            _write_elite_pool_dir(dst_pool, elite_parents)
+            _write_elite_pool_dir(
+                dst_pool,
+                elite_parents,
+                extra_manifest_fields=(
+                    [
+                        _elite_mdl_manifest_fields(
+                            parent,
+                            mdl_lambda=mdl_lambda,
+                            n=_mdl_n_for_score(
+                                evolution_selection_score,
+                                len(train_trials),
+                                len(val_trials),
+                                elite_val_logliks[i] if i < len(elite_val_logliks) else None,
+                            ),
+                        )
+                        or None
+                        for i, parent in enumerate(elite_parents)
+                    ]
+                    if mdl_enabled(mdl_lambda)
+                    else None
+                ),
+            )
     elif track_elite_val_loglik:
         base_val = (
             _safe_float(baseline_val_eval["avg_loglik"])
@@ -9135,6 +9482,7 @@ def run_evolution(
                 if baseline_val_eval is not None
                 else None
             ),
+            mdl_lambda=mdl_lambda,
         )
         last_significant_best = float(elite_parents[0][1])
 
@@ -9686,6 +10034,18 @@ def run_evolution(
                     _row["selection_score"] = selection_score
                 if val_eval is not None:
                     _row["val_loglik"] = val_loglik
+                if fitness_metric == "loglik" and selection_score is not None:
+                    _attach_mdl_to_candidate(
+                        _row,
+                        mdl_lambda=mdl_lambda,
+                        n=_mdl_n_for_score(
+                            evolution_selection_score,
+                            len(train_trials),
+                            len(val_trials),
+                            val_loglik,
+                        ),
+                        selection_score=selection_score,
+                    )
                 candidate_results.append(_row)
             elif is_binary_loglik_dataset(dataset):
                 choose_fn, compile_error = compile_program_with_error(code)
@@ -9841,6 +10201,18 @@ def run_evolution(
                     _row["selection_score"] = selection_score
                 if val_eval is not None:
                     _row["val_loglik"] = val_loglik
+                if fitness_metric == "loglik" and selection_score is not None:
+                    _attach_mdl_to_candidate(
+                        _row,
+                        mdl_lambda=mdl_lambda,
+                        n=_mdl_n_for_score(
+                            evolution_selection_score,
+                            len(train_trials),
+                            len(val_trials),
+                            val_loglik,
+                        ),
+                        selection_score=selection_score,
+                    )
                 candidate_results.append(_row)
 
         print(
@@ -9864,7 +10236,7 @@ def run_evolution(
         if selected_results:
             runtime_valid_evolved_found = True
             # Sort by fitness (for CPC18: -MSE, for others: accuracy)
-            selected_results.sort(key=lambda x: x["fitness"], reverse=True)
+            sort_candidates(selected_results, mdl_lambda)
             # Keep legacy name for downstream logging blocks.
             valid_results = selected_results
             
@@ -9999,29 +10371,33 @@ def run_evolution(
                         result.get("test_mse", None),
                     ))
                 elif is_cpc18_split:
-                    elite_parents.append((
-                        result["code"],
-                        result["fitness"],
-                        result["test_acc"],
-                        program_id,
-                        None,
-                        None,
-                        result["train_loglik"]
-                        if use_train_val_selection and fitness_metric == "loglik"
-                        else result["train_acc"],
-                    ))
+                    elite_parents.append(
+                        _elite_tuple_for_ranking(
+                            result["code"],
+                            result["fitness"],
+                            result["test_acc"],
+                            program_id,
+                            result["train_loglik"]
+                            if use_train_val_selection and fitness_metric == "loglik"
+                            else result["train_acc"],
+                            mdl_lambda=mdl_lambda,
+                            mdl_score=result.get("mdl_score"),
+                        )
+                    )
                 else:
-                    elite_parents.append((
-                        result["code"],
-                        result["fitness"],
-                        result["test_acc"],
-                        program_id,
-                        None,
-                        None,
-                        result["train_loglik"]
-                        if use_train_val_selection and fitness_metric == "loglik"
-                        else result["train_acc"],
-                    ))
+                    elite_parents.append(
+                        _elite_tuple_for_ranking(
+                            result["code"],
+                            result["fitness"],
+                            result["test_acc"],
+                            program_id,
+                            result["train_loglik"]
+                            if use_train_val_selection and fitness_metric == "loglik"
+                            else result["train_acc"],
+                            mdl_lambda=mdl_lambda,
+                            mdl_score=result.get("mdl_score"),
+                        )
+                    )
                 if track_elite_val_loglik:
                     elite_val_logliks.append(_safe_float(result.get("val_loglik")))
 
@@ -10031,14 +10407,14 @@ def run_evolution(
             if track_elite_val_loglik:
                 paired_elite = list(zip(elite_parents, elite_val_logliks))
                 if should_sort_elite:
-                    paired_elite.sort(key=lambda x: x[0][1], reverse=True)
+                    sort_elite_pairs(paired_elite, mdl_lambda)
                 elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
                 paired_elite = paired_elite[:elite_cap]
                 elite_parents = [p[0] for p in paired_elite]
                 elite_val_logliks = [p[1] for p in paired_elite]
             else:
                 if should_sort_elite:
-                    elite_parents.sort(key=lambda x: x[1], reverse=True)
+                    sort_elites(elite_parents, mdl_lambda)
                 elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
                 elite_parents = elite_parents[:elite_cap]
 
@@ -10421,6 +10797,7 @@ def run_evolution(
                     _cr["val_loglik"] = r.get("val_loglik")
                 if r.get("selection_score") is not None:
                     _cr["selection_score"] = r.get("selection_score")
+                _cr.update(_candidate_mdl_log_fields(r))
                 _cand_rows.append(_cr)
             _loglik_best: Dict[str, Any] = {
                 "best_train_fitness": best_fitness if selected_results else None,
@@ -10441,6 +10818,12 @@ def run_evolution(
                 "best_program_id": best_program_id,
                 "evolution_selection_score": evolution_selection_score,
             }
+            if mdl_enabled(mdl_lambda):
+                _loglik_header["mdl_lambda"] = float(mdl_lambda)
+                if elite_parents and len(elite_parents[0]) > 7 and elite_parents[0][7] is not None:
+                    _loglik_header["pool_best_mdl_score"] = float(elite_parents[0][7])
+                if selected_results:
+                    _loglik_best.update(_candidate_mdl_log_fields(selected_results[0]))
             _loglik_header.update(cand_source_header)
             metrics = _build_iteration_metrics_json(
                 participant_id=participant_id,
@@ -10858,6 +11241,7 @@ def run_evolution(
             n_train=len(train_trials),
             n_val=len(val_trials),
             evolution_selection_score=evolution_selection_score,
+            mdl_lambda=mdl_lambda,
         )
         print(
             f"Saved evolution elite pool ({len(elite_parents)} programs) -> {pool_dir}"
@@ -10889,6 +11273,9 @@ def run_evolution(
             elite_val_logliks,
             split_ratio=split_ratio,
             evolution_selection_score=evolution_selection_score,
+            mdl_lambda=mdl_lambda,
+            n_train=len(train_trials),
+            n_val=len(val_trials),
         )
         _fresh_val_ll = (
             float(baseline_val_eval["avg_loglik"])
@@ -10936,6 +11323,7 @@ def run_evolution(
             prompt_token_estimator=prompt_token_estimator,
             max_error_prompt_chars=max_error_prompt_chars,
             error_feedback_mode=error_feedback_mode,
+            mdl_lambda=mdl_lambda,
         )
         refinement_ran = gated_test_loglik is not None
         if gated_test_loglik is not None:
@@ -11868,6 +12256,23 @@ def main():
         ),
     )
     parser.add_argument(
+        "--mdl_lambda",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional MDL ranking overlay: mdl_score = n * selection_score - mdl_lambda * "
+            "program_ast_size. Default 0.0 leaves ranking unchanged. When >0, programs compete "
+            "by mdl_score but reported fitness, early stopping, MEM traces, and test loglik "
+            "keep the original mean log-likelihood."
+        ),
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=TEH_WANDB_PROJECT,
+        help=f"W&B project name (default: {TEH_WANDB_PROJECT}).",
+    )
+    parser.add_argument(
         "--cpc18_official_mse",
         action="store_true",
         help="Legacy CPC18 only (not supported in TEH CLI).",
@@ -12154,6 +12559,9 @@ def main():
     if not (0.0 < args.split_ratio < 1.0):
         print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
         return
+    if float(getattr(args, "mdl_lambda", 0.0) or 0.0) < 0.0:
+        print(f"Error: --mdl_lambda must be >= 0, got {args.mdl_lambda}.")
+        return
     if (
         args.split_mode == "across_participants"
         and args.dataset != PETERSON2021USING_ALIAS
@@ -12324,8 +12732,10 @@ def main():
                 range_end=args.range_end_ordinal,
                 ordinals=args.ordinals,
             )
+            if float(getattr(args, "mdl_lambda", 0.0) or 0.0) > 0.0:
+                run_name = f"{run_name}_mdl_l{args.mdl_lambda}"
             wandb.init(
-                project=TEH_WANDB_PROJECT,
+                project=str(getattr(args, "wandb_project", None) or TEH_WANDB_PROJECT),
                 name=run_name,
                 config=vars(args),
                 reinit=False,
@@ -12559,6 +12969,7 @@ def main():
             max_error_prompt_chars=args.max_error_prompt_chars,
             error_feedback_mode=args.error_feedback_mode,
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            mdl_lambda=args.mdl_lambda,
         )
 
     if args.phase == "refine":
@@ -12615,6 +13026,7 @@ def main():
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+                mdl_lambda=args.mdl_lambda,
             )
         finally:
             if wandb is not None:
@@ -12733,6 +13145,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                mdl_lambda=args.mdl_lambda,
             )
         finally:
             if wandb is not None:
@@ -12825,6 +13238,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                mdl_lambda=args.mdl_lambda,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -13222,6 +13636,7 @@ def main():
                         mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                mdl_lambda=args.mdl_lambda,
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -13505,6 +13920,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                mdl_lambda=args.mdl_lambda,
             )
 
         try:

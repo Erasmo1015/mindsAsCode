@@ -476,6 +476,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Fitness for pool ranking (default: train_val).",
     )
     parser.add_argument(
+        "--mdl_lambda",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional MDL ranking overlay: mdl_score = n * selection_score - mdl_lambda * "
+            "program_ast_size. Default 0.0 leaves ranking unchanged."
+        ),
+    )
+    parser.add_argument(
         "--fitness_metric",
         type=str,
         default="loglik",
@@ -519,6 +528,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _validate_args(args: argparse.Namespace) -> bool:
     if not (0.0 < args.split_ratio < 1.0):
         print(f"Error: --split_ratio must be in (0,1), got {args.split_ratio}.")
+        return False
+    if float(getattr(args, "mdl_lambda", 0.0) or 0.0) < 0.0:
+        print(f"Error: --mdl_lambda must be >= 0, got {args.mdl_lambda}.")
         return False
     if args.max_workers < 1:
         print("Error: --max_workers must be >= 1.")
@@ -616,6 +628,7 @@ def _shared_evolution_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "prompt_token_estimator": args.prompt_token_estimator,
         "evolution_selection_score": args.evolution_selection_score,
         "max_error_prompt_chars": args.max_error_prompt_chars,
+        "mdl_lambda": getattr(args, "mdl_lambda", 0.0),
     }
 
 
