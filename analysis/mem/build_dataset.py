@@ -49,9 +49,9 @@ def _is_finite(x: Any) -> bool:
         return False
 
 
-def _load_annotations_v2(path: Path) -> Dict[Tuple[Any, str], Dict[str, Any]]:
-    """Index by (participant_id, candidate_id). Ignore non-v2 rows."""
-    by_key: Dict[Tuple[Any, str], Dict[str, Any]] = {}
+def _load_annotations_v2(path: Path) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+    """Index by annotation_resume_key (participant, candidate, ref_id, ref_type)."""
+    by_key: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     if not path.is_file():
         raise FileNotFoundError(f"annotations file not found: {path}")
     n_skipped_v1 = 0
@@ -69,7 +69,17 @@ def _load_annotations_v2(path: Path) -> Dict[Tuple[Any, str], Dict[str, Any]]:
             continue
         if "participant_id" not in rec:
             continue
-        key = annotation_resume_key(rec.get("participant_id"), cid)
+        ref_id = rec.get("reference_id") or rec.get("reference_parent_id")
+        ref_type = rec.get("reference_type") or rec.get("reference_kind") or ""
+        # Legacy v2 annotations lacked reference_type; they used pool-best pairing.
+        if not ref_type and ref_id:
+            ref_type = "pool_best_proxy"
+        key = annotation_resume_key(
+            rec.get("participant_id"),
+            cid,
+            reference_id=ref_id,
+            reference_type=ref_type,
+        )
         by_key[key] = rec
     if n_skipped_v1:
         print(
@@ -112,7 +122,7 @@ def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
 def build_rows_v2(
     *,
     run_dir: Path,
-    annotations: Dict[Tuple[Any, str], Dict[str, Any]],
+    annotations: Dict[Tuple[Any, ...], Dict[str, Any]],
     phase: str = "evolution",
     source: str = "normal",
     require_runtime_valid: bool = True,
@@ -122,7 +132,7 @@ def build_rows_v2(
 ) -> Tuple[List[Dict[str, Any]], Counter]:
     """Build analysis rows; record every exclusion reason (no silent drops)."""
     rows: List[Dict[str, Any]] = []
-    seen: Set[Tuple[Any, str]] = set()
+    seen: Set[Tuple[Any, ...]] = set()
     excl: Counter = Counter()
     dir_cols = all_directional_behavioral_columns()
     struct_cols = all_structural_columns()
@@ -130,13 +140,19 @@ def build_rows_v2(
     for rec in _iter_candidate_traces(run_dir):
         pid = rec.get("participant_id")
         cid = str(rec.get("candidate_id"))
-        key = annotation_resume_key(pid, cid)
+        ref_id = rec.get("reference_id") or rec.get("reference_parent_id")
+        ref_type = rec.get("reference_type") or rec.get("reference_kind") or ""
+        key = annotation_resume_key(
+            pid, cid, reference_id=ref_id, reference_type=ref_type
+        )
         base_excl = {
             "participant_id": pid,
             "candidate_id": cid,
             "iteration": rec.get("iteration"),
             "source": rec.get("source"),
             "phase": rec.get("phase"),
+            "reference_id": ref_id,
+            "reference_type": ref_type,
         }
 
         def _exclude(reason: str) -> None:
@@ -161,7 +177,7 @@ def build_rows_v2(
             _exclude("excl_missing_annotation_v2")
             continue
         if key in seen:
-            _exclude("excl_duplicate_participant_candidate")
+            _exclude("excl_duplicate_participant_candidate_reference")
             continue
         seen.add(key)
 
@@ -183,9 +199,18 @@ def build_rows_v2(
             "val_loglik": rec.get("val_loglik"),
             "selection_score": rec.get("selection_score"),
             "reference_parent_id": rec.get("reference_parent_id"),
+            "reference_id": ref_id,
             "reference_parent_score": rec.get("reference_parent_score"),
+            "reference_score": rec.get("reference_score") or rec.get("reference_parent_score"),
             "reference_kind": rec.get("reference_kind"),
+            "reference_type": ref_type,
+            "reference_is_exact": rec.get("reference_is_exact"),
+            "reference_is_proxy": rec.get("reference_is_proxy"),
             "delta_f": rec.get("delta_f"),
+            "delta_f_vs_baseline": rec.get("delta_f_vs_baseline"),
+            "delta_f_vs_population_program": rec.get("delta_f_vs_population_program"),
+            "delta_f_vs_best_prompted_parent": rec.get("delta_f_vs_best_prompted_parent"),
+            "delta_f_vs_pool_best": rec.get("delta_f_vs_pool_best"),
             "survived_elite_truncation": rec.get("survived_elite_truncation"),
             "evolution_selection_score": rec.get("evolution_selection_score"),
             "no_meaningful_change": int(bool(ann.get("no_meaningful_change"))) if ann else None,
@@ -325,9 +350,18 @@ def main() -> None:
         "val_loglik",
         "selection_score",
         "reference_parent_id",
+        "reference_id",
         "reference_parent_score",
+        "reference_score",
         "reference_kind",
+        "reference_type",
+        "reference_is_exact",
+        "reference_is_proxy",
         "delta_f",
+        "delta_f_vs_baseline",
+        "delta_f_vs_population_program",
+        "delta_f_vs_best_prompted_parent",
+        "delta_f_vs_pool_best",
         "survived_elite_truncation",
         "evolution_selection_score",
         "no_meaningful_change",

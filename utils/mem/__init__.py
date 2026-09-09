@@ -27,10 +27,20 @@ from utils.mem.reconstruct_old_run import (  # noqa: F401
     reconstruct_run,
     validate_artifacts_for_reconstruction,
 )
+from utils.mem.reference_types import (  # noqa: F401
+    REF_BEST_PROMPTED_PARENT,
+    REF_POOL_BEST_PROXY,
+    REF_POPULATION_PROGRAM,
+    REF_SEED_BASELINE,
+)
 
 __all__ = [
     "BEHAVIORAL_MOTIFS_V2",
     "MOTIF_TAXONOMY",
+    "REF_BEST_PROMPTED_PARENT",
+    "REF_POOL_BEST_PROXY",
+    "REF_POPULATION_PROGRAM",
+    "REF_SEED_BASELINE",
     "REFERENCE_KIND_POOL_BEST_PROXY",
     "SCHEMA_VERSION",
     "STRUCTURAL_OPERATIONS_V2",

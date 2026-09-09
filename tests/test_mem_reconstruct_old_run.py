@@ -179,6 +179,7 @@ def test_reconstruct_uses_pre_iteration_pool_best_not_future(tmp_path: Path):
     cand1 = [r for r in records if r.get("candidate_id") == "iteration_1_candidate_0"][0]
     assert cand1["reference_kind"] == REFERENCE_KIND_POOL_BEST_PROXY
     assert cand1["reference_type"] == REFERENCE_KIND_POOL_BEST_PROXY
+    assert cand1["reference_is_proxy"] is True
     assert cand1["reference_parent_id"] == "explore_candidate_0"
     assert cand1["reference_parent_score"] == pytest.approx(-0.5)
     assert cand1["delta_f"] == pytest.approx(compute_delta_f(-0.2, -0.5))
@@ -191,11 +192,24 @@ def test_reconstruct_uses_pre_iteration_pool_best_not_future(tmp_path: Path):
     # Non-runtime-valid excluded
     assert not any(r.get("candidate_id") == "iteration_1_candidate_2" for r in records)
 
+    # Fresh uses exact seed baseline, NOT pool-best proxy.
     cand2 = [r for r in records if r.get("candidate_id") == "iteration_2_candidate_0"][0]
-    assert cand2["reference_parent_id"] == "iteration_1_candidate_0"
-    assert cand2["reference_parent_score"] == pytest.approx(-0.2)
     assert cand2["source"] == "fresh"
-    assert cand2["delta_f"] == pytest.approx(compute_delta_f(-0.15, -0.2))
+    assert cand2["reference_type"] == "seed_baseline"
+    assert cand2["reference_is_exact"] is True
+    assert cand2["reference_parent_id"] == "global_baseline"
+    assert cand2["reference_parent_score"] == pytest.approx(-0.9)
+    assert cand2["delta_f"] == pytest.approx(compute_delta_f(-0.15, -0.9))
+    assert cand2["delta_f_vs_baseline"] == pytest.approx(cand2["delta_f"])
+
+    # Explore phase emitted vs baseline (exact).
+    explore = [r for r in records if r.get("candidate_id") == "explore_candidate_0"][0]
+    assert explore["phase"] == "explore"
+    assert explore["reference_type"] == "seed_baseline"
+    assert explore["reference_is_exact"] is True
+    assert explore["delta_f"] == pytest.approx(compute_delta_f(-0.5, -0.9))
+    # No future leakage into explore reference.
+    assert explore["reference_parent_id"] == "global_baseline"
 
     out = write_participant_mem_trace(pdir, records, overwrite=True)
     loaded = list(iter_jsonl_records([out]))

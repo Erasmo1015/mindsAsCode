@@ -495,3 +495,16 @@ Compatible `choose(problem, history)` programs; do **not** use the old transfer 
 4. **Stage D** participant PICS comparison (after C): `bash cluster/2026Sep_Sparse_Data/submit_stage_d_sparse_pics.sh`
 
 Records: `cluster/record/2026Sep_Sparse_Data.tsv`. Tests: `tests/test_sparse_observations.py`, `tests/test_initial_pool_programs.py`.
+
+---
+
+## Short update (Sep 9 2026 — MEM reference-aware redo)
+
+Participant MEM now starts at **explore** (after population handoff), not mid-evolution. ΔF uses the **actual generation reference**: explore/fresh → exact `seed_baseline` (or population parent when handoff); normal old runs → explicit `pool_best_proxy` (exact prompted parents not recoverable). Do not assign pool-best to explore/fresh when baseline is recoverable; do not mix reference types in one regression without factors/separate models.
+
+- Reconstruct / live `mem_trace`: `utils/mem/reconstruct_old_run.py`, `utils/mem/reference_types.py`, `teh.py` (explore + fresh + normal logging).
+- Annotate resume key includes reference pairing (no reuse across changed candidate–reference pairs). Schema-v2 NMC repair strengthened; still quarantine on failure.
+- Fit: `analysis/mem/predictor_support.py` + `fit_mem_random_slopes.py` (one focal motif random slope). Prior incomplete predictor list was a hard-coded job default, not collinearity.
+- Report: `analysis_2026Sep/Sep9_mem_report/MEM_REFERENCE_AND_RANDOM_SLOPES.md`. Five-new TEH runs lack `--mem_trace` → no exact-parent MEM.
+- Submit (outputs under `analysis_2026Sep/mem/fix_rerun1_refv2/`):  
+  `DATASETS="1peterson2021using,3frey2017cct,11enkavi2019recentprobes" bash cluster/2026Sep_MEM/submit_old_teh_mem.sh`

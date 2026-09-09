@@ -8011,6 +8011,10 @@ def _run_pre_evolution_explore_phase(
     evolution_selection_score: str = "train_val",
     explore_parent_programs: Optional[List[Tuple[str, str]]] = None,
     pin_program_ids: Optional[Sequence[str]] = None,
+    mem_trace_file: Optional[Path] = None,
+    mem_run_id: str = "",
+    baseline_selection_score: Optional[float] = None,
+    baseline_val_loglik: Optional[float] = None,
 ) -> None:
     """
     One-shot candidate generation before the evolution loop.
@@ -8080,6 +8084,7 @@ def _run_pre_evolution_explore_phase(
             f"(no validation split available)."
         )
     candidate_codes: List[str] = []
+    candidate_prompt_parent_ids: List[str] = []
     for parent_i, ((parent_code, parent_id), n_from_parent) in enumerate(
         zip(explore_parents, parent_counts)
     ):
@@ -8119,6 +8124,7 @@ def _run_pre_evolution_explore_phase(
             iteration=None,
         )
         candidate_codes.extend(variants)
+        candidate_prompt_parent_ids.extend([str(parent_id)] * len(variants))
         print(
             f"Explore generated {len(variants)} candidate(s) from parent {parent_id} "
             f"(requested {n_from_parent})."
@@ -8289,6 +8295,7 @@ def _run_pre_evolution_explore_phase(
             "elite_pool_size_after": len(elite_parents),
             "best_explore_fitness": best_explore_score,
             "evolution_selection_score": evolution_selection_score,
+            "explore_used_population_parents": bool(explore_parent_programs),
             "candidate_results": [
                 {
                     "idx": r["idx"],
@@ -8300,6 +8307,11 @@ def _run_pre_evolution_explore_phase(
                     "selection_score": r.get("selection_score"),
                     "fitness": r.get("fitness"),
                     "runtime_valid": r.get("runtime_valid", False),
+                    "prompt_parent_id": (
+                        candidate_prompt_parent_ids[r["idx"]]
+                        if r["idx"] < len(candidate_prompt_parent_ids)
+                        else None
+                    ),
                 }
                 for r in candidate_results
             ],
@@ -8324,6 +8336,101 @@ def _run_pre_evolution_explore_phase(
         (explore_dir / "metrics.json").write_text(
             json.dumps(metrics, indent=2), encoding="utf-8"
         )
+
+    # Passive MEM: explore candidates vs exact generation reference.
+    if mem_trace_file is not None:
+        from utils.mem.reference_types import (
+            REF_POPULATION_PROGRAM,
+            REF_SEED_BASELINE,
+        )
+
+        use_pop = bool(explore_parent_programs)
+        # Build parent id -> selection score from elite pool when available.
+        elite_score_by_id = {
+            str(p[3]): float(p[1]) for p in elite_parents if p[1] is not None
+        }
+        seed_sel = baseline_selection_score
+        if seed_sel is None and fitness_metric == "loglik":
+            seed_sel = float(baseline_train_eval.get("avg_loglik"))
+        parent_recs = []
+        for parent_code, parent_id in explore_parents:
+            pid_s = str(parent_id)
+            score = elite_score_by_id.get(pid_s)
+            if score is None and pid_s in ("baseline", "global_baseline"):
+                score = seed_sel
+            parent_recs.append(
+                {
+                    "program_id": pid_s,
+                    "selection_score": score,
+                    "train_loglik": score,
+                    "val_loglik": baseline_val_loglik,
+                    "code": parent_code,
+                }
+            )
+        append_mem_trace_record(
+            mem_trace_file,
+            build_iteration_context_record(
+                dataset=dataset,
+                participant_id=participant_id,
+                run_id=mem_run_id,
+                split_seed=int(split_seed),
+                phase="explore",
+                iteration=0,
+                evolution_selection_score=evolution_selection_score,
+                selected_parents=parent_recs,
+                best_selected_parent_id=str(explore_parents[0][1]) if explore_parents else "baseline",
+            ),
+        )
+        elite_ids_after = {str(p[3]) for p in elite_parents}
+        for result in candidate_results:
+            idx = int(result.get("idx", 0))
+            program_id = f"explore_candidate_{idx}"
+            prompt_pid = (
+                candidate_prompt_parent_ids[idx]
+                if idx < len(candidate_prompt_parent_ids)
+                else "baseline"
+            )
+            if use_pop and prompt_pid not in ("baseline", "global_baseline"):
+                reference_kind = REF_POPULATION_PROGRAM
+            else:
+                reference_kind = REF_SEED_BASELINE
+            ref_score = elite_score_by_id.get(str(prompt_pid))
+            if ref_score is None:
+                ref_score = seed_sel
+            cand_score = result.get("selection_score")
+            if cand_score is None:
+                cand_score = result.get("fitness") if result.get("runtime_valid") else None
+            append_mem_trace_record(
+                mem_trace_file,
+                build_candidate_record(
+                    dataset=dataset,
+                    participant_id=participant_id,
+                    run_id=mem_run_id,
+                    split_seed=int(split_seed),
+                    phase="explore",
+                    iteration=0,
+                    candidate_id=program_id,
+                    candidate_idx=idx,
+                    source="explore",
+                    code=result.get("code") or "",
+                    runtime_valid=bool(result.get("runtime_valid", False)),
+                    train_loglik=_safe_float(result.get("train_loglik")),
+                    val_loglik=_safe_float(result.get("val_loglik")),
+                    selection_score=_safe_float(cand_score),
+                    reference_parent_id=str(prompt_pid),
+                    reference_parent_score=_safe_float(ref_score),
+                    reference_kind=reference_kind,
+                    reference_type=reference_kind,
+                    reference_id=str(prompt_pid),
+                    reference_is_exact=True,
+                    delta_f=compute_delta_f(
+                        _safe_float(cand_score), _safe_float(ref_score)
+                    ),
+                    survived_elite_truncation=program_id in elite_ids_after,
+                    evolution_selection_score=evolution_selection_score,
+                    prompted_parent_ids=[str(prompt_pid)],
+                ),
+            )
 
 
 def run_evolution(
@@ -9016,6 +9123,16 @@ def run_evolution(
             pin_program_ids=(
                 [str(p[3]) for p in elite_parents]
                 if explore_from_handoff_parents and elite_parents
+                else None
+            ),
+            mem_trace_file=mem_trace_file,
+            mem_run_id=mem_run_id,
+            baseline_selection_score=_safe_float(
+                (baseline_results or {}).get("selection_score")
+            ),
+            baseline_val_loglik=(
+                _safe_float(baseline_val_eval.get("avg_loglik"))
+                if baseline_val_eval is not None
                 else None
             ),
         )
@@ -10149,10 +10266,18 @@ def run_evolution(
                     reference_kind = "seed_baseline"
                     cand_ref_id = "baseline"
                     cand_ref_score = mem_seed_selection_score
+                    prompted_ids = ["baseline"]
+                    ref_exact = True
                 else:
-                    reference_kind = "best_selected_parent"
+                    reference_kind = "best_prompted_parent"
                     cand_ref_id = ref_parent_id
                     cand_ref_score = ref_parent_score
+                    prompted_ids = [
+                        str(p.get("program_id"))
+                        for p in mem_selected_parent_records
+                        if p.get("program_id") is not None
+                    ]
+                    ref_exact = True
                 cand_score = result.get("selection_score")
                 if cand_score is None and fitness_metric == "loglik":
                     # Prefer explicit selection_score; else use pool fitness when valid.
@@ -10181,11 +10306,15 @@ def run_evolution(
                         reference_parent_id=cand_ref_id,
                         reference_parent_score=_safe_float(cand_ref_score),
                         reference_kind=reference_kind,
+                        reference_type=reference_kind,
+                        reference_id=cand_ref_id,
+                        reference_is_exact=ref_exact,
                         delta_f=compute_delta_f(
                             _safe_float(cand_score), _safe_float(cand_ref_score)
                         ),
                         survived_elite_truncation=program_id in elite_ids_after,
                         evolution_selection_score=evolution_selection_score,
+                        prompted_parent_ids=prompted_ids,
                     ),
                 )
 

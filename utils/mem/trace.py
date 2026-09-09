@@ -360,8 +360,16 @@ def build_candidate_record(
     delta_f: Optional[float],
     survived_elite_truncation: bool,
     evolution_selection_score: str,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[str] = None,
+    reference_is_exact: Optional[bool] = None,
+    prompted_parent_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    return {
+    from utils.mem.reference_types import enrich_candidate_reference_fields
+
+    ref_type = str(reference_type or reference_kind)
+    ref_id = reference_id if reference_id is not None else reference_parent_id
+    base = {
         "record_type": "candidate",
         "dataset": dataset,
         "participant_id": participant_id,
@@ -378,12 +386,18 @@ def build_candidate_record(
         "train_loglik": train_loglik,
         "val_loglik": val_loglik,
         "selection_score": selection_score,
-        "reference_parent_id": reference_parent_id,
-        "reference_parent_score": reference_parent_score,
-        "reference_kind": reference_kind,
-        "delta_f": delta_f,
         "survived_elite_truncation": bool(survived_elite_truncation),
     }
+    if prompted_parent_ids is not None:
+        base["prompted_parent_ids"] = [str(x) for x in prompted_parent_ids]
+    return enrich_candidate_reference_fields(
+        base,
+        reference_type=ref_type,
+        reference_id=ref_id,
+        reference_score=reference_parent_score,
+        delta_f=delta_f,
+        reference_is_exact=reference_is_exact,
+    )
 
 
 def iter_jsonl_records(paths: Iterable[Path | str]) -> Iterable[Dict[str, Any]]:

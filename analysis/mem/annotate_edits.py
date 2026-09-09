@@ -98,34 +98,69 @@ def _load_grouped_candidates(
     return contexts, candidates
 
 
-def _default_filter(rec: Dict[str, Any]) -> bool:
-    if rec.get("phase") != "evolution":
-        return False
-    if rec.get("source") != "normal":
-        return False
+def _eligibility_reason(rec: Dict[str, Any], *, include_fresh: bool, include_explore: bool) -> Optional[str]:
+    """Return exclusion reason or None if eligible."""
+    phase = rec.get("phase")
+    source = rec.get("source")
+    if phase == "explore":
+        if not include_explore:
+            return "excl_phase_explore"
+    elif phase != "evolution":
+        return "excl_phase"
+    else:
+        if include_fresh:
+            if source not in ("normal", "fresh"):
+                return f"excl_source_{source}"
+        else:
+            if source != "normal":
+                return f"excl_source_{source}"
     if not rec.get("runtime_valid"):
-        return False
+        return "excl_not_runtime_valid"
     if rec.get("delta_f") is None:
-        return False
+        return "excl_delta_f_none"
     try:
         float(rec["delta_f"])
     except (TypeError, ValueError):
-        return False
-    return True
+        return "excl_delta_f_nonfinite"
+    return None
 
 
-def _fresh_filter(rec: Dict[str, Any]) -> bool:
-    if rec.get("phase") != "evolution":
-        return False
-    if not rec.get("runtime_valid"):
-        return False
-    if rec.get("delta_f") is None:
-        return False
-    try:
-        float(rec["delta_f"])
-    except (TypeError, ValueError):
-        return False
-    return True
+def _resolve_reference_for_candidate(
+    rec: Dict[str, Any],
+    ctx: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Pick reference parent dict + id from the candidate's own pairing."""
+    ref_id = rec.get("reference_id") or rec.get("reference_parent_id")
+    parents = (ctx or {}).get("selected_parents") or []
+    if ref_id is not None:
+        for p in parents:
+            if p.get("program_id") == ref_id:
+                return p, str(ref_id)
+    # Fall back to context best (legacy traces).
+    best_id = (ctx or {}).get("best_selected_parent_id")
+    for p in parents:
+        if p.get("program_id") == best_id:
+            return p, str(best_id) if best_id is not None else None
+    scored = [p for p in parents if p.get("selection_score") is not None]
+    if scored:
+        ref = max(scored, key=lambda p: float(p["selection_score"]))
+        return ref, str(ref.get("program_id"))
+    return None, str(ref_id) if ref_id is not None else None
+
+
+def _nmc_repair_hint(validation_error: str) -> str:
+    """Strengthen repair instructions for contradictory no_meaningful_change rows."""
+    base = validation_error
+    if "no_meaningful_change" not in validation_error:
+        return base
+    return (
+        f"{base}\n"
+        "CONTRADICTION FIX (required): If no_meaningful_change=true, you MUST return "
+        "empty lists for added_motifs, removed_motifs, modified_motifs, and "
+        "structural_operations. Alternatively set no_meaningful_change=false and keep "
+        "the non-empty motif/structural lists that justify a real functional change. "
+        "Do not leave both a true flag and non-empty lists."
+    )
 
 
 def _build_user_prompt(reference_code: str, batch: Sequence[Dict[str, Any]]) -> str:
@@ -188,9 +223,9 @@ EXAMPLES (illustrative; follow the schema exactly):
     )
 
 
-def _load_completed_v2_keys(out_jsonl: Path) -> Set[Tuple[Any, str]]:
+def _load_completed_v2_keys(out_jsonl: Path) -> Set[Tuple[Any, ...]]:
     """Only schema_version==2 rows count as completed. Never treat v1 as done."""
-    done: Set[Tuple[Any, str]] = set()
+    done: Set[Tuple[Any, ...]] = set()
     if not out_jsonl.is_file():
         return done
     with out_jsonl.open("r", encoding="utf-8") as f:
@@ -209,7 +244,19 @@ def _load_completed_v2_keys(out_jsonl: Path) -> Set[Tuple[Any, str]]:
                 continue
             if "participant_id" not in obj:
                 continue
-            done.add(annotation_resume_key(obj.get("participant_id"), cid))
+            ref_id = obj.get("reference_id") or obj.get("reference_parent_id")
+            ref_type = obj.get("reference_type") or obj.get("reference_kind") or ""
+            # Legacy v2 rows omitted reference_type; they were annotated vs pool-best.
+            if not ref_type and ref_id:
+                ref_type = "pool_best_proxy"
+            done.add(
+                annotation_resume_key(
+                    obj.get("participant_id"),
+                    cid,
+                    reference_id=ref_id,
+                    reference_type=ref_type,
+                )
+            )
     return done
 
 
@@ -308,6 +355,8 @@ def annotate_with_splits(
         err = "not attempted"
         for attempt in range(max_attempts):
             hint = last_err if attempt > 0 else ""
+            if hint:
+                hint = _nmc_repair_hint(hint)
             rows, raw, err = _annotate_batch(
                 client,
                 model_name=model_name,
@@ -406,6 +455,11 @@ def main() -> None:
         help="Also annotate fresh candidates (default: normal only).",
     )
     parser.add_argument(
+        "--include_explore",
+        action="store_true",
+        help="Also annotate explore-phase candidates (default: evolution only).",
+    )
+    parser.add_argument(
         "--no_guided_json",
         action="store_true",
         help="Disable vLLM guided_json (validation still enforced).",
@@ -459,7 +513,7 @@ def main() -> None:
         n_failed = sum(1 for _ in failures_path.open())
 
     planned: List[
-        Tuple[Tuple[Any, ...], List[Dict[str, Any]], str, List[List[Dict[str, Any]]]]
+        Tuple[Tuple[Any, ...], List[Dict[str, Any]], str, str, str, List[List[Dict[str, Any]]]]
     ] = []
     pending_total = 0
 
@@ -478,100 +532,71 @@ def main() -> None:
                 exclusion_counts["missing_iteration_context"] += 1
             continue
 
-        parents = ctx.get("selected_parents") or []
-        best_id = ctx.get("best_selected_parent_id")
-        ref = None
-        for p in parents:
-            if p.get("program_id") == best_id:
-                ref = p
-                break
-        if ref is None and parents:
-            scored = [p for p in parents if p.get("selection_score") is not None]
-            if scored:
-                ref = max(scored, key=lambda p: float(p["selection_score"]))
-        if ref is None:
-            for rec in cand_list:
+        # Group eligible candidates by their own generation reference.
+        by_ref: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for rec in cand_list:
+            cid = str(rec.get("candidate_id"))
+            reason = _eligibility_reason(
+                rec,
+                include_fresh=bool(args.include_fresh),
+                include_explore=bool(args.include_explore),
+            )
+            if reason is not None:
+                _append_jsonl(
+                    exclusions_path,
+                    {
+                        "reason": reason,
+                        "participant_id": pid,
+                        "candidate_id": cid,
+                        "iteration": iteration,
+                        "source": rec.get("source"),
+                        "phase": rec.get("phase"),
+                    },
+                )
+                exclusion_counts[reason] += 1
+                continue
+
+            ref, ref_id = _resolve_reference_for_candidate(rec, ctx)
+            ref_type = str(
+                rec.get("reference_type")
+                or rec.get("reference_kind")
+                or (ctx.get("reference_type") if ctx else None)
+                or ""
+            )
+            rkey = annotation_resume_key(
+                pid, cid, reference_id=ref_id, reference_type=ref_type
+            )
+            if rkey in completed:
+                continue
+
+            if ref is None:
                 _append_jsonl(
                     exclusions_path,
                     {
                         "reason": "missing_reference_parent",
                         "participant_id": pid,
-                        "candidate_id": rec.get("candidate_id"),
+                        "candidate_id": cid,
                         "iteration": iteration,
+                        "reference_id": ref_id,
                     },
                 )
                 exclusion_counts["missing_reference_parent"] += 1
-            continue
+                continue
 
-        reference_code = ref.get("code") or ""
-        if not str(reference_code).strip():
-            for rec in cand_list:
+            reference_code = ref.get("code") or ""
+            if not str(reference_code).strip():
                 _append_jsonl(
                     exclusions_path,
                     {
                         "reason": "empty_reference_code",
                         "participant_id": pid,
-                        "candidate_id": rec.get("candidate_id"),
+                        "candidate_id": cid,
                         "iteration": iteration,
+                        "reference_id": ref_id,
                     },
                 )
                 exclusion_counts["empty_reference_code"] += 1
-            continue
-
-        todo: List[Dict[str, Any]] = []
-        for rec in cand_list:
-            cid = str(rec.get("candidate_id"))
-            rkey = annotation_resume_key(pid, cid)
-            if rkey in completed:
                 continue
-
-            # Explicit source filter (never silent)
-            if args.include_fresh:
-                source_ok = _fresh_filter(rec)
-                if not source_ok:
-                    reason = "ineligible_fresh_filter"
-                    if rec.get("source") not in ("normal", "fresh"):
-                        reason = f"excl_source_{rec.get('source')}"
-                    elif not rec.get("runtime_valid"):
-                        reason = "excl_not_runtime_valid"
-                    elif rec.get("delta_f") is None:
-                        reason = "excl_delta_f_none"
-                    _append_jsonl(
-                        exclusions_path,
-                        {
-                            "reason": reason,
-                            "participant_id": pid,
-                            "candidate_id": cid,
-                            "iteration": iteration,
-                            "source": rec.get("source"),
-                        },
-                    )
-                    exclusion_counts[reason] += 1
-                    continue
-            else:
-                if not _default_filter(rec):
-                    if rec.get("phase") != "evolution":
-                        reason = "excl_phase"
-                    elif rec.get("source") != "normal":
-                        reason = f"excl_source_{rec.get('source')}"
-                    elif not rec.get("runtime_valid"):
-                        reason = "excl_not_runtime_valid"
-                    elif rec.get("delta_f") is None:
-                        reason = "excl_delta_f_none"
-                    else:
-                        reason = "excl_delta_f_nonfinite"
-                    _append_jsonl(
-                        exclusions_path,
-                        {
-                            "reason": reason,
-                            "participant_id": pid,
-                            "candidate_id": cid,
-                            "iteration": iteration,
-                            "source": rec.get("source"),
-                        },
-                    )
-                    exclusion_counts[reason] += 1
-                    continue
 
             code = rec.get("code") or ""
             if not str(code).strip():
@@ -588,38 +613,42 @@ def main() -> None:
                 continue
 
             n_eligible += 1
-            todo.append(rec)
+            bucket = by_ref.setdefault((str(ref_id), ref_type), [])
+            # Attach resolved reference code for batching.
+            enriched_rec = dict(rec)
+            enriched_rec["_resolved_reference_id"] = ref_id
+            enriched_rec["_resolved_reference_type"] = ref_type
+            enriched_rec["_resolved_reference_code"] = reference_code
+            bucket.append(enriched_rec)
 
-        if not todo:
-            continue
-
-        batches = split_annotation_batches(
-            todo,
-            reference_code=reference_code,
-            base_prompt_chars=base_prompt_chars,
-            max_input_tokens=int(args.max_input_tokens),
-            max_candidates_per_batch=int(args.max_candidates_per_batch),
-        )
-        pending_total += len(todo)
-        planned.append((key, todo, reference_code, batches))
+        for (ref_id, ref_type), todo in sorted(by_ref.items(), key=lambda kv: kv[0]):
+            reference_code = str(todo[0].get("_resolved_reference_code") or "")
+            batches = split_annotation_batches(
+                todo,
+                reference_code=reference_code,
+                base_prompt_chars=base_prompt_chars,
+                max_input_tokens=int(args.max_input_tokens),
+                max_candidates_per_batch=int(args.max_candidates_per_batch),
+            )
+            pending_total += len(todo)
+            planned.append((key, todo, reference_code, ref_id, ref_type, batches))
 
     print(
-        f"[annotate] Pending candidates={pending_total} across {len(planned)} iteration group(s).",
+        f"[annotate] Pending candidates={pending_total} across {len(planned)} "
+        f"reference group(s).",
         flush=True,
     )
 
     failures_before = n_failed
-    for key, todo, reference_code, batches in planned:
+    for key, todo, reference_code, ref_id, ref_type, batches in planned:
         run_id, dataset, pid, phase, iteration = key
-        ctx = contexts.get(key) or {}
-        best_id = ctx.get("best_selected_parent_id")
         print(
-            f"[annotate] Starting participant={pid} iteration={iteration}: "
-            f"{len(todo)} candidates in {len(batches)} batch(es)",
+            f"[annotate] Starting participant={pid} iteration={iteration} "
+            f"ref={ref_id}/{ref_type}: {len(todo)} candidates in {len(batches)} batch(es)",
             flush=True,
         )
         for bi, batch in enumerate(batches):
-            tag = f"r{run_id}_p{pid}_i{iteration}_b{bi}"
+            tag = f"r{run_id}_p{pid}_i{iteration}_ref{ref_id}_b{bi}"
             print(
                 f"[annotate] Batch {bi+1}/{len(batches)} ({tag}): "
                 f"waiting on LLM for {len(batch)} candidate(s)...",
@@ -651,7 +680,10 @@ def main() -> None:
                             "participant_id": pid,
                             "phase": phase,
                             "iteration": iteration,
-                            "reference_parent_id": best_id,
+                            "reference_parent_id": ref_id,
+                            "reference_id": ref_id,
+                            "reference_type": ref_type,
+                            "reference_kind": ref_type,
                         }
                     )
                     src = next(
@@ -665,8 +697,19 @@ def main() -> None:
                             enriched["selection_score"] = src.get("selection_score")
                         if src.get("source") is not None:
                             enriched["source"] = src.get("source")
+                        if src.get("reference_is_exact") is not None:
+                            enriched["reference_is_exact"] = src.get("reference_is_exact")
+                        if src.get("reference_is_proxy") is not None:
+                            enriched["reference_is_proxy"] = src.get("reference_is_proxy")
                     f.write(json.dumps(enriched, ensure_ascii=False) + "\n")
-                    completed.add(annotation_resume_key(pid, str(row["candidate_id"])))
+                    completed.add(
+                        annotation_resume_key(
+                            pid,
+                            str(row["candidate_id"]),
+                            reference_id=ref_id,
+                            reference_type=ref_type,
+                        )
+                    )
                     n_written += 1
                     n_success += 1
             print(
@@ -688,6 +731,7 @@ def main() -> None:
         "run_dir": str(run_dir),
         "output_dir": str(out_dir),
         "include_fresh": bool(args.include_fresh),
+        "include_explore": bool(args.include_explore),
         "guided_json": use_guided,
         "n_trace_files": len(trace_files),
         "n_iteration_groups": len(candidates),
@@ -698,6 +742,7 @@ def main() -> None:
         "n_completed_v2_total": n_completed_total,
         "n_failures_total": n_failed,
         "n_failures_new": n_failed_new,
+        "exclusion_counts": dict(exclusion_counts),
         "exclusions_by_reason": dict(sorted(exclusion_counts.items())),
         "n_exclusions": int(sum(exclusion_counts.values())),
         "coverage_completed_over_eligible_plus_prior": (

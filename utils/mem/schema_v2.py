@@ -69,9 +69,23 @@ BEHAVIORAL_MOTIF_DEFINITIONS = {
 DIRECTIONAL_SUFFIXES = ("added", "removed", "modified")
 
 
-def annotation_resume_key(participant_id: Any, candidate_id: str) -> Tuple[Any, str]:
-    """Stable resume identity for schema v2."""
-    return (participant_id, str(candidate_id))
+def annotation_resume_key(
+    participant_id: Any,
+    candidate_id: str,
+    reference_id: Optional[str] = None,
+    reference_type: Optional[str] = None,
+) -> Tuple[Any, ...]:
+    """Stable resume identity for schema v2.
+
+    Includes reference identity so a candidate annotated vs pool-best is NOT
+    reused when the pairing changes to baseline or a prompted parent.
+    """
+    return (
+        participant_id,
+        str(candidate_id),
+        str(reference_id) if reference_id is not None else "",
+        str(reference_type) if reference_type is not None else "",
+    )
 
 
 def is_schema_v2_row(rec: Dict[str, Any]) -> bool:
