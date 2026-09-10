@@ -18,6 +18,8 @@ def choose(problem, history):
         - problem_id: int (pairwise problem index 1..40)
         - option_A: {"alternative_id": int, "cues": {"cue1": 0|1, ..., "cue6": 0|1}}
         - option_B: {"alternative_id": int, "cues": {"cue1": 0|1, ..., "cue6": 0|1}}
+          Access cues ONLY via nesting, e.g. problem["option_A"]["cues"]["cue1"]
+          NEVER problem["option_A"]["cue1"] (KeyError).
         - option_keys: [0, 1]
         - has_feedback: False
         - action_means_option_A_when_1: True
@@ -31,6 +33,12 @@ def choose(problem, history):
 
     return: float, probability of choosing action 1, i.e. P(choose option_A)
     """
+
+Sandbox / allowed builtins (CRITICAL — programs crash otherwise):
+- ALLOWED: len, range, enumerate, reversed, zip, sum, abs, min, max,
+  float, int, str, list, dict, tuple, bool, isinstance, hasattr, getattr
+- math module is available if needed
+- FORBIDDEN (NameError if used): sorted, set, any, all, map, filter, next
 
 Requirements:
 - Pure Python, no imports, deterministic.

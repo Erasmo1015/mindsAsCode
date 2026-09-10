@@ -40,6 +40,13 @@ def choose(problem, history):
             Example uniform: {0: 0.125, 1: 0.125, ..., 7: 0.125}
     """
 
+Sandbox / allowed builtins (CRITICAL — programs crash otherwise):
+- ALLOWED: len, range, enumerate, reversed, zip, sum, abs, min, max,
+  float, int, str, list, dict, tuple, bool, isinstance, hasattr, getattr
+- math module is available if needed
+- FORBIDDEN (NameError if used): sorted, set, any, all, map, filter, next
+- Use loops / sum(...) instead of any/all/sorted/set.
+
 Requirements:
 - Pure Python, no imports, deterministic.
 - Use only the provided problem and history.

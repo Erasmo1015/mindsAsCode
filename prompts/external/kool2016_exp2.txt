@@ -17,71 +17,146 @@ def choose(problem, history):
     Evaluated by Bernoulli log-likelihood: log P(observed action).
     Goal: maximize log-likelihood of the observed human choices.
 
-    The same function is called for stage 1 and stage 2. Branch on problem["stage"].
+    The same function is called for stage 1 and stage 2.
+    ALWAYS branch first on problem["stage"].
 
-    problem: dict with keys (stage-dependent)
-        Common:
-          - dataset_alias: "14kool2016when"
-          - experiment_id: "kool2016when/exp2.csv"
-          - stage: 1 or 2
-          - presented_day: int (1..125)
-          - option_keys: [key0, key1]  # presentation order of the two options
-          - history_scope: "session_continuous"
-          - raw_key_coding: "letter_presentation_order"
-          - internal_action_coding: "0=first_presented_key,1=second_presented_key"
-          - spaceship_labels / planet_labels / planet_aliens: instruction-level labels
+    =====================================================================
+    STAGE CHEAT-SHEET (read carefully — wrong keys cause KeyError)
+    =====================================================================
 
-        Stage 1 ONLY (spaceship choice):
-          - spaceship_options: same as option_keys
-          - MUST NOT contain: current planet, current aliens, current treasure
+    Common keys on BOTH stages:
+        - dataset_alias: "14kool2016when"
+        - experiment_id: "kool2016when/exp2.csv"
+        - stage: 1 or 2
+        - presented_day: int
+        - option_keys: [key0, key1]   # presentation order THIS decision
+        - spaceship_labels: list[str] # instruction-level, participant-visible
+        - planet_labels: list[str]
+        - planet_aliens: dict planet -> [alien0, alien1]
+        - history_scope / raw_key_coding / internal_action_coding / schema_type
 
-        Stage 2 ONLY (alien choice; after transition):
-          - planet: observed current planet letter
-          - alien_options: same as option_keys
-          - stage1_action / stage1_option_keys / spaceship: just-made stage-1 choice
-          - MUST NOT contain: current treasure / reward
+    Stage 1 ONLY (spaceship choice) — example:
+        problem == {
+          "stage": 1,
+          "option_keys": ["R", "U"],          # same as spaceship_options
+          "spaceship_options": ["R", "U"],
+          "spaceship_labels": [...],
+          "planet_labels": [...],
+          "planet_aliens": {...},
+          ...
+        }
+        MUST NOT expect on stage 1:
+          problem["spaceship"], problem["planet"], problem["alien_options"],
+          problem["stage1_action"], problem["reward"], problem["treasure"]
+        To refer to the two spaceships now on screen, use ONLY:
+          problem["option_keys"] or problem["spaceship_options"]
 
-    history: list of prior completed stage records in chronological order
-        Stage-1 entry (after that choice resolved):
-          {"stage": 1, "action": 0|1, "option_keys": [...], "spaceship": str, "planet": str}
-        Stage-2 entry (after treasure observed):
-          {"stage": 2, "action": 0|1, "option_keys": [...], "alien": str,
-           "planet": str, "reward": 0|1, "feedback": 0|1}
-        History is empty at the start of the session.
-        On stage 2 of the current day, history already includes that day's stage-1
+    Stage 2 ONLY (alien choice, after transition) — example:
+        problem == {
+          "stage": 2,
+          "planet": "J",                      # observed current planet
+          "option_keys": ["W", "K"],          # same as alien_options
+          "alien_options": ["W", "K"],
+          "spaceship": "R",                   # spaceship chosen earlier today
+          "stage1_action": 0,                 # 0/1 for today's stage-1 choice
+          "stage1_option_keys": ["R", "U"],
+          "spaceship_labels": [...],
+          "planet_labels": [...],
+          "planet_aliens": {...},
+          ...
+        }
+        MUST NOT expect on stage 2:
+          problem["reward"], problem["treasure"], problem["feedback"]
+          (treasure is unknown until AFTER this choice)
+
+    Action coding (BOTH stages):
+        - action 0 = first key in problem["option_keys"]
+        - action 1 = second key in problem["option_keys"]
+        - return float in (0, 1) = P(action=1)
+          i.e. probability of choosing the SECOND presented option
+        - Letters are participant-specific; never hard-code "XYZT" or guess
+          letter sets. Use problem["planet_labels"], problem["spaceship_labels"],
+          problem["planet_aliens"], and/or letters actually seen in history.
+
+    history: prior completed stage records in chronological order (across days).
+        Stage-1 entry (added AFTER that choice resolved, includes transition):
+          {"stage": 1, "action": 0|1, "option_keys": [...],
+           "spaceship": str, "planet": str}
+        Stage-2 entry (added AFTER treasure observed):
+          {"stage": 2, "action": 0|1, "option_keys": [...],
+           "alien": str, "planet": str, "reward": 0|1, "feedback": 0|1}
+        History is [] at session start.
+        On stage 2 of the CURRENT day, history already includes today's stage-1
         entry (with planet) but NOT the current reward.
 
-    Action coding (INTERNAL, both stages):
-        - action 0 = first key in problem["option_keys"] (presentation order)
-        - action 1 = second key in problem["option_keys"]
-        - Raw Psych-101 keys are participant-specific letters
-
-    return: float in (0, 1) = P(action=1)
-            i.e. probability of choosing the second presented option
+    How to read history safely:
+        - Spaceship / planet of PAST stage-1 choices: entry["spaceship"], entry["planet"]
+          only when entry["stage"] == 1
+        - Alien / reward of PAST stage-2 choices: entry["alien"], entry["reward"]
+          only when entry["stage"] == 2
+        - Do NOT read problem["spaceship"] on stage 1
+        - Do NOT invent planet/alien letters; collect from history or use
+          problem["planet_labels"] / problem["planet_aliens"][planet]
     """
+
+Sandbox / allowed builtins (CRITICAL — programs crash otherwise):
+- ALLOWED: len, range, enumerate, reversed, zip, sum, abs, min, max,
+  float, int, str, list, dict, tuple, bool, isinstance, hasattr, getattr
+- math module is available if needed
+- FORBIDDEN (NameError if used): sorted, set, any, all, map, filter, next,
+  open, print
+- Do NOT write: set(...), sorted(...), any(...), all(...)
+- To collect unique planets seen in history without set():
+    planets = []
+    for entry in history:
+        if entry["stage"] == 1:
+            p = entry["planet"]
+            if p not in planets:
+                planets.append(p)
+- Prefer plain dict/list loops.
 
 Requirements:
 - Pure Python, no imports, deterministic.
 - Use only the provided problem and history.
 - Do not call external APIs.
 - Do not sample or use randomness.
-- Return a single finite float probability of action 1.
-- Clip probabilities away from exact 0/1 if needed for numerical safety.
-- Do not use `pow(...)`; use `**` for exponentiation.
+- Return a single finite float probability of action 1; clip to
+  [1e-6, 1 - 1e-6] (or similar safe range inside (0, 1)).
+- Never return a raw count ratio that can exceed 1 or be negative.
+- Avoid division by zero (use Laplace / +1 smoothing when counting).
+- Do not use `pow(...)`; use `**`.
 - Keep helpers inside `choose(...)`.
-- Ensure every variable used is defined on all branches.
+- Ensure every variable is defined on all branches.
+- Branch on problem["stage"] first; do not assume stage-2 keys exist on stage 1.
 
 What is NOT available / do NOT invent:
-- Current treasure before the stage-2 choice.
+- Current treasure / reward before the stage-2 choice.
 - Future days' outcomes.
-- Latent generating reward probabilities / drift parameters.
-- Common/rare transition labels as hidden experimenter annotations
-  (infer transitions only from observed spaceship→planet history).
+- Latent generative reward probabilities / drift parameters.
+- Hidden common/rare transition labels (infer transitions only from observed
+  spaceship→planet pairs in history).
+- Hard-coded planet/alien alphabets that are not in problem or history.
 - Cross-participant information.
 
-Behavioral notes:
-- Use continuous history of transitions and rewards across days.
-- Stage-1 and stage-2 share one policy program; condition on problem["stage"].
-- The returned P(action=1) for the observed action determines the log-likelihood.
+Behavioral notes (important signals — do not ignore rewards):
+- Stage 2 should use PAST stage-2 rewards on the current planet (and alien)
+  from history. Counting only how often an alien was chosen, while ignoring
+  entry["reward"], throws away the main learning signal.
+  Example pattern (illustrative, adapt freely):
+    planet = problem["planet"]
+    alien1 = problem["option_keys"][1]
+    suc1 = 0
+    n1 = 0
+    for entry in history:
+        if entry["stage"] == 2 and entry["planet"] == planet and entry["alien"] == alien1:
+            n1 += 1
+            suc1 += entry["reward"]
+    # then form P(action=1) from smoothed success rates for both aliens
+- Stage 1 should use past spaceship→planet transitions in history (stage==1
+  entries) plus which planets led to treasure later (pair with later stage-2
+  rewards), not only raw spaceship choice frequency.
+- Presentation order matters: always map action 0/1 through the CURRENT
+  problem["option_keys"], which can swap across days.
+- Stage-1 and stage-2 share one program; condition on problem["stage"].
 
 Provide only the code for `choose(...)` as a complete function.

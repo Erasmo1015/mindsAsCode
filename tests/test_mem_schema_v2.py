@@ -12,6 +12,7 @@ import pytest
 
 from analysis.mem.annotate_edits import (
     _load_completed_v2_keys,
+    _parse_participants,
     annotate_with_splits,
 )
 from analysis.mem.build_dataset import build_rows_v2
@@ -40,6 +41,13 @@ def _valid_row(cid: str, **overrides: Any) -> Dict[str, Any]:
     }
     row.update(overrides)
     return row
+
+
+def test_parse_participants_ranges():
+    assert _parse_participants(None) is None
+    assert _parse_participants("") is None
+    assert _parse_participants("0,2,5-7") == {"0", "2", "5", "6", "7"}
+    assert _parse_participants("10-8") == {"8", "9", "10"}
 
 
 def test_validate_v2_ok_multilabel():
