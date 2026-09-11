@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 import warnings
 from pathlib import Path
@@ -27,6 +26,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from analysis.mem.bh_fdr import bh_fdr  # noqa: E402
 from analysis.mem.predictor_support import motif_support_report  # noqa: E402
 from utils.mem.schema_v2 import (  # noqa: E402
     DIRECTIONAL_SUFFIXES,
@@ -44,27 +44,9 @@ def _require_statsmodels():
     return smf
 
 
+# Deprecated local name kept for any external imports; delegates to bh_fdr.
 def _bh_fdr(pvals: Sequence[Optional[float]]) -> List[Optional[float]]:
-    """Benjamini–Hochberg q-values; None stays None."""
-    indexed = [(i, p) for i, p in enumerate(pvals) if p is not None and math.isfinite(p)]
-    m = len(indexed)
-    out: List[Optional[float]] = [None] * len(pvals)
-    if m == 0:
-        return out
-    indexed.sort(key=lambda t: t[1])
-    prev = 1.0
-    ranks = {}
-    for rank, (i, p) in enumerate(indexed, start=1):
-        q = min(prev, p * m / rank)
-        prev = q
-        ranks[i] = q
-    # Enforce monotonicity from largest p upward
-    running = 1.0
-    for i, p in reversed(indexed):
-        running = min(running, ranks[i])
-        out[i] = running
-    return out
-
+    return bh_fdr(pvals)
 
 def _participant_slopes(
     result,
@@ -386,7 +368,7 @@ def main() -> None:
         (r.get("fixed_effect") or {}).get("pvalue") if r.get("status") != "skipped_unsupported" else None
         for r in results
     ]
-    qvals = _bh_fdr(raw_p)
+    qvals = bh_fdr(raw_p)
     for r, q in zip(results, qvals):
         if r.get("fixed_effect") is not None:
             r["fixed_effect"]["qvalue_bh"] = q
