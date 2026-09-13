@@ -7,11 +7,18 @@ from pathlib import Path
 from utils.teh.sparse_observations import (
     allocate_train_val_counts,
     apply_max_observed_trials,
+    audit_match_errors,
     distribute_explore_budget,
     initial_program_id_from_path,
+    load_reference_audits_by_participant,
+    load_sparse_audits,
     normalize_max_observed_trials,
+    replay_sparse_audit_from_original_counts,
+    require_all_reference_participants_seen,
+    require_audit_matches_reference,
     sparse_budget_for_dataset,
     should_persist_sparse_audit,
+    write_sparse_audits_csv,
 )
 
 
@@ -184,3 +191,117 @@ def test_initial_program_ids_are_distinct():
     assert a != b
     assert a.startswith("global_")
     assert b.startswith("global_")
+
+
+def test_csv_roundtrip_and_reference_match(tmp_path: Path):
+    train, val, test = _trials(60, "t"), _trials(20, "v"), _trials(20, "x")
+    _, _, _, audit = apply_max_observed_trials(
+        train,
+        val,
+        test,
+        max_observed_trials_per_participant=10,
+        dataset="1peterson2021using",
+        participant_id=0,
+        split_seed=0,
+    )
+    csv_path = tmp_path / "sparse_observations.csv"
+    write_sparse_audits_csv(csv_path, [audit])
+    loaded = load_sparse_audits(csv_path)
+    assert len(loaded) == 1
+    assert loaded[0].subset_fingerprint == audit.subset_fingerprint
+    assert loaded[0].selected_train_indices == audit.selected_train_indices
+    assert loaded[0].applied is True
+    by_pid = load_reference_audits_by_participant(tmp_path)
+    require_audit_matches_reference(audit, by_pid)
+    require_all_reference_participants_seen(by_pid, [0])
+
+
+def test_require_match_raises_on_fingerprint_mismatch():
+    train, val, test = _trials(60, "t"), _trials(20, "v"), _trials(20, "x")
+    _, _, _, audit = apply_max_observed_trials(
+        train,
+        val,
+        test,
+        max_observed_trials_per_participant=10,
+        dataset="1peterson2021using",
+        participant_id=0,
+        split_seed=0,
+    )
+    other = apply_max_observed_trials(
+        train,
+        val,
+        test,
+        max_observed_trials_per_participant=20,
+        dataset="1peterson2021using",
+        participant_id=0,
+        split_seed=0,
+    )[3]
+    errors = audit_match_errors(other, audit)
+    assert errors
+    assert any("subset_fingerprint" in e for e in errors)
+    try:
+        require_audit_matches_reference(other, {0: audit})
+    except ValueError as exc:
+        assert "mismatch" in str(exc).lower()
+    else:
+        raise AssertionError("expected mismatch error")
+    try:
+        require_all_reference_participants_seen({0: audit, 1: audit}, [0])
+    except ValueError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("expected missing-participant error")
+
+
+def test_replay_from_original_counts_matches_helper():
+    train, val, test = _trials(50, "t"), _trials(20, "v"), _trials(15, "x")
+    _, _, _, expected = apply_max_observed_trials(
+        train,
+        val,
+        test,
+        max_observed_trials_per_participant=10,
+        dataset="1peterson2021using",
+        participant_id=7,
+        split_seed=0,
+    )
+    replayed = replay_sparse_audit_from_original_counts(expected)
+    assert replayed.subset_fingerprint == expected.subset_fingerprint
+    assert replayed.selected_train_indices == expected.selected_train_indices
+    assert replayed.selected_val_indices == expected.selected_val_indices
+    assert replayed.retained_n_train + replayed.retained_n_val == 10
+    assert replayed.retained_n_test == expected.original_n_test
+
+
+_STAGE_D_TARGET = {
+    10: Path(
+        "generated_outputs/psych101_train/1peterson2021using/sparse_data/"
+        "stage_d/budget_10/target/job_245390/sparse_observations.csv"
+    ),
+    20: Path(
+        "generated_outputs/psych101_train/1peterson2021using/sparse_data/"
+        "stage_d/budget_20/target/job_245392/sparse_observations.csv"
+    ),
+    40: Path(
+        "generated_outputs/psych101_train/1peterson2021using/sparse_data/"
+        "stage_d/budget_40/target/job_245394/sparse_observations.csv"
+    ),
+}
+
+
+def test_stage_d_target_audits_replay_for_all_50_participants():
+    repo = Path(__file__).resolve().parent.parent
+    for budget, rel in _STAGE_D_TARGET.items():
+        path = repo / rel
+        if not path.is_file():
+            raise AssertionError(f"missing Stage D audit CSV: {path}")
+        by_pid = load_reference_audits_by_participant(path)
+        assert len(by_pid) == 50
+        assert set(by_pid) == set(range(50))
+        for pid, expected in by_pid.items():
+            assert expected.dataset == "1peterson2021using"
+            assert expected.split_seed == 0
+            assert expected.max_observed_trials_per_participant == budget
+            assert expected.retained_n_train + expected.retained_n_val == budget
+            assert expected.retained_n_test == expected.original_n_test
+            replayed = replay_sparse_audit_from_original_counts(expected)
+            require_audit_matches_reference(replayed, {pid: expected})

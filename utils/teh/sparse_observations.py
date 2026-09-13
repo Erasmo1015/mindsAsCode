@@ -57,18 +57,18 @@ class SparseObservationAudit:
             max_observed_trials_per_participant=(
                 None if budget in (None, "") else int(budget)
             ),
-            applied=bool(payload.get("applied", False)),
+            applied=_as_bool_flag(payload.get("applied", False)),
             original_n_train=int(payload.get("original_n_train", 0)),
             original_n_val=int(payload.get("original_n_val", 0)),
             original_n_test=int(payload.get("original_n_test", 0)),
             retained_n_train=int(payload.get("retained_n_train", 0)),
             retained_n_val=int(payload.get("retained_n_val", 0)),
             retained_n_test=int(payload.get("retained_n_test", 0)),
-            selected_train_indices=tuple(
-                int(i) for i in (payload.get("selected_train_indices") or ())
+            selected_train_indices=parse_selected_indices(
+                payload.get("selected_train_indices")
             ),
-            selected_val_indices=tuple(
-                int(i) for i in (payload.get("selected_val_indices") or ())
+            selected_val_indices=parse_selected_indices(
+                payload.get("selected_val_indices")
             ),
             subset_fingerprint=str(payload.get("subset_fingerprint") or ""),
         )
@@ -98,6 +98,38 @@ class SparseObservationAudit:
             ),
             "selected_val_indices": ",".join(str(i) for i in self.selected_val_indices),
         }
+
+
+def parse_selected_indices(value: Any) -> Tuple[int, ...]:
+    """Parse index lists from JSON (list) or CSV (comma-separated string)."""
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(int(i) for i in value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (int(value),)
+    text = str(value).strip()
+    if not text:
+        return ()
+    if text.startswith("["):
+        parsed = json.loads(text)
+        return tuple(int(i) for i in parsed)
+    return tuple(int(part) for part in text.split(",") if part.strip() != "")
+
+
+def _as_bool_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"", "0", "false", "no", "none"}:
+        return False
+    if text in {"1", "true", "yes"}:
+        return True
+    raise ValueError(f"Cannot parse boolean flag {value!r}")
 
 
 def normalize_max_observed_trials(value: Optional[int]) -> Optional[int]:
@@ -440,6 +472,148 @@ def rewrite_sparse_audit_csv_from_jsonl(
         SPARSE_AUDIT_CSV_FILENAME
     )
     return write_sparse_audits_csv(out, audits)
+
+
+_AUDIT_MATCH_FIELDS = (
+    "dataset",
+    "participant_id",
+    "split_seed",
+    "max_observed_trials_per_participant",
+    "original_n_train",
+    "original_n_val",
+    "original_n_test",
+    "retained_n_train",
+    "retained_n_val",
+    "retained_n_test",
+    "selected_train_indices",
+    "selected_val_indices",
+    "subset_fingerprint",
+)
+
+
+def load_sparse_audits(path: Path) -> List[SparseObservationAudit]:
+    """Load audits from a run directory, JSON/JSONL payload, or CSV."""
+    path = Path(path)
+    if path.is_dir():
+        json_path = path / SPARSE_AUDIT_FILENAME
+        csv_path = path / SPARSE_AUDIT_CSV_FILENAME
+        jsonl_path = path / SPARSE_AUDIT_JSONL_FILENAME
+        if json_path.is_file():
+            return load_sparse_audits(json_path)
+        if csv_path.is_file():
+            return load_sparse_audits(csv_path)
+        if jsonl_path.is_file():
+            return load_sparse_audits(jsonl_path)
+        raise FileNotFoundError(
+            f"No {SPARSE_AUDIT_FILENAME}, {SPARSE_AUDIT_CSV_FILENAME}, or "
+            f"{SPARSE_AUDIT_JSONL_FILENAME} under {path}"
+        )
+    if not path.is_file():
+        raise FileNotFoundError(f"Sparse audit path not found: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        import csv
+
+        with path.open(newline="", encoding="utf-8") as f:
+            return [SparseObservationAudit.from_dict(row) for row in csv.DictReader(f)]
+    if suffix == ".jsonl":
+        audits: List[SparseObservationAudit] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            audits.append(SparseObservationAudit.from_dict(json.loads(line)))
+        return audits
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and "participants" in payload:
+        return [SparseObservationAudit.from_dict(row) for row in payload["participants"]]
+    if isinstance(payload, list):
+        return [SparseObservationAudit.from_dict(row) for row in payload]
+    if isinstance(payload, dict):
+        return [SparseObservationAudit.from_dict(payload)]
+    raise ValueError(f"Unrecognized sparse audit payload in {path}")
+
+
+def load_reference_audits_by_participant(
+    path: Path,
+) -> Dict[int, SparseObservationAudit]:
+    audits = load_sparse_audits(path)
+    if not audits:
+        raise ValueError(f"No sparse audits in {path}")
+    by_pid: Dict[int, SparseObservationAudit] = {}
+    for audit in audits:
+        pid = int(audit.participant_id)
+        if pid in by_pid:
+            raise ValueError(f"Duplicate participant_id={pid} in {path}")
+        by_pid[pid] = audit
+    return by_pid
+
+
+def audit_match_errors(
+    got: SparseObservationAudit,
+    expected: SparseObservationAudit,
+) -> List[str]:
+    errors: List[str] = []
+    for field in _AUDIT_MATCH_FIELDS:
+        left = getattr(got, field)
+        right = getattr(expected, field)
+        if left != right:
+            errors.append(
+                f"participant {got.participant_id} {field}: got {left!r} != expected {right!r}"
+            )
+    return errors
+
+
+def require_audit_matches_reference(
+    audit: SparseObservationAudit,
+    reference_by_pid: Dict[int, SparseObservationAudit],
+) -> None:
+    expected = reference_by_pid.get(int(audit.participant_id))
+    if expected is None:
+        raise ValueError(
+            f"Sparse subset mismatch: participant {audit.participant_id} is not in the "
+            "Stage D reference audit."
+        )
+    errors = audit_match_errors(audit, expected)
+    if errors:
+        raise ValueError(
+            "Sparse subset mismatch vs Stage D reference:\n" + "\n".join(errors)
+        )
+
+
+def require_all_reference_participants_seen(
+    reference_by_pid: Dict[int, SparseObservationAudit],
+    seen_pids: Sequence[int],
+) -> None:
+    seen = {int(pid) for pid in seen_pids}
+    expected = set(reference_by_pid)
+    missing = sorted(expected - seen)
+    extra = sorted(seen - expected)
+    if missing or extra:
+        raise ValueError(
+            "Sparse subset mismatch vs Stage D reference participants: "
+            f"missing={missing} extra={extra}"
+        )
+
+
+def replay_sparse_audit_from_original_counts(
+    expected: SparseObservationAudit,
+) -> SparseObservationAudit:
+    """Re-apply the shared cap using only the original split sizes (no trial content)."""
+    train = [{"i": i} for i in range(expected.original_n_train)]
+    val = [{"i": i} for i in range(expected.original_n_val)]
+    test = [{"i": i} for i in range(expected.original_n_test)]
+    _, _, _, audit = apply_max_observed_trials(
+        train,
+        val,
+        test,
+        max_observed_trials_per_participant=expected.max_observed_trials_per_participant,
+        dataset=expected.dataset,
+        participant_id=expected.participant_id,
+        split_seed=expected.split_seed,
+    )
+    return audit
 
 
 def distribute_explore_budget(n_explore: int, n_parents: int) -> List[int]:

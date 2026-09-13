@@ -52,6 +52,9 @@ from utils.teh.sparse_observations import (
     SPARSE_AUDIT_FILENAME,
     SparseObservationAudit,
     apply_max_observed_trials,
+    load_reference_audits_by_participant,
+    require_all_reference_participants_seen,
+    require_audit_matches_reference,
     should_persist_sparse_audit,
     write_sparse_audit,
     write_sparse_audits_csv,
@@ -816,6 +819,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--require_sparse_audit_match",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Directory or sparse_observations.json/.csv from a prior run (e.g. Stage D "
+            "target PICS). Retained counts and subset fingerprints must match for every "
+            "participant; mismatch exits with error. Omit for no check (default)."
+        ),
+    )
+    parser.add_argument(
         "--fitness_metric",
         type=str,
         default="loglik",
@@ -849,6 +863,23 @@ def main() -> None:
     if args.max_observed_trials_per_participant is not None and args.max_observed_trials_per_participant < 0:
         print("Error: --max_observed_trials_per_participant must be >= 0 when set (0 disables).")
         sys.exit(1)
+    reference_by_pid = None
+    if args.require_sparse_audit_match:
+        if (
+            args.max_observed_trials_per_participant is None
+            or args.max_observed_trials_per_participant <= 0
+        ):
+            print(
+                "Error: --require_sparse_audit_match requires --max_observed_trials_per_participant > 0."
+            )
+            sys.exit(1)
+        try:
+            reference_by_pid = load_reference_audits_by_participant(
+                Path(args.require_sparse_audit_match)
+            )
+        except (OSError, ValueError) as e:
+            print(f"Error: {e}")
+            sys.exit(1)
     if (
         args.split_mode == "across_participants"
         and args.max_observed_trials_per_participant is not None
@@ -1014,6 +1045,12 @@ def main() -> None:
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
             return_audit=True,
         )
+        if reference_by_pid is not None:
+            try:
+                require_audit_matches_reference(audit, reference_by_pid)
+            except ValueError as e:
+                print(f"Error: {e}")
+                sys.exit(1)
         results = _fit_and_evaluate_participant(
             args.dataset,
             participant_id,
@@ -1043,6 +1080,15 @@ def main() -> None:
     if sparse_audits:
         write_sparse_audits_payload(Path(base_run_dir) / SPARSE_AUDIT_FILENAME, sparse_audits)
         write_sparse_audits_csv(Path(base_run_dir) / SPARSE_AUDIT_CSV_FILENAME, sparse_audits)
+
+    if reference_by_pid is not None:
+        try:
+            require_all_reference_participants_seen(
+                reference_by_pid, participants_to_process
+            )
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
     _write_experiment_loglik_csvs(base_run_dir, participant_details_loglik)
     _print_within_summary(args, participants_summary, participants_to_process, base_run_dir)
