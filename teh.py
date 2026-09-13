@@ -104,6 +104,10 @@ from utils.teh.sparse_observations import (
     write_sparse_audits_csv,
     write_sparse_audits_payload,
 )
+from utils.teh.explore_handoff import (
+    resolve_explore_from_handoff_parents,
+    select_explore_handoff_parents,
+)
 from utils.teh.mdl_selection import (
     apply_mdl_to_scored_elite,
     attach_mdl_fields,
@@ -8808,6 +8812,7 @@ def run_evolution(
     mem_trace: bool = False,
     max_observed_trials_per_participant: Optional[int] = None,
     explore_from_handoff_parents: bool = False,
+    explore_population_top_k: int = 0,
     mdl_lambda: float = 0.0,
 ):
     """
@@ -9427,6 +9432,22 @@ def run_evolution(
         and run_phase in ("all", "evolution")
     ):
         initial_pool_size_before_explore = len(elite_parents)
+        explore_parent_programs, pin_program_ids = select_explore_handoff_parents(
+            elite_parents,
+            enabled=explore_from_handoff_parents,
+            top_k=explore_population_top_k,
+        )
+        if explore_from_handoff_parents and not explore_parent_programs:
+            print(
+                "[WARN] explore_from_handoff_parents is set but the elite pool is empty; "
+                "explore uses --seed_path only."
+            )
+        elif explore_parent_programs:
+            print(
+                f"Explore from {len(explore_parent_programs)} handoff parent(s) "
+                f"(explore_population_top_k={int(explore_population_top_k)}; "
+                f"ids={[pid for _, pid in explore_parent_programs]})."
+            )
         _run_pre_evolution_explore_phase(
             explore_candidates=int(explore_candidates),
             client=client,
@@ -9462,16 +9483,8 @@ def run_evolution(
             initial_pool_from_global=global_pool_handoff,
             initial_pool_size_before_explore=initial_pool_size_before_explore,
             evolution_selection_score=evolution_selection_score,
-            explore_parent_programs=(
-                [(str(p[0]), str(p[3])) for p in elite_parents]
-                if explore_from_handoff_parents and elite_parents
-                else None
-            ),
-            pin_program_ids=(
-                [str(p[3]) for p in elite_parents]
-                if explore_from_handoff_parents and elite_parents
-                else None
-            ),
+            explore_parent_programs=explore_parent_programs,
+            pin_program_ids=pin_program_ids,
             mem_trace_file=mem_trace_file,
             mem_run_id=mem_run_id,
             baseline_selection_score=_safe_float(
@@ -12111,8 +12124,32 @@ def main():
         help=(
             "Before per-participant evolution, generate this many candidates, evaluate them, "
             "and merge valid programs into the initial elite pool (default: 0 = disabled). "
-            "With --initial_pool_programs, the budget is split across those programs; "
-            "otherwise candidates are generated from --seed_path only."
+            "With --initial_pool_programs, or with --global_phase plus "
+            "--explore_from_population_parents, the budget is split across those handoff "
+            "programs; otherwise candidates are generated from --seed_path only."
+        ),
+    )
+    parser.add_argument(
+        "--explore_from_population_parents",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "After --global_phase, generate --explore_candidates from the population "
+            "handoff programs (same parent path as --initial_pool_programs) instead of "
+            "the vanilla seed. Default: False (EMNLP: live global explore stays seed-only). "
+            "No effect on --initial_pool_programs, which already explores from those files. "
+            "Requires --global_phase (or an initial pool) and --explore_candidates > 0."
+        ),
+    )
+    parser.add_argument(
+        "--explore_population_top_k",
+        type=int,
+        default=0,
+        metavar="K",
+        help=(
+            "When exploring from handoff/population parents, use only the first K programs "
+            "in global/handoff order (0 = all; 1 = sole rank-1 population program, Stage B). "
+            "Default: 0."
         ),
     )
     parser.add_argument(
@@ -12607,6 +12644,21 @@ def main():
     if args.explore_candidates < 0:
         print("Error: --explore_candidates must be >= 0.")
         return
+    if args.explore_population_top_k < 0:
+        print("Error: --explore_population_top_k must be >= 0 (0 = all handoff parents).")
+        return
+    if args.explore_from_population_parents:
+        if not (args.global_phase or bool(args.initial_pool_programs or args.initial_pool_dir)):
+            print(
+                "Error: --explore_from_population_parents requires --global_phase "
+                "or --initial_pool_programs/--initial_pool_dir."
+            )
+            return
+        if int(args.explore_candidates) <= 0:
+            print(
+                "Error: --explore_from_population_parents requires --explore_candidates > 0."
+            )
+            return
     if args.early_stop_iters is not None and int(args.early_stop_iters) < -1:
         print("Error: --early_stop_iters must be -1 (disabled) or >= 0.")
         return
@@ -12903,8 +12955,8 @@ def main():
     evolution_run_phase = "evolution" if args.phase == "evolution" else "all"
 
     global_elite_for_handoff: Optional[List[Tuple[Any, ...]]] = None
-    explore_from_handoff_parents = False
-    if args.initial_pool_programs or args.initial_pool_dir:
+    has_initial_pool = bool(args.initial_pool_programs or args.initial_pool_dir)
+    if has_initial_pool:
         try:
             global_elite_for_handoff = _load_initial_pool_from_cli(
                 program_paths=args.initial_pool_programs,
@@ -12915,7 +12967,6 @@ def main():
             if wandb is not None:
                 wandb.finish()
             return
-        explore_from_handoff_parents = True
         print(
             f"Loaded {len(global_elite_for_handoff)} initial-pool program(s) for "
             f"participant handoff: {[p[3] for p in global_elite_for_handoff]}"
@@ -12970,6 +13021,29 @@ def main():
             error_feedback_mode=args.error_feedback_mode,
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
             mdl_lambda=args.mdl_lambda,
+        )
+
+    explore_from_handoff_parents = resolve_explore_from_handoff_parents(
+        has_initial_pool=has_initial_pool,
+        explore_from_population_parents=bool(args.explore_from_population_parents),
+    )
+    if (
+        explore_from_handoff_parents
+        and bool(args.explore_from_population_parents)
+        and args.global_phase
+        and not has_initial_pool
+    ):
+        top_k = int(args.explore_population_top_k)
+        parent_desc = (
+            "all population handoff programs"
+            if top_k <= 0
+            else f"the top-{top_k} population program(s) in global order"
+        )
+        n_handoff = 0 if global_elite_for_handoff is None else len(global_elite_for_handoff)
+        print(
+            f"[INFO] --explore_from_population_parents: "
+            f"{int(args.explore_candidates)} explore candidates from {parent_desc} "
+            f"(handoff pool size={n_handoff})."
         )
 
     if args.phase == "refine":
@@ -13145,6 +13219,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
             )
         finally:
@@ -13238,6 +13313,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
@@ -13636,6 +13712,7 @@ def main():
                         mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
                     )
                 
@@ -13920,6 +13997,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 explore_from_handoff_parents=explore_from_handoff_parents,
+                explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
             )
 

@@ -292,6 +292,8 @@ def test_cli_help_exposes_new_flags_and_old_help_still_works():
     assert "--max_observed_trials_per_participant" in teh_help
     assert "--initial_pool_programs" in teh_help
     assert "--initial_pool_dir" in teh_help
+    assert "--explore_from_population_parents" in teh_help
+    assert "--explore_population_top_k" in teh_help
     transfer_help = subprocess.run(
         [sys.executable, str(REPO / "teh_transfer.py"), "--help"],
         cwd=str(REPO),
