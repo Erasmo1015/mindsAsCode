@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Build a schema-v2 MEM analysis CSV from mem_trace.jsonl + annotations_v2.jsonl.
+"""Build MEM analysis CSV from mem_trace.jsonl + annotations_v{2,3}.jsonl.
 
-Directional behavioral columns (binary, never averaged):
+Schema v2: directional behavioral columns only (binary, never averaged).
   {motif}_added / {motif}_removed / {motif}_modified
-
-Structural columns:
   structural_{operation}
+  No eligibility / state columns (absent, not zero-filled).
+
+Schema v3 (default): same directional columns plus:
+  reference_has_*, candidate_has_*, eligible_*_*, retained_unmodified_*
+  State lists stored as JSON strings.
 
 Writes:
   --output_csv
@@ -31,7 +34,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from utils.mem.schema_v2 import (  # noqa: E402
     BEHAVIORAL_MOTIFS_V2,
-    SCHEMA_VERSION,
+    SCHEMA_VERSION as SCHEMA_VERSION_V2,
     STRUCTURAL_OPERATIONS_V2,
     all_directional_behavioral_columns,
     all_structural_columns,
@@ -39,7 +42,18 @@ from utils.mem.schema_v2 import (  # noqa: E402
     directional_flags_from_annotation,
     is_schema_v2_row,
 )
+from utils.mem.schema_v3 import (  # noqa: E402
+    SCHEMA_VERSION as SCHEMA_VERSION_V3,
+    all_eligibility_columns,
+    all_state_columns,
+    assert_transition_identities,
+    is_schema_v3_row,
+    state_and_eligibility_flags,
+)
 from utils.mem.trace import iter_jsonl_records, record_contains_test_metrics  # noqa: E402
+
+# Backward-compat alias for older imports/tests.
+SCHEMA_VERSION = SCHEMA_VERSION_V2
 
 
 def _is_finite(x: Any) -> bool:
@@ -49,21 +63,30 @@ def _is_finite(x: Any) -> bool:
         return False
 
 
-def _load_annotations_v2(path: Path) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+def _load_annotations(
+    path: Path,
+    *,
+    schema_version: int,
+) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
     """Index by annotation_resume_key (participant, candidate, ref_id, ref_type)."""
     by_key: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     if not path.is_file():
         raise FileNotFoundError(f"annotations file not found: {path}")
-    n_skipped_v1 = 0
+    n_skipped = 0
     for rec in iter_jsonl_records([path]):
         if record_contains_test_metrics(rec):
             raise ValueError(
                 "Test metric keys must not appear in annotations "
                 f"(candidate_id={rec.get('candidate_id')!r})"
             )
-        if not is_schema_v2_row(rec):
-            n_skipped_v1 += 1
-            continue
+        if schema_version >= 3:
+            if not is_schema_v3_row(rec):
+                n_skipped += 1
+                continue
+        else:
+            if not is_schema_v2_row(rec):
+                n_skipped += 1
+                continue
         cid = rec.get("candidate_id")
         if not isinstance(cid, str):
             continue
@@ -81,13 +104,16 @@ def _load_annotations_v2(path: Path) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
             reference_type=ref_type,
         )
         by_key[key] = rec
-    if n_skipped_v1:
+    if n_skipped:
         print(
-            f"[build] Skipped {n_skipped_v1} non-v2 annotation row(s) "
-            "(v1 never treated as completed v2).",
+            f"[build] Skipped {n_skipped} non-v{schema_version} annotation row(s).",
             flush=True,
         )
     return by_key
+
+
+def _load_annotations_v2(path: Path) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+    return _load_annotations(path, schema_version=2)
 
 
 def _discover_trace_files(run_dir: Path) -> List[Path]:
@@ -119,6 +145,64 @@ def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _base_row_from_trace(
+    rec: Dict[str, Any],
+    *,
+    pid: Any,
+    cid: str,
+    ref_id: Any,
+    ref_type: Any,
+    ann: Optional[Dict[str, Any]],
+    schema_version: int,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": schema_version,
+        "run_id": rec.get("run_id"),
+        "dataset": rec.get("dataset"),
+        "participant_id": pid,
+        "phase": rec.get("phase"),
+        "iteration": rec.get("iteration"),
+        "candidate_id": cid,
+        "candidate_idx": rec.get("candidate_idx"),
+        "source": rec.get("source"),
+        "runtime_valid": rec.get("runtime_valid"),
+        "train_loglik": rec.get("train_loglik"),
+        "val_loglik": rec.get("val_loglik"),
+        "selection_score": rec.get("selection_score"),
+        "reference_parent_id": rec.get("reference_parent_id"),
+        "reference_id": ref_id,
+        "reference_parent_score": rec.get("reference_parent_score"),
+        "reference_score": rec.get("reference_score") or rec.get("reference_parent_score"),
+        "reference_kind": rec.get("reference_kind"),
+        "reference_type": ref_type,
+        "reference_is_exact": rec.get("reference_is_exact"),
+        "reference_is_proxy": rec.get("reference_is_proxy"),
+        "delta_f": rec.get("delta_f"),
+        "delta_f_vs_baseline": rec.get("delta_f_vs_baseline"),
+        "delta_f_vs_population_program": rec.get("delta_f_vs_population_program"),
+        "delta_f_vs_best_prompted_parent": rec.get("delta_f_vs_best_prompted_parent"),
+        "delta_f_vs_pool_best": rec.get("delta_f_vs_pool_best"),
+        "survived_elite_truncation": rec.get("survived_elite_truncation"),
+        "evolution_selection_score": rec.get("evolution_selection_score"),
+        "no_meaningful_change": int(bool(ann.get("no_meaningful_change"))) if ann else None,
+        "confidence": ann.get("confidence") if ann else None,
+        "added_motifs": json.dumps(ann.get("added_motifs", []), ensure_ascii=False)
+        if ann
+        else None,
+        "removed_motifs": json.dumps(ann.get("removed_motifs", []), ensure_ascii=False)
+        if ann
+        else None,
+        "modified_motifs": json.dumps(ann.get("modified_motifs", []), ensure_ascii=False)
+        if ann
+        else None,
+        "structural_operations": json.dumps(
+            ann.get("structural_operations", []), ensure_ascii=False
+        )
+        if ann
+        else None,
+    }
+
+
 def build_rows_v2(
     *,
     run_dir: Path,
@@ -130,7 +214,10 @@ def build_rows_v2(
     require_annotation: bool = True,
     exclusions_path: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], Counter]:
-    """Build analysis rows; record every exclusion reason (no silent drops)."""
+    """Build analysis rows; record every exclusion reason (no silent drops).
+
+    Legacy path: no eligibility/state columns (absent, not zero-filled).
+    """
     rows: List[Dict[str, Any]] = []
     seen: Set[Tuple[Any, ...]] = set()
     excl: Counter = Counter()
@@ -184,54 +271,121 @@ def build_rows_v2(
         flags = directional_flags_from_annotation(ann) if ann else {
             c: 0 for c in dir_cols + struct_cols
         }
-        row: Dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "run_id": rec.get("run_id"),
-            "dataset": rec.get("dataset"),
-            "participant_id": pid,
-            "phase": rec.get("phase"),
-            "iteration": rec.get("iteration"),
-            "candidate_id": cid,
-            "candidate_idx": rec.get("candidate_idx"),
-            "source": rec.get("source"),
-            "runtime_valid": rec.get("runtime_valid"),
-            "train_loglik": rec.get("train_loglik"),
-            "val_loglik": rec.get("val_loglik"),
-            "selection_score": rec.get("selection_score"),
-            "reference_parent_id": rec.get("reference_parent_id"),
-            "reference_id": ref_id,
-            "reference_parent_score": rec.get("reference_parent_score"),
-            "reference_score": rec.get("reference_score") or rec.get("reference_parent_score"),
-            "reference_kind": rec.get("reference_kind"),
-            "reference_type": ref_type,
-            "reference_is_exact": rec.get("reference_is_exact"),
-            "reference_is_proxy": rec.get("reference_is_proxy"),
-            "delta_f": rec.get("delta_f"),
-            "delta_f_vs_baseline": rec.get("delta_f_vs_baseline"),
-            "delta_f_vs_population_program": rec.get("delta_f_vs_population_program"),
-            "delta_f_vs_best_prompted_parent": rec.get("delta_f_vs_best_prompted_parent"),
-            "delta_f_vs_pool_best": rec.get("delta_f_vs_pool_best"),
-            "survived_elite_truncation": rec.get("survived_elite_truncation"),
-            "evolution_selection_score": rec.get("evolution_selection_score"),
-            "no_meaningful_change": int(bool(ann.get("no_meaningful_change"))) if ann else None,
-            "confidence": ann.get("confidence") if ann else None,
-            "added_motifs": json.dumps(ann.get("added_motifs", []), ensure_ascii=False)
-            if ann
-            else None,
-            "removed_motifs": json.dumps(ann.get("removed_motifs", []), ensure_ascii=False)
-            if ann
-            else None,
-            "modified_motifs": json.dumps(ann.get("modified_motifs", []), ensure_ascii=False)
-            if ann
-            else None,
-            "structural_operations": json.dumps(
-                ann.get("structural_operations", []), ensure_ascii=False
-            )
-            if ann
-            else None,
-        }
+        row = _base_row_from_trace(
+            rec,
+            pid=pid,
+            cid=cid,
+            ref_id=ref_id,
+            ref_type=ref_type,
+            ann=ann,
+            schema_version=SCHEMA_VERSION_V2,
+        )
         for c in dir_cols + struct_cols:
             row[c] = int(flags.get(c, 0))
+        rows.append(row)
+    return rows, excl
+
+
+def build_rows_v3(
+    *,
+    run_dir: Path,
+    annotations: Dict[Tuple[Any, ...], Dict[str, Any]],
+    phase: str = "evolution",
+    source: str = "normal",
+    require_runtime_valid: bool = True,
+    require_finite_delta_f: bool = True,
+    require_annotation: bool = True,
+    exclusions_path: Optional[Path] = None,
+) -> Tuple[List[Dict[str, Any]], Counter]:
+    """Build schema-v3 rows with state + eligibility columns.
+
+    Missing annotation state is never coerced to empty sets for eligibility.
+    Rows without a v3 annotation are excluded when require_annotation=True.
+    """
+    rows: List[Dict[str, Any]] = []
+    seen: Set[Tuple[Any, ...]] = set()
+    excl: Counter = Counter()
+    dir_cols = all_directional_behavioral_columns()
+    struct_cols = all_structural_columns()
+    state_cols = all_state_columns()
+    elig_cols = all_eligibility_columns()
+
+    for rec in _iter_candidate_traces(run_dir):
+        pid = rec.get("participant_id")
+        cid = str(rec.get("candidate_id"))
+        ref_id = rec.get("reference_id") or rec.get("reference_parent_id")
+        ref_type = rec.get("reference_type") or rec.get("reference_kind") or ""
+        key = annotation_resume_key(
+            pid, cid, reference_id=ref_id, reference_type=ref_type
+        )
+        base_excl = {
+            "participant_id": pid,
+            "candidate_id": cid,
+            "iteration": rec.get("iteration"),
+            "source": rec.get("source"),
+            "phase": rec.get("phase"),
+            "reference_id": ref_id,
+            "reference_type": ref_type,
+        }
+
+        def _exclude(reason: str) -> None:
+            excl[reason] += 1
+            if exclusions_path is not None:
+                _append_jsonl(exclusions_path, {**base_excl, "reason": reason})
+
+        if phase and rec.get("phase") != phase:
+            _exclude("excl_phase")
+            continue
+        if source and rec.get("source") != source:
+            _exclude(f"excl_source_{rec.get('source')}")
+            continue
+        if require_runtime_valid and not rec.get("runtime_valid"):
+            _exclude("excl_not_runtime_valid")
+            continue
+        if require_finite_delta_f and not _is_finite(rec.get("delta_f")):
+            _exclude("excl_delta_f_nonfinite_or_none")
+            continue
+        ann = annotations.get(key)
+        if require_annotation and ann is None:
+            _exclude("excl_missing_annotation_v3")
+            continue
+        if key in seen:
+            _exclude("excl_duplicate_participant_candidate_reference")
+            continue
+        seen.add(key)
+
+        row = _base_row_from_trace(
+            rec,
+            pid=pid,
+            cid=cid,
+            ref_id=ref_id,
+            ref_type=ref_type,
+            ann=ann,
+            schema_version=SCHEMA_VERSION_V3,
+        )
+        if ann is not None:
+            if "reference_motif_state" not in ann or "candidate_motif_state" not in ann:
+                raise ValueError(
+                    f"schema_v3 annotation missing state fields for {cid!r}; "
+                    "do not coerce missing state to empty sets"
+                )
+            assert_transition_identities(ann)
+            flags = state_and_eligibility_flags(ann)
+            row["prompt_version"] = ann.get("prompt_version")
+            row["reference_motif_state"] = json.dumps(
+                ann.get("reference_motif_state", []), ensure_ascii=False
+            )
+            row["candidate_motif_state"] = json.dumps(
+                ann.get("candidate_motif_state", []), ensure_ascii=False
+            )
+            for c in state_cols + dir_cols + elig_cols + struct_cols:
+                row[c] = int(flags.get(c, 0))
+        else:
+            row["prompt_version"] = None
+            row["reference_motif_state"] = None
+            row["candidate_motif_state"] = None
+            for c in state_cols + dir_cols + elig_cols + struct_cols:
+                row[c] = None
         rows.append(row)
     return rows, excl
 
@@ -282,7 +436,7 @@ def build_rows(
         # Infer participant from annotation if present; else allow None key match via scan
         pid = ann.get("participant_id", 0)
         a = dict(ann)
-        a.setdefault("schema_version", SCHEMA_VERSION)
+        a.setdefault("schema_version", SCHEMA_VERSION_V2)
         keyed[annotation_resume_key(pid, cid)] = a
     rows, _excl = build_rows_v2(
         run_dir=run_dir,
@@ -297,45 +451,10 @@ def build_rows(
     return rows
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run_dir", type=str, required=True)
-    parser.add_argument(
-        "--annotations",
-        type=str,
-        required=True,
-        help="annotations_v2.jsonl path (schema_version=2 only)",
-    )
-    parser.add_argument("--output_csv", type=str, required=True)
-    parser.add_argument("--phase", type=str, default="evolution")
-    parser.add_argument(
-        "--source",
-        type=str,
-        default="normal",
-        help="Candidate source filter (default: normal). Use empty string for all.",
-    )
-    args = parser.parse_args()
-
-    out = Path(args.output_csv)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    excl_path = out.with_name(out.stem + "_exclusions.jsonl")
-    summary_path = out.with_name(out.stem + "_build_summary.json")
-    if excl_path.exists():
-        excl_path.unlink()
-
-    annotations = _load_annotations_v2(Path(args.annotations))
-    source = args.source if args.source != "" else ""
-    rows, excl = build_rows_v2(
-        run_dir=Path(args.run_dir),
-        annotations=annotations,
-        phase=args.phase,
-        source=source,
-        exclusions_path=excl_path,
-    )
-
+def _fieldnames_for_schema(schema_version: int) -> List[str]:
     dir_cols = all_directional_behavioral_columns()
     struct_cols = all_structural_columns()
-    fieldnames = [
+    base = [
         "schema_version",
         "run_id",
         "dataset",
@@ -370,23 +489,96 @@ def main() -> None:
         "removed_motifs",
         "modified_motifs",
         "structural_operations",
-        *dir_cols,
-        *struct_cols,
     ]
+    if schema_version >= 3:
+        return [
+            *base[:1],
+            "prompt_version",
+            *base[1:],
+            "reference_motif_state",
+            "candidate_motif_state",
+            *all_state_columns(),
+            *dir_cols,
+            *all_eligibility_columns(),
+            *struct_cols,
+        ]
+    return [*base, *dir_cols, *struct_cols]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run_dir", type=str, required=True)
+    parser.add_argument(
+        "--annotations",
+        type=str,
+        required=True,
+        help="annotations_v2.jsonl or annotations_v3.jsonl path",
+    )
+    parser.add_argument("--output_csv", type=str, required=True)
+    parser.add_argument(
+        "--schema_version",
+        type=int,
+        default=3,
+        choices=[2, 3],
+        help="Expected annotation schema (default 3). v2 CSVs omit eligibility columns.",
+    )
+    parser.add_argument("--phase", type=str, default="evolution")
+    parser.add_argument(
+        "--source",
+        type=str,
+        default="normal",
+        help="Candidate source filter (default: normal). Use empty string for all.",
+    )
+    args = parser.parse_args()
+
+    schema_version = int(args.schema_version)
+    out = Path(args.output_csv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    excl_path = out.with_name(out.stem + "_exclusions.jsonl")
+    summary_path = out.with_name(out.stem + "_build_summary.json")
+    if excl_path.exists():
+        excl_path.unlink()
+
+    annotations = _load_annotations(Path(args.annotations), schema_version=schema_version)
+    source = args.source if args.source != "" else ""
+    if schema_version >= 3:
+        rows, excl = build_rows_v3(
+            run_dir=Path(args.run_dir),
+            annotations=annotations,
+            phase=args.phase,
+            source=source,
+            exclusions_path=excl_path,
+        )
+    else:
+        rows, excl = build_rows_v2(
+            run_dir=Path(args.run_dir),
+            annotations=annotations,
+            phase=args.phase,
+            source=source,
+            exclusions_path=excl_path,
+        )
+
+    fieldnames = _fieldnames_for_schema(schema_version)
     with out.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
     summary = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "n_rows": len(rows),
-        "n_annotations_v2_indexed": len(annotations),
+        f"n_annotations_v{schema_version}_indexed": len(annotations),
         "exclusions_by_reason": dict(sorted(excl.items())),
         "n_exclusions": int(sum(excl.values())),
         "descriptive_counts": _descriptive_counts(rows),
         "output_csv": str(out),
         "exclusions_path": str(excl_path),
+        "has_eligibility_columns": schema_version >= 3,
+        "note_legacy_x0": (
+            None
+            if schema_version >= 3
+            else "Legacy v2 X=0 is not eligibility; eligibility columns are absent."
+        ),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Wrote {len(rows)} rows to {out}")

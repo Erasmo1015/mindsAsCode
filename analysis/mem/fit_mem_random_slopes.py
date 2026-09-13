@@ -9,6 +9,12 @@ Fits added / removed / modified separately (never averages opposite directions).
 CPU-only statsmodels MixedLM. Reports fixed effects, random-slope variance,
 participant-specific slopes, convergence / singularity diagnostics, and BH-FDR
 across planned motif tests.
+
+Eligibility (schema_v3 CSV only):
+  --eligibility_mode off      (default) use all rows; legacy v2 CSVs OK
+  --eligibility_mode restrict require eligible_<focal> column; subset to
+                      eligible==1. Refuses legacy / missing-state CSVs.
+  Focal restrict ≠ joint FE-adjust (see fit_mem_joint_random_slopes.py).
 """
 
 from __future__ import annotations
@@ -297,6 +303,13 @@ def main() -> None:
         default="evolution",
         help="Phase filter when not --combine_phases (default: evolution).",
     )
+    parser.add_argument(
+        "--eligibility_mode",
+        choices=["off", "restrict"],
+        default="off",
+        help="off: all rows. restrict: subset each focal to eligible_<focal>==1 "
+        "(requires schema_v3 eligibility columns; refuses legacy).",
+    )
     args = parser.parse_args()
 
     df = pd.read_csv(args.input_csv)
@@ -305,6 +318,17 @@ def main() -> None:
 
     if not args.combine_phases and args.phase and "phase" in df.columns:
         df = df[df["phase"] == args.phase].copy()
+
+    eligibility_mode = str(args.eligibility_mode)
+    if eligibility_mode == "restrict":
+        # Pre-check that at least one eligible_* column exists; per-focal checked below.
+        elig_any = [c for c in df.columns if str(c).startswith("eligible_")]
+        if not elig_any:
+            raise SystemExit(
+                "eligibility_mode=restrict requires schema_v3 eligibility columns "
+                "(eligible_<motif>_<direction>). Legacy v2 CSVs lack state/eligibility; "
+                "do not treat directional X=0 as ineligible. Refusing."
+            )
 
     support = motif_support_report(
         df,
@@ -336,6 +360,21 @@ def main() -> None:
                 }
             )
             continue
+        df_focal = df
+        if eligibility_mode == "restrict":
+            elig_col = f"eligible_{focal}"
+            if elig_col not in df.columns:
+                raise SystemExit(
+                    f"eligibility_mode=restrict requires column {elig_col!r} "
+                    f"for focal {focal!r}. Missing/null eligibility is not treated "
+                    "as zero; refusing legacy or incomplete state-aware CSV."
+                )
+            if df[elig_col].isna().any():
+                raise SystemExit(
+                    f"eligibility_mode=restrict: {elig_col} has null values; "
+                    "refusing (missing state ≠ ineligible)."
+                )
+            df_focal = df[df[elig_col].astype(int) == 1].copy()
         # Controls: other supported motifs; never opposite-direction averaging.
         controls = [c for c in supported if c != focal]
         # Prefer not to explode FE dim: keep same-direction and common others.
@@ -348,14 +387,22 @@ def main() -> None:
             ),
             reverse=True,
         )[:8]
-        print(f"[fit_rs] Fitting focal={focal} controls={controls_sorted}", flush=True)
+        print(
+            f"[fit_rs] Fitting focal={focal} controls={controls_sorted} "
+            f"n_rows={len(df_focal)} eligibility_mode={eligibility_mode}",
+            flush=True,
+        )
         res = fit_focal_motif(
-            df,
+            df_focal,
             focal=focal,
             controls=controls_sorted,
             include_phase_effects=bool(args.combine_phases),
             structural_controls=structural,
         )
+        if eligibility_mode == "restrict":
+            res["eligibility_mode"] = "restrict"
+            res["n_rows_eligible"] = int(len(df_focal))
+            res["n_rows_full"] = int(len(df))
         results.append(res)
         # Per-focal participant slopes CSV
         if res.get("participant_slopes"):
@@ -376,6 +423,7 @@ def main() -> None:
 
     summary = {
         "n_models": len(results),
+        "eligibility_mode": eligibility_mode,
         "phase_filter": None if args.combine_phases else args.phase,
         "combine_phases": bool(args.combine_phases),
         "supported_controls_universe": supported,

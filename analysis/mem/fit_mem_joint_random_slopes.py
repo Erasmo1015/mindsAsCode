@@ -10,6 +10,14 @@ Shared fixed-effect design (all joint models):
 Random effects are a subset of those motif columns (plus intercept), chosen via
 ``--random_slopes``. Primary optimizer is REML + lbfgs (matches focal pipeline);
 optional secondary methods (cg, powell) are also fit and stored.
+
+Eligibility (schema_v3 CSV only):
+  --eligibility_mode off       (default) use all rows; legacy v2 OK
+  --eligibility_mode fe_adjust requires all relevant eligible_* columns;
+                       includes eligible_* as fixed covariates. This is an
+                       exploratory FE adjustment — not a validated joint model
+                       and does **not** intersect eligibility sets (unlike
+                       focal --eligibility_mode restrict). Refuses v2/missing.
 """
 
 from __future__ import annotations
@@ -641,14 +649,55 @@ def main() -> None:
         default=0,
         help="If >0, assert prepared n_rows equals this value.",
     )
+    parser.add_argument(
+        "--eligibility_mode",
+        choices=["off", "fe_adjust"],
+        default="off",
+        help="off: all rows. fe_adjust: add eligible_* as FE covariates for motif "
+        "terms (requires schema_v3; refuses v2). FE-adjust ≠ validated joint "
+        "eligibility intersection.",
+    )
     args = parser.parse_args()
 
     reml = False if args.no_reml else True
     random_slopes = _parse_csv_list(args.random_slopes)
     fixed_effects = _parse_csv_list(args.fixed_effects)
     methods = _parse_csv_list(args.methods)
+    eligibility_mode = str(args.eligibility_mode)
 
     df = pd.read_csv(args.input_csv)
+
+    if eligibility_mode == "fe_adjust":
+        motif_fes = [
+            t
+            for t in fixed_effects
+            if t != "iteration" and not str(t).startswith("eligible_")
+        ]
+        missing = []
+        elig_terms: List[str] = []
+        for t in motif_fes:
+            elig = f"eligible_{t}"
+            if elig not in df.columns:
+                missing.append(elig)
+            else:
+                elig_terms.append(elig)
+        if missing:
+            raise SystemExit(
+                "eligibility_mode=fe_adjust requires schema_v3 eligibility columns; "
+                f"missing: {missing}. Legacy v2 CSVs refused. "
+                "Note: FE adjustment does not intersect eligibility sets and is "
+                "not a validated joint eligibility model."
+            )
+        if any(df[c].isna().any() for c in elig_terms):
+            raise SystemExit(
+                "eligibility_mode=fe_adjust: nulls in eligible_* columns; "
+                "refusing (missing state ≠ zero)."
+            )
+        # Append unique eligibility FE terms (do not put them in random slopes).
+        for e in elig_terms:
+            if e not in fixed_effects:
+                fixed_effects.append(e)
+
     fit = fit_joint_random_slopes(
         df,
         random_slopes=random_slopes,
@@ -659,6 +708,7 @@ def main() -> None:
         maxiter=args.maxiter,
         phase=args.phase or None,
     )
+    fit["eligibility_mode"] = eligibility_mode
     if args.assert_n_rows and fit.get("prep", {}).get("n_rows") != args.assert_n_rows:
         raise SystemExit(
             f"n_rows={fit.get('prep', {}).get('n_rows')} != assert {args.assert_n_rows}"
@@ -670,6 +720,7 @@ def main() -> None:
         json.dumps(
             {
                 "status": fit.get("status"),
+                "eligibility_mode": eligibility_mode,
                 "n_rows": fit.get("prep", {}).get("n_rows"),
                 "fingerprint": fit.get("prep", {}).get("fingerprint_sha256"),
                 "llf": fit.get("llf"),

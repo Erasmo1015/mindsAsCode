@@ -27,21 +27,29 @@ def test_default_manifest_loads_and_validates():
     assert "live_mem_trace" in modes
 
 
-def test_queue_jobs_excludes_done_choice13k():
+def test_queue_jobs_includes_choice13k_statev3_reannotate():
     data = load_manifest()
     q = queue_jobs(data, include_optional=True)
-    ids = {(j["dataset"], j["run_id"]) for j in q}
-    assert ("1peterson2021using", "run_260706_211034") not in ids
-    assert ("1peterson2021using", "run_260709_120406") in ids
+    ids = {(j["dataset"], j["run_id"], j["mem_wave"]) for j in q}
+    assert ("1peterson2021using", "run_260706_211034", "fix_rerun1_statev3") in ids
+    assert ("1peterson2021using", "run_260709_120406", "fix_rerun2_statev3") in ids
+    # Historical refv2 provenance must not be queued.
+    assert ("1peterson2021using", "run_260706_211034", "fix_rerun1_refv2") not in ids
     assert any(j["dataset"] == "bergert_nosofsky_2007" for j in q)
+    assert all("statev3" in j["mem_wave"] for j in q)
 
 
 def test_bergert_skip_reconstruct_flags():
     data = load_manifest()
-    berg = [j for j in data["jobs"] if j["dataset"] == "bergert_nosofsky_2007"]
+    berg = [
+        j
+        for j in data["jobs"]
+        if j["dataset"] == "bergert_nosofsky_2007" and "statev3" in j["mem_wave"]
+    ]
     assert len(berg) == 1
     assert berg[0]["skip_reconstruct"] is True
     assert berg[0]["reference_mode"] == "live_mem_trace"
+    assert berg[0]["mem_wave"] == "bergert_five_new_emnlp_statev3"
 
 
 def test_write_tsv(tmp_path: Path):
