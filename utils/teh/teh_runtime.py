@@ -37,7 +37,13 @@ from data_modules.psych101_binary import (
     format_trials_for_prompt,
     get_psych101_binary_experiment,
     normalize_psych101_dataset_alias,
-    summarize_runtime_schema_for_prompt,
+)
+from utils.teh.prompt_context import (
+    DEFAULT_EXAMPLE_CHAR_BUDGET,
+    DEFAULT_HISTORY_MAX_ENTRIES,
+    DEFAULT_MAX_EXAMPLES,
+    infer_recursive_runtime_schema,
+    serialize_train_trials_for_prompt_generation,
 )
 from utils.teh.prompt_sanitize import strip_embedded_choose_from_evolution_prompt
 from utils.teh.teh_datasets import (
@@ -138,6 +144,8 @@ def _extract_action_semantics(schema_summary: str) -> str:
     for line in schema_summary.splitlines():
         if line.startswith("- action semantics:"):
             return line.split(":", 1)[1].strip()
+        if line.startswith("- action / option_keys note:"):
+            return line.split(":", 1)[1].strip()
     return "action=0 is first option; action=1 is second; return P(action=1)."
 
 
@@ -156,17 +164,12 @@ def _build_schema_neutral_base_prompt(
     *,
     categorical: bool = False,
 ) -> str:
-    """Non-gamble base prompt: document observed problem/history keys only."""
-    problem_keys = _problem_keys_from_trials(trials)
+    """Non-gamble base prompt: API/safety skeleton; nested schema lives in schema section."""
     action_sem = _extract_action_semantics(schema_summary)
-    history_note = "(none observed)"
-    for line in schema_summary.splitlines():
-        if line.startswith("- history core keys:"):
-            history_note = line.split(":", 1)[1].strip()
-            break
+    history_note = "see Runtime schema summary (entry keys / always-sometimes)"
     problem_doc = (
-        "\n".join(f"        - {key}: (type/structure per parsed examples)" for key in problem_keys)
-        or "        - (see parsed trial examples)"
+        "        - Nested structure and always/sometimes keys: see Runtime schema summary\n"
+        "        - Do not invent fields absent from that summary or the parsed examples"
     )
     if categorical:
         intro = (
@@ -400,7 +403,7 @@ def _format_trials_for_prompt(trials: List[Dict[str, Any]], max_trials: int = 8)
 
 
 def _runtime_schema_summary_for_prompt(trials: List[Dict[str, Any]]) -> str:
-    raw = summarize_runtime_schema_for_prompt(trials)
+    raw = infer_recursive_runtime_schema(trials)
     return _sanitize_schema_summary_for_prompt(
         raw, is_gamble=_is_gamble_ab_task(trials)
     )
@@ -412,6 +415,9 @@ def _merge_prompt_fallback(
     sample_trials: List[Dict[str, Any]],
     *,
     base_prompt_path: Optional[Path | str] = None,
+    example_char_budget: int = DEFAULT_EXAMPLE_CHAR_BUDGET,
+    history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
+    max_examples: int = DEFAULT_MAX_EXAMPLES,
 ) -> str:
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     base = _base_prompt_for_trials(
@@ -428,12 +434,18 @@ def _merge_prompt_fallback(
         spec = PSYCH101_BINARY_DATASETS[alias]
         display = spec["display_name"]
         task_desc = spec["task_description"]
+    trial_examples = serialize_train_trials_for_prompt_generation(
+        sample_trials,
+        char_budget=example_char_budget,
+        history_max_entries=history_max_entries,
+        max_examples=max_examples,
+    )
     extra = (
         f"\n\n## Dataset: {display} (`{dataset_alias}`)\n\n"
         f"{task_desc}\n\n"
         f"### Runtime schema summary (from parsed trials)\n\n{schema_summary}\n\n"
         f"### Task instructions (from Psych-101 transcript)\n\n{instruction[:1500]}\n\n"
-        f"### Example parsed trials\n\n{_format_trials_for_prompt(sample_trials)}\n"
+        f"### Example parsed trials\n\n{trial_examples}\n"
     )
     return base + extra
 
@@ -444,6 +456,9 @@ def build_prompt_generation_llm_user_content(
     sample_trials: List[Dict[str, Any]],
     *,
     base_prompt_path: Optional[Path | str] = None,
+    example_char_budget: int = DEFAULT_EXAMPLE_CHAR_BUDGET,
+    history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
+    max_examples: int = DEFAULT_MAX_EXAMPLES,
 ) -> str:
     """User message sent to the prompt-generation LLM (no API call)."""
     display = dataset_display_name(dataset_alias)
@@ -455,7 +470,12 @@ def build_prompt_generation_llm_user_content(
         dataset_alias=dataset_alias,
         base_prompt_path=base_prompt_path,
     )
-    trial_examples = _format_trials_for_prompt(sample_trials, max_trials=10)
+    trial_examples = serialize_train_trials_for_prompt_generation(
+        sample_trials,
+        char_budget=example_char_budget,
+        history_max_entries=history_max_entries,
+        max_examples=max_examples,
+    )
     if is_mixed_gambles_dataset(dataset_alias) or is_external_dataset(dataset_alias):
         task_description = instruction
     else:
@@ -542,12 +562,18 @@ def _generate_prompt_via_llm(
     max_tokens: int = 2048,
     save_llm_input_to: Optional[Path] = None,
     base_prompt_path: Optional[Path | str] = None,
+    example_char_budget: int = DEFAULT_EXAMPLE_CHAR_BUDGET,
+    history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
+    max_examples: int = DEFAULT_MAX_EXAMPLES,
 ) -> str:
     user_content = build_prompt_generation_llm_user_content(
         dataset_alias,
         instruction,
         sample_trials,
         base_prompt_path=base_prompt_path,
+        example_char_budget=example_char_budget,
+        history_max_entries=history_max_entries,
+        max_examples=max_examples,
     )
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     is_gamble = _is_gamble_ab_task(sample_trials)
@@ -601,11 +627,18 @@ def setup_teh_run_prompts(
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     filter_mixed_gambles: bool = False,
     psych_dataset_split: str = "train",
+    example_char_budget: int = DEFAULT_EXAMPLE_CHAR_BUDGET,
+    history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
+    max_examples: int = DEFAULT_MAX_EXAMPLES,
+    prefer_auto_llm_prompt: bool = False,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
 
     Returns path to prompts directory.
+
+    When prefer_auto_llm_prompt is True (dataset-prompt evolution pilot), skip hand-written
+    reference prompts so the run starts from the auto LLM prompt.
     """
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
@@ -695,6 +728,8 @@ def setup_teh_run_prompts(
     generated = False
     used_reference = False
     reference_prompt = resolve_dataset_reference_prompt_path(dataset_alias)
+    if prefer_auto_llm_prompt:
+        reference_prompt = None
     if reference_prompt is not None:
         text = strip_embedded_choose_from_evolution_prompt(
             reference_prompt.read_text(encoding="utf-8")
@@ -713,6 +748,9 @@ def setup_teh_run_prompts(
                 sample_trial_list,
                 save_llm_input_to=prompts_dir / "llm_input_prompt.txt",
                 base_prompt_path=resolved_base_prompt,
+                example_char_budget=example_char_budget,
+                history_max_entries=history_max_entries,
+                max_examples=max_examples,
             )
             infer_path.write_text(
                 strip_embedded_choose_from_evolution_prompt(infer_text), encoding="utf-8"
@@ -728,6 +766,9 @@ def setup_teh_run_prompts(
             instruction,
             sample_trial_list,
             base_prompt_path=resolved_base_prompt,
+            example_char_budget=example_char_budget,
+            history_max_entries=history_max_entries,
+            max_examples=max_examples,
         )
         if _is_gamble_ab_task(sample_trial_list):
             merged = _apply_gamble_neutral_wording(merged)
@@ -748,6 +789,13 @@ def setup_teh_run_prompts(
         "reference_prompt_source": str(reference_prompt) if used_reference else None,
         "seed_program_source": str(seed_src),
         "base_prompt_path": str(resolved_base_prompt),
+        "dataset_prompt_evolved": False,
+        "evolution_iterations": 0,
+        "best_prompt_id": None,
+        "example_char_budget": int(example_char_budget),
+        "history_max_entries": int(history_max_entries),
+        "max_examples": int(max_examples),
+        "prefer_auto_llm_prompt": bool(prefer_auto_llm_prompt),
     }
     if is_mixed_gambles_dataset(dataset_alias):
         meta["mixed_gambles_csv"] = mixed_gambles_csv

@@ -508,3 +508,14 @@ Participant MEM now starts at **explore** (after population handoff), not mid-ev
 - Report: `analysis_2026Sep/Sep9_mem_report/MEM_REFERENCE_AND_RANDOM_SLOPES.md`. Five-new TEH runs lack `--mem_trace` → no exact-parent MEM.
 - Submit (outputs under `analysis_2026Sep/mem/fix_rerun1_refv2/`):  
   `DATASETS="1peterson2021using,3frey2017cct,11enkavi2019recentprobes" bash cluster/2026Sep_MEM/submit_old_teh_mem.sh`
+
+---
+
+## Short update (Sep 13 2026 — structured auto-prompt context + optional prompt evolution)
+
+Default TEH remains **one-shot** auto prompt writing. PICS per-iteration state still uses compact one-liners.
+
+- **Faithful prompt-gen context:** `utils/teh/prompt_context.py` — recursive/conditional schema (e.g. Bergert nested `cues`, Kool stage-conditional keys) + budgeted full-JSON train examples (defaults: char budget `10000`, history `8`, max examples `8`). Wired only into `build_prompt_generation_llm_user_content` / `setup_teh_run_prompts`.
+- **Optional dataset-prompt evolution** (default off): `utils/teh/dataset_prompt_evolution.py` + CLI `--dataset_prompt_evolution_iterations` (default `0`). When `>0`, skip hand `reference_prompt`, start from auto LLM prompt, freeze API/schema/sandbox, beam-search evolvable guidance; light gen+eval scoring on fixed train/val for first K valid ordinals. Artifacts under `prompts/dataset_prompt_evolution/`; best overwrites `infer_single_choice.txt`.
+- **Context-size check:** `scripts/report_dataset_prompt_context_sizes.py` — Hilbig/EMNLP/external cases ~27–39% of 16k; **keep default budgets**. Report: `generated_outputs/dataset_prompt_context_sizes.json`.
+- Tests: `tests/test_dataset_prompt_context.py`, `tests/test_dataset_prompt_evolution.py`.

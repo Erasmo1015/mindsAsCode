@@ -88,6 +88,16 @@ from utils.teh.teh_runtime import (
     teh_wandb_run_name,
     valid_participant_ids_path,
 )
+from utils.teh.prompt_context import (
+    DEFAULT_EXAMPLE_CHAR_BUDGET,
+    DEFAULT_HISTORY_MAX_ENTRIES,
+    DEFAULT_MAX_EXAMPLES,
+)
+from utils.teh.dataset_prompt_evolution import (
+    build_mutation_user_message,
+    maybe_run_dataset_prompt_evolution,
+    wrap_prompt_with_contract,
+)
 from utils.teh.sparse_observations import (
     SPARSE_AUDIT_CSV_FILENAME,
     SPARSE_AUDIT_FILENAME,
@@ -1878,6 +1888,169 @@ def find_template_program_for_gridworld(num_blocks: int, num_walls: int, agent_i
     
     # If not found, return None
     return None
+
+
+def _score_dataset_prompt_lightweight(
+    *,
+    rendered_prompt: str,
+    dataset: str,
+    client: OpenAI,
+    model_name: str,
+    seed_program: str,
+    prompts_dir: Path,
+    dev_participant_ids: Sequence[int],
+    eval_candidates: int,
+    split_ratio: float,
+    split_seed: int,
+    filter_mixed_gambles: bool,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str,
+    llm_max_tokens: int,
+    max_workers: int,
+) -> Dict[str, Any]:
+    """Generate N programs from seed under a candidate prompt; score train/val mean loglik."""
+    score_dir = prompts_dir / "dataset_prompt_evolution" / "_score_scratch"
+    score_dir.mkdir(parents=True, exist_ok=True)
+    # Temporary prompts dir for generate_program_variants (needs infer + template).
+    scratch = score_dir / "active"
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir(parents=True)
+    (scratch / "infer_single_choice.txt").write_text(rendered_prompt, encoding="utf-8")
+    for name in ("refine.txt", "seed_program.py", "single_code_template.txt"):
+        src = prompts_dir / name
+        if src.is_file():
+            shutil.copy2(src, scratch / name)
+    # Template may live under repo defaults if not copied into run prompts.
+    if not (scratch / "single_code_template.txt").is_file():
+        default_tmpl = (
+            _REPO_ROOT
+            / "prompts"
+            / "Template_evo"
+            / "choice13k"
+            / "non_strict"
+            / "loglik"
+            / "single_code_template.txt"
+        )
+        if default_tmpl.is_file():
+            shutil.copy2(default_tmpl, scratch / "single_code_template.txt")
+
+    train_fitnesses: List[float] = []
+    val_fitnesses: List[float] = []
+    n_exec = 0
+    n_total = 0
+    error_signatures: List[str] = []
+    strong_snippets: List[str] = []
+
+    for pid in dev_participant_ids:
+        train_trials, val_trials, _ = _trials_for_loglik_participant(
+            dataset,
+            int(pid),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            filter_mixed_gambles=filter_mixed_gambles,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+        )
+        codes = generate_program_variants(
+            client=client,
+            model_name=model_name,
+            parent_programs=[seed_program],
+            train_trials=train_trials,
+            n_variants=max(1, int(eval_candidates)),
+            max_tokens=llm_max_tokens,
+            dataset=dataset,
+            fitness_metric="loglik",
+            run_prompts_dir=str(scratch),
+            max_workers=max_workers,
+            parent_train_accuracies=None,
+            parent_overall_logliks=[None],
+        )
+        for code in codes:
+            n_total += 1
+            choose_fn, err = compile_program_with_error(code or "")
+            if choose_fn is None:
+                error_signatures.append(
+                    f"compile:{type(err).__name__ if err else 'unknown'}"
+                )
+                continue
+            try:
+                train_eval = _evaluate_loglik_for_dataset(
+                    dataset, choose_fn, train_trials, n_seeds=1
+                )
+                val_eval = _evaluate_loglik_for_dataset(
+                    dataset, choose_fn, val_trials, n_seeds=1
+                )
+            except Exception as exc:
+                error_signatures.append(f"eval:{type(exc).__name__}")
+                continue
+            n_exec += 1
+            t_ll = float(train_eval.get("avg_loglik", float("-inf")))
+            v_ll = float(val_eval.get("avg_loglik", float("-inf")))
+            train_fitnesses.append(t_ll)
+            val_fitnesses.append(v_ll)
+            if v_ll > -1.0 and len(strong_snippets) < 3:
+                strong_snippets.append((code or "")[:500])
+
+    mean_train = (
+        sum(train_fitnesses) / len(train_fitnesses) if train_fitnesses else float("-inf")
+    )
+    mean_val = (
+        sum(val_fitnesses) / len(val_fitnesses) if val_fitnesses else float("-inf")
+    )
+    return {
+        "mean_train_fitness": mean_train,
+        "mean_val_fitness": mean_val,
+        "executable_rate": (n_exec / n_total) if n_total else 0.0,
+        "error_signatures": error_signatures[:20],
+        "strong_snippets": strong_snippets,
+    }
+
+
+def _mutate_dataset_prompt_via_llm(
+    client: OpenAI,
+    model_name: str,
+    parent_text: str,
+    role: str,
+    feedback: str,
+    *,
+    max_tokens: int = 2048,
+    artifacts_dir: Optional[Path] = None,
+) -> str:
+    user_content = build_mutation_user_message(
+        parent_prompt=wrap_prompt_with_contract(parent_text),
+        role=role,
+        feedback=feedback,
+    )
+    if artifacts_dir is not None:
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        safe_role = re.sub(r"[^a-zA-Z0-9_]+", "_", role)
+        (artifacts_dir / f"mutate_{safe_role}_in.txt").write_text(
+            user_content, encoding="utf-8"
+        )
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You revise dataset evolution instruction prompts. "
+                    "Preserve frozen contract markers exactly; mutate only evolvable text."
+                ),
+            },
+            {"role": "user", "content": user_content},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.4,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    if artifacts_dir is not None:
+        (artifacts_dir / f"mutate_{safe_role}_out.txt").write_text(text, encoding="utf-8")
+    if not text:
+        return wrap_prompt_with_contract(parent_text)
+    return wrap_prompt_with_contract(text)
 
 
 def compile_program_with_error(code_str: str) -> Tuple[Optional[Callable], Optional[BaseException]]:
@@ -11976,6 +12149,66 @@ def main():
         help="Skip LLM prompt generation; merge base loglik prompt with dataset description only.",
     )
     parser.add_argument(
+        "--dataset_prompt_evolution_iterations",
+        type=int,
+        default=0,
+        help=(
+            "Optional dataset-prompt evolution rounds after one-shot auto prompt "
+            "(default: 0 = one-shot only)."
+        ),
+    )
+    parser.add_argument(
+        "--dataset_prompt_evolution_population",
+        type=int,
+        default=3,
+        help="Beam size for dataset-prompt evolution (default: 3).",
+    )
+    parser.add_argument(
+        "--dataset_prompt_evolution_children",
+        type=int,
+        default=3,
+        help="Children per evolution round (default: 3; roles repair/model/explore).",
+    )
+    parser.add_argument(
+        "--dataset_prompt_dev_participants",
+        type=int,
+        default=3,
+        help="Number of valid-list ordinals 0..K-1 used to score prompts (default: 3).",
+    )
+    parser.add_argument(
+        "--dataset_prompt_eval_candidates",
+        type=int,
+        default=5,
+        help="Programs generated per prompt×dev-participant during prompt scoring (default: 5).",
+    )
+    parser.add_argument(
+        "--dataset_prompt_example_char_budget",
+        type=int,
+        default=DEFAULT_EXAMPLE_CHAR_BUDGET,
+        help=(
+            "Char budget for full-JSON train examples in auto prompt generation "
+            f"(default: {DEFAULT_EXAMPLE_CHAR_BUDGET})."
+        ),
+    )
+    parser.add_argument(
+        "--dataset_prompt_history_max_entries",
+        type=int,
+        default=DEFAULT_HISTORY_MAX_ENTRIES,
+        help=(
+            "Max history entries per prompt-generation example "
+            f"(default: {DEFAULT_HISTORY_MAX_ENTRIES})."
+        ),
+    )
+    parser.add_argument(
+        "--dataset_prompt_max_examples",
+        type=int,
+        default=DEFAULT_MAX_EXAMPLES,
+        help=(
+            "Max complete JSON train examples in auto prompt generation "
+            f"(default: {DEFAULT_MAX_EXAMPLES})."
+        ),
+    )
+    parser.add_argument(
         "--base_prompt",
         type=str,
         default="prompts/teh/infer_single_choice.txt",
@@ -12936,6 +13169,7 @@ def main():
     seed_program_path = _resolve_default_seed_program_path(args, 0)
 
     teh_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+    evo_iters = int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0)
     run_prompts_dir = setup_teh_run_prompts(
         Path(base_run_dir),
         args.dataset,
@@ -12948,9 +13182,94 @@ def main():
         mixed_gambles_csv=args.mixed_gambles_csv,
         filter_mixed_gambles=mixed_gambles_gain_loss_only,
         psych_dataset_split=psych_dataset_split,
+        example_char_budget=int(
+            getattr(args, "dataset_prompt_example_char_budget", DEFAULT_EXAMPLE_CHAR_BUDGET)
+        ),
+        history_max_entries=int(
+            getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
+        ),
+        max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
+        prefer_auto_llm_prompt=evo_iters > 0,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")
+
+    if evo_iters > 0:
+        valid_for_prompt = load_valid_participant_ids_from_json(
+            args.dataset,
+            _REPO_ROOT,
+            filter_mixed_gambles=mixed_gambles_gain_loss_only,
+            split_ratio=args.split_ratio,
+            split_seed=args.split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+        )
+        n_dev = max(1, int(getattr(args, "dataset_prompt_dev_participants", 3)))
+        if not valid_for_prompt:
+            raise ValueError(
+                "dataset_prompt_evolution requires valid participant ids, but none were found."
+            )
+        dev_ids = [int(valid_for_prompt[i]) for i in range(min(n_dev, len(valid_for_prompt)))]
+        seed_text = Path(seed_program_path).read_text(encoding="utf-8")
+        baseline_prompt = (run_prompts_dir / "infer_single_choice.txt").read_text(
+            encoding="utf-8"
+        )
+        mutate_art = run_prompts_dir / "dataset_prompt_evolution" / "mutations"
+
+        def _mutate(parent: str, role: str, feedback: str) -> str:
+            return _mutate_dataset_prompt_via_llm(
+                teh_client,
+                args.model_name,
+                parent,
+                role,
+                feedback,
+                max_tokens=int(getattr(args, "llm_max_tokens", 2048) or 2048),
+                artifacts_dir=mutate_art,
+            )
+
+        def _score(rendered: str) -> Dict[str, Any]:
+            return _score_dataset_prompt_lightweight(
+                rendered_prompt=rendered,
+                dataset=args.dataset,
+                client=teh_client,
+                model_name=args.model_name,
+                seed_program=seed_text,
+                prompts_dir=run_prompts_dir,
+                dev_participant_ids=dev_ids,
+                eval_candidates=int(
+                    getattr(args, "dataset_prompt_eval_candidates", 5) or 5
+                ),
+                split_ratio=float(args.split_ratio),
+                split_seed=int(args.split_seed),
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                psych_dataset_split=psych_dataset_split,
+                local_dataset=args.local_dataset,
+                mixed_gambles_csv=args.mixed_gambles_csv,
+                llm_max_tokens=int(getattr(args, "llm_max_tokens", 800) or 800),
+                max_workers=int(getattr(args, "max_workers", 5) or 5),
+            )
+
+        evo_summary = maybe_run_dataset_prompt_evolution(
+            iterations=evo_iters,
+            prompts_dir=run_prompts_dir,
+            baseline_prompt=baseline_prompt,
+            population=int(getattr(args, "dataset_prompt_evolution_population", 3) or 3),
+            children_per_round=int(
+                getattr(args, "dataset_prompt_evolution_children", 3) or 3
+            ),
+            dev_participant_ids=dev_ids,
+            eval_candidates=int(getattr(args, "dataset_prompt_eval_candidates", 5) or 5),
+            seed_program=seed_text,
+            mutate_fn=_mutate,
+            score_fn=_score,
+        )
+        if evo_summary:
+            print(
+                "[TEH] Dataset-prompt evolution finished: "
+                f"best={evo_summary.get('best_prompt_id')} "
+                f"val={evo_summary.get('best_mean_val_fitness')}"
+            )
 
     evolution_run_phase = "evolution" if args.phase == "evolution" else "all"
 
