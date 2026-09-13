@@ -69,6 +69,9 @@ What is NOT available / do NOT invent:
 
 Behavioral notes:
 - Use within-round history of (action, reward) pairs for exploration/exploitation.
+- ALWAYS Laplace-smooth option counts; never divide by a raw zero count.
+- Keep early-round distributions soft; avoid collapsing to one option after a
+  single reward (overconfidence hurts log-likelihood on 8-way choice).
 - The returned probability for the observed action determines the log-likelihood.
 
 Provide only the code for `choose(...)` as a complete function.

@@ -74,17 +74,21 @@ Requirements:
   return it raw (boolean expressions summed into a "probability" often
   exceed 1 — always clip).
 - Higher returned values mean the participant is more likely to STOP.
-- Avoid division by zero / overflow.
+- Avoid division by zero / overflow: never divide by n_obs, remaining, or
+  rank without a guard (use max(1, remaining), or +1 smoothing).
 - Do not use `pow(...)`; use `**` for exponentiation.
 - If using a logistic/sigmoid without imports, use:
   `1 / (1 + 2.718281828 ** (-x))`
 - Keep all helpers inside `choose(...)`.
-- Ensure every variable used is defined on all branches.
+- Ensure every variable used is defined on all branches
+  (define position, remaining, rank, score before any branch uses them).
 
 Mandatory task structure:
 - If position == sequence_length, stopping is mandatory: return a value
   near 1 (e.g. 1 - 1e-6). Do not return ~0.5 on the last position.
 - values_observed never contains future items; len(values_observed) == position.
+- Do NOT implement `return 0.5` (or any other constant) for all non-final
+  positions. Even a simple rank/remaining rule is better than uniform.
 
 What is NOT available / do NOT invent:
 - Future sequence values beyond problem["position"].
@@ -99,7 +103,8 @@ Behavioral notes (features that usually matter):
 - Position and remaining length: position, sequence_length - position
 - Environment: "neutral" vs "plentiful" (thresholds often differ)
 - Optional: mild use of within-problem history inertia (empty at position 1)
-- The probability must depend meaningfully on these inputs; do not return a
-  constant near 0.5 except when evidence truly gives no preference.
+- Soft probabilities: avoid near-0/1 except last position or extremely strong
+  evidence (overconfidence hurts log-likelihood).
+- The probability must depend meaningfully on these inputs.
 
 Provide only the code for `choose(...)` as a complete function.

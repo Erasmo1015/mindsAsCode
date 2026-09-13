@@ -65,6 +65,10 @@ What is NOT available / do NOT invent:
 
 Behavioral notes:
 - Use within-game history of (action, reward) pairs for exploration/exploitation.
+- ALWAYS Laplace-smooth arm counts: prefer (suc+1)/(n+k) style rates; never
+  divide by a raw zero count (ZeroDivisionError is common otherwise).
+- Keep the distribution soft early in a game; avoid putting ~all mass on one
+  arm from a single observation (hurts log-likelihood if wrong).
 - The returned probability for the observed action determines the log-likelihood.
 
 Provide only the code for `choose(...)` as a complete function.

@@ -123,11 +123,25 @@ Requirements:
 - Return a single finite float probability of action 1; clip to
   [1e-6, 1 - 1e-6] (or similar safe range inside (0, 1)).
 - Never return a raw count ratio that can exceed 1 or be negative.
-- Avoid division by zero (use Laplace / +1 smoothing when counting).
+- ALWAYS use Laplace / +1 smoothing for counts. Never write
+  suc/n or score_a/(score_a+score_b) unless both sides are guaranteed > 0
+  (prefer (suc+1)/(n+2) and (s1+1)/((s1+1)+(s2+1))).
 - Do not use `pow(...)`; use `**`.
 - Keep helpers inside `choose(...)`.
 - Ensure every variable is defined on all branches.
 - Branch on problem["stage"] first; do not assume stage-2 keys exist on stage 1.
+
+KeyError traps (MOST common crash — avoid these):
+- On stage 1: NEVER read problem["spaceship"], problem["planet"],
+  problem["alien_options"], problem["stage1_action"]. Those keys do not exist yet.
+  Current spaceships = problem["option_keys"] (or spaceship_options).
+  Past spaceship/planet only from history entries with entry["stage"] == 1.
+- On stage 2: planet/aliens come from problem["planet"] / problem["option_keys"].
+  NEVER assume a letter like "R","J","K" exists; only use letters from
+  problem / history. Guard every dict lookup: use .get(key, default) or
+  check "key" in d before indexing.
+- When pairing stage-1 transitions with later rewards, iterate history carefully;
+  do not index into empty lists or empty count dicts.
 
 What is NOT available / do NOT invent:
 - Current treasure / reward before the stage-2 choice.
@@ -144,17 +158,25 @@ Behavioral notes (important signals — do not ignore rewards):
   entry["reward"], throws away the main learning signal.
   Example pattern (illustrative, adapt freely):
     planet = problem["planet"]
+    alien0 = problem["option_keys"][0]
     alien1 = problem["option_keys"][1]
-    suc1 = 0
-    n1 = 0
+    suc0 = suc1 = n0 = n1 = 0
     for entry in history:
-        if entry["stage"] == 2 and entry["planet"] == planet and entry["alien"] == alien1:
-            n1 += 1
-            suc1 += entry["reward"]
-    # then form P(action=1) from smoothed success rates for both aliens
+        if entry["stage"] == 2 and entry["planet"] == planet:
+            if entry["alien"] == alien0:
+                n0 += 1
+                suc0 += entry["reward"]
+            elif entry["alien"] == alien1:
+                n1 += 1
+                suc1 += entry["reward"]
+    p0 = (suc0 + 1) / (n0 + 2)
+    p1 = (suc1 + 1) / (n1 + 2)
+    # P(action=1) from relative smoothed success, then clip
+    p = p1 / (p0 + p1)
 - Stage 1 should use past spaceship→planet transitions in history (stage==1
   entries) plus which planets led to treasure later (pair with later stage-2
   rewards), not only raw spaceship choice frequency.
+- Soft probabilities beat overconfident 1e-6 / 1-1e-6 when counts are small.
 - Presentation order matters: always map action 0/1 through the CURRENT
   problem["option_keys"], which can swap across days.
 - Stage-1 and stage-2 share one program; condition on problem["stage"].

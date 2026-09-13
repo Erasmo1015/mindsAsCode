@@ -46,8 +46,8 @@ Requirements:
 - Do not call external APIs.
 - Do not sample or use randomness.
 - Return a single finite float probability of choosing action 1 (option_A).
-- The return value must be strictly inside (0, 1). If needed, clip to a safe
-  range such as [1e-6, 1 - 1e-6].
+- The return value must be strictly inside (0, 1). Always clip, e.g.
+  max(1e-6, min(1 - 1e-6, p)).
 - Higher returned values mean the participant is more likely to choose option_A.
 - Avoid numerical errors such as division by zero, overflow, or invalid operations.
 - Do not use `pow(...)`; use `**` for exponentiation.
@@ -57,17 +57,37 @@ Requirements:
 - Do not rely on top-level helper functions outside `choose(...)`.
 - Ensure every variable used in expressions is defined on all branches.
 
+CALIBRATION (CRITICAL for log-likelihood):
+- Never feed large integer cue scores into a raw sigmoid. A score of ±3 already
+  yields ~0.95/0.05; ±6 is essentially 1e-6 / 1-1e-6. One wrong overconfident
+  prediction hurts log-likelihood far more than a mild error.
+- Prefer SMALL weights / a temperature: e.g. sigmoid(0.5 * score) or
+  sigmoid(score / 3.0) with score from cue differences in {-1,0,1}.
+- Soft probabilities in roughly [0.05, 0.95] are usually safer than extremes
+  unless the cue evidence is decisive AND consistent with the participant.
+- Do NOT return a constant ~0.5 for every trial; the probability must vary with
+  the cue pattern. But also do NOT default to near-certain option_A.
+
 What is NOT available / do NOT invent:
 - No cue_validities / log_odds_weight fields (not shown to participants).
 - No response times.
 - No ground-truth "correct" alternative beyond the cue patterns shown.
-- No future trials; history is empty.
+- No future trials; history is empty (no online learning from past trials).
 - Do not assume action=1 means option_B (that convention is used by some other
   datasets, but NOT this one).
 
-Behavioral notes:
-- Decisions depend on the binary cue patterns of option_A vs option_B.
+Behavioral notes (useful strategies — pick what fits the participant):
+- Decisions depend ONLY on the binary cue patterns of option_A vs option_B.
+- Participants differ a lot: some nearly always choose option_A; others mix;
+  a minority prefer option_B often. Fit the *observed* pattern, not a fixed bias.
+- Common human-like policies (illustrative):
+  * Take-the-best / lexicographic: scan cues in some order; first differing cue
+    decides (map to a soft P, not hard 0/1).
+  * Small weighted cue sum: for i in 1..6, add w_i * (cueA_i - cueB_i) with
+    |w_i| around 0.3..1.5, then sigmoid with temperature.
+  * Majority / tally of cue advantages for A vs B, then soft transform.
+- Cue1 is often important but NOT always decisive; do not hard-code ecological
+  validities (they are not inputs).
 - The probability must depend meaningfully on those cues.
-- Do not return a constant near 0.5 unless the cues truly provide no preference.
 
 Provide only the code for `choose(...)` as a complete function.
