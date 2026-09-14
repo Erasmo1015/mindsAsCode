@@ -198,13 +198,22 @@ def sort_elite_pairs(
     pairs.sort(key=lambda row: elite_rank_key(row[0], mdl_lambda), reverse=True)
 
 
+def elite_core(parent: Sequence[Any]) -> Tuple[Any, ...]:
+    """First 7 elite fields. Drops optional ``mdl_score`` at index 7.
+
+    Callers that unpack ``(code, fitness, test_acc, program_id, ..., idx6)``
+    must use this (or ``parent[:7]``) so MDL 8-tuples do not crash.
+    """
+    return tuple(parent[:7])
+
+
 def with_elite_mdl_score(
     parent: Sequence[Any],
     mdl_score: Optional[float],
     mdl_lambda: float,
 ) -> EliteParent:
     """Keep a 7-tuple when MDL is off; append mdl_score as index 7 when on."""
-    core = tuple(parent[:7])
+    core = elite_core(parent)
     if not mdl_enabled(mdl_lambda) or mdl_score is None:
         return core
     return core + (float(mdl_score),)
@@ -241,7 +250,7 @@ def apply_mdl_to_scored_elite(
     mdl_lambda: float,
     runtime_valid: bool = True,
 ) -> EliteParent:
-    core = tuple(parent[:7])
+    core = elite_core(parent)
     if not mdl_enabled(mdl_lambda) or not runtime_valid:
         return core
     size = program_ast_size(str(parent[0] or ""))

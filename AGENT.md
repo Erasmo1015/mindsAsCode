@@ -519,3 +519,13 @@ Default TEH remains **one-shot** auto prompt writing. PICS per-iteration state s
 - **Optional dataset-prompt evolution** (default off): `utils/teh/dataset_prompt_evolution.py` + CLI `--dataset_prompt_evolution_iterations` (default `0`). When `>0`, skip hand `reference_prompt`, start from auto LLM prompt, freeze API/schema/sandbox, beam-search evolvable guidance; light gen+eval scoring on fixed train/val for first K valid ordinals. Artifacts under `prompts/dataset_prompt_evolution/`; best overwrites `infer_single_choice.txt`.
 - **Context-size check:** `scripts/report_dataset_prompt_context_sizes.py` — Hilbig/EMNLP/external cases ~27–39% of 16k; **keep default budgets**. Report: `generated_outputs/dataset_prompt_context_sizes.json`.
 - Tests: `tests/test_dataset_prompt_context.py`, `tests/test_dataset_prompt_evolution.py`.
+
+---
+
+## Short update (Sep 14 2026 — prompt-evo pilot + cursor-designed comparison)
+
+- Pending job **249704** = **`7hilbig2014generalized` + prompt evolution** (bash history `DATASET=7hilbig... sbatch ...`; job renamed to `7hilbig2014generalized_prompt_evo`).
+- Hand prompts: `prompts/teh/cursor_designed/{7hilbig2014generalized,11enkavi2019recentprobes}.txt` (Choice13k-style template, dataset schema from parsers/instructions).
+- CLI: `--dataset_prompt_file` copies a fixed prompt as `infer_single_choice.txt`.
+- Submit with dataset-prefixed job name:  
+  `DATASET=... PROMPT_MODE=prompt_evo|cursor_designed bash cluster/2026Sep_Prompt_Evolution/submit_prompt_pilot.sh`

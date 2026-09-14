@@ -1,0 +1,91 @@
+You are given observations of human product choices
+(Hilbig & Moshagen, 2014 generalized / Psych-101 `7hilbig2014generalized`).
+
+Each trial presents two fictitious products. For each product you see four expert
+ratings (1 = positive, 0 = negative). Experts are ordered by descending validity
+(about 90%, 80%, 70%, 60%). The participant chooses which product is higher quality
+by pressing the corresponding key.
+
+Write Python code that reproduces the observed behavior. You must generate a
+program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - ratings_A: List[int] length 4, each 0 or 1 (expert ratings for product A)
+        - ratings_B: List[int] length 4, each 0 or 1 (expert ratings for product B)
+        - option_A_features: {"key": str} display label for product A (e.g. "A")
+        - option_B_features: {"key": str} display label for product B (e.g. "R")
+        - option_keys: [label_A, label_B]  (same order as action indices)
+        - schema_type: "B"
+        - dataset_alias / experiment_id may also be present
+
+    history: list of prior trials for this participant. Each entry typically has
+        - action: int (0 or 1)
+        - and may include copies of prior ratings / option features
+        Use history when helpful (inertia, preference bias); do not rely only on
+        copying the last action.
+
+    Action coding:
+        - action 0 -> first product (option_keys[0] / ratings_A)
+        - action 1 -> second product (option_keys[1] / ratings_B)
+
+    return: float, P(action=1) = probability of choosing the second product
+    """
+
+Sandbox / allowed builtins (CRITICAL — programs crash otherwise):
+- ALLOWED: len, range, enumerate, reversed, zip, sum, abs, min, max,
+  float, int, str, list, dict, tuple, bool, isinstance, hasattr, getattr
+- math module is available if needed
+- FORBIDDEN (NameError if used): sorted, set, any, all, map, filter, next
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing action 1.
+- The return value must be strictly inside (0, 1). Always clip, e.g.
+  max(1e-6, min(1 - 1e-6, p)).
+- Higher returned values mean the participant is more likely to choose product B
+  (action 1).
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- If using a logistic/sigmoid transform without imports, use:
+  `1 / (1 + 2.718281828 ** (-x))`
+- Keep all helper logic used by `choose(...)` inside `choose(...)`.
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches.
+
+CALIBRATION (CRITICAL for log-likelihood):
+- Never feed large raw scores into an unscaled sigmoid (overconfidence destroys LL).
+- Prefer small weights / temperature, e.g. sigmoid(0.4 * score) or sigmoid(score / 3.0).
+- Soft probabilities in roughly [0.05, 0.95] are usually safer than extremes unless
+  cue evidence is decisive AND consistent with the participant.
+- Do NOT return a constant ~0.5; probabilities must vary with the rating patterns.
+
+What is NOT available / do NOT invent:
+- No trial-by-trial feedback of which product was truly better.
+- No gamble_A / gamble_B fields (this is NOT a Choice13k gamble task).
+- Do not match action by comparing option letter strings to "A"/"B" names in code;
+  always use numeric action indices with ratings_A / ratings_B.
+
+Behavioral notes (useful strategies — pick what fits the participant):
+- Take-the-best / lexicographic: scan experts from most to least valid (index 0→3);
+  first differing rating decides which product looks better (map to a soft P).
+- Weighted tally: for i in 0..3, add w_i * (ratings_A[i] - ratings_B[i]) with
+  decreasing |w_i| (e.g. ~[0.9, 0.8, 0.7, 0.6] scaled down), then sigmoid.
+- Majority / equal weights over the four experts, then soft transform.
+- Participants differ: some nearly always follow the most valid expert; others mix
+  or show left/right (A vs R) bias visible in history.
+- History may capture a mild preference for one product key or recent switching.
+
+Generation requirements:
+- Prefer concise programs; keep choose() reasonably compact.
+- Produce a valid program that is meaningfully different from the parent.
+- Avoid only superficial changes without changing behavior.
+
+Provide only the code for `choose(...)` as a complete function.

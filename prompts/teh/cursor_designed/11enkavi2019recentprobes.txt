@@ -1,0 +1,94 @@
+You are given observations of human probe-recognition choices
+(Enkavi et al., 2019 recent-probes / Psych-101 `11enkavi2019recentprobes`).
+
+Each trial shows a short memory set of letters, then a single probe letter.
+The participant answers whether the probe was in the memory set by pressing a
+yes-key or a no-key (keys vary by participant; see option_keys).
+
+Write Python code that reproduces the observed behavior. You must generate a
+program implementing:
+
+def choose(problem, history):
+    """
+    Evaluated by log-likelihood.
+    Goal: maximize log-likelihood of the observed human choices.
+
+    problem: dict with keys
+        - memory_set_letters: List[str]  (typically 6 letters shown before the probe)
+        - probe_letter: str  (single probe letter, usually uppercase)
+        - probe_in_set: bool  (oracle membership: probe_letter in memory_set_letters)
+          NOTE: this is deterministically computable from the two letter fields.
+          Humans are imperfect; do NOT return hard 0/1 from oracle membership alone.
+        - yes_key: str  (key meaning "yes / was in the set")
+        - no_key: str   (key meaning "no / was not in the set")
+        - option_keys: [no_key, yes_key]  ALWAYS in this order for this dataset
+        - key_mapping: {"no": no_key, "yes": yes_key}
+        - task: "recent_probes_memory"
+        - schema_type: "B"
+        - dataset_alias / experiment_id may also be present
+
+    history: list of prior recognition trials. Each entry typically has
+        - action: int (0 or 1)
+        - and may include prior memory_set_letters / probe_letter / probe_in_set
+        Use history for bias, fatigue, or recent yes/no rate when helpful.
+
+    Action coding (exact TEH coding):
+        - action 0 -> no  (option_keys[0] / no_key)  : "probe was NOT in the set"
+        - action 1 -> yes (option_keys[1] / yes_key) : "probe WAS in the set"
+
+    return: float, P(action=1) = P(yes / probe-in-set response)
+    """
+
+Sandbox / allowed builtins (CRITICAL — programs crash otherwise):
+- ALLOWED: len, range, enumerate, reversed, zip, sum, abs, min, max,
+  float, int, str, list, dict, tuple, bool, isinstance, hasattr, getattr
+- math module is available if needed
+- FORBIDDEN (NameError if used): sorted, set, any, all, map, filter, next
+  (so implement membership with a loop / equality checks, not `set(...)` / `in set`)
+
+Requirements:
+- Pure Python, no imports, deterministic.
+- Use only the provided problem and history.
+- Do not call external APIs.
+- Do not sample or use randomness.
+- Return a single finite float probability of choosing action 1 (yes).
+- The return value must be strictly inside (0, 1). Always clip, e.g.
+  max(1e-6, min(1 - 1e-6, p)).
+- Higher returned values mean the participant is more likely to press yes.
+- Avoid numerical errors such as division by zero, overflow, or invalid operations.
+- Do not use `pow(...)`; use `**` for exponentiation.
+- If using a logistic/sigmoid transform without imports, use:
+  `1 / (1 + 2.718281828 ** (-x))`
+- Keep all helper logic used by `choose(...)` inside `choose(...)`.
+- Do not rely on top-level helper functions outside `choose(...)`.
+- Ensure every variable used in expressions is defined on all branches.
+
+CALIBRATION (CRITICAL for log-likelihood):
+- Humans make false alarms and misses. Soft probabilities beat hard 0/1 oracle.
+- Prefer something like base ≈ 0.15–0.35 for "no" and ≈ 0.65–0.85 for "yes"
+  when evidence is clear, then adjust with history bias / position effects.
+- Never return a constant ~0.5 for every trial; P must track membership evidence.
+- Do not map letter keys (C/Q/...) to actions by string matching in a brittle way;
+  use numeric action indices and option_keys order.
+
+What is NOT available / do NOT invent:
+- No response times, no display durations, no eye-tracking.
+- No gamble_A / gamble_B / product ratings fields (NOT Choice13k / NOT Hilbig).
+- Do not assume option_keys are always ["Q","C"]; read them from the problem.
+
+Behavioral notes (useful strategies — pick what fits the participant):
+- Primary signal: is probe_letter among memory_set_letters? (loop equality checks).
+  You may use problem["probe_in_set"] as the same oracle bit, but soften it.
+- Position / recency: letters later in the memory list are often remembered better;
+  early letters may be weaker (serial-position). Soft-weight by index.
+- Similarity / confusions: near-miss letters can raise false-alarm rates.
+- Base-rate / bias: some participants press yes more often; estimate from history.
+- Fatigue / inertia: recent yes-rate or last action can slightly shift the logit.
+- Combine membership evidence + mild history bias with a calibrated sigmoid.
+
+Generation requirements:
+- Prefer concise programs; keep choose() reasonably compact.
+- Produce a valid program that is meaningfully different from the parent.
+- Avoid only superficial changes without changing behavior.
+
+Provide only the code for `choose(...)` as a complete function.

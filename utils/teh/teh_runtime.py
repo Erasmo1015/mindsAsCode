@@ -631,6 +631,7 @@ def setup_teh_run_prompts(
     history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
     max_examples: int = DEFAULT_MAX_EXAMPLES,
     prefer_auto_llm_prompt: bool = False,
+    dataset_prompt_file: Optional[Path | str] = None,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
@@ -639,6 +640,9 @@ def setup_teh_run_prompts(
 
     When prefer_auto_llm_prompt is True (dataset-prompt evolution pilot), skip hand-written
     reference prompts so the run starts from the auto LLM prompt.
+
+    When dataset_prompt_file is set, copy that file as infer_single_choice.txt (skips
+    reference / LLM / merge). Used for hand-designed comparison prompts.
     """
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
@@ -727,10 +731,28 @@ def setup_teh_run_prompts(
     infer_path = prompts_dir / "infer_single_choice.txt"
     generated = False
     used_reference = False
+    used_dataset_prompt_file = False
+    forced_prompt: Optional[Path] = None
+    if dataset_prompt_file is not None:
+        forced_prompt = Path(str(dataset_prompt_file)).expanduser()
+        if not forced_prompt.is_absolute():
+            forced_prompt = (REPO_ROOT / forced_prompt).resolve()
+        else:
+            forced_prompt = forced_prompt.resolve()
+        if not forced_prompt.is_file():
+            raise FileNotFoundError(f"dataset_prompt_file not found: {forced_prompt}")
+        text = strip_embedded_choose_from_evolution_prompt(
+            forced_prompt.read_text(encoding="utf-8")
+        )
+        infer_path.write_text(text, encoding="utf-8")
+        used_dataset_prompt_file = True
+        print(f"[TEH] Wrote dataset_prompt_file -> {infer_path}")
+        print(f"[TEH]   source: {forced_prompt}")
+
     reference_prompt = resolve_dataset_reference_prompt_path(dataset_alias)
-    if prefer_auto_llm_prompt:
+    if prefer_auto_llm_prompt or used_dataset_prompt_file:
         reference_prompt = None
-    if reference_prompt is not None:
+    if not used_dataset_prompt_file and reference_prompt is not None:
         text = strip_embedded_choose_from_evolution_prompt(
             reference_prompt.read_text(encoding="utf-8")
         )
@@ -738,7 +760,7 @@ def setup_teh_run_prompts(
         used_reference = True
         print(f"[TEH] Wrote hand-written reference prompt -> {infer_path}")
         print(f"[TEH]   source: {reference_prompt}")
-    elif use_llm and client is not None:
+    elif not used_dataset_prompt_file and use_llm and client is not None:
         try:
             infer_text = _generate_prompt_via_llm(
                 client,
@@ -760,7 +782,7 @@ def setup_teh_run_prompts(
         except Exception as e:
             print(f"[TEH] LLM prompt generation failed ({e}); using merge fallback.")
 
-    if not generated and not used_reference:
+    if not generated and not used_reference and not used_dataset_prompt_file:
         merged = _merge_prompt_fallback(
             dataset_alias,
             instruction,
@@ -786,6 +808,8 @@ def setup_teh_run_prompts(
         "dataset_alias": dataset_alias,
         "llm_generated": generated,
         "used_reference_prompt": used_reference,
+        "used_dataset_prompt_file": used_dataset_prompt_file,
+        "dataset_prompt_file": str(forced_prompt) if used_dataset_prompt_file else None,
         "reference_prompt_source": str(reference_prompt) if used_reference else None,
         "seed_program_source": str(seed_src),
         "base_prompt_path": str(resolved_base_prompt),

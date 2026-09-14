@@ -6,6 +6,7 @@ from utils.teh.mdl_selection import (
     attach_mdl_fields,
     candidate_rank_key,
     compute_mdl_score,
+    elite_core,
     elite_rank_key,
     program_ast_size,
     selection_trial_count,
@@ -145,6 +146,28 @@ def test_lambda_positive_prefers_higher_mdl_score():
     elites = [elite_large, elite_small]
     sort_elites(elites, lam)
     assert elites[0][3] == "small"
+
+
+def test_elite_core_unpacks_mdl_eight_tuple():
+    """Regression: job 245398 died unpacking MDL 8-tuples as 7 values."""
+    core = (SMALL, -0.2, 0.5, "prog", None, None, -0.2)
+    parent = with_elite_mdl_score(core, -12.0, 1.0)
+    assert len(parent) == 8
+    try:
+        _code, _fitness, _test_acc, _prog_id, _, _, _train_acc = parent
+        raise AssertionError("8-tuple must not unpack into 7 names")
+    except ValueError as exc:
+        assert "too many values to unpack" in str(exc)
+    code, fitness, test_acc, prog_id, _, _, train_acc = elite_core(parent)
+    assert code == SMALL
+    assert fitness == -0.2
+    assert test_acc == 0.5
+    assert prog_id == "prog"
+    assert train_acc == -0.2
+    assert elite_core(core) == core
+    mse_code, mse_fit, mse_test, mse_id, train_mse, test_mse = elite_core(parent)[:6]
+    assert mse_code == SMALL and mse_fit == -0.2 and mse_id == "prog"
+    assert train_mse is None and test_mse is None
 
 
 def test_invalid_candidates_do_not_get_mdl_fields():

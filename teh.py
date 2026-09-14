@@ -121,6 +121,7 @@ from utils.teh.explore_handoff import (
 from utils.teh.mdl_selection import (
     apply_mdl_to_scored_elite,
     attach_mdl_fields,
+    elite_core,
     mdl_enabled,
     normalize_mdl_lambda,
     selection_trial_count,
@@ -9802,11 +9803,11 @@ def run_evolution(
 
         if is_cpc18_mse:
             for i, parent_tuple in enumerate(selected_parents):
-                code, fitness, test_mse, prog_id, train_mse, test_mse = parent_tuple
+                code, fitness, test_mse, prog_id, train_mse, test_mse = elite_core(parent_tuple)[:6]
                 print(f"  Parent {i+1}: {prog_id} (train_mse={train_mse:.2f}, test_mse={test_mse:.2f}, fitness={fitness:.2f})")
         else:
             for i, parent_tuple in enumerate(selected_parents):
-                code, fitness, test_acc, prog_id, _, _, train_acc_prompt = parent_tuple
+                code, fitness, test_acc, prog_id, _, _, train_acc_prompt = elite_core(parent_tuple)
                 if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
                     print(f"  Parent {i+1}: {prog_id} (log-likelihood={fitness:.4f}, test_acc={test_acc:.4f})")
                 else:
@@ -12209,6 +12210,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--dataset_prompt_file",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a fixed evolution prompt written as infer_single_choice.txt "
+            "(skips reference / LLM / merge). Example: "
+            "prompts/teh/cursor_designed/7hilbig2014generalized.txt"
+        ),
+    )
+    parser.add_argument(
         "--base_prompt",
         type=str,
         default="prompts/teh/infer_single_choice.txt",
@@ -13190,6 +13201,7 @@ def main():
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
         prefer_auto_llm_prompt=evo_iters > 0,
+        dataset_prompt_file=getattr(args, "dataset_prompt_file", None),
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")
