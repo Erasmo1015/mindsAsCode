@@ -31,7 +31,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
-from baseline_methods.psych101_features import option_b_feature_diff
+from baseline_methods.psych101_features import categorical_arm_means, option_b_feature_diff
+from data_modules.external import external_default_data_dir, load_external_loglik_trials
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
@@ -62,6 +63,8 @@ from utils.teh.sparse_observations import (
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
     is_binary_loglik_dataset,
+    is_categorical_output_dataset,
+    is_external_dataset,
     is_mixed_gambles_dataset,
 )
 
@@ -185,6 +188,8 @@ def mle_output_base_dir(
 ) -> str:
     if is_mixed_gambles_dataset(dataset):
         return f"generated_outputs/mixed_gambles/MLE/run_{timestamp}"
+    if is_external_dataset(dataset):
+        return f"generated_outputs/external/{dataset}/MLE/run_{timestamp}"
     split = normalize_psych_dataset_split(psych_dataset_split)
     return f"generated_outputs/psych101_{split}/MLE/{dataset}/run_{timestamp}"
 
@@ -209,6 +214,14 @@ def trials_for_participant(
             participant_id,
             csv_path=csv_path,
             filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+    elif is_external_dataset(dataset):
+        train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
+            dataset,
+            int(participant_id),
+            data_dir=external_default_data_dir(dataset),
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
@@ -330,6 +343,63 @@ def eval_mean_loglik_ev_diff(trials: List[Dict[str, Any]], beta: float, bias: fl
         y = int(t["action"])
         total += y * np.log(pr) + (1.0 - y) * np.log(1.0 - pr)
     return float(total / len(trials))
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    z = np.asarray(logits, dtype=np.float64)
+    z = z - np.max(z)
+    e = np.exp(z)
+    s = float(np.sum(e))
+    if not np.isfinite(s) or s <= 0.0:
+        return np.full_like(z, 1.0 / max(1, z.size))
+    return e / s
+
+
+def fit_softmax_arm_means(train_trials: List[Dict[str, Any]]) -> float:
+    """Fit temperature beta for P(a) = softmax(beta * empirical_arm_means)."""
+    if not train_trials:
+        return 1.0
+
+    def nll(params: np.ndarray) -> float:
+        beta = float(params[0])
+        total = 0.0
+        for t in train_trials:
+            means = np.asarray(
+                categorical_arm_means(t["problem"], t.get("history")), dtype=np.float64
+            )
+            p = np.clip(_softmax(beta * means), 1e-9, 1.0)
+            a = int(t["action"])
+            if a < 0 or a >= p.size:
+                total += 20.0
+                continue
+            total -= float(np.log(p[a]))
+        return total
+
+    res = minimize(nll, x0=[1.0], method="L-BFGS-B", bounds=[(-50.0, 50.0)])
+    return float(res.x[0])
+
+
+def eval_mean_loglik_softmax_arm_means(trials: List[Dict[str, Any]], beta: float) -> float:
+    if not trials:
+        return float("nan")
+    total = 0.0
+    for t in trials:
+        means = np.asarray(
+            categorical_arm_means(t["problem"], t.get("history")), dtype=np.float64
+        )
+        p = np.clip(_softmax(float(beta) * means), 1e-9, 1.0)
+        a = int(t["action"])
+        if a < 0 or a >= p.size:
+            total += np.log(1e-9)
+            continue
+        total += float(np.log(p[a]))
+    return float(total / len(trials))
+
+
+def predict_action_softmax_arm_means(beta: float, problem: Dict[str, Any], history: Optional[List[Dict[str, Any]]]) -> int:
+    means = np.asarray(categorical_arm_means(problem, history), dtype=np.float64)
+    p = _softmax(float(beta) * means)
+    return int(np.argmax(p))
 
 
 def fit_logistic_mixed_gambles(train_trials: List[Dict[str, Any]]) -> Tuple[float, float]:
@@ -484,6 +554,16 @@ def _fit_and_evaluate_participant(
 
         fitted = {"omega": omega_hat, "lambda": lam_hat}
         loglik_fn = lambda trials: eval_mean_loglik_mixed_gambles(trials, omega_hat, lam_hat)
+    elif is_categorical_output_dataset(dataset):
+        beta_hat = fit_softmax_arm_means(fit_trials)
+
+        def predict_action(tr: Dict[str, Any]) -> int:
+            return predict_action_softmax_arm_means(
+                beta_hat, tr["problem"], tr.get("history")
+            )
+
+        fitted = {"beta": beta_hat, "model": "softmax_arm_means"}
+        loglik_fn = lambda trials: eval_mean_loglik_softmax_arm_means(trials, beta_hat)
     else:
         beta_hat, bias_hat = fit_logistic_ev_diff(fit_trials)
 

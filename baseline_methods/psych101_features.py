@@ -32,6 +32,21 @@ def _task_kind(problem: Dict[str, Any]) -> str:
         and "accumulated_points_before" in problem
     ):
         return "balloon_risk"
+    if schema in ("bergert", "bergert_pairwise") or (
+        "option_A" in problem and "option_B" in problem and "cues" in (problem.get("option_A") or {})
+    ):
+        return "bergert_pairwise"
+    if schema == "guan_stopping" or "values_observed" in problem:
+        return "guan_stopping"
+    if schema == "kool_twostep" or (
+        problem.get("stage") in (1, 2)
+        and ("spaceship_options" in problem or "alien_options" in problem)
+    ):
+        return "kool_twostep"
+    if schema == "categorical_bandit" or (
+        int(problem.get("n_arms") or 0) >= 3 and "options" in problem
+    ):
+        return "categorical_bandit"
     if "n_cards_remaining" in problem:
         return "cct"
     if schema == "D":
@@ -86,9 +101,11 @@ def _bandit_empirical_means(
         a = int(h.get("action", -1))
         if a < 0 or a >= n_options:
             continue
-        if "feedback" in h:
-            sums[a] += float(h["feedback"])
-            counts[a] += 1
+        reward = h.get("feedback", h.get("reward"))
+        if reward is None:
+            continue
+        sums[a] += float(reward)
+        counts[a] += 1
     return [sums[i] / counts[i] if counts[i] > 0 else 0.0 for i in range(n_options)]
 
 
@@ -189,7 +206,92 @@ def option_b_feature_diff(
         if correct == key_a:
             return -1.0
         return 0.0
+    if kind == "bergert_pairwise":
+        return _bergert_cue_diff(problem)
+    if kind == "guan_stopping":
+        return _guan_stop_feature(problem)
+    if kind == "kool_twostep":
+        keys = problem.get("option_keys") or []
+        if len(keys) < 2:
+            return 0.0
+        return _kool_letter_mean(problem, history, keys[1]) - _kool_letter_mean(
+            problem, history, keys[0]
+        )
+    if kind == "categorical_bandit":
+        means = categorical_arm_means(problem, history)
+        if len(means) < 2:
+            return 0.0
+        return float(means[1] - means[0])
     return 0.0
+
+
+def _cue_sum(option: Any) -> float:
+    cues = (option or {}).get("cues") or {}
+    return float(sum(int(v) for v in cues.values()))
+
+
+def _bergert_cue_diff(problem: Dict[str, Any]) -> float:
+    """Scalar x for P(action=1). Bergert action=1 selects option_A."""
+    diff_b_minus_a = _cue_sum(problem.get("option_B")) - _cue_sum(problem.get("option_A"))
+    if problem.get("action_means_option_A_when_1", True):
+        return -diff_b_minus_a
+    return diff_b_minus_a
+
+
+def _guan_stop_feature(problem: Dict[str, Any]) -> float:
+    """Positive x favors stop (action=1). Uses last observed value only."""
+    observed = problem.get("values_observed") or []
+    if not observed:
+        return 0.0
+    return float(observed[-1])
+
+
+def _kool_letter_mean(
+    problem: Dict[str, Any],
+    history: Optional[List[Dict[str, Any]]],
+    letter: Any,
+) -> float:
+    """Mean reward for a presented letter; stage-1 uses the following stage-2 reward."""
+    stage = int(problem.get("stage") or 1)
+    rewards: List[float] = []
+    hist = list(history or [])
+    for i, h in enumerate(hist):
+        if int(h.get("stage", -1)) != stage:
+            continue
+        keys = h.get("option_keys") or []
+        a = int(h.get("action", -1))
+        if a < 0 or a >= len(keys) or keys[a] != letter:
+            continue
+        if stage == 2:
+            r = h.get("reward", h.get("feedback"))
+            if r is not None:
+                rewards.append(float(r))
+            continue
+        for h2 in hist[i + 1 :]:
+            if int(h2.get("stage", -1)) != 2:
+                continue
+            r = h2.get("reward", h2.get("feedback"))
+            if r is not None:
+                rewards.append(float(r))
+            break
+    if not rewards:
+        return 0.0
+    return float(sum(rewards) / len(rewards))
+
+
+def categorical_n_actions(problem: Dict[str, Any]) -> int:
+    n = int(problem.get("n_arms") or 0)
+    if n >= 2:
+        return n
+    keys = problem.get("option_keys") or problem.get("options") or []
+    return max(2, len(keys))
+
+
+def categorical_arm_means(
+    problem: Dict[str, Any],
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> List[float]:
+    return _bandit_empirical_means(history, n_options=categorical_n_actions(problem))
 
 
 def _gamble_getters_gamble_ab() -> Tuple[GambleGetter, GambleGetter]:
@@ -338,6 +440,47 @@ def _gamble_getters_category_learning() -> Tuple[GambleGetter, GambleGetter]:
     return opt_a, opt_b
 
 
+def _gamble_getters_bergert() -> Tuple[GambleGetter, GambleGetter]:
+    # action 0 = option_B? Bergert: action 1 selects option_A, so A-getter is action=1 side.
+    def action0(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        if p.get("action_means_option_A_when_1", True):
+            return ([_cue_sum(p.get("option_B"))], [1.0])
+        return ([_cue_sum(p.get("option_A"))], [1.0])
+
+    def action1(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        if p.get("action_means_option_A_when_1", True):
+            return ([_cue_sum(p.get("option_A"))], [1.0])
+        return ([_cue_sum(p.get("option_B"))], [1.0])
+
+    return action0, action1
+
+
+def _gamble_getters_guan() -> Tuple[GambleGetter, GambleGetter]:
+    def continue_opt(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        return ([0.0], [1.0])
+
+    def stop_opt(p: Dict[str, Any], _h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        return ([_guan_stop_feature(p)], [1.0])
+
+    return continue_opt, stop_opt
+
+
+def _gamble_getters_kool() -> Tuple[GambleGetter, GambleGetter]:
+    def opt_a(p: Dict[str, Any], h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        keys = p.get("option_keys") or []
+        if not keys:
+            return ([0.0], [1.0])
+        return ([_kool_letter_mean(p, h, keys[0])], [1.0])
+
+    def opt_b(p: Dict[str, Any], h: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[float], Optional[List[float]]]:
+        keys = p.get("option_keys") or []
+        if len(keys) < 2:
+            return ([0.0], [1.0])
+        return ([_kool_letter_mean(p, h, keys[1])], [1.0])
+
+    return opt_a, opt_b
+
+
 def prospect_gamble_getters(
     problem: Dict[str, Any],
 ) -> Tuple[GambleGetter, GambleGetter]:
@@ -363,4 +506,14 @@ def prospect_gamble_getters(
         return _gamble_getters_memory_probe()
     if kind == "category_learning":
         return _gamble_getters_category_learning()
+    if kind == "bergert_pairwise":
+        return _gamble_getters_bergert()
+    if kind == "guan_stopping":
+        return _gamble_getters_guan()
+    if kind == "kool_twostep":
+        return _gamble_getters_kool()
+    if kind == "categorical_bandit":
+        raise ValueError(
+            "categorical_bandit uses softmax prospect fitting, not two-option getters"
+        )
     raise ValueError(f"Unsupported task kind for prospect getters: {kind!r}")

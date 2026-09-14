@@ -32,7 +32,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
-from baseline_methods.psych101_features import prospect_gamble_getters
+from baseline_methods.psych101_features import categorical_arm_means, prospect_gamble_getters
+from data_modules.external import external_default_data_dir, load_external_loglik_trials
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
@@ -63,6 +64,8 @@ from utils.teh.sparse_observations import (
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
     is_binary_loglik_dataset,
+    is_categorical_output_dataset,
+    is_external_dataset,
     is_mixed_gambles_dataset,
 )
 
@@ -184,6 +187,8 @@ def pt_output_base_dir(
 ) -> str:
     if is_mixed_gambles_dataset(dataset):
         return f"generated_outputs/mixed_gambles/prospect_theory/run_{timestamp}"
+    if is_external_dataset(dataset):
+        return f"generated_outputs/external/{dataset}/prospect_theory/run_{timestamp}"
     split = normalize_psych_dataset_split(psych_dataset_split)
     return f"generated_outputs/psych101_{split}/prospect_theory/{dataset}/run_{timestamp}"
 
@@ -207,6 +212,14 @@ def trials_for_participant(
             participant_id,
             csv_path=csv_path,
             filter_gain_loss_only=filter_mixed_gambles,
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+        )
+    elif is_external_dataset(dataset):
+        train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
+            dataset,
+            int(participant_id),
+            data_dir=external_default_data_dir(dataset),
             split_ratio=split_ratio,
             split_seed=split_seed,
         )
@@ -459,6 +472,101 @@ def eval_mean_loglik_choice13k_prospect(
     return float(total / len(trials))
 
 
+def _softmax_logits(logits: np.ndarray) -> np.ndarray:
+    z = np.asarray(logits, dtype=np.float64)
+    z = z - np.max(z)
+    e = np.exp(z)
+    s = float(np.sum(e))
+    if not np.isfinite(s) or s <= 0.0:
+        return np.full_like(z, 1.0 / max(1, z.size))
+    return e / s
+
+
+def _categorical_arm_values(
+    problem: Dict[str, Any],
+    history: Optional[List[Dict[str, Any]]],
+    alpha: float,
+    lam: float,
+    gamma: float,
+) -> np.ndarray:
+    means = categorical_arm_means(problem, history)
+    return np.asarray(
+        [subjective_value_gamble([float(m)], [1.0], alpha, lam, gamma) for m in means],
+        dtype=np.float64,
+    )
+
+
+def fit_prospect_theory_categorical(
+    train_trials: List[Dict[str, Any]],
+    *,
+    dataset: Optional[str] = None,
+    participant_id: Optional[int] = None,
+) -> Dict[str, float]:
+    """Softmax over CPT values of empirical arm means (K-arm analog of two-option PT)."""
+    default_theta = np.array([0.8, 2.0, 1.0, 1.0], dtype=np.float64)
+    if len(train_trials) == 0:
+        print(
+            f"[Warning][prospect_theory] Degenerate train set (empty). "
+            f"Using default params. dataset={dataset} participant_id={participant_id}"
+        )
+        return {
+            "alpha": float(default_theta[0]),
+            "lambda": float(default_theta[1]),
+            "gamma": float(default_theta[2]),
+            "beta": float(default_theta[3]),
+        }
+
+    def nll(theta: np.ndarray) -> float:
+        alpha, lam, gamma, beta = (float(theta[0]), float(theta[1]), float(theta[2]), float(theta[3]))
+        total = 0.0
+        for tr in train_trials:
+            v = _categorical_arm_values(tr["problem"], tr.get("history"), alpha, lam, gamma)
+            p = np.clip(_softmax_logits(beta * v), 1e-9, 1.0)
+            a = int(tr["action"])
+            if a < 0 or a >= p.size:
+                total += 20.0
+                continue
+            total -= float(np.log(p[a]))
+        return total
+
+    bounds = [(0.01, 2.0), (0.01, 10.0), (0.01, 5.0), (0.01, 20.0)]
+    res = minimize(nll, x0=default_theta, method="L-BFGS-B", bounds=bounds)
+    if not getattr(res, "success", False):
+        msg = getattr(res, "message", "")
+        print(
+            f"[Warning][prospect_theory] Optimization failed; using best found params. "
+            f"dataset={dataset} participant_id={participant_id} message={msg}"
+        )
+    return {
+        "alpha": float(res.x[0]),
+        "lambda": float(res.x[1]),
+        "gamma": float(res.x[2]),
+        "beta": float(res.x[3]),
+    }
+
+
+def eval_mean_loglik_categorical_prospect(
+    trials: List[Dict[str, Any]],
+    params: Dict[str, float],
+) -> float:
+    if not trials:
+        return float("nan")
+    alpha = float(params["alpha"])
+    lam = float(params["lambda"])
+    gamma = float(params["gamma"])
+    beta = float(params["beta"])
+    total = 0.0
+    for tr in trials:
+        v = _categorical_arm_values(tr["problem"], tr.get("history"), alpha, lam, gamma)
+        p = np.clip(_softmax_logits(beta * v), 1e-9, 1.0)
+        a = int(tr["action"])
+        if a < 0 or a >= p.size:
+            total += float(np.log(1e-9))
+            continue
+        total += float(np.log(p[a]))
+    return float(total / len(trials))
+
+
 def _round_floats_for_csv_row(row: Dict[str, Any], ndigits: int = 4) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in row.items():
@@ -553,6 +661,40 @@ def _fit_and_evaluate_participant(
     fit_trials = train_trials + val_trials
     if not fit_trials:
         raise ValueError(f"No training trials for participant {participant_id}.")
+    if is_categorical_output_dataset(dataset):
+        params = fit_prospect_theory_categorical(
+            fit_trials, dataset=dataset, participant_id=participant_id
+        )
+
+        def predict_action(tr: Dict[str, Any]) -> int:
+            v = _categorical_arm_values(
+                tr["problem"],
+                tr.get("history"),
+                float(params["alpha"]),
+                float(params["lambda"]),
+                float(params["gamma"]),
+            )
+            p = _softmax_logits(float(params["beta"]) * v)
+            return int(np.argmax(p))
+
+        train_acc = eval_accuracy_from_predict_fn(train_trials, predict_action)
+        val_acc = eval_accuracy_from_predict_fn(val_trials, predict_action)
+        test_acc = eval_accuracy_from_predict_fn(test_trials, predict_action)
+        return {
+            "method": "prospect_theory_MLE",
+            "dataset": dataset,
+            "participant_id": participant_id,
+            "fitted_params": params,
+            "train_accuracy": train_acc["accuracy"],
+            "val_accuracy": val_acc["accuracy"],
+            "test_accuracy": test_acc["accuracy"],
+            "train_mean_loglik": eval_mean_loglik_categorical_prospect(train_trials, params),
+            "val_mean_loglik": eval_mean_loglik_categorical_prospect(val_trials, params),
+            "test_mean_loglik": eval_mean_loglik_categorical_prospect(test_trials, params),
+            "n_train": train_acc["total"],
+            "n_val": val_acc["total"],
+            "n_test": test_acc["total"],
+        }
     sample_problem = fit_trials[0]["problem"]
     ga, gb = prospect_gamble_getters(sample_problem)
     params = fit_prospect_theory_gamble_choice(
