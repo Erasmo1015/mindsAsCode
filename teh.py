@@ -94,6 +94,7 @@ from utils.teh.prompt_context import (
     DEFAULT_MAX_EXAMPLES,
 )
 from utils.teh.dataset_prompt_evolution import (
+    aggregate_pics_style_prompt_scores,
     build_mutation_user_message,
     maybe_run_dataset_prompt_evolution,
     wrap_prompt_with_contract,
@@ -1910,7 +1911,12 @@ def _score_dataset_prompt_lightweight(
     llm_max_tokens: int,
     max_workers: int,
 ) -> Dict[str, Any]:
-    """Generate N programs from seed under a candidate prompt; score train/val mean loglik."""
+    """Generate N programs from seed under a candidate prompt; score PICS-style.
+
+    For each development participant: evaluate the seed and each generated candidate,
+    keep the best by val loglik (including seed), then average those bests across
+    participants. Do not mean over all generations.
+    """
     score_dir = prompts_dir / "dataset_prompt_evolution" / "_score_scratch"
     score_dir.mkdir(parents=True, exist_ok=True)
     # Temporary prompts dir for generate_program_variants (needs infer + template).
@@ -1937,8 +1943,7 @@ def _score_dataset_prompt_lightweight(
         if default_tmpl.is_file():
             shutil.copy2(default_tmpl, scratch / "single_code_template.txt")
 
-    train_fitnesses: List[float] = []
-    val_fitnesses: List[float] = []
+    per_participant_scores: List[List[Tuple[float, float]]] = []
     n_exec = 0
     n_total = 0
     error_signatures: List[str] = []
@@ -1955,6 +1960,33 @@ def _score_dataset_prompt_lightweight(
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
         )
+        participant_scores: List[Tuple[float, float]] = []
+
+        # Include seed (same as PICS: best candidate vs seed).
+        n_total += 1
+        seed_fn, seed_err = compile_program_with_error(seed_program or "")
+        if seed_fn is None:
+            error_signatures.append(
+                f"seed_compile:{type(seed_err).__name__ if seed_err else 'unknown'}"
+            )
+        else:
+            try:
+                seed_train = _evaluate_loglik_for_dataset(
+                    dataset, seed_fn, train_trials, n_seeds=1
+                )
+                seed_val = _evaluate_loglik_for_dataset(
+                    dataset, seed_fn, val_trials, n_seeds=1
+                )
+                n_exec += 1
+                participant_scores.append(
+                    (
+                        float(seed_train.get("avg_loglik", float("-inf"))),
+                        float(seed_val.get("avg_loglik", float("-inf"))),
+                    )
+                )
+            except Exception as exc:
+                error_signatures.append(f"seed_eval:{type(exc).__name__}")
+
         codes = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -1990,20 +2022,16 @@ def _score_dataset_prompt_lightweight(
             n_exec += 1
             t_ll = float(train_eval.get("avg_loglik", float("-inf")))
             v_ll = float(val_eval.get("avg_loglik", float("-inf")))
-            train_fitnesses.append(t_ll)
-            val_fitnesses.append(v_ll)
+            participant_scores.append((t_ll, v_ll))
             if v_ll > -1.0 and len(strong_snippets) < 3:
                 strong_snippets.append((code or "")[:500])
 
-    mean_train = (
-        sum(train_fitnesses) / len(train_fitnesses) if train_fitnesses else float("-inf")
-    )
-    mean_val = (
-        sum(val_fitnesses) / len(val_fitnesses) if val_fitnesses else float("-inf")
-    )
+        per_participant_scores.append(participant_scores)
+
+    agg = aggregate_pics_style_prompt_scores(per_participant_scores)
     return {
-        "mean_train_fitness": mean_train,
-        "mean_val_fitness": mean_val,
+        "mean_train_fitness": agg["mean_train_fitness"],
+        "mean_val_fitness": agg["mean_val_fitness"],
         "executable_rate": (n_exec / n_total) if n_total else 0.0,
         "error_signatures": error_signatures[:20],
         "strong_snippets": strong_snippets,

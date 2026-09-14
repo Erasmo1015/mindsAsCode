@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,9 +10,13 @@ from utils.teh.dataset_prompt_evolution import (
     FROZEN_END,
     EVOLVABLE_BEGIN,
     EVOLVABLE_END,
+    TASK_KNOWLEDGE_HEADER,
     PromptCandidate,
+    aggregate_pics_style_prompt_scores,
+    ensure_task_knowledge_in_prompt,
     frozen_hash,
     maybe_run_dataset_prompt_evolution,
+    render_prompt_for_generation,
     run_dataset_prompt_evolution,
     select_beam,
     split_frozen_evolvable,
@@ -63,6 +66,78 @@ def test_leakage_language_rejected() -> None:
     ok, reason = validate_child_prompt(leaky, parent_frozen_hash=parent_h)
     assert ok is False
     assert reason == "test_leakage_language"
+
+
+def test_domain_guidance_is_evolvable_not_frozen() -> None:
+    wrapped = wrap_prompt_with_contract(BASELINE)
+    frozen, evolvable = split_frozen_evolvable(wrapped)
+    assert "def choose" in frozen
+    assert "Pure Python" in frozen or "deterministic" in frozen
+    assert "Behavioral requirements" in evolvable
+    assert "Prefer cue-based models" in evolvable
+    # Intro / task narrative should not be locked in frozen.
+    assert "You are given observations of human choices." in evolvable
+    assert "You are given observations of human choices." not in frozen
+
+
+def test_task_knowledge_retained_in_evolvable() -> None:
+    thin = (
+        "def choose(problem, history):\n"
+        "    return: float, P(action=1)\n\n"
+        "Requirements:\n"
+        "- Pure Python, no imports, deterministic.\n\n"
+        "Behavioral requirements:\n"
+        "- Prefer simple models.\n"
+    )
+    task = (
+        "Participants rate cue validity as 90/80/70/60 and often use take-the-best."
+    )
+    instr = "In this experiment you will see four cues with expert validity weights."
+    out = ensure_task_knowledge_in_prompt(
+        thin, task_description=task, instruction_excerpt=instr
+    )
+    # Unmarked input stays marker-free for one-shot PICS path.
+    assert FROZEN_BEGIN not in out
+    assert "90/80/70/60" in out
+    assert TASK_KNOWLEDGE_HEADER in out
+    wrapped = wrap_prompt_with_contract(out)
+    frozen, evolvable = split_frozen_evolvable(wrapped)
+    assert "90/80/70/60" in evolvable
+    assert "take-the-best" in evolvable
+    assert "90/80/70/60" not in frozen
+
+
+def test_task_knowledge_keeps_markers_when_already_present() -> None:
+    marked = wrap_prompt_with_contract(
+        "def choose(problem, history):\n"
+        "    return: float, P(action=1)\n\n"
+        "Requirements:\n"
+        "- Pure Python, no imports, deterministic.\n\n"
+        "Behavioral requirements:\n"
+        "- Prefer simple models.\n"
+    )
+    out = ensure_task_knowledge_in_prompt(
+        marked,
+        task_description="Domain fact ALPHA_VALIDITY_0.9 must remain evolvable.",
+        instruction_excerpt="",
+    )
+    assert FROZEN_BEGIN in out and EVOLVABLE_BEGIN in out
+    _, evolvable = split_frozen_evolvable(out)
+    assert "ALPHA_VALIDITY_0.9" in evolvable
+
+
+def test_pics_style_scoring_uses_best_per_participant_not_mean_all() -> None:
+    # Participant A: seed -0.7, gens -1.2 and -0.5 -> best -0.5
+    # Participant B: seed -0.6, gens -0.9 -> best -0.6 (seed)
+    # Mean of bests = (-0.5 + -0.6) / 2 = -0.55
+    # Mean over all gens would be different and worse.
+    per = [
+        [(-0.69, -0.70), (-1.1, -1.2), (-0.4, -0.5)],
+        [(-0.65, -0.60), (-0.8, -0.90)],
+    ]
+    agg = aggregate_pics_style_prompt_scores(per)
+    assert agg["mean_val_fitness"] == pytest.approx(-0.55)
+    assert agg["mean_train_fitness"] == pytest.approx((-0.4 + -0.65) / 2)
 
 
 def test_beam_keeps_best() -> None:

@@ -42,9 +42,12 @@ from utils.teh.prompt_context import (
     DEFAULT_EXAMPLE_CHAR_BUDGET,
     DEFAULT_HISTORY_MAX_ENTRIES,
     DEFAULT_MAX_EXAMPLES,
+    history_keys_note_from_schema,
     infer_recursive_runtime_schema,
+    problem_keys_note_from_schema,
     serialize_train_trials_for_prompt_generation,
 )
+from utils.teh.dataset_prompt_evolution import ensure_task_knowledge_in_prompt
 from utils.teh.prompt_sanitize import strip_embedded_choose_from_evolution_prompt
 from utils.teh.teh_datasets import (
     dataset_display_name,
@@ -158,19 +161,30 @@ def _problem_keys_from_trials(trials: List[Dict[str, Any]]) -> List[str]:
     return sorted(keys)
 
 
+def _task_description_for_prompt_gen(
+    dataset_alias: str, instruction: str
+) -> str:
+    """High-level task description used in auto prompt-gen input (and retained in baseline)."""
+    if is_mixed_gambles_dataset(dataset_alias) or is_external_dataset(dataset_alias):
+        return instruction
+    try:
+        return PSYCH101_BINARY_DATASETS[
+            normalize_psych101_dataset_alias(dataset_alias)
+        ]["task_description"]
+    except Exception:
+        return instruction
+
+
 def _build_schema_neutral_base_prompt(
     schema_summary: str,
     trials: List[Dict[str, Any]],
     *,
     categorical: bool = False,
 ) -> str:
-    """Non-gamble base prompt: API/safety skeleton; nested schema lives in schema section."""
+    """Non-gamble base prompt: API/safety skeleton with concrete problem/history keys."""
     action_sem = _extract_action_semantics(schema_summary)
-    history_note = "see Runtime schema summary (entry keys / always-sometimes)"
-    problem_doc = (
-        "        - Nested structure and always/sometimes keys: see Runtime schema summary\n"
-        "        - Do not invent fields absent from that summary or the parsed examples"
-    )
+    history_note = history_keys_note_from_schema(schema_summary)
+    problem_doc = problem_keys_note_from_schema(schema_summary)
     if categorical:
         intro = (
             "You are given observations of human choices in multi-action decision problems.\n"
@@ -447,7 +461,12 @@ def _merge_prompt_fallback(
         f"### Task instructions (from Psych-101 transcript)\n\n{instruction[:1500]}\n\n"
         f"### Example parsed trials\n\n{trial_examples}\n"
     )
-    return base + extra
+    merged = base + extra
+    return ensure_task_knowledge_in_prompt(
+        merged,
+        task_description=task_desc,
+        instruction_excerpt=instruction,
+    )
 
 
 def build_prompt_generation_llm_user_content(
@@ -540,6 +559,10 @@ def build_prompt_generation_llm_user_content(
         f"{adapt_instructions}"
         f"{api_line}"
         f"{safety_line}"
+        "- Retain the **Task description** and **Instruction excerpt** content in the output "
+        "prompt (task/domain facts must appear in the evolution prompt itself, not only here).\n"
+        "- Prefer concrete modelling cues from the task description (e.g. cue validities, "
+        "payoffs, stage structure) over vague behavioural platitudes.\n"
         f"- {CONCISE_PROGRAM_GUIDANCE}\n"
         "- Output ONLY the evolution instruction prompt text (no markdown code fence).\n"
         "- Do NOT append a sample, reference, or complete choose() implementation.\n"
@@ -610,6 +633,11 @@ def _generate_prompt_via_llm(
     text = strip_embedded_choose_from_evolution_prompt(text)
     if not text:
         raise ValueError("LLM prompt was empty after removing embedded choose() code.")
+    text = ensure_task_knowledge_in_prompt(
+        text,
+        task_description=_task_description_for_prompt_gen(dataset_alias, instruction),
+        instruction_excerpt=instruction,
+    )
     return text
 
 

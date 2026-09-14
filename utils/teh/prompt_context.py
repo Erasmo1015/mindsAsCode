@@ -38,6 +38,13 @@ def _merge_type_sets(dst: Set[str], src: Iterable[str]) -> None:
     dst.update(src)
 
 
+def _ensure_key_stat(key_stats: Dict[str, Dict[str, Any]], path: str) -> Dict[str, Any]:
+    return key_stats.setdefault(
+        path,
+        {"present": 0, "types": set(), "list_elem_types": set(), "children_seen": 0},
+    )
+
+
 def _walk_value_schema(
     value: Any,
     *,
@@ -50,10 +57,7 @@ def _walk_value_schema(
         return
     for key, child in value.items():
         path = f"{path_prefix}.{key}" if path_prefix else str(key)
-        st = key_stats.setdefault(
-            path,
-            {"present": 0, "types": set(), "list_elem_types": set(), "children_seen": 0},
-        )
+        st = _ensure_key_stat(key_stats, path)
         st["present"] += 1
         st["types"].add(_json_type_name(child))
         if isinstance(child, dict):
@@ -65,6 +69,54 @@ def _walk_value_schema(
                     _walk_value_schema(
                         elem, key_stats=key_stats, n_parents=n_parents, path_prefix=f"{path}[]"
                     )
+
+
+def _collect_history_paths_for_trial(
+    history: Any,
+) -> Tuple[Set[str], Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """
+    Collect history key paths for one trial (union across entries).
+
+    Presence is later counted once per trial, not once per history entry.
+    """
+    present_paths: Set[str] = set()
+    types_by_path: Dict[str, Set[str]] = defaultdict(set)
+    list_elem_by_path: Dict[str, Set[str]] = defaultdict(set)
+
+    def _collect(value: Any, path_prefix: str = "") -> None:
+        if not isinstance(value, dict):
+            return
+        for key, child in value.items():
+            path = f"{path_prefix}.{key}" if path_prefix else str(key)
+            present_paths.add(path)
+            types_by_path[path].add(_json_type_name(child))
+            if isinstance(child, dict):
+                _collect(child, path)
+            elif isinstance(child, list) and child:
+                for elem in child[:5]:
+                    list_elem_by_path[path].add(_json_type_name(elem))
+                    if isinstance(elem, dict):
+                        _collect(elem, f"{path}[]")
+
+    if isinstance(history, list):
+        for entry in history:
+            if isinstance(entry, dict):
+                _collect(entry)
+    return present_paths, types_by_path, list_elem_by_path
+
+
+def _merge_history_trial_paths(
+    key_stats: Dict[str, Dict[str, Any]],
+    present_paths: Set[str],
+    types_by_path: Dict[str, Set[str]],
+    list_elem_by_path: Dict[str, Set[str]],
+) -> None:
+    """Increment each path's presence by one for this trial."""
+    for path in present_paths:
+        st = _ensure_key_stat(key_stats, path)
+        st["present"] += 1
+        st["types"].update(types_by_path.get(path) or ())
+        st["list_elem_types"].update(list_elem_by_path.get(path) or ())
 
 
 def _format_key_stats(key_stats: Dict[str, Dict[str, Any]], n_examples: int) -> List[str]:
@@ -137,10 +189,13 @@ def infer_recursive_runtime_schema(trials: Sequence[Dict[str, Any]]) -> str:
             _walk_value_schema(p, key_stats=problem_stats, n_parents=n)
             hist = t.get("history") or []
             history_lens.append(len(hist) if isinstance(hist, list) else 0)
-            if isinstance(hist, list):
-                for entry in hist:
-                    if isinstance(entry, dict):
-                        _walk_value_schema(entry, key_stats=history_stats, n_parents=n)
+            present_paths, types_by_path, list_elem_by_path = _collect_history_paths_for_trial(
+                hist
+            )
+            if present_paths:
+                _merge_history_trial_paths(
+                    history_stats, present_paths, types_by_path, list_elem_by_path
+                )
 
         header = (
             f"- problem schema ({bucket_name}, n_examples={n}):"
@@ -363,3 +418,52 @@ def build_prompt_generation_trial_and_schema_sections(
         max_examples=max_examples,
     )
     return schema, trials_text
+
+
+def history_keys_note_from_schema(schema_summary: str) -> str:
+    """Compact history key list from recursive schema text (for base-prompt docstring)."""
+    keys: List[str] = []
+    in_hist = False
+    for line in schema_summary.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- history entry schema") or stripped.startswith(
+            "- history:"
+        ):
+            in_hist = True
+            if "empty" in stripped.lower() or "no dict" in stripped.lower():
+                return "(empty history observed)"
+            continue
+        if in_hist:
+            if line.startswith("  - "):
+                key = line.strip()[2:].split(":", 1)[0].strip()
+                if key and key not in keys:
+                    keys.append(key)
+            elif stripped.startswith("- "):
+                break
+    if keys:
+        return ", ".join(keys)
+    return "(none observed)"
+
+
+def problem_keys_note_from_schema(schema_summary: str) -> str:
+    """Top-level / nested problem key lines for base-prompt docstring."""
+    keys: List[str] = []
+    in_problem = False
+    for line in schema_summary.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- problem schema"):
+            in_problem = True
+            continue
+        if in_problem:
+            if line.startswith("  - "):
+                key = line.strip()[2:].split(":", 1)[0].strip()
+                if key and key not in keys:
+                    keys.append(key)
+            elif stripped.startswith("- "):
+                break
+    if keys:
+        return "\n".join(f"        - {key}" for key in keys)
+    return (
+        "        - Nested structure and always/sometimes keys: see Runtime schema summary\n"
+        "        - Do not invent fields absent from that summary or the parsed examples"
+    )

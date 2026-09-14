@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from utils.teh.prompt_context import (
+    history_keys_note_from_schema,
     infer_recursive_runtime_schema,
     serialize_train_trials_for_prompt_generation,
 )
 from utils.teh.teh_runtime import (
+    _build_schema_neutral_base_prompt,
     build_prompt_generation_llm_user_content,
     setup_teh_run_prompts,
 )
@@ -148,6 +151,52 @@ def test_budget_respects_limit_and_valid_json() -> None:
         assert "problem" in obj and "action" in obj and "history" in obj
 
 
+def test_history_presence_counted_per_trial_not_per_entry() -> None:
+    """Presence denominators use n_trials; numerators must not exceed n_trials."""
+    n_trials = 4
+    entries_per_trial = 30
+    trials = []
+    for i in range(n_trials):
+        trials.append(
+            {
+                "problem": {"schema_type": "toy", "x": i, "option_keys": ["A", "B"]},
+                "action": i % 2,
+                "history": [
+                    {"action": j % 2, "feedback": float(j)}
+                    for j in range(entries_per_trial)
+                ],
+            }
+        )
+    schema = infer_recursive_runtime_schema(trials)
+    # Old bug: action present counted as 4*30=120; fixed: <= 4.
+    matches = re.findall(
+        r"- action: \w+ \((?:always|sometimes) present, (\d+)/(\d+)\)", schema
+    )
+    assert matches, schema
+    for present_s, total_s in matches:
+        present, total = int(present_s), int(total_s)
+        assert present <= n_trials
+        assert total == n_trials
+        assert present <= total
+
+
+def test_base_prompt_uses_concrete_history_keys_not_placeholder() -> None:
+    trials = [
+        {
+            "problem": {"schema_type": "toy", "rating": 3, "option_keys": ["A", "B"]},
+            "action": 1,
+            "history": [{"action": 0, "feedback": 1.0, "rating": 2}],
+        }
+    ]
+    schema = infer_recursive_runtime_schema(trials)
+    prompt = _build_schema_neutral_base_prompt(schema, trials)
+    assert "see Runtime schema summary" not in prompt
+    assert "action" in history_keys_note_from_schema(schema)
+    assert "feedback" in prompt or "rating" in prompt
+    assert "history: list of dicts (keys observed: " in prompt
+    assert "rating" in prompt  # problem key from schema
+
+
 def test_choice13k_serializes_gambles() -> None:
     text = serialize_train_trials_for_prompt_generation(
         [_choice13k_trial()], char_budget=4000, max_examples=2
@@ -172,6 +221,7 @@ def test_prompt_generation_user_content_uses_json_not_one_liners() -> None:
     assert "Runtime schema summary" in content
     # One-liner style "option_A cues={...}" should not be the primary format.
     assert "option_A cues={" not in content
+    assert "Retain the **Task description**" in content
 
 
 def test_default_oneshot_meta_no_evolution(tmp_path: Path) -> None:
@@ -232,3 +282,5 @@ def test_default_oneshot_meta_no_evolution(tmp_path: Path) -> None:
     assert meta.get("dataset_prompt_evolved") is False
     assert meta.get("evolution_iterations") == 0
     assert not (prompts_dir / "dataset_prompt_evolution").exists()
+    # Default non-evolution path still writes an infer prompt.
+    assert (prompts_dir / "infer_single_choice.txt").is_file()

@@ -18,9 +18,12 @@ FROZEN_END = "<<<FROZEN_END>>>"
 EVOLVABLE_BEGIN = "<<<EVOLVABLE_BEGIN>>>"
 EVOLVABLE_END = "<<<EVOLVABLE_END>>>"
 
+TASK_KNOWLEDGE_HEADER = "## Task / domain knowledge (retained from prompt-generation input)"
+
 MUTATION_ROLES = ("repair", "improve_modelling", "explore_strategy")
 
-_SPLIT_MARKERS = (
+# Legacy markers used only as a last-resort split when API/requirements cannot be found.
+_LEGACY_EVOLVABLE_MARKERS = (
     "Behavioral requirements:",
     "Generation requirements:",
     "Diversity requirements:",
@@ -55,6 +58,24 @@ _SANDBOX_WEAKENED = (
         r"\bnon-deterministic\s+(?:code|programs?|behaviour|behavior)\b",
         re.I,
     ),
+)
+
+_REQUIREMENTS_START = re.compile(r"(?im)^Requirements:\s*$")
+_SCHEMA_START = re.compile(
+    r"(?im)^(?:#{1,3}\s*)?Runtime schema summary(?:\s*\([^)]*\))?\s*:?\s*$"
+)
+_SECTION_END_HINTS = (
+    "Behavioral requirements:",
+    "Generation requirements:",
+    "Diversity requirements:",
+    "Mutation guidance:",
+    "Task description",
+    "## Task",
+    "### Task",
+    TASK_KNOWLEDGE_HEADER,
+    "Cognitive",
+    "Modeling guidance",
+    "Modelling guidance",
 )
 
 
@@ -92,21 +113,138 @@ def extract_marked_section(text: str, begin: str, end: str) -> Optional[str]:
         return None
 
 
+def _merge_spans(spans: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    if not spans:
+        return []
+    ordered = sorted(spans, key=lambda se: se[0])
+    merged: List[Tuple[int, int]] = [ordered[0]]
+    for start, end in ordered[1:]:
+        prev_s, prev_e = merged[-1]
+        if start <= prev_e:
+            merged[-1] = (prev_s, max(prev_e, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _span_until_section(text: str, start: int) -> Tuple[int, int]:
+    rest = text[start:]
+    end = len(rest)
+    for marker in _SECTION_END_HINTS:
+        idx = rest.find(marker)
+        if idx > 0:
+            end = min(end, idx)
+    # Also stop at a following top-level markdown heading (except the current line).
+    for m in re.finditer(r"(?m)^## ", rest):
+        if m.start() > 0:
+            end = min(end, m.start())
+            break
+    return start, start + end
+
+
+def _find_choose_api_span(text: str) -> Optional[Tuple[int, int]]:
+    m = re.search(r"def\s+choose\s*\(\s*problem\s*,\s*history\s*\)", text)
+    if not m:
+        return None
+    start = m.start()
+    rest = text[start:]
+    doc = re.match(
+        r"def\s+choose\s*\(\s*problem\s*,\s*history\s*\)\s*:?\s*\n\s*\"\"\"[\s\S]*?\"\"\"",
+        rest,
+    )
+    if doc:
+        return start, start + doc.end()
+    # Docstring-less / short API note: take through return/P(action) lines.
+    lines = rest.splitlines(keepends=True)
+    end_rel = 0
+    seen_return = False
+    for i, line in enumerate(lines[:24]):
+        if i > 0 and _REQUIREMENTS_START.match(line):
+            break
+        if i > 0 and any(line.startswith(h) for h in _SECTION_END_HINTS):
+            break
+        end_rel += len(line)
+        if re.search(r"return\s*:", line, re.I) or "P(action" in line:
+            seen_return = True
+        if i > 0 and seen_return and line.strip() == "":
+            break
+    return start, start + max(end_rel, len(lines[0]) if lines else 0)
+
+
+def _find_requirements_span(text: str) -> Optional[Tuple[int, int]]:
+    m = _REQUIREMENTS_START.search(text)
+    if not m:
+        return None
+    return _span_until_section(text, m.start())
+
+
+def _find_schema_spans(text: str) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    for m in _SCHEMA_START.finditer(text):
+        spans.append(_span_until_section(text, m.start()))
+    return spans
+
+
+def _default_evolvable_stub() -> str:
+    return (
+        "Behavioral requirements:\n"
+        "- Prefer models that use observed problem/history structure.\n"
+        "- Encourage diversity across candidates.\n"
+    )
+
+
 def split_frozen_evolvable(prompt: str) -> Tuple[str, str]:
+    """
+    Split into frozen contract vs evolvable guidance.
+
+    Frozen: API (`choose`), return type, Requirements/sandbox, runtime schema.
+    Evolvable: task/domain narrative, behavioural/cognitive/generation guidance.
+    """
     frozen = extract_marked_section(prompt, FROZEN_BEGIN, FROZEN_END)
     evolvable = extract_marked_section(prompt, EVOLVABLE_BEGIN, EVOLVABLE_END)
     if frozen is not None and evolvable is not None:
         return frozen, evolvable
-    # Post-process: schema/API/requirements as frozen; remainder evolvable.
-    split_at = None
-    for marker in _SPLIT_MARKERS:
-        idx = prompt.find(marker)
-        if idx >= 0 and (split_at is None or idx < split_at):
-            split_at = idx
-    if split_at is None:
-        # Fallback: first 60% frozen.
-        split_at = max(1, int(len(prompt) * 0.6))
-    return prompt[:split_at].strip(), prompt[split_at:].strip()
+
+    spans: List[Tuple[int, int]] = []
+    api = _find_choose_api_span(prompt)
+    if api:
+        spans.append(api)
+    req = _find_requirements_span(prompt)
+    if req:
+        spans.append(req)
+    spans.extend(_find_schema_spans(prompt))
+    spans = _merge_spans(spans)
+
+    if not spans:
+        # Last resort: freeze everything before first behavioural/generation marker.
+        split_at = None
+        for marker in _LEGACY_EVOLVABLE_MARKERS:
+            idx = prompt.find(marker)
+            if idx >= 0 and (split_at is None or idx < split_at):
+                split_at = idx
+        if split_at is None:
+            split_at = max(1, int(len(prompt) * 0.6))
+        return prompt[:split_at].strip(), prompt[split_at:].strip()
+
+    frozen_chunks = [prompt[s:e].strip() for s, e in spans if prompt[s:e].strip()]
+    frozen_text = "\n\n".join(frozen_chunks)
+
+    evolvable_parts: List[str] = []
+    prev = 0
+    for s, e in spans:
+        if s > prev:
+            chunk = prompt[prev:s].strip()
+            if chunk:
+                evolvable_parts.append(chunk)
+        prev = e
+    if prev < len(prompt):
+        chunk = prompt[prev:].strip()
+        if chunk:
+            evolvable_parts.append(chunk)
+    evolvable_text = "\n\n".join(evolvable_parts).strip()
+    if not evolvable_text:
+        evolvable_text = _default_evolvable_stub()
+    return frozen_text, evolvable_text
 
 
 def wrap_prompt_with_contract(prompt: str) -> str:
@@ -114,11 +252,7 @@ def wrap_prompt_with_contract(prompt: str) -> str:
         return prompt
     frozen, evolvable = split_frozen_evolvable(prompt)
     if not evolvable:
-        evolvable = (
-            "Behavioral requirements:\n"
-            "- Prefer models that use observed problem/history structure.\n"
-            "- Encourage diversity across candidates.\n"
-        )
+        evolvable = _default_evolvable_stub()
     return (
         f"{FROZEN_BEGIN}\n{frozen}\n{FROZEN_END}\n\n"
         f"{EVOLVABLE_BEGIN}\n{evolvable}\n{EVOLVABLE_END}\n"
@@ -131,6 +265,70 @@ def render_prompt_for_generation(prompt: str) -> str:
     for tag in (FROZEN_BEGIN, FROZEN_END, EVOLVABLE_BEGIN, EVOLVABLE_END):
         text = text.replace(tag, "")
     return re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
+
+
+def _knowledge_already_present(haystack: str, needle: str, *, min_chars: int = 40) -> bool:
+    text = (needle or "").strip()
+    if len(text) < min_chars:
+        return bool(text) and text in haystack
+    probe = re.sub(r"\s+", " ", text[:120]).strip().lower()
+    compact = re.sub(r"\s+", " ", haystack).lower()
+    return bool(probe) and probe in compact
+
+
+def ensure_task_knowledge_in_prompt(
+    prompt: str,
+    *,
+    task_description: str,
+    instruction_excerpt: str,
+    max_instruction_chars: int = 2000,
+) -> str:
+    """
+    Ensure auto prompt-gen task knowledge is present and evolvable.
+
+    Injects a task/domain block when missing so mutation can keep refining modelling
+    guidance without losing facts from llm_input. Preserves marker-free prompts for
+    the default non-evolution path (markers only if the input already had them).
+    """
+    desc = (task_description or "").strip()
+    instr = (instruction_excerpt or "").strip()[: max(0, int(max_instruction_chars))]
+    if not desc and not instr:
+        return prompt
+
+    had_markers = FROZEN_BEGIN in prompt and EVOLVABLE_BEGIN in prompt
+    wrapped = wrap_prompt_with_contract(prompt)
+    frozen, evolvable = split_frozen_evolvable(wrapped)
+    rendered = render_prompt_for_generation(wrapped)
+
+    need_desc = bool(desc) and not _knowledge_already_present(rendered, desc)
+    need_instr = bool(instr) and not _knowledge_already_present(
+        rendered, instr, min_chars=60
+    )
+    if not need_desc and not need_instr:
+        return prompt if not had_markers else wrapped
+
+    parts: List[str] = [TASK_KNOWLEDGE_HEADER, ""]
+    if need_desc or (desc and not _knowledge_already_present(evolvable, desc)):
+        if desc:
+            parts.append(desc)
+            parts.append("")
+    if need_instr:
+        parts.append("Instruction excerpt:")
+        parts.append(instr)
+        parts.append("")
+    block = "\n".join(parts).strip()
+    if TASK_KNOWLEDGE_HEADER in evolvable:
+        new_evolvable = evolvable.rstrip() + "\n\n" + block + "\n"
+    else:
+        new_evolvable = block + "\n\n" + evolvable
+    marked = (
+        f"{FROZEN_BEGIN}\n{frozen}\n{FROZEN_END}\n\n"
+        f"{EVOLVABLE_BEGIN}\n{new_evolvable.strip()}\n{EVOLVABLE_END}\n"
+    )
+    if had_markers:
+        return marked
+    # One-shot / unmarked baseline: keep marker-free text for PICS.
+    return render_prompt_for_generation(marked)
 
 
 def validate_child_prompt(
@@ -182,6 +380,10 @@ def build_mutation_user_message(
         "Rules:\n"
         f"- Preserve {FROZEN_BEGIN}...{FROZEN_END} byte-for-byte (same content).\n"
         f"- Only edit content inside {EVOLVABLE_BEGIN}...{EVOLVABLE_END}.\n"
+        "- Frozen content is only the API, return type, schema, sandbox, and leakage "
+        "constraints. Task/domain facts and cognitive modelling guidance are evolvable.\n"
+        "- Retain factual task/domain knowledge already present in the evolvable section; "
+        "do not delete cue validities, payoffs, stage rules, or instruction facts.\n"
         "- Do not add imports, randomness, or test-set leakage language.\n"
         "- Output the full prompt with both marker pairs; no markdown fence.\n\n"
         f"## Parent prompt\n\n{parent_prompt}\n\n"
@@ -213,14 +415,40 @@ def select_beam(
     return beam
 
 
-def _summarize_errors(signatures: Sequence[str], limit: int = 5) -> List[str]:
-    counts: Dict[str, int] = {}
-    for s in signatures:
-        counts[s] = counts.get(s, 0) + 1
-    return [
-        f"{sig} (n={counts[sig]})"
-        for sig in sorted(counts, key=lambda k: (-counts[k], k))[:limit]
-    ]
+def aggregate_pics_style_prompt_scores(
+    per_participant_scores: Sequence[Sequence[Tuple[float, float]]],
+) -> Dict[str, float]:
+    """
+    PICS-aligned prompt scoring.
+
+    For each development participant, take the best (train_ll, val_ll) among that
+    participant's candidates (typically seed + generated programs) by val_ll, then
+    average those best scores across participants.
+
+    Do not mean over all generations.
+    """
+    best_trains: List[float] = []
+    best_vals: List[float] = []
+    for scores in per_participant_scores:
+        usable = [
+            (float(t), float(v))
+            for t, v in scores
+            if t == t and v == v  # not NaN
+        ]
+        if not usable:
+            continue
+        best_t, best_v = max(usable, key=lambda tv: tv[1])
+        best_trains.append(best_t)
+        best_vals.append(best_v)
+    if not best_vals:
+        return {
+            "mean_train_fitness": float("-inf"),
+            "mean_val_fitness": float("-inf"),
+        }
+    return {
+        "mean_train_fitness": sum(best_trains) / len(best_trains),
+        "mean_val_fitness": sum(best_vals) / len(best_vals),
+    }
 
 
 def compact_feedback_for_parent(parent: PromptCandidate) -> str:
