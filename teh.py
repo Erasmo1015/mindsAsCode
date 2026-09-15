@@ -99,6 +99,17 @@ from utils.teh.dataset_prompt_evolution import (
     maybe_run_dataset_prompt_evolution,
     wrap_prompt_with_contract,
 )
+from utils.teh.limited_data_protocol import (
+    LIMITED_DATA_MANIFEST_CSV_FILENAME,
+    LIMITED_DATA_MANIFEST_FILENAME,
+    LIMITED_DATA_MANIFEST_JSONL_FILENAME,
+    add_limited_data_cli_arguments,
+    append_limited_data_manifest_jsonl,
+    load_participant_limited_splits,
+    rewrite_limited_data_csv_from_jsonl,
+    should_persist_limited_data_manifest,
+    write_limited_data_manifest,
+)
 from utils.teh.sparse_observations import (
     SPARSE_AUDIT_CSV_FILENAME,
     SPARSE_AUDIT_FILENAME,
@@ -2682,6 +2693,8 @@ def _collect_pooled_split_trials_for_participants(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     audits_out: Optional[List[SparseObservationAudit]] = None,
 ) -> List[Dict[str, Any]]:
     """Concatenate per-participant train or val splits (same splits as evolution uses)."""
@@ -2701,6 +2714,8 @@ def _collect_pooled_split_trials_for_participants(
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
             max_observed_trials_per_participant=max_observed_trials_per_participant,
+            limited_data_protocol=limited_data_protocol,
+            limited_train_val=limited_train_val,
             return_audit=True,
         )
         pooled.extend((train_trials, val_trials)[split_idx])
@@ -2721,6 +2736,8 @@ def _collect_pooled_train_trials_for_participants(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     audits_out: Optional[List[SparseObservationAudit]] = None,
 ) -> List[Dict[str, Any]]:
     """Concatenate per-participant train splits (same splits as evolution uses)."""
@@ -2736,6 +2753,8 @@ def _collect_pooled_train_trials_for_participants(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
         audits_out=audits_out,
     )
 
@@ -2956,6 +2975,8 @@ def run_global_evolution_phase(
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     mdl_lambda: float = 0.0,
 ) -> List[Tuple[Any, ...]]:
     """
@@ -2978,6 +2999,8 @@ def run_global_evolution_phase(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
         audits_out=sparse_audits,
     )
     pooled_val = _collect_pooled_split_trials_for_participants(
@@ -2992,6 +3015,8 @@ def run_global_evolution_phase(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
     )
     budget_n = normalize_max_observed_trials(max_observed_trials_per_participant)
     print(f"\n{'='*80}")
@@ -3513,6 +3538,8 @@ def run_global_evolution_phase(
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
             max_observed_trials_per_participant=max_observed_trials_per_participant,
+            limited_data_protocol=limited_data_protocol,
+            limited_train_val=limited_train_val,
         )
         global_results: Dict[str, Any] = {
             "phase": "global",
@@ -5156,6 +5183,8 @@ def _write_global_phase_summary_loglik_csv(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
 ) -> None:
     """
     Write global_phase/summary_loglik.csv: pool-best program evaluated per participant,
@@ -5181,6 +5210,8 @@ def _write_global_phase_summary_loglik_csv(
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv,
             max_observed_trials_per_participant=max_observed_trials_per_participant,
+            limited_data_protocol=limited_data_protocol,
+            limited_train_val=limited_train_val,
         )
         train_eval = _evaluate_loglik_for_dataset(
             dataset, choose_fn, train_trials, n_seeds=n_eval_seeds
@@ -5315,44 +5346,27 @@ def _trials_for_loglik_participant(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     return_audit: bool = False,
+    return_manifest: bool = False,
 ):
-    if is_mixed_gambles_dataset(dataset):
-        train_trials, val_trials, test_trials, _ = load_mixed_gambles_trials(
-            participant_id,
-            csv_path=mixed_gambles_csv,
-            filter_gain_loss_only=filter_mixed_gambles,
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-        )
-    elif is_external_dataset(dataset):
-        train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
-            dataset,
-            participant_id,
-            data_dir=str(_REPO_ROOT / external_default_data_dir(dataset)),
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-        )
-    elif not is_psych101_dataset(dataset):
-        raise ValueError(f"Unsupported TEH dataset for loglik split: {dataset!r}")
-    else:
-        train_trials, val_trials, test_trials = _psych101_trials_for_participant(
-            dataset,
-            participant_id,
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-            psych_dataset_split=psych_dataset_split,
-            local_dataset=local_dataset,
-        )
-    train_trials, val_trials, test_trials, audit = apply_max_observed_trials(
-        train_trials,
-        val_trials,
-        test_trials,
+    del data_path
+    train_trials, val_trials, test_trials, audit, manifest = load_participant_limited_splits(
+        dataset,
+        int(participant_id),
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
-        dataset=dataset,
-        participant_id=int(participant_id),
-        split_seed=int(split_seed),
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
     )
+    if return_manifest:
+        return train_trials, val_trials, test_trials, audit, manifest
     if return_audit:
         return train_trials, val_trials, test_trials, audit
     return train_trials, val_trials, test_trials
@@ -5399,6 +5413,8 @@ def run_loglik_refine_participant_from_checkpoint(
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     mdl_lambda: float = 0.0,
 ) -> Dict[str, Any]:
     """
@@ -5423,6 +5439,8 @@ def run_loglik_refine_participant_from_checkpoint(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
         return_audit=True,
     )
     choose_fn = compile_program(initial_code)
@@ -5637,6 +5655,8 @@ def run_loglik_refine_from_prev_experiment(
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     mdl_lambda: float = 0.0,
 ) -> None:
     """Refine-only across participants; copy prior loglik CSV and update gated_test_loglik."""
@@ -5758,6 +5778,8 @@ def run_loglik_refine_from_prev_experiment(
             max_error_prompt_chars=max_error_prompt_chars,
             error_feedback_mode=error_feedback_mode,
             max_observed_trials_per_participant=max_observed_trials_per_participant,
+            limited_data_protocol=limited_data_protocol,
+            limited_train_val=limited_train_val,
             mdl_lambda=mdl_lambda,
         )
         return int(participant_id), metrics
@@ -9013,6 +9035,8 @@ def run_evolution(
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
     mem_trace: bool = False,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     explore_from_handoff_parents: bool = False,
     explore_population_top_k: int = 0,
     mdl_lambda: float = 0.0,
@@ -9127,32 +9151,75 @@ def run_evolution(
                 local_dataset=local_dataset,
             )
         n_blocks, n_parsed = _psych101_experiment_trial_counts(exp)
-        train_trials, val_trials, test_trials, options = split_psych_experiment(
-            exp, split_ratio=split_ratio, split_seed=split_seed
+        from utils.teh.limited_data_protocol import (
+            SPEEKENBRINK_ALIAS as _SPEEKEN_ALIAS,
+            apply_limited_data_protocol,
+            split_continuous_session_chronological,
         )
+        from utils.teh.limited_data_registry import (
+            LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE as _LDP_SA,
+            normalize_limited_data_protocol as _norm_ldp,
+        )
+        from data_modules.psych101_binary import experiment_to_trial_dicts as _exp_to_trials
+
+        if (
+            _norm_ldp(limited_data_protocol) == _LDP_SA
+            and str(dataset).strip() == _SPEEKEN_ALIAS
+        ):
+            all_trials = _exp_to_trials(exp)
+            train_trials, val_trials, test_trials = split_continuous_session_chronological(
+                all_trials, split_ratio
+            )
+            options = list(train_trials[0]["options"]) if train_trials else list(
+                (test_trials[0]["options"] if test_trials else [])
+            )
+            _split_kind = "structure_aware_chronological_session"
+        else:
+            train_trials, val_trials, test_trials, options = split_psych_experiment(
+                exp, split_ratio=split_ratio, split_seed=split_seed
+            )
+            _split_kind = (
+                "legacy_chronological_days"
+                if str(dataset).strip() == "14kool2016when"
+                else (
+                    "legacy_pseudo_block_shuffle"
+                    if str(dataset).strip() == _SPEEKEN_ALIAS
+                    else "legacy_unit_shuffle"
+                )
+            )
         print(
             f"[Load] Parsed blocks={n_blocks}, total_trials={n_parsed}; "
             f"split train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)} "
-            f"(seed={split_seed}, ratio={split_ratio:.3f})"
+            f"(seed={split_seed}, ratio={split_ratio:.3f}, split_kind={_split_kind})"
         )
 
     sparse_audit: Optional[SparseObservationAudit] = None
+    limited_manifest = None
     if choice13k_train_trials_override is None:
-        train_trials, val_trials, test_trials, sparse_audit = apply_max_observed_trials(
+        from utils.teh.limited_data_protocol import apply_limited_data_protocol
+
+        train_trials, val_trials, test_trials, sparse_audit, limited_manifest = apply_limited_data_protocol(
             train_trials,
             val_trials,
             test_trials,
-            max_observed_trials_per_participant=max_observed_trials_per_participant,
             dataset=dataset,
             participant_id=int(participant_id),
             split_seed=int(split_seed),
+            split_ratio=float(split_ratio),
+            max_observed_trials_per_participant=max_observed_trials_per_participant,
+            limited_data_protocol=limited_data_protocol,
+            limited_train_val=limited_train_val,
+            split_kind=locals().get("_split_kind", "legacy_unit_shuffle"),
         )
-        if sparse_audit.applied:
+        if sparse_audit.applied or (
+            limited_manifest is not None and limited_manifest.protocol != "off"
+        ):
             print(
-                f"[Sparse] train+val cap={sparse_audit.max_observed_trials_per_participant}: "
+                f"[LimitedData protocol={limited_manifest.protocol if limited_manifest else 'off'}] "
+                f"train+val cap={sparse_audit.max_observed_trials_per_participant}: "
                 f"train {sparse_audit.original_n_train}->{sparse_audit.retained_n_train}, "
                 f"val {sparse_audit.original_n_val}->{sparse_audit.retained_n_val}, "
-                f"test unchanged ({sparse_audit.retained_n_test}); "
+                f"test {sparse_audit.original_n_test}->{sparse_audit.retained_n_test}; "
                 f"fingerprint={sparse_audit.subset_fingerprint[:12]}"
             )
 
@@ -9176,6 +9243,22 @@ def run_evolution(
             with _SHARED_EXPERIMENT_CSV_LOCK:
                 append_sparse_audit_jsonl(run_root / SPARSE_AUDIT_JSONL_FILENAME, sparse_audit)
                 rewrite_sparse_audit_csv_from_jsonl(run_root / SPARSE_AUDIT_JSONL_FILENAME)
+        if limited_manifest is not None and should_persist_limited_data_manifest(limited_manifest):
+            write_limited_data_manifest(
+                output_path / LIMITED_DATA_MANIFEST_FILENAME, limited_manifest
+            )
+            run_root = (
+                output_path.parent
+                if output_path.name.startswith("participant_")
+                else output_path
+            )
+            with _SHARED_EXPERIMENT_CSV_LOCK:
+                append_limited_data_manifest_jsonl(
+                    run_root / LIMITED_DATA_MANIFEST_JSONL_FILENAME, limited_manifest
+                )
+                rewrite_limited_data_csv_from_jsonl(
+                    run_root / LIMITED_DATA_MANIFEST_JSONL_FILENAME
+                )
     error_history_path = output_path / "error_history.jsonl"
     mem_trace_file: Optional[Path] = None
     mem_run_id = ""
@@ -12616,9 +12699,12 @@ def main():
         help=(
             "After the train/val/test split, keep at most N train+val observations per "
             "participant (sampled proportionally from train and val; test is never changed). "
-            "Omitted or <=0 disables the cap (full data). Uses --split_seed."
+            "Omitted or <=0 disables the cap (full data). Uses --split_seed. "
+            "Under --limited_data_protocol structure_aware this is the same N as "
+            "--limited_train_val when that flag is omitted."
         ),
     )
+    add_limited_data_cli_arguments(parser)
     parser.add_argument(
         "--max_prompt_train_trials",
         type=int,
@@ -12971,6 +13057,17 @@ def main():
     if args.max_observed_trials_per_participant is not None and args.max_observed_trials_per_participant < 0:
         print("Error: --max_observed_trials_per_participant must be >= 0 when set (0 disables).")
         return
+    try:
+        from utils.teh.limited_data_protocol import resolve_limited_data_budget
+
+        resolve_limited_data_budget(
+            protocol=args.limited_data_protocol,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_train_val=args.limited_train_val,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
     if args.phase not in _RUN_PHASES:
         print(f"Error: --phase must be one of {sorted(_RUN_PHASES)}, got {args.phase!r}.")
         return
@@ -13157,6 +13254,16 @@ def main():
         + (
             f", max_observed_trials_per_participant={args.max_observed_trials_per_participant}"
             if args.max_observed_trials_per_participant
+            else ""
+        )
+        + (
+            f", limited_data_protocol={args.limited_data_protocol}"
+            if str(args.limited_data_protocol).strip().lower() not in {"", "off"}
+            else ""
+        )
+        + (
+            f", limited_train_val={args.limited_train_val}"
+            if args.limited_train_val
             else ""
         )
     )
@@ -13379,6 +13486,8 @@ def main():
             max_error_prompt_chars=args.max_error_prompt_chars,
             error_feedback_mode=args.error_feedback_mode,
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
             mdl_lambda=args.mdl_lambda,
         )
 
@@ -13459,6 +13568,8 @@ def main():
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
                 mdl_lambda=args.mdl_lambda,
             )
         finally:
@@ -13577,6 +13688,8 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
@@ -13671,6 +13784,8 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
@@ -14070,6 +14185,8 @@ def main():
                         ablation=args.ablation,
                         mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
@@ -14355,6 +14472,8 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,

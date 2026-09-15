@@ -47,6 +47,16 @@ from data_modules.psych101_binary import (
     split_psych_experiment,
 )
 from utils.teh.participant_ids import load_valid_participant_ids
+from utils.teh.limited_data_protocol import (
+    LIMITED_DATA_MANIFEST_CSV_FILENAME,
+    LIMITED_DATA_MANIFEST_FILENAME,
+    add_limited_data_cli_arguments,
+    load_participant_limited_splits,
+    resolve_limited_data_budget,
+    should_persist_limited_data_manifest,
+    write_limited_data_manifest,
+    write_limited_data_manifests_csv,
+)
 from utils.teh.sparse_observations import (
     SPARSE_AUDIT_CSV_FILENAME,
     SPARSE_AUDIT_FILENAME,
@@ -205,47 +215,27 @@ def trials_for_participant(
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
     max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
     return_audit: bool = False,
+    return_manifest: bool = False,
 ):
     """Train/val/test trials for one participant (TEH split conventions)."""
-    if is_mixed_gambles_dataset(dataset):
-        csv_path = mixed_gambles_csv or DEFAULT_CSV_PATH
-        train_trials, val_trials, test_trials, _ = load_mixed_gambles_trials(
-            participant_id,
-            csv_path=csv_path,
-            filter_gain_loss_only=filter_mixed_gambles,
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-        )
-    elif is_external_dataset(dataset):
-        train_trials, val_trials, test_trials, _ = load_external_loglik_trials(
-            dataset,
-            int(participant_id),
-            data_dir=external_default_data_dir(dataset),
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-        )
-    elif not is_psych101_dataset(dataset):
-        raise ValueError(f"Unsupported dataset: {dataset!r}")
-    else:
-        exp = get_psych101_binary_experiment(
-            dataset,
-            int(participant_id),
-            split=psych_dataset_split,
-            local_dataset=local_dataset,
-        )
-        train_trials, val_trials, test_trials, _ = split_psych_experiment(
-            exp, split_ratio=split_ratio, split_seed=split_seed
-        )
-    train_trials, val_trials, test_trials, audit = apply_max_observed_trials(
-        train_trials,
-        val_trials,
-        test_trials,
+    train_trials, val_trials, test_trials, audit, manifest = load_participant_limited_splits(
+        dataset,
+        int(participant_id),
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
         max_observed_trials_per_participant=max_observed_trials_per_participant,
-        dataset=dataset,
-        participant_id=int(participant_id),
-        split_seed=int(split_seed),
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
     )
+    if return_manifest:
+        return train_trials, val_trials, test_trials, audit, manifest
     if return_audit:
         return train_trials, val_trials, test_trials, audit
     return train_trials, val_trials, test_trials
@@ -824,9 +814,12 @@ def main() -> None:
         help=(
             "After the train/val/test split, keep at most N train+val observations per "
             "participant (sampled proportionally from train and val; test is never changed). "
-            "Omitted or <=0 disables the cap (full data). Uses --split_seed."
+            "Omitted or <=0 disables the cap (full data). Uses --split_seed. "
+            "Under --limited_data_protocol structure_aware this is the same N as "
+            "--limited_train_val when that flag is omitted."
         ),
     )
+    add_limited_data_cli_arguments(parser)
     parser.add_argument(
         "--require_sparse_audit_match",
         type=str,
@@ -871,6 +864,15 @@ def main() -> None:
         sys.exit(1)
     if args.max_observed_trials_per_participant is not None and args.max_observed_trials_per_participant < 0:
         print("Error: --max_observed_trials_per_participant must be >= 0 when set (0 disables).")
+        sys.exit(1)
+    try:
+        resolve_limited_data_budget(
+            protocol=args.limited_data_protocol,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_train_val=args.limited_train_val,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
         sys.exit(1)
     reference_by_pid = None
     if args.require_sparse_audit_match:
@@ -1037,9 +1039,10 @@ def main() -> None:
     participant_details_loglik: List[Dict[str, Any]] = []
     participants_summary: List[Dict[str, Any]] = []
     sparse_audits: List[SparseObservationAudit] = []
+    limited_manifests: List[Any] = []
 
     for participant_id in tqdm(participants_to_process, desc="Participants"):
-        train_trials, val_trials, test_trials, audit = trials_for_participant(
+        train_trials, val_trials, test_trials, audit, manifest = trials_for_participant(
             args.dataset,
             participant_id,
             split_ratio=args.split_ratio,
@@ -1049,7 +1052,9 @@ def main() -> None:
             local_dataset=args.local_dataset,
             mixed_gambles_csv=args.mixed_gambles_csv,
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-            return_audit=True,
+            limited_data_protocol=args.limited_data_protocol,
+            limited_train_val=args.limited_train_val,
+            return_manifest=True,
         )
         if reference_by_pid is not None:
             try:
@@ -1082,10 +1087,19 @@ def main() -> None:
         if should_persist_sparse_audit(audit):
             write_sparse_audit(Path(participant_output_dir) / SPARSE_AUDIT_FILENAME, audit)
             sparse_audits.append(audit)
+        if should_persist_limited_data_manifest(manifest):
+            write_limited_data_manifest(
+                Path(participant_output_dir) / LIMITED_DATA_MANIFEST_FILENAME, manifest
+            )
+            limited_manifests.append(manifest)
 
     if sparse_audits:
         write_sparse_audits_payload(Path(base_run_dir) / SPARSE_AUDIT_FILENAME, sparse_audits)
         write_sparse_audits_csv(Path(base_run_dir) / SPARSE_AUDIT_CSV_FILENAME, sparse_audits)
+    if limited_manifests:
+        write_limited_data_manifests_csv(
+            Path(base_run_dir) / LIMITED_DATA_MANIFEST_CSV_FILENAME, limited_manifests
+        )
 
     if reference_by_pid is not None:
         try:

@@ -512,11 +512,17 @@ def split_psych_experiment(
     exp: PsychExperiment,
     split_ratio: float = 0.8,
     split_seed: int = 42,
+    *,
+    expand_single_block: bool = True,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], list]:
     """Split by block (problem/game/round); history does not cross blocks.
 
     Kool two-step is special-cased: contiguous presented-day split with
     continuous cross-day history (see kool2016_exp2 module docstring).
+
+    ``expand_single_block`` (default True) chunks a single parsed block into
+    shuffled pseudo-blocks. The structure-aware limited-data protocol does not
+    use this helper for Speekenbrink; leave the default on for EMNLP/legacy.
     """
     alias = normalize_psych101_dataset_alias(exp.dataset_alias)
     if PSYCH101_BINARY_DATASETS.get(alias, {}).get("parser") == "kool_twostep":
@@ -528,7 +534,8 @@ def split_psych_experiment(
             exp, split_ratio=split_ratio, split_seed=split_seed
         )
 
-    exp = _expand_single_block_to_pseudo_blocks(exp)
+    if expand_single_block:
+        exp = _expand_single_block_to_pseudo_blocks(exp)
     n_blocks = len(exp.blocks)
     if n_blocks < 3:
         raise ValueError(

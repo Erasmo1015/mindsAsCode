@@ -529,3 +529,19 @@ Default TEH remains **one-shot** auto prompt writing. PICS per-iteration state s
 - CLI: `--dataset_prompt_file` copies a fixed prompt as `infer_single_choice.txt`.
 - Submit with dataset-prefixed job name:  
   `DATASET=... PROMPT_MODE=prompt_evo|cursor_designed bash cluster/2026Sep_Prompt_Evolution/submit_prompt_pilot.sh`
+
+---
+
+## Short update (Sep 15 2026 — structure-aware limited-data protocol)
+
+Default-off. Omitting the new flags keeps the legacy splitter and random train+val cap (`apply_max_observed_trials`; test untouched). Opt-in:
+
+`--limited_data_protocol structure_aware --limited_train_val 40`
+
+(or the same budget via `--max_observed_trials_per_participant 40`). **40 = combined train+val per participant; test is reserved first and never counted.** Shared by PICS, LM, and PT (`utils/teh/limited_data_protocol.py` + registry). Histories are rebuilt from retained observations only; manifests/fingerprints must match across methods.
+
+- **IID** (Wulff, Hilbig, Enkavi, Bergert, mixed gambles): seeded trial sample.
+- **Resetting units** (problems/rounds/balloons/games/…): complete units, then a chronological prefix if valid (e.g. 35+5=40).
+- **Continuous** (Speekenbrink, Kool): contiguous TV immediately before fixed test. **Speekenbrink chronological 60/20/20 only under this option**; legacy pseudo-block shuffle remains when off. Kool stays day-contiguous; a mid-day cut may keep matching stage-1 (audit overshoot).
+- Insufficient TV: keep all eligible, do not shrink test, do not auto-exclude. CPU audit: `analysis_2026Sep/Sep9_mem_report/Sep15_eligibility_set/structure_aware_limited_data/` (history pass; test≠legacy only Speekenbrink; Bergert all 32 TV; Enkavi pid 17 = 6; Wulff 1598/1599 = 22; Kool 41/45 = 41).
+- Tests: `tests/test_limited_data_protocol.py`. Cluster (do not submit from this note): `cluster/2026Sep15_StructureAware_S40/` — BF16 remaining-8 half (Wulff, Speekenbrink, Schulz, Kool), AWQ-Marlin other half (balloon, Bergert, Guan, Steyvers), LM/PT all 15. Outputs under `sparse_data/structure_aware*` (not `emnlp_1iter`).
