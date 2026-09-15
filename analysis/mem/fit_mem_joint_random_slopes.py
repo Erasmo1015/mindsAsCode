@@ -507,6 +507,21 @@ def write_heatmaps(
 
 def write_outputs(fit: Dict[str, Any], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Persist failure diagnostics without requiring a successful MixedLM extract.
+    if fit.get("status") == "fit_failed" or "participant_effects" not in fit:
+        (out_dir / "fit_summary.json").write_text(
+            json.dumps(fit, indent=2, default=str), encoding="utf-8"
+        )
+        (out_dir / "summary.md").write_text(
+            "# Joint random-slope fit\n\n"
+            f"- status: `{fit.get('status')}`\n"
+            f"- formula: `{fit.get('formula')}`\n"
+            f"- re_formula: `{fit.get('re_formula')}`\n"
+            f"- method_results: see `fit_summary.json`\n",
+            encoding="utf-8",
+        )
+        return
+
     part = fit["participant_effects"]
     if not isinstance(part, pd.DataFrame):
         part = pd.DataFrame(part)
@@ -693,10 +708,64 @@ def main() -> None:
                 "eligibility_mode=fe_adjust: nulls in eligible_* columns; "
                 "refusing (missing state ≠ zero)."
             )
-        # Append unique eligibility FE terms (do not put them in random slopes).
+        # Drop weak / near-constant motif FEs (except required random slopes) and
+        # near-constant eligible_* covariates. nunique>=2 alone is not enough:
+        # e.g. value_added with 2 positives still singularizes the MixedLM design.
+        phase = args.phase or None
+        work = df
+        if phase and "phase" in df.columns and (df["phase"] == phase).any():
+            work = df[df["phase"] == phase]
+        min_pos = 5
+        min_both = 2
+        keep_fe: List[str] = []
+        for t in fixed_effects:
+            if t == "iteration" or t in random_slopes:
+                keep_fe.append(t)
+                continue
+            if t not in work.columns:
+                continue
+            s = pd.to_numeric(work[t], errors="coerce").fillna(0)
+            n_pos = int((s == 1).sum())
+            n_both = int(
+                work.assign(_x=s)
+                .groupby("participant_id")["_x"]
+                .nunique()
+                .ge(2)
+                .sum()
+            )
+            if s.nunique(dropna=True) < 2 or n_pos < min_pos or n_both < min_both:
+                print(
+                    f"[fit_joint] drop weak FE {t} (n_pos={n_pos}, n_both={n_both})",
+                    flush=True,
+                )
+                continue
+            keep_fe.append(t)
+        fixed_effects = list(dict.fromkeys(keep_fe))
         for e in elig_terms:
-            if e not in fixed_effects:
-                fixed_effects.append(e)
+            if e in fixed_effects:
+                continue
+            # Only adjust eligibility for motifs that remain in the FE design.
+            motif = e[len("eligible_") :]
+            if motif not in fixed_effects:
+                print(
+                    f"[fit_joint] skip eligibility FE {e} (motif not in FE)",
+                    flush=True,
+                )
+                continue
+            s = pd.to_numeric(work[e], errors="coerce").fillna(0)
+            n0 = int((s == 0).sum())
+            n1 = int((s == 1).sum())
+            if s.nunique(dropna=True) < 2 or min(n0, n1) < min_pos:
+                print(
+                    f"[fit_joint] drop weak eligibility FE {e} (n0={n0}, n1={n1})",
+                    flush=True,
+                )
+                continue
+            fixed_effects.append(e)
+        print(
+            f"[fit_joint] fe_adjust fixed_effects={fixed_effects}",
+            flush=True,
+        )
 
     fit = fit_joint_random_slopes(
         df,
