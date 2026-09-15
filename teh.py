@@ -127,9 +127,12 @@ from utils.teh.sparse_observations import (
     write_sparse_audits_payload,
 )
 from utils.teh.explore_handoff import (
+    prefix_elite_program_ids,
     resolve_explore_from_handoff_parents,
     select_explore_handoff_parents,
+    split_explore_budget_seed_and_parents,
 )
+from utils.teh.explore_source_prompt import build_rank1_explore_prompt_suffix
 from utils.teh.mdl_selection import (
     apply_mdl_to_scored_elite,
     attach_mdl_fields,
@@ -2825,31 +2828,53 @@ def _load_initial_pool_program_files(paths: Sequence[str]) -> List[Tuple[Any, ..
     return elite_parents
 
 
+def _resolve_global_elite_pool_dir(path: Path) -> Path:
+    """Accept a pool dir, global_phase dir, or run dir that contains pool_manifest.json."""
+    candidates = (
+        path,
+        path / "global_elite_pool",
+        path / "global_phase" / "global_elite_pool",
+    )
+    for cand in candidates:
+        if (cand / "pool_manifest.json").is_file():
+            return cand
+    return path
+
+
+def _load_one_initial_pool_dir(pool_dir: str) -> List[Tuple[Any, ...]]:
+    path = Path(pool_dir).expanduser()
+    if not path.is_absolute():
+        path = (_REPO_ROOT / path).resolve()
+    if path.is_file() and path.name.endswith(".py"):
+        return _load_initial_pool_program_files([str(path)])
+    path = _resolve_global_elite_pool_dir(path)
+    loaded = _load_global_elite_pool(path)
+    if not loaded:
+        raise ValueError(f"Empty initial pool directory: {path}")
+    for parent in loaded:
+        if compile_program(parent[0] or "") is None:
+            raise ValueError(
+                f"Failed to compile initial pool program {parent[3]!r} from {path}"
+            )
+    return loaded
+
+
 def _load_initial_pool_from_cli(
     *,
     program_paths: Optional[Sequence[str]],
-    pool_dir: Optional[str],
+    pool_dirs: Optional[Sequence[str]],
 ) -> List[Tuple[Any, ...]]:
-    """Load ``--initial_pool_programs`` and/or ``--initial_pool_dir``."""
+    """Load ``--initial_pool_programs`` and/or one-or-more ``--initial_pool_dir``."""
     elite_parents: List[Tuple[Any, ...]] = []
     if program_paths:
         elite_parents.extend(_load_initial_pool_program_files(program_paths))
-    if pool_dir:
-        path = Path(pool_dir).expanduser()
-        if not path.is_absolute():
-            path = (_REPO_ROOT / path).resolve()
-        if path.is_file() and path.name.endswith(".py"):
-            elite_parents.extend(_load_initial_pool_program_files([str(path)]))
-        else:
-            loaded = _load_global_elite_pool(path)
-            if not loaded:
-                raise ValueError(f"Empty initial pool directory: {path}")
-            for parent in loaded:
-                if compile_program(parent[0] or "") is None:
-                    raise ValueError(
-                        f"Failed to compile initial pool program {parent[3]!r} from {path}"
-                    )
-            elite_parents.extend(loaded)
+    dirs = [d for d in (pool_dirs or []) if d]
+    multi = len(dirs) > 1
+    for idx, pool_dir in enumerate(dirs):
+        loaded = _load_one_initial_pool_dir(pool_dir)
+        if multi:
+            loaded = prefix_elite_program_ids(loaded, f"pool{idx}_")
+        elite_parents.extend(loaded)
     if not elite_parents:
         raise ValueError(
             "No initial-pool programs loaded. Provide --initial_pool_programs and/or --initial_pool_dir."
@@ -8534,6 +8559,8 @@ def _run_pre_evolution_explore_phase(
     evolution_selection_score: str = "train_val",
     explore_parent_programs: Optional[List[Tuple[str, str]]] = None,
     pin_program_ids: Optional[Sequence[str]] = None,
+    prompt_suffix: Optional[str] = None,
+    explore_seed_candidates: int = 0,
     mem_trace_file: Optional[Path] = None,
     mem_run_id: str = "",
     baseline_selection_score: Optional[float] = None,
@@ -8562,8 +8589,21 @@ def _run_pre_evolution_explore_phase(
     print("PRE-EVOLUTION EXPLORE PHASE")
     print(f"{'='*80}")
     print(f"Requested explore candidates: {n_explore}")
-    explore_parents = list(explore_parent_programs) if explore_parent_programs else [(seed_code, "baseline")]
-    parent_counts = distribute_explore_budget(n_explore, len(explore_parents))
+    handoff_parents = list(explore_parent_programs) if explore_parent_programs else []
+    n_seed_cands, handoff_counts = split_explore_budget_seed_and_parents(
+        n_explore,
+        n_seed=int(explore_seed_candidates),
+        n_handoff_parents=len(handoff_parents),
+    )
+    if handoff_parents:
+        explore_parents = list(handoff_parents)
+        parent_counts = list(handoff_counts)
+        if n_seed_cands > 0:
+            explore_parents.append((seed_code, "baseline"))
+            parent_counts.append(n_seed_cands)
+    else:
+        explore_parents = [(seed_code, "baseline")]
+        parent_counts = [n_explore]
     if initial_pool_from_global:
         if explore_parent_programs:
             alloc = ", ".join(
@@ -8572,7 +8612,7 @@ def _run_pre_evolution_explore_phase(
             print(
                 f"Initial elite pool from handoff: "
                 f"{initial_pool_size_before_explore or len(elite_parents)} program(s); "
-                f"explore budget distributed across handoff parents: {alloc}."
+                f"explore budget distributed: {alloc}."
             )
         else:
             print(
@@ -8580,6 +8620,8 @@ def _run_pre_evolution_explore_phase(
                 f"{initial_pool_size_before_explore or len(elite_parents)} program(s); "
                 "explore uses seed program only (not pool parents)."
             )
+    if prompt_suffix:
+        print("[INFO] Explore prompt includes a cross-task source rank-1 suffix.")
 
     explore_dir: Optional[Path] = None
     candidates_dir: Optional[Path] = None
@@ -8647,6 +8689,7 @@ def _run_pre_evolution_explore_phase(
             phase="explore",
             participant_id=int(participant_id),
             iteration=None,
+            prompt_suffix=prompt_suffix,
         )
         candidate_codes.extend(variants)
         candidate_prompt_parent_ids.extend([str(parent_id)] * len(variants))
@@ -9040,6 +9083,8 @@ def run_evolution(
     explore_from_handoff_parents: bool = False,
     explore_population_top_k: int = 0,
     mdl_lambda: float = 0.0,
+    explore_prompt_suffix: Optional[str] = None,
+    explore_seed_candidates: int = 0,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -9770,6 +9815,8 @@ def run_evolution(
             evolution_selection_score=evolution_selection_score,
             explore_parent_programs=explore_parent_programs,
             pin_program_ids=pin_program_ids,
+            prompt_suffix=explore_prompt_suffix,
+            explore_seed_candidates=int(explore_seed_candidates),
             mem_trace_file=mem_trace_file,
             mem_run_id=mem_run_id,
             baseline_selection_score=_safe_float(
@@ -12508,6 +12555,35 @@ def main():
         ),
     )
     parser.add_argument(
+        "--explore_seed_candidates",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Of --explore_candidates, generate this many from the vanilla seed. The rest "
+            "are split across handoff/population parents. Default 0 = all from handoff "
+            "parents when those exist (Stage B/D). Stage F uses 25 of 50."
+        ),
+    )
+    parser.add_argument(
+        "--explore_prompt_source_program",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Stage E: inject this live source rank-1 choose() program into the participant "
+            "explore prompt (cross-task suffix). Explore still generates from --seed_path "
+            "unless an initial pool is also set. Requires --explore_prompt_source_dataset."
+        ),
+    )
+    parser.add_argument(
+        "--explore_prompt_source_dataset",
+        type=str,
+        default=None,
+        metavar="DATASET",
+        help="Dataset alias for --explore_prompt_source_program (task description + example trial).",
+    )
+    parser.add_argument(
         "--num_episodes",
         type=int,
         default=10,
@@ -12924,12 +13000,14 @@ def main():
     )
     parser.add_argument(
         "--initial_pool_dir",
-        type=str,
+        nargs="+",
         default=None,
+        metavar="DIR",
         help=(
             "Optional global_elite_pool directory (pool_manifest.json + ranked .py files) "
-            "to load as the participant initial pool. Can be combined with --initial_pool_programs. "
-            "Cannot be combined with --global_phase."
+            "to load as the participant initial pool. Repeat to mix two live pools "
+            "(Stage F: source pool then target pool). Can be combined with "
+            "--initial_pool_programs. Cannot be combined with --global_phase."
         ),
     )
 
@@ -13004,6 +13082,26 @@ def main():
         return
     if args.explore_population_top_k < 0:
         print("Error: --explore_population_top_k must be >= 0 (0 = all handoff parents).")
+        return
+    if int(args.explore_seed_candidates) < 0:
+        print("Error: --explore_seed_candidates must be >= 0.")
+        return
+    if int(args.explore_seed_candidates) > int(args.explore_candidates):
+        print(
+            "Error: --explore_seed_candidates cannot exceed --explore_candidates "
+            f"(got {args.explore_seed_candidates} > {args.explore_candidates})."
+        )
+        return
+    src_prog = getattr(args, "explore_prompt_source_program", None)
+    src_ds = getattr(args, "explore_prompt_source_dataset", None)
+    if bool(src_prog) != bool(src_ds):
+        print(
+            "Error: --explore_prompt_source_program and --explore_prompt_source_dataset "
+            "must be set together."
+        )
+        return
+    if src_prog and int(args.explore_candidates) <= 0:
+        print("Error: --explore_prompt_source_program requires --explore_candidates > 0.")
         return
     if args.explore_from_population_parents:
         if not (args.global_phase or bool(args.initial_pool_programs or args.initial_pool_dir)):
@@ -13426,7 +13524,7 @@ def main():
         try:
             global_elite_for_handoff = _load_initial_pool_from_cli(
                 program_paths=args.initial_pool_programs,
-                pool_dir=args.initial_pool_dir,
+                pool_dirs=args.initial_pool_dir,
             )
         except (FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}")
@@ -13495,6 +13593,24 @@ def main():
         has_initial_pool=has_initial_pool,
         explore_from_population_parents=bool(args.explore_from_population_parents),
     )
+    explore_prompt_suffix = None
+    if args.explore_prompt_source_program:
+        try:
+            explore_prompt_suffix = build_rank1_explore_prompt_suffix(
+                source_dataset=str(args.explore_prompt_source_dataset),
+                program_path=str(args.explore_prompt_source_program),
+                split_seed=int(args.split_seed),
+                psych_dataset_split=psych_dataset_split,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}")
+            if wandb is not None:
+                wandb.finish()
+            return
+        print(
+            "[INFO] Stage E explore prompt includes live source rank-1 "
+            f"({args.explore_prompt_source_dataset}: {args.explore_prompt_source_program})"
+        )
     if (
         explore_from_handoff_parents
         and bool(args.explore_from_population_parents)
@@ -13568,8 +13684,8 @@ def main():
                 max_error_prompt_chars=args.max_error_prompt_chars,
                 error_feedback_mode=args.error_feedback_mode,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-            limited_data_protocol=args.limited_data_protocol,
-            limited_train_val=args.limited_train_val,
+                limited_data_protocol=args.limited_data_protocol,
+                limited_train_val=args.limited_train_val,
                 mdl_lambda=args.mdl_lambda,
             )
         finally:
@@ -13688,11 +13804,13 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-            limited_data_protocol=args.limited_data_protocol,
-            limited_train_val=args.limited_train_val,
+                limited_data_protocol=args.limited_data_protocol,
+                limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
+                explore_prompt_suffix=explore_prompt_suffix,
+                explore_seed_candidates=int(args.explore_seed_candidates),
             )
         finally:
             if wandb is not None:
@@ -13784,11 +13902,13 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-            limited_data_protocol=args.limited_data_protocol,
-            limited_train_val=args.limited_train_val,
+                limited_data_protocol=args.limited_data_protocol,
+                limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
+                explore_prompt_suffix=explore_prompt_suffix,
+                explore_seed_candidates=int(args.explore_seed_candidates),
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -14185,11 +14305,13 @@ def main():
                         ablation=args.ablation,
                         mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-            limited_data_protocol=args.limited_data_protocol,
-            limited_train_val=args.limited_train_val,
+                limited_data_protocol=args.limited_data_protocol,
+                limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
+                explore_prompt_suffix=explore_prompt_suffix,
+                explore_seed_candidates=int(args.explore_seed_candidates),
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -14472,11 +14594,13 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-            limited_data_protocol=args.limited_data_protocol,
-            limited_train_val=args.limited_train_val,
+                limited_data_protocol=args.limited_data_protocol,
+                limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
+                explore_prompt_suffix=explore_prompt_suffix,
+                explore_seed_candidates=int(args.explore_seed_candidates),
             )
 
         try:

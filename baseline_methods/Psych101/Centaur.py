@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Centaur (Llama 3.1 + Psych-101-style prompts) baseline for TEH Psych-101 datasets.
+Centaur (Llama 3.1 + Psych-101-style prompts) baseline for TEH loglik datasets.
 
-Evaluates held-out test trials with explicit Bernoulli log-likelihood:
-  P(action=1) from normalized logprobs of <<option_keys[0]>> vs <<option_keys[1]>> completions.
+Evaluates held-out test trials with explicit trial log-likelihood (PICS-fair Option P):
+  - Bernoulli: P(action=1) from softmax over <<key0>> vs <<key1>> suffix logprobs
+  - Categorical (K-way): softmax over <<display_key_i>> suffixes; LL = log p[action]
+
+Supports Psych-101 binaries, Kool/Schulz, and external Bergert/Guan/Steyvers.
+Sparse / limited-data protocol matches TEH/MLE (caps train+val; test untouched).
 
 Model loading / suffix scoring follows reference_repos/Llama-3.1-Centaur-70B/test_adapter.py
 (Unsloth FastLanguageModel, teacher-forcing loss on suffix tokens only — not trainer.evaluate()).
@@ -33,16 +37,38 @@ import numpy as np
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_PSYCH101_DIR = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(_PSYCH101_DIR) not in sys.path:
+    sys.path.insert(0, str(_PSYCH101_DIR))
 
+from centaur_prompts import (  # noqa: E402
+    centaur_display_keys,
+    try_build_extended_centaur_prefix,
+)
+from data_modules.mixed_gambles import DEFAULT_CSV_PATH  # noqa: E402
 from data_modules.psych101_binary import (  # noqa: E402
     DEFAULT_PSYCH_DATASET_SPLIT,
-    PSYCH101_BINARY_DATASETS,
     get_psych101_binary_experiment,
+    is_psych101_dataset,
     normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
-    split_psych_experiment,
+)
+from data_modules.external import (  # noqa: E402
+    EXTERNAL_DATASETS,
+    external_dataset_task_description,
+    is_external_dataset,
+)
+from utils.teh.limited_data_protocol import (  # noqa: E402
+    LIMITED_DATA_MANIFEST_CSV_FILENAME,
+    LIMITED_DATA_MANIFEST_JSONL_FILENAME,
+    add_limited_data_cli_arguments,
+    append_limited_data_manifest_jsonl,
+    load_participant_limited_splits,
+    resolve_limited_data_budget,
+    rewrite_limited_data_csv_from_jsonl,
+    should_persist_limited_data_manifest,
 )
 from utils.teh.participant_ids import load_valid_participant_ids  # noqa: E402
 from utils.teh.teh_datasets import (  # noqa: E402
@@ -50,7 +76,19 @@ from utils.teh.teh_datasets import (  # noqa: E402
     is_binary_loglik_dataset,
 )
 
-PSYCH101_CENTAUR_DATASETS = sorted(IMPLEMENTED_PSYCH101_ALIASES)
+# Five new datasets + all implemented Psych-101 aliases.
+CENTAUR_FOCUS_DATASETS = frozenset(
+    {
+        "14kool2016when",
+        "13schulz2020finding",
+        "bergert_nosofsky_2007",
+        "guan_2020_stopping",
+        "steyvers_2009_bandit",
+    }
+)
+PSYCH101_CENTAUR_DATASETS = sorted(
+    set(IMPLEMENTED_PSYCH101_ALIASES) | set(EXTERNAL_DATASETS)
+)
 
 
 def _effective_psych_dataset_split(psych_dataset_split: str) -> str:
@@ -149,9 +187,32 @@ def centaur_output_base_dir(
     *,
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
 ) -> str:
-    split = normalize_psych_dataset_split(psych_dataset_split)
     alias = normalize_psych101_dataset_alias(dataset)
+    if is_external_dataset(alias):
+        return f"generated_outputs/external/{alias}/centaur/run_{timestamp}"
+    split = normalize_psych_dataset_split(psych_dataset_split)
     return f"generated_outputs/psych101_{split}/centaur/{alias}/run_{timestamp}"
+
+
+def _task_instruction_for_participant(
+    dataset: str,
+    participant_id: int,
+    *,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+) -> str:
+    alias = normalize_psych101_dataset_alias(dataset)
+    if is_external_dataset(alias):
+        return external_dataset_task_description(alias)
+    if is_psych101_dataset(alias):
+        exp = get_psych101_binary_experiment(
+            alias,
+            int(participant_id),
+            split=psych_dataset_split,
+            local_dataset=local_dataset,
+        )
+        return str(exp.instruction or "")
+    return ""
 
 
 # ----- Psych-101 transcript-style prompt construction -----
@@ -493,6 +554,11 @@ def build_centaur_prompt_prefix_indexed(
     instruction: str = "",
 ) -> str:
     """Build Psych-101-style prefix for trials[trial_index] (ends with 'You press ')."""
+    extended = try_build_extended_centaur_prefix(
+        trials, trial_index, instruction=instruction
+    )
+    if extended is not None:
+        return extended
     schema = str(trials[trial_index]["problem"].get("schema_type", "?"))
     if schema == "A" and (
         "gamble_A" in trials[trial_index]["problem"]
@@ -514,7 +580,7 @@ def build_centaur_prompt_prefix_indexed(
 
 
 class CentaurChooser:
-    """Loads Centaur once; scores P(action=1) via normalized <<key>> suffix logprobs."""
+    """Loads Centaur once; scores action probs via normalized <<key>> suffix logprobs."""
 
     def __init__(
         self,
@@ -584,35 +650,53 @@ class CentaurChooser:
                 return score, f"logprob_non_finite:{score}"
             return score, None
 
-    def prob_choose_second_option(self, trials: List[Dict[str, Any]], trial_index: int) -> float:
+    def action_probs_from_suffixes(
+        self, trials: List[Dict[str, Any]], trial_index: int
+    ) -> List[float]:
+        """Softmax over Centaur display-key suffix logprobs; length K = n_actions."""
         problem = trials[trial_index]["problem"]
-        keys = problem["option_keys"]
-        if len(keys) != 2:
-            raise ValueError(f"Expected two option keys, got {keys!r}")
+        keys = centaur_display_keys(problem)
+        if len(keys) < 2:
+            raise ValueError(f"Expected >=2 display keys, got {keys!r}")
 
         prefix = build_centaur_prompt_prefix_indexed(
             trials, trial_index, instruction=self.task_instruction
         )
-        s0 = f"<<{keys[0]}>>."
-        s1 = f"<<{keys[1]}>>."
-        lp0, r0 = self._suffix_logprob_detailed(prefix, s0)
-        lp1, r1 = self._suffix_logprob_detailed(prefix, s1)
-        m = max(lp0, lp1)
-        t0 = math.exp(lp0 - m)
-        t1 = math.exp(lp1 - m)
-        denom = t0 + t1
+        lps: List[float] = []
+        reasons: List[Optional[str]] = []
+        for key in keys:
+            lp, reason = self._suffix_logprob_detailed(prefix, f"<<{key}>>.")
+            lps.append(lp)
+            reasons.append(reason)
+        m = max(lps)
+        exps = [math.exp(lp - m) for lp in lps]
+        denom = sum(exps)
         if denom <= 0 or not math.isfinite(denom):
             self.last_prob_debug = {
                 "fallback_source": "invalid_denom",
-                "lp0": lp0,
-                "lp1": lp1,
-                "suffix0_reason": r0,
-                "suffix1_reason": r1,
+                "lps": lps,
+                "reasons": reasons,
+                "keys": keys,
             }
-            return 0.5
-        p1 = t1 / denom
-        self.last_prob_debug = {"fallback_source": None, "lp0": lp0, "lp1": lp1}
-        return float(min(max(p1, 1e-9), 1.0 - 1e-9))
+            return [1.0 / len(keys)] * len(keys)
+        probs = [e / denom for e in exps]
+        self.last_prob_debug = {
+            "fallback_source": None,
+            "lps": lps,
+            "keys": keys,
+            "probs": probs,
+        }
+        return [float(min(max(p, 1e-9), 1.0 - 1e-9)) for p in probs]
+
+    def prob_choose_second_option(self, trials: List[Dict[str, Any]], trial_index: int) -> float:
+        """Bernoulli P(action=1); for K=2 this is the second display-key probability."""
+        probs = self.action_probs_from_suffixes(trials, trial_index)
+        if len(probs) != 2:
+            raise ValueError(
+                f"prob_choose_second_option requires K=2, got K={len(probs)} "
+                f"(use action_probs_from_suffixes for categorical)"
+            )
+        return float(probs[1])
 
 
 def evaluate_centaur_on_trials(
@@ -635,16 +719,24 @@ def evaluate_centaur_on_trials(
         for i in range(total):
             y = int(trials[i]["action"])
             try:
-                p_raw = chooser.prob_choose_second_option(trials, i)
+                probs = chooser.action_probs_from_suffixes(trials, i)
+                if y < 0 or y >= len(probs):
+                    raise ValueError(f"action {y} out of range for K={len(probs)}")
+                p_obs = float(probs[y])
+                pred = int(max(range(len(probs)), key=lambda a: probs[a]))
             except Exception as e:
                 errors += 1
                 if verbose and errors <= 3 and seed_idx == 0:
                     print(f"  Evaluation error trial {i}: {e}")
-                p_raw = 0.5
-            p = min(max(float(p_raw), 1e-9), 1.0 - 1e-9)
-            loglik_acc += y * math.log(p) + (1 - y) * math.log(1.0 - p)
-            pred = 1 if float(p_raw) >= 0.5 else 0
+                keys = centaur_display_keys(trials[i]["problem"])
+                k = max(2, len(keys))
+                p_obs = 1.0 / k
+                pred = 0
+            p_obs = min(max(p_obs, 1e-9), 1.0 - 1e-9)
+            loglik_acc += math.log(p_obs)
             correct += int(pred == y)
+            if debug_prob and seed_idx == 0 and i < debug_limit:
+                print(f"  [debug] trial={i} y={y} p_obs={p_obs:.6f} dbg={chooser.last_prob_debug}")
         avg_ll = loglik_acc / total if total else 0.0
         acc = correct / total if total else 0.0
         return avg_ll, acc, errors
@@ -673,13 +765,17 @@ def collect_centaur_predictions(
     rows: List[Dict[str, Any]] = []
     for i, t in enumerate(trials):
         y = int(t["action"])
-        keys = t["problem"].get("option_keys", [])
-        p_raw: Optional[float] = None
+        keys = centaur_display_keys(t["problem"])
+        p_obs: Optional[float] = None
         pred: Optional[int] = None
         error = ""
+        probs_json = ""
         try:
-            p_raw = float(chooser.prob_choose_second_option(trials, i))
-            pred = 1 if p_raw >= 0.5 else 0
+            probs = chooser.action_probs_from_suffixes(trials, i)
+            probs_json = json.dumps([float(p) for p in probs])
+            if 0 <= y < len(probs):
+                p_obs = float(probs[y])
+            pred = int(max(range(len(probs)), key=lambda a: probs[a]))
         except Exception as e:
             error = str(e)
         rows.append(
@@ -690,9 +786,16 @@ def collect_centaur_predictions(
                 "trial_index": i,
                 "option_key_0": keys[0] if len(keys) > 0 else "",
                 "option_key_1": keys[1] if len(keys) > 1 else "",
+                "n_keys": len(keys),
                 "actual_action": y,
-                "pred_prob_action1": p_raw,
+                "pred_prob_observed": p_obs,
+                "pred_prob_action1": (
+                    float(json.loads(probs_json)[1])
+                    if probs_json and len(json.loads(probs_json)) == 2
+                    else p_obs
+                ),
                 "pred_action": pred,
+                "probs_json": probs_json,
                 "history_len": len(t.get("history", [])),
                 "schema_type": t.get("problem", {}).get("schema_type", ""),
                 "error": error,
@@ -701,6 +804,51 @@ def collect_centaur_predictions(
     return rows
 
 
+def _load_centaur_trials(
+    dataset: str,
+    participant_row_index: int,
+    *,
+    split_ratio: float,
+    split_seed: int,
+    psych_dataset_split: str,
+    local_dataset: Optional[str],
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
+    data_dir: Optional[str] = None,
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    str,
+    Any,
+]:
+    """Load train/val/test with optional sparse/limited-data protocol; return instruction + manifest."""
+    alias = normalize_psych101_dataset_alias(dataset)
+    train_trials, val_trials, test_trials, _audit, manifest = load_participant_limited_splits(
+        alias,
+        int(participant_row_index),
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
+        data_dir=data_dir,
+    )
+    instruction = _task_instruction_for_participant(
+        alias,
+        int(participant_row_index),
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+    )
+    return train_trials, val_trials, test_trials, instruction, manifest
+
+
+# Back-compat alias used by older call sites / tests.
 def _load_psych101_trials(
     dataset: str,
     participant_row_index: int,
@@ -715,17 +863,15 @@ def _load_psych101_trials(
     List[Dict[str, Any]],
     str,
 ]:
-    alias = normalize_psych101_dataset_alias(dataset)
-    exp = get_psych101_binary_experiment(
-        alias,
-        int(participant_row_index),
-        split=psych_dataset_split,
+    train, val, test, instruction, _manifest = _load_centaur_trials(
+        dataset,
+        participant_row_index,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
     )
-    train_trials, val_trials, test_trials, _ = split_psych_experiment(
-        exp, split_ratio=split_ratio, split_seed=split_seed
-    )
-    return train_trials, val_trials, test_trials, exp.instruction
+    return train, val, test, instruction
 
 
 def _safe_mean_numeric(values: List[Any]) -> Optional[float]:
@@ -836,15 +982,21 @@ def run_smoke_prompt_check(
     psych_dataset_split: str,
     local_dataset: Optional[str],
     n_trials: int = 3,
+    max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Validate loaders, option_keys, and prompt prefixes without loading the model."""
-    train, val, test, instruction = _load_psych101_trials(
+    """Validate loaders, display keys, and prompt prefixes without loading the model."""
+    train, val, test, instruction, manifest = _load_centaur_trials(
         dataset,
         participant_row_index,
         split_ratio=split_ratio,
         split_seed=split_seed,
         psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
     )
     trials = test or val or train
     if not trials:
@@ -852,19 +1004,23 @@ def run_smoke_prompt_check(
     samples = []
     for i in range(min(n_trials, len(trials))):
         prob = trials[i]["problem"]
-        keys = prob.get("option_keys", [])
-        if len(keys) != 2:
-            raise ValueError(f"Trial {i}: expected 2 option_keys, got {keys!r}")
+        keys = centaur_display_keys(prob)
+        if len(keys) < 2:
+            raise ValueError(f"Trial {i}: expected >=2 display keys, got {keys!r}")
         prefix = build_centaur_prompt_prefix_indexed(trials, i, instruction=instruction)
+        if not prefix.rstrip().endswith("You press"):
+            raise ValueError(f"Trial {i}: prefix must end with 'You press ', got tail={prefix[-40:]!r}")
         samples.append(
             {
                 "trial_index": i,
                 "schema_type": prob.get("schema_type"),
-                "option_keys": keys,
+                "dataset_alias": prob.get("dataset_alias"),
+                "option_keys": prob.get("option_keys"),
+                "display_keys": keys,
                 "action": trials[i]["action"],
                 "history_len": len(trials[i].get("history", [])),
                 "prefix_tail": prefix[-400:],
-                "suffixes": [f"<<{keys[0]}>>.", f"<<{keys[1]}>>."],
+                "suffixes": [f"<<{k}>>." for k in keys],
             }
         )
     return {
@@ -873,6 +1029,10 @@ def run_smoke_prompt_check(
         "n_train": len(train),
         "n_val": len(val),
         "n_test": len(test),
+        "limited_data_protocol": getattr(manifest, "protocol", None),
+        "retained_n_train": getattr(manifest, "retained_n_train", None),
+        "retained_n_val": getattr(manifest, "retained_n_val", None),
+        "retained_n_test": getattr(manifest, "retained_n_test", None),
         "instruction_chars": len(instruction),
         "samples": samples,
     }
@@ -890,20 +1050,30 @@ def _evaluate_participant(
     n_eval_seeds: int,
     debug_prob: bool,
     debug_limit: int,
+    max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
+    manifest_jsonl_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    train_trials, val_trials, test_trials, instruction = _load_psych101_trials(
+    train_trials, val_trials, test_trials, instruction, manifest = _load_centaur_trials(
         dataset,
         participant_row_index,
         split_ratio=split_ratio,
         split_seed=split_seed,
         psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
     )
+    if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
+        append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
     chooser.task_instruction = instruction
     print(
         f"[Split] {dataset} participant row {participant_row_index}: "
         f"train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)} "
-        f"(ratio={split_ratio:.3f}, seed={split_seed}; Centaur evaluates test only)"
+        f"(ratio={split_ratio:.3f}, seed={split_seed}; Centaur evaluates test only; "
+        f"protocol={manifest.protocol})"
     )
     test_eval = evaluate_centaur_on_trials(
         chooser,
@@ -931,7 +1101,10 @@ def _evaluate_participant(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Centaur baseline for TEH Psych-101 binary datasets (held-out test loglik)."
+        description=(
+            "Centaur baseline for TEH loglik datasets (held-out test trial loglik; "
+            "Bernoulli or K-way categorical)."
+        )
     )
     _choices = sorted(
         set(PSYCH101_CENTAUR_DATASETS)
@@ -970,6 +1143,17 @@ def main() -> None:
     parser.add_argument("--debug_prob_limit", type=int, default=5)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument(
+        "--max_observed_trials_per_participant",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Sparse-data: after the train/val/test split, keep at most N combined "
+            "train+val observations per participant (test untouched). Same CLI as TEH/MLE."
+        ),
+    )
+    add_limited_data_cli_arguments(parser)
+    parser.add_argument(
         "--smoke_prompt_only",
         action="store_true",
         help="Validate parsing/prompts for participant 0 (or --single_participant_id) without GPU.",
@@ -977,7 +1161,12 @@ def main() -> None:
     parser.add_argument(
         "--smoke_all_datasets",
         action="store_true",
-        help="Run --smoke_prompt_only for every Psych-101 dataset alias (no GPU).",
+        help="Run --smoke_prompt_only for every Centaur dataset alias (no GPU).",
+    )
+    parser.add_argument(
+        "--smoke_focus_datasets",
+        action="store_true",
+        help="Like --smoke_all_datasets but only the five new focus datasets.",
     )
     args = parser.parse_args()
 
@@ -987,24 +1176,54 @@ def main() -> None:
     if not (0.0 < args.split_ratio < 1.0):
         print("--split_ratio must be in (0, 1).")
         sys.exit(1)
-    if not args.smoke_all_datasets and not args.dataset:
-        print("--dataset is required unless --smoke_all_datasets is set.")
+    if not args.smoke_all_datasets and not args.smoke_focus_datasets and not args.dataset:
+        print("--dataset is required unless --smoke_all_datasets / --smoke_focus_datasets is set.")
+        sys.exit(1)
+    try:
+        resolve_limited_data_budget(
+            protocol=args.limited_data_protocol,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_train_val=args.limited_train_val,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
         sys.exit(1)
 
     dataset = normalize_psych101_dataset_alias(args.dataset) if args.dataset else ""
     psych_split = _effective_psych_dataset_split(args.psych_dataset_split)
+    sparse_kwargs = dict(
+        max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+        limited_data_protocol=args.limited_data_protocol,
+        limited_train_val=args.limited_train_val,
+    )
 
-    if args.smoke_all_datasets:
-        for alias in PSYCH101_CENTAUR_DATASETS:
+    smoke_aliases: List[str] = []
+    if args.smoke_focus_datasets:
+        smoke_aliases = sorted(CENTAUR_FOCUS_DATASETS)
+    elif args.smoke_all_datasets:
+        smoke_aliases = list(PSYCH101_CENTAUR_DATASETS)
+
+    if smoke_aliases:
+        for alias in smoke_aliases:
             print(f"\n=== smoke {alias} ===")
             try:
-                info = run_smoke_prompt_check(
+                valid = load_valid_participant_ids_from_json(
                     alias,
-                    0,
+                    REPO_ROOT,
                     split_ratio=args.split_ratio,
                     split_seed=args.split_seed,
                     psych_dataset_split=psych_split,
                     local_dataset=args.local_dataset,
+                )
+                pid = int(valid[0]) if valid else 0
+                info = run_smoke_prompt_check(
+                    alias,
+                    pid,
+                    split_ratio=args.split_ratio,
+                    split_seed=args.split_seed,
+                    psych_dataset_split=psych_split,
+                    local_dataset=args.local_dataset,
+                    **sparse_kwargs,
                 )
                 print(json.dumps(info, indent=2))
             except Exception as e:
@@ -1035,6 +1254,7 @@ def main() -> None:
             split_seed=args.split_seed,
             psych_dataset_split=psych_split,
             local_dataset=args.local_dataset,
+            **sparse_kwargs,
         )
         print(json.dumps(info, indent=2))
         return
@@ -1047,6 +1267,7 @@ def main() -> None:
     )
     cmd_log = _write_command_line_log(base_run_dir)
     print(f"Wrote full command line to {cmd_log}")
+    manifest_jsonl = base_run_dir / "log" / LIMITED_DATA_MANIFEST_JSONL_FILENAME
 
     chooser = CentaurChooser(args.centaur_model, max_seq_length=args.max_seq_length)
     participant_loglik: List[Dict[str, Any]] = []
@@ -1064,12 +1285,17 @@ def main() -> None:
             n_eval_seeds=args.n_eval_seeds,
             debug_prob=args.debug_prob,
             debug_limit=args.debug_prob_limit,
+            manifest_jsonl_path=manifest_jsonl,
+            **sparse_kwargs,
         )
         participant_loglik.append(summ)
         prediction_rows.extend(preds)
 
     _write_loglik_csvs(base_run_dir, participant_loglik)
     _write_predictions_csv(base_run_dir, prediction_rows)
+    rewrite_limited_data_csv_from_jsonl(
+        manifest_jsonl, base_run_dir / "log" / LIMITED_DATA_MANIFEST_CSV_FILENAME
+    )
     print(f"Wrote participant_details_loglik.csv and summary_loglik.csv under {base_run_dir}")
 
 

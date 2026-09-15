@@ -64,6 +64,7 @@ from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_tria
 from data_modules.psych101_binary import (
     DEFAULT_PSYCH_DATASET_SPLIT,
     PETERSON2021USING_ALIAS,
+    PSYCH101_BINARY_DATASETS,
     PSYCH101_LEGACY_ALIASES,
     get_psych101_binary_experiment,
     hf_id_for_psych_dataset_split,
@@ -72,14 +73,31 @@ from data_modules.psych101_binary import (
     normalize_psych_dataset_split,
     split_psych_experiment,
 )
+from data_modules.external import (
+    EXTERNAL_DATASETS,
+    external_reference_prompt_path,
+    is_external_dataset,
+)
 # utils.teh.* here: dataset registry + participant-id paths only (not TEH prompts/runtime).
 from utils.psych101_openevolve_pool import WORKER_VANILLA as _WORKER_VANILLA
+from utils.teh.limited_data_protocol import (
+    LIMITED_DATA_MANIFEST_CSV_FILENAME,
+    LIMITED_DATA_MANIFEST_JSONL_FILENAME,
+    add_limited_data_cli_arguments,
+    append_limited_data_manifest_jsonl,
+    load_participant_limited_splits,
+    resolve_limited_data_budget,
+    rewrite_limited_data_csv_from_jsonl,
+    should_persist_limited_data_manifest,
+)
 from utils.teh.participant_ids import load_valid_participant_ids
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
     is_binary_loglik_dataset,
+    is_categorical_output_dataset,
     is_mixed_gambles_dataset,
 )
+from utils.teh_psych.categorical_eval import evaluate_categorical_program
 
 from openevolve import OpenEvolve
 from openevolve.config import Config
@@ -88,8 +106,18 @@ from openevolve.process_parallel import ProcessParallelController
 WANDB_PROJECT = "openevolve"
 CHOICE13K_LOGLIK_EPS = 1e-9
 DEFAULT_SEED_PATH = _REPO_ROOT / "persona_code_example" / "openevolve_vanilla" / "choices13k.py"
+DEFAULT_CATEGORICAL_SEED_PATH = _REPO_ROOT / "persona_code_example" / "teh" / "categorical_uniform.py"
 DEFAULT_BASE_PROMPT = (
     _REPO_ROOT / "prompts" / "openevolve_vanilla" / "choices13k" / "infer_single_choice.txt"
+)
+FOCUS_DATASETS = frozenset(
+    {
+        "14kool2016when",
+        "13schulz2020finding",
+        "bergert_nosofsky_2007",
+        "guan_2020_stopping",
+        "steyvers_2009_bandit",
+    }
 )
 
 _SHARED_CSV_LOCK = threading.Lock()
@@ -166,9 +194,38 @@ def _run_openevolve(oe: OpenEvolve, iterations: int) -> Any:
 
 
 def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> str:
-    if is_mixed_gambles_dataset(dataset):
+    if is_mixed_gambles_dataset(dataset) or is_external_dataset(dataset):
         return DEFAULT_PSYCH_DATASET_SPLIT
     return normalize_psych_dataset_split(psych_dataset_split)
+
+
+def resolve_openevolve_seed_and_prompt(
+    dataset: str,
+    *,
+    seed_path: Optional[str] = None,
+    base_prompt: Optional[str] = None,
+) -> Tuple[Path, Path]:
+    """Pick seed/program prompt; auto-switch for categorical / focus datasets when defaults used."""
+    alias = normalize_psych101_dataset_alias(dataset)
+    seed = Path(seed_path) if seed_path else DEFAULT_SEED_PATH
+    prompt = Path(base_prompt) if base_prompt else DEFAULT_BASE_PROMPT
+    using_default_seed = Path(seed).resolve() == DEFAULT_SEED_PATH.resolve()
+    using_default_prompt = Path(prompt).resolve() == DEFAULT_BASE_PROMPT.resolve()
+
+    if using_default_seed and is_categorical_output_dataset(alias):
+        seed = DEFAULT_CATEGORICAL_SEED_PATH
+
+    if using_default_prompt:
+        ref: Optional[str] = None
+        if is_external_dataset(alias):
+            ref = external_reference_prompt_path(alias)
+        elif is_psych101_dataset(alias):
+            ref = PSYCH101_BINARY_DATASETS.get(alias, {}).get("reference_prompt")
+        if ref:
+            cand = _REPO_ROOT / str(ref)
+            if cand.is_file():
+                prompt = cand
+    return seed, prompt
 
 
 def _safe_float(x: Any) -> Optional[float]:
@@ -291,27 +348,27 @@ def trials_for_participant(
     psych_dataset_split: str,
     local_dataset: Optional[str],
     mixed_gambles_csv: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    if is_mixed_gambles_dataset(dataset):
-        train_trials, val_trials, test_trials, _ = load_mixed_gambles_trials(
-            participant_id,
-            csv_path=mixed_gambles_csv,
-            filter_gain_loss_only=filter_mixed_gambles,
-            split_ratio=split_ratio,
-            split_seed=split_seed,
-        )
-        return train_trials, val_trials, test_trials
-    if not is_psych101_dataset(dataset):
-        raise ValueError(f"Unsupported dataset: {dataset!r}")
-    exp = get_psych101_binary_experiment(
+    max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
+    return_manifest: bool = False,
+):
+    """Train/val/test with optional sparse/limited-data protocol (same as TEH/MLE)."""
+    train_trials, val_trials, test_trials, audit, manifest = load_participant_limited_splits(
         dataset,
         int(participant_id),
-        split=psych_dataset_split,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
         local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
     )
-    train_trials, val_trials, test_trials, _ = split_psych_experiment(
-        exp, split_ratio=split_ratio, split_seed=split_seed
-    )
+    if return_manifest:
+        return train_trials, val_trials, test_trials, audit, manifest
     return train_trials, val_trials, test_trials
 
 
@@ -362,9 +419,17 @@ def _clamp_probability(p: float) -> float:
     return min(max(float(p), CHOICE13K_LOGLIK_EPS), 1.0 - CHOICE13K_LOGLIK_EPS)
 
 
-def evaluate_loglik(choose_fn: Callable, trials: List[Dict[str, Any]]) -> Dict[str, float]:
+def evaluate_loglik(
+    choose_fn: Callable,
+    trials: List[Dict[str, Any]],
+    *,
+    dataset: Optional[str] = None,
+) -> Dict[str, float]:
     if not trials:
         return {"avg_loglik": float("-inf"), "total": 0, "errors": 0}
+    alias = normalize_psych101_dataset_alias(dataset) if dataset else None
+    if alias and is_categorical_output_dataset(alias):
+        return evaluate_categorical_program(choose_fn, trials)
     loglik_acc = 0.0
     errors = 0
     for t in trials:
@@ -527,8 +592,39 @@ def _compact_history(history: List[Dict[str, Any]], max_items: int = 6) -> str:
 
 def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
     problem = trial.get("problem") or {}
+    alias = str(problem.get("dataset_alias") or "")
+    schema = str(problem.get("schema_type") or "")
     if "gamble_A" in problem:
         core = _compact_gamble(problem)
+    elif schema == "bergert_pairwise" or alias == "bergert_nosofsky_2007":
+        oa = problem.get("option_A") or {}
+        ob = problem.get("option_B") or {}
+        core = (
+            f"bergert pid={problem.get('problem_id')} "
+            f"A_cues={oa.get('cues')} B_cues={ob.get('cues')} "
+            f"keys={list(problem.get('option_keys') or [])}"
+        )
+    elif schema == "guan_stopping" or alias == "guan_2020_stopping":
+        core = (
+            f"guan env={problem.get('environment')} L={problem.get('sequence_length')} "
+            f"pos={problem.get('position')} vals={list(problem.get('values_observed') or [])}"
+        )
+    elif alias == "steyvers_2009_bandit":
+        core = (
+            f"steyvers game={problem.get('game')} trial={problem.get('trial')} "
+            f"n_arms={problem.get('n_arms')} keys={list(problem.get('option_keys') or [])}"
+        )
+    elif schema == "categorical_bandit" or alias == "13schulz2020finding":
+        core = (
+            f"schulz round={problem.get('round')} trial={problem.get('trial')} "
+            f"n_arms={problem.get('n_arms')} keys={list(problem.get('option_keys') or [])}"
+        )
+    elif schema == "kool_twostep" or alias == "14kool2016when":
+        core = (
+            f"kool stage={problem.get('stage')} day={problem.get('presented_day')} "
+            f"keys={list(problem.get('option_keys') or [])} "
+            f"planet={problem.get('planet')}"
+        )
     elif "memory_set_letters" in problem and "probe_letter" in problem:
         core = (
             "memory_set="
@@ -971,8 +1067,12 @@ def openevolve_output_base_dir(
     *,
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
 ) -> str:
-    split = _effective_psych_dataset_split(dataset, psych_dataset_split)
     alias = normalize_psych101_dataset_alias(dataset)
+    if is_external_dataset(alias):
+        return f"generated_outputs/external/{alias}/openevolve/run_{timestamp}"
+    if is_mixed_gambles_dataset(alias):
+        return f"generated_outputs/mixed_gambles/openevolve/run_{timestamp}"
+    split = _effective_psych_dataset_split(dataset, psych_dataset_split)
     return f"generated_outputs/psych101_{split}/openevolve/{alias}/run_{timestamp}"
 
 
@@ -1010,10 +1110,16 @@ def _write_posthoc_test_json(path: Path, test_trials: List[Dict[str, Any]]) -> N
     path.write_text(json.dumps(payload, default=_json_default), encoding="utf-8")
 
 
-def _render_evaluator_py(evolution_split_path: Path, *, split_ratio: float) -> str:
+def _render_evaluator_py(
+    evolution_split_path: Path,
+    *,
+    split_ratio: float,
+    categorical: bool = False,
+) -> str:
     split_path = str(evolution_split_path.resolve())
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
+    categorical_lit = "True" if categorical else "False"
     return f'''"""Auto-generated OpenEvolve evaluator (train+val objective; no test access)."""
 import json
 import math
@@ -1023,6 +1129,7 @@ from typing import Any, Callable, Dict, List, Tuple
 SPLIT_PATH = Path(r\"{split_path}\")
 SPLIT_RATIO = {float(split_ratio)}
 CHOICE13K_LOGLIK_EPS = {CHOICE13K_LOGLIK_EPS}
+CATEGORICAL = {categorical_lit}
 
 
 def _train_val_ratios() -> Tuple[float, float]:
@@ -1071,11 +1178,79 @@ def _clamp(p: float) -> float:
     return min(max(float(p), CHOICE13K_LOGLIK_EPS), 1.0 - CHOICE13K_LOGLIK_EPS)
 
 
+def _valid_action_ids(problem: Dict[str, Any]) -> List[int]:
+    options = problem.get("options") or []
+    ids: List[int] = []
+    for opt in options:
+        if isinstance(opt, dict) and "action" in opt:
+            ids.append(int(opt["action"]))
+    if ids:
+        return ids
+    keys = problem.get("option_keys") or []
+    out: List[int] = []
+    for i, k in enumerate(keys):
+        try:
+            out.append(int(k))
+        except (TypeError, ValueError):
+            out.append(i)
+    return out
+
+
+def _coerce_categorical(probs_raw: Any, valid_ids: List[int]) -> Dict[int, float]:
+    K = len(valid_ids)
+    expected = set(valid_ids)
+    if isinstance(probs_raw, dict):
+        raw = probs_raw
+    elif K == 2 and isinstance(probs_raw, (float, int, bool)):
+        p1 = float(probs_raw)
+        p1 = min(max(p1, 0.0), 1.0) if math.isfinite(p1) else 0.5
+        raw = {{0: 1.0 - p1, 1: p1}}
+    else:
+        u = 1.0 / K
+        return {{aid: u for aid in valid_ids}}
+    probs = {{aid: 0.0 for aid in valid_ids}}
+    for key, val in raw.items():
+        try:
+            aid = int(key)
+        except (TypeError, ValueError):
+            continue
+        if aid not in expected:
+            continue
+        try:
+            p = float(val)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(p) and p >= 0.0:
+            probs[aid] = p
+    total = sum(probs.values())
+    if total <= 0.0:
+        u = 1.0 / K
+        return {{aid: u for aid in valid_ids}}
+    return {{aid: probs[aid] / total for aid in valid_ids}}
+
+
 def evaluate_trials(choose_fn: Callable, trials: List[Dict[str, Any]]) -> Dict[str, float]:
     if not trials:
         return {{"avg_loglik": float("-inf"), "errors": 1}}
     ll = 0.0
     errors = 0
+    if CATEGORICAL:
+        for t in trials:
+            problem = t.get("problem") or {{}}
+            y = int(t["action"])
+            valid_ids = _valid_action_ids(problem)
+            if not valid_ids:
+                errors += 1
+                ll += math.log(CHOICE13K_LOGLIK_EPS)
+                continue
+            try:
+                probs = _coerce_categorical(choose_fn(problem, t.get("history") or []), valid_ids)
+                p = _clamp(float(probs.get(y, 0.0)))
+            except Exception:
+                errors += 1
+                p = _clamp(1.0 / max(1, len(valid_ids)))
+            ll += math.log(p)
+        return {{"avg_loglik": float(ll / len(trials)), "errors": errors}}
     for t in trials:
         y = int(t["action"])
         try:
@@ -1222,7 +1397,7 @@ def run_participant(
     exp_dir = participant_dir / "openevolve_experiment"
     exp_dir.mkdir(parents=True, exist_ok=True)
 
-    train_trials, val_trials, test_trials = trials_for_participant(
+    train_trials, val_trials, test_trials, _audit, manifest = trials_for_participant(
         args.dataset,
         participant_id,
         split_ratio=args.split_ratio,
@@ -1231,23 +1406,41 @@ def run_participant(
         psych_dataset_split=_effective_psych_dataset_split(args.dataset, args.psych_dataset_split),
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
+        max_observed_trials_per_participant=getattr(
+            args, "max_observed_trials_per_participant", None
+        ),
+        limited_data_protocol=getattr(args, "limited_data_protocol", "off"),
+        limited_train_val=getattr(args, "limited_train_val", None),
+        return_manifest=True,
     )
+    manifest_jsonl = run_dir / "log" / LIMITED_DATA_MANIFEST_JSONL_FILENAME
+    if should_persist_limited_data_manifest(manifest):
+        append_limited_data_manifest_jsonl(manifest_jsonl, manifest)
 
     evolution_split_path = exp_dir / "trials_evolution_split.json"
     _write_evolution_split_json(evolution_split_path, train_trials, val_trials)
     posthoc_test_path = participant_dir / "trials_test_posthoc.json"
     _write_posthoc_test_json(posthoc_test_path, test_trials)
 
-    task_text = Path(args.base_prompt).read_text(encoding="utf-8")
+    seed_path, base_prompt_path = resolve_openevolve_seed_and_prompt(
+        args.dataset,
+        seed_path=args.seed_path,
+        base_prompt=args.base_prompt,
+    )
+    task_text = base_prompt_path.read_text(encoding="utf-8")
     (exp_dir / "vanilla_task_prompt.txt").write_text(task_text, encoding="utf-8")
 
-    initial_src = Path(args.seed_path).resolve()
+    initial_src = seed_path.resolve()
     initial_dst = exp_dir / "initial_program.py"
     shutil.copy2(initial_src, initial_dst)
 
     evaluator_path = exp_dir / "evaluator.py"
     evaluator_path.write_text(
-        _render_evaluator_py(evolution_split_path, split_ratio=args.split_ratio),
+        _render_evaluator_py(
+            evolution_split_path,
+            split_ratio=args.split_ratio,
+            categorical=is_categorical_output_dataset(args.dataset),
+        ),
         encoding="utf-8",
     )
 
@@ -1317,9 +1510,9 @@ def run_participant(
                 status = "failed"
                 error_msg = "best program does not compile or lacks choose()"
             else:
-                train_ll = evaluate_loglik(choose_fn, train_trials)["avg_loglik"]
-                val_ll = evaluate_loglik(choose_fn, val_trials)["avg_loglik"]
-                test_ll = evaluate_loglik(choose_fn, test_trials)["avg_loglik"]
+                train_ll = evaluate_loglik(choose_fn, train_trials, dataset=args.dataset)["avg_loglik"]
+                val_ll = evaluate_loglik(choose_fn, val_trials, dataset=args.dataset)["avg_loglik"]
+                test_ll = evaluate_loglik(choose_fn, test_trials, dataset=args.dataset)["avg_loglik"]
         else:
             status = "failed"
             error_msg = "no best program file produced"
@@ -1428,6 +1621,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--split_seed", type=int, default=0)
     p.add_argument("--seed_path", type=str, default=str(DEFAULT_SEED_PATH))
     p.add_argument("--base_prompt", type=str, default=str(DEFAULT_BASE_PROMPT))
+    p.add_argument(
+        "--max_observed_trials_per_participant",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Sparse-data: after the train/val/test split, keep at most N combined "
+            "train+val observations per participant (test untouched). Same as TEH/MLE."
+        ),
+    )
+    add_limited_data_cli_arguments(p)
     p.add_argument("--n_iterations", type=int, default=600)
     p.add_argument("--checkpoint_interval", type=int, default=50)
     p.add_argument("--max_prompt_train_trials", type=int, default=40)
@@ -1497,6 +1701,23 @@ def main() -> None:
         raise ValueError(f"--parallel_participants must be >= 1, got {args.parallel_participants}")
     if args.parallel_evaluations < 1:
         raise ValueError(f"--parallel_evaluations must be >= 1, got {args.parallel_evaluations}")
+    try:
+        resolve_limited_data_budget(
+            protocol=args.limited_data_protocol,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_train_val=args.limited_train_val,
+        )
+    except ValueError as e:
+        raise SystemExit(f"Error: {e}") from e
+
+    # Resolve dataset-specific seed/prompt when CLI still points at Bernoulli defaults.
+    seed_resolved, prompt_resolved = resolve_openevolve_seed_and_prompt(
+        args.dataset,
+        seed_path=args.seed_path,
+        base_prompt=args.base_prompt,
+    )
+    args.seed_path = str(seed_resolved)
+    args.base_prompt = str(prompt_resolved)
 
     parallel_participants = int(args.parallel_participants)
     parallel_evaluations = int(args.parallel_evaluations)
@@ -1504,6 +1725,9 @@ def main() -> None:
     print(f"parallel_participants={parallel_participants}")
     print(f"parallel_evaluations={parallel_evaluations}")
     print(f"approx_total_concurrency={approx_concurrency}")
+    print(f"dataset={args.dataset} categorical={is_categorical_output_dataset(args.dataset)}")
+    print(f"seed_path={args.seed_path}")
+    print(f"base_prompt={args.base_prompt}")
     if approx_concurrency > 100:
         print(
             f"WARNING: approx_total_concurrency={approx_concurrency} > 100; "
@@ -1517,6 +1741,7 @@ def main() -> None:
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
+    (run_dir / "log").mkdir(exist_ok=True)
 
     valid = load_valid_participant_ids_from_json(
         args.dataset,
@@ -1623,6 +1848,10 @@ def main() -> None:
     if wandb_module is not None:
         wandb_module.finish()
 
+    rewrite_limited_data_csv_from_jsonl(
+        run_dir / "log" / LIMITED_DATA_MANIFEST_JSONL_FILENAME,
+        run_dir / "log" / LIMITED_DATA_MANIFEST_CSV_FILENAME,
+    )
     print(f"Done. CSVs: {run_dir / 'participant_details_loglik.csv'}, {run_dir / 'summary_loglik.csv'}")
 
 

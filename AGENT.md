@@ -545,3 +545,24 @@ Default-off. Omitting the new flags keeps the legacy splitter and random train+v
 - **Continuous** (Speekenbrink, Kool): contiguous TV immediately before fixed test. **Speekenbrink chronological 60/20/20 only under this option**; legacy pseudo-block shuffle remains when off. Kool stays day-contiguous; a mid-day cut may keep matching stage-1 (audit overshoot).
 - Insufficient TV: keep all eligible, do not shrink test, do not auto-exclude. CPU audit: `analysis_2026Sep/Sep9_mem_report/Sep15_eligibility_set/structure_aware_limited_data/` (history pass; test≠legacy only Speekenbrink; Bergert all 32 TV; Enkavi pid 17 = 6; Wulff 1598/1599 = 22; Kool 41/45 = 41).
 - Tests: `tests/test_limited_data_protocol.py`. Cluster (do not submit from this note): `cluster/2026Sep15_StructureAware_S40/` — BF16 remaining-8 half (Wulff, Speekenbrink, Schulz, Kool), AWQ-Marlin other half (balloon, Bergert, Guan, Steyvers), LM/PT all 15. Outputs under `sparse_data/structure_aware*` (not `emnlp_1iter`).
+
+---
+
+## Short update (Sep 16 2026 — Stage E/F live MEM-source probe)
+
+Cheap live probe of the frozen **score-weighted cosine** source map (7-dataset subset). One target per category that has a selector. **Everything live** except F/E person jobs reuse this submit’s own source/target pops — never Stage A–D / June. **No target-only person ablation.**
+
+| Cat | Target | Source |
+|---|---|---|
+| G | `1peterson2021using` | Enkavi |
+| S | `3frey2017cct` | Enkavi |
+| C-cue | `7hilbig2014generalized` | CPC18 |
+| R | `11enkavi2019recentprobes` | Choice13k |
+
+Skip J (empty in the 15); skip Speekenbrink/Badham (no 7-subset selector); skip Bergert.
+
+- **E:** live 10-iter **source** pop → person PICS with that **rank-1 in the explore prompt** (not a parent), 50 seed-explore, 1 person iter.
+- **F:** live 5-iter **target** pop + E’s source pool mixed as `--initial_pool_dir SRC TGT`; 25 parent-explore + 25 seed-explore; original dataset prompt only; 1 person iter.
+- CLI: `--explore_prompt_source_program` / `--explore_prompt_source_dataset`, `--explore_seed_candidates`, multi `--initial_pool_dir`.
+- Submit (prints a Notion markdown JobID table): `bash cluster/2026Sep16_StageEF/submit_stage_ef.sh`
+- Outputs: `generated_outputs/psych101_train/teh/<dataset>/stage_{e,f}_*/job_<id>/`

@@ -83,6 +83,29 @@ def test_select_top_k_larger_than_pool_keeps_all():
     assert programs == [("code_rank1", "rank1")]
 
 
+def test_split_explore_budget_stage_f_half_seed():
+    n_seed, parent_counts = _handoff.split_explore_budget_seed_and_parents(
+        50, n_seed=25, n_handoff_parents=4
+    )
+    assert n_seed == 25
+    assert sum(parent_counts) == 25
+    assert len(parent_counts) == 4
+
+
+def test_split_explore_budget_zero_seed_all_handoff():
+    n_seed, parent_counts = _handoff.split_explore_budget_seed_and_parents(
+        50, n_seed=0, n_handoff_parents=2
+    )
+    assert n_seed == 0
+    assert parent_counts == [25, 25]
+
+
+def test_prefix_elite_program_ids():
+    tagged = _handoff.prefix_elite_program_ids([_parent("rank1")], "pool0_")
+    assert tagged[0][3] == "pool0_rank1"
+    assert tagged[0][0] == "code_rank1"
+
+
 def _run_teh(*extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -126,3 +149,28 @@ def test_cli_rejects_negative_explore_population_top_k():
     )
     combined = (proc.stdout or "") + (proc.stderr or "")
     assert "explore_population_top_k must be >= 0" in combined
+
+
+def test_cli_rejects_explore_prompt_source_without_dataset():
+    proc = _run_teh(
+        "--explore_candidates",
+        "50",
+        "--explore_prompt_source_program",
+        "missing.py",
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "must be set together" in combined
+
+
+def test_cli_help_exposes_stage_e_f_flags():
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "teh.py"), "--help"],
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    assert "--explore_seed_candidates" in proc.stdout
+    assert "--explore_prompt_source_program" in proc.stdout
+    assert "--explore_prompt_source_dataset" in proc.stdout
