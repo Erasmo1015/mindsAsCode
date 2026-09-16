@@ -1,0 +1,44 @@
+# Official T-PICS source per target (self excluded).
+# Base ranking: score-weighted motif cosine (softmax on pool global_fitness, T=0.05);
+# ties → lexicographic source id.
+#
+# Post-filter (2026-09-16): do NOT use pre-fix programs from these sources:
+#   CPC18/Plonsky (2plonsky2018when), Speekenbrink (5speekenbrink2008learning),
+#   Frey Risk (10frey2017risk), Badham (12badham2017deficits).
+# If the top pick is in that set, take the next ranked source (and so on).
+#
+# Evidence:
+#   analysis_2026Sep/mem/population_motif_pilot_emnlp_r1/phase3/SCORE_WEIGHTED_BEST_SOURCE_REPORT.md
+#   similarity: .../phase3/similarity_score_weighted_cosine.csv
+
+method: score_weighted_motif_cosine
+tie_break: lexicographic_source_id
+excluded_sources_pre_fix:
+  - 2plonsky2018when      # CPC18 / Plonsky
+  - 5speekenbrink2008learning
+  - 10frey2017risk        # Frey Risk
+  - 12badham2017deficits  # Badham
+evidence: analysis_2026Sep/mem/population_motif_pilot_emnlp_r1/phase3/SCORE_WEIGHTED_BEST_SOURCE_REPORT.md
+
+# target_alias: source_alias
+# Comments note original top pick when skipped.
+sources:
+  1peterson2021using: 11enkavi2019recentprobes
+  2plonsky2018when: 11enkavi2019recentprobes
+  # was 10frey2017risk (excluded) → next Enkavi
+  3frey2017cct: 11enkavi2019recentprobes
+  4wulff2018description: 11enkavi2019recentprobes
+  # was 12badham2017deficits (excluded), then 2plonsky2018when (excluded) → Enkavi
+  5speekenbrink2008learning: 11enkavi2019recentprobes
+  # was 2plonsky2018when (excluded) → Enkavi
+  7hilbig2014generalized: 11enkavi2019recentprobes
+  10frey2017risk: 11enkavi2019recentprobes
+  11enkavi2019recentprobes: 1peterson2021using
+  # was 5speekenbrink2008learning (excluded), then 2plonsky2018when (excluded) → Enkavi
+  12badham2017deficits: 11enkavi2019recentprobes
+  mixed_gambles: 11enkavi2019recentprobes
+  bergert_nosofsky_2007: 11enkavi2019recentprobes
+  guan_2020_stopping: 11enkavi2019recentprobes
+  steyvers_2009_bandit: 7hilbig2014generalized
+  13schulz2020finding: 11enkavi2019recentprobes
+  14kool2016when: 1peterson2021using

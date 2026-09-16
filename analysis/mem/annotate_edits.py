@@ -55,6 +55,8 @@ from utils.mem.schema_v3 import (  # noqa: E402
 )
 from utils.mem.trace import (  # noqa: E402
     estimate_tokens_char4,
+    hydrate_parent_record,
+    hydrate_trace_code_fields,
     iter_jsonl_records,
     split_annotation_batches,
 )
@@ -132,6 +134,7 @@ def _load_grouped_candidates(
     contexts: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     candidates: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for path in trace_files:
+        participant_dir = Path(path).parent
         for rec in iter_jsonl_records([path]):
             key = (
                 rec.get("run_id"),
@@ -141,9 +144,20 @@ def _load_grouped_candidates(
                 rec.get("iteration"),
             )
             if rec.get("record_type") == "iteration_context":
-                contexts[key] = rec
+                # Hydrate slim parent codes from on-disk artifacts.
+                parents = [
+                    hydrate_parent_record(p, participant_dir)
+                    for p in (rec.get("selected_parents") or [])
+                    if isinstance(p, dict)
+                ]
+                ctx = dict(rec)
+                ctx["selected_parents"] = parents
+                ctx["_participant_dir"] = str(participant_dir)
+                contexts[key] = ctx
             elif rec.get("record_type") == "candidate":
-                candidates[key].append(rec)
+                cand = hydrate_trace_code_fields(rec, participant_dir)
+                cand["_participant_dir"] = str(participant_dir)
+                candidates[key].append(cand)
     return contexts, candidates
 
 
@@ -890,6 +904,11 @@ def main() -> None:
                 continue
 
             ref, ref_id = _resolve_reference_for_candidate(rec, ctx)
+            # If parent still lacks code (slim + unresolved), try again with participant dir.
+            if ref is not None and not str(ref.get("code") or "").strip():
+                pdir = rec.get("_participant_dir") or (ctx or {}).get("_participant_dir")
+                if pdir:
+                    ref = hydrate_parent_record(ref, pdir)
             ref_type = str(
                 rec.get("reference_type")
                 or rec.get("reference_kind")

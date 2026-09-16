@@ -133,6 +133,13 @@ from utils.teh.explore_handoff import (
     split_explore_budget_seed_and_parents,
 )
 from utils.teh.explore_source_prompt import build_rank1_explore_prompt_suffix
+from utils.teh.t_pics_sources import (
+    DEFAULT_T_PICS_SOURCE_CONFIG,
+    official_t_pics_source,
+    is_auto_t_pics_source_token,
+    normalize_t_pics_dataset,
+    resolve_t_pics_source_participant_ids,
+)
 from utils.teh.mdl_selection import (
     apply_mdl_to_scored_elite,
     attach_mdl_fields,
@@ -3622,6 +3629,157 @@ def run_global_evolution_phase(
             encoding="utf-8",
         )
     return elite_parents
+
+
+def _cross_task_source_suffix(
+    *,
+    source_dataset: str,
+    program_path: str,
+    args: Any,
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+    best_loglik: Optional[float] = None,
+) -> str:
+    """Build the G/E source-program suffix using the same obs protocol as this run."""
+    return build_rank1_explore_prompt_suffix(
+        source_dataset=source_dataset,
+        program_path=program_path,
+        split_seed=int(args.split_seed),
+        psych_dataset_split=psych_dataset_split,
+        best_loglik=best_loglik,
+        split_ratio=float(args.split_ratio),
+        limited_data_protocol=str(args.limited_data_protocol),
+        limited_train_val=args.limited_train_val,
+        max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=args.mixed_gambles_csv,
+        filter_mixed_gambles=filter_mixed_gambles,
+    )
+
+
+def _run_t_pics_source_population(
+    *,
+    source_dataset: str,
+    source_participants: List[int],
+    output_dir: Path,
+    seed_program_path: str,
+    args: Any,
+    client: OpenAI,
+    wandb_module: Optional[Any],
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+) -> Tuple[Path, Optional[float]]:
+    """G.1: live source-dataset population under the same knobs/obs protocol as the target.
+
+    No cross-task prompt. No person evolution. Writes ``output_dir/global_phase/best_program.py``.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_prompts_dir = setup_teh_run_prompts(
+        output_dir,
+        source_dataset,
+        Path(seed_program_path),
+        client=client,
+        model_name=args.model_name,
+        use_llm=not args.no_llm_prompt,
+        base_prompt_path=args.base_prompt,
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=args.mixed_gambles_csv,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        example_char_budget=int(
+            getattr(args, "dataset_prompt_example_char_budget", DEFAULT_EXAMPLE_CHAR_BUDGET)
+        ),
+        history_max_entries=int(
+            getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
+        ),
+        max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
+        prefer_auto_llm_prompt=False,
+        dataset_prompt_file=None,
+    )
+    source_seed = str(source_prompts_dir / "seed_program.py")
+    print(
+        f"[T-PICS] Training source population on {source_dataset}: "
+        f"{len(source_participants)} participant(s), global_iters={args.global_iters}, "
+        f"protocol={args.limited_data_protocol}, limited_train_val={args.limited_train_val}"
+    )
+    elite = run_global_evolution_phase(
+        dataset=source_dataset,
+        participants=[int(p) for p in source_participants],
+        seed_program_path=source_seed,
+        n_iterations=args.global_iters,
+        n_candidates_per_iteration=args.n_candidates,
+        fresh_n_candidates=args.fresh_n_candidates,
+        sample_size=args.sample_size,
+        sample_parents=args.sample_parents,
+        sampled_parents_decay=args.sampled_parents_decay,
+        elite_pool_size=args.elite_pool_size,
+        model_name=args.model_name,
+        client=client,
+        split_ratio=args.split_ratio,
+        split_seed=args.split_seed,
+        data_path=args.data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        max_prompt_train_trials=args.max_prompt_train_trials,
+        max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
+        llm_max_tokens=args.llm_max_tokens,
+        max_workers=args.max_workers,
+        n_eval_seeds=args.n_eval_seeds,
+        output_dir=output_dir,
+        save_artifacts=True,
+        wandb_module=None,
+        run_prompts_dir=str(source_prompts_dir),
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=args.mixed_gambles_csv,
+        max_parent_chars=args.max_parent_chars,
+        warn_parent_truncation_ratio=args.warn_parent_truncation_ratio,
+        early_stop_iters=args.early_stop_iters,
+        hard_prompt_token_cap=args.hard_prompt_token_cap,
+        strict_prompt_budget=args.strict_prompt_budget,
+        prompt_token_estimator=args.prompt_token_estimator,
+        prompt_debug=args.prompt_debug,
+        prompt_debug_on_no_valid=args.prompt_debug_on_no_valid,
+        prompt_debug_exit=args.prompt_debug_exit,
+        evolution_selection_score=args.evolution_selection_score,
+        max_error_prompt_chars=args.max_error_prompt_chars,
+        error_feedback_mode=args.error_feedback_mode,
+        max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+        limited_data_protocol=args.limited_data_protocol,
+        limited_train_val=args.limited_train_val,
+        mdl_lambda=args.mdl_lambda,
+        prompt_suffix=None,
+    )
+    best_path = output_dir / "global_phase" / BEST_PROGRAM_FILENAME
+    if not best_path.is_file():
+        raise FileNotFoundError(f"T-PICS source population did not write {best_path}")
+    best_ll = float(elite[0][1]) if elite else None
+    manifest = {
+        "phase": "t_pics_source_population",
+        "source_dataset": source_dataset,
+        "n_participants": len(source_participants),
+        "participant_ids": [int(p) for p in source_participants],
+        "global_iters": int(args.global_iters),
+        "limited_data_protocol": str(args.limited_data_protocol),
+        "limited_train_val": args.limited_train_val,
+        "max_observed_trials_per_participant": args.max_observed_trials_per_participant,
+        "best_program": str(best_path),
+        "pool_best_selection_score": best_ll,
+        "elite_pool_size": args.elite_pool_size,
+    }
+    (output_dir / "SOURCE_POPULATION.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    if wandb_module is not None:
+        wandb_module.log(
+            {
+                "t_pics/source_dataset": source_dataset,
+                "t_pics/source_n_participants": len(source_participants),
+                "t_pics/source_selection_score": best_ll,
+            }
+        )
+    print(f"[T-PICS] Source rank-1 -> {best_path}")
+    return best_path, best_ll
 
 
 def _refinement_pool_best_metrics(
@@ -8953,7 +9111,6 @@ def _run_pre_evolution_explore_phase(
                     "selection_score": score,
                     "train_loglik": score,
                     "val_loglik": baseline_val_loglik,
-                    "code": parent_code,
                 }
             )
         append_mem_trace_record(
@@ -12606,7 +12763,51 @@ def main():
         type=str,
         default=None,
         metavar="DATASET",
-        help="Dataset alias for --global_prompt_source_program.",
+        help=(
+            "Dataset alias for --global_prompt_source_program. "
+            "If omitted while --global_prompt_source_program is set, T-PICS looks up the "
+            "official source for --dataset in --t_pics_source_config "
+            "(default: analysis/config/transfer_source/t_pics_score_weighted_temp_fix.yaml)."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics",
+        action="store_true",
+        default=False,
+        help=(
+            "Independent T-PICS: train the source population in this run, then the target. "
+            "If --t_pics_source is omitted, look up the official source for --dataset."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_source",
+        type=str,
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="DATASET",
+        help=(
+            "T-PICS source dataset for a live source population in this run. "
+            "Pass --t_pics_source with no value, or --t_pics without this flag, to auto-select "
+            "from --t_pics_source_config (default: "
+            "analysis/config/transfer_source/t_pics_score_weighted_temp_fix.yaml). "
+            "Do not combine with --global_prompt_source_program. "
+            "Requires --global_phase, --explore_from_population_parents, "
+            "--explore_population_top_k 1, --explore_candidates > 0, and "
+            "--no-refinement_phase."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_source_config",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "YAML target→source map for T-PICS auto-select. Default: "
+            "analysis/config/transfer_source/t_pics_score_weighted_temp_fix.yaml "
+            "(skips pre-fix CPC18 / Speekenbrink / Frey Risk / Badham). "
+            "Pass t_pics_score_weighted.yaml for the unfiltered cosine ranking."
+        ),
     )
     parser.add_argument(
         "--num_episodes",
@@ -13130,12 +13331,125 @@ def main():
         return
     g_prog = getattr(args, "global_prompt_source_program", None)
     g_ds = getattr(args, "global_prompt_source_dataset", None)
-    if bool(g_prog) != bool(g_ds):
-        print(
-            "Error: --global_prompt_source_program and --global_prompt_source_dataset "
-            "must be set together."
-        )
-        return
+    t_pics_flag = bool(getattr(args, "t_pics", False))
+    t_pics_source_raw = getattr(args, "t_pics_source", None)
+    t_pics_source_alias = None
+    t_pics_cfg_raw = getattr(args, "t_pics_source_config", None)
+    if t_pics_cfg_raw:
+        t_pics_cfg = Path(str(t_pics_cfg_raw)).expanduser()
+        if not t_pics_cfg.is_absolute():
+            t_pics_cfg = (_REPO_ROOT / t_pics_cfg).resolve()
+    else:
+        t_pics_cfg = DEFAULT_T_PICS_SOURCE_CONFIG
+    want_independent = t_pics_flag or t_pics_source_raw is not None
+    if want_independent:
+        try:
+            if is_auto_t_pics_source_token(t_pics_source_raw):
+                t_pics_source_alias = official_t_pics_source(
+                    str(args.dataset), config_path=t_pics_cfg
+                )
+                print(
+                    f"[T-PICS] auto source for {args.dataset} -> {t_pics_source_alias} "
+                    f"({t_pics_cfg})"
+                )
+            else:
+                t_pics_source_alias = normalize_t_pics_dataset(str(t_pics_source_raw))
+        except (ValueError, KeyError) as exc:
+            print(f"Error: {exc}")
+            return
+        if t_pics_source_alias not in _PARTICIPANT_DATASETS:
+            print(
+                f"Error: --t_pics_source {t_pics_source_alias!r} is not a TEH participant dataset."
+            )
+            return
+        try:
+            target_alias = normalize_t_pics_dataset(str(args.dataset))
+        except ValueError:
+            target_alias = str(args.dataset)
+        if t_pics_source_alias == target_alias:
+            print("Error: --t_pics_source must differ from --dataset (self is excluded).")
+            return
+        if g_prog:
+            print(
+                "Error: --t_pics / --t_pics_source trains the source population in this run; "
+                "do not also pass --global_prompt_source_program."
+            )
+            return
+        if g_ds and normalize_t_pics_dataset(str(g_ds)) != t_pics_source_alias:
+            print(
+                "Error: --global_prompt_source_dataset must match --t_pics_source "
+                f"({t_pics_source_alias!r}), got {g_ds!r}."
+            )
+            return
+        if not args.global_phase:
+            print("Error: --t_pics / --t_pics_source requires --global_phase.")
+            return
+        if not args.explore_from_population_parents:
+            print(
+                "Error: --t_pics / --t_pics_source requires --explore_from_population_parents "
+                "(T-PICS explore is from the target transfer-pop rank-1)."
+            )
+            return
+        if int(args.explore_population_top_k) != 1:
+            print(
+                "Error: --t_pics / --t_pics_source requires --explore_population_top_k 1 "
+                f"(got {args.explore_population_top_k})."
+            )
+            return
+        if int(args.explore_candidates) <= 0:
+            print("Error: --t_pics / --t_pics_source requires --explore_candidates > 0.")
+            return
+        if args.refinement_phase:
+            print(
+                "Error: --t_pics / --t_pics_source requires --no-refinement_phase "
+                "(T-PICS has no refinement/finetune)."
+            )
+            return
+        if src_prog:
+            print(
+                "Error: --t_pics / --t_pics_source cannot be combined with "
+                "--explore_prompt_source_program (that is Method E)."
+            )
+            return
+        if not is_auto_t_pics_source_token(t_pics_source_raw):
+            try:
+                official = official_t_pics_source(
+                    str(args.dataset), config_path=t_pics_cfg
+                )
+            except KeyError:
+                official = None
+            if official is not None and official != t_pics_source_alias:
+                print(
+                    f"[WARN] Official T-PICS source for {args.dataset} is {official}, "
+                    f"but --t_pics_source is {t_pics_source_alias}."
+                )
+        args.t_pics_source = t_pics_source_alias
+        if not g_ds:
+            args.global_prompt_source_dataset = t_pics_source_alias
+        g_ds = args.global_prompt_source_dataset
+    if bool(g_prog) != bool(g_ds) and not t_pics_source_alias:
+        if g_prog and not g_ds:
+            try:
+                g_ds = official_t_pics_source(
+                    str(args.dataset), config_path=t_pics_cfg
+                )
+                args.global_prompt_source_dataset = g_ds
+                print(
+                    f"[T-PICS] auto source dataset for reuse -> {g_ds} "
+                    f"({t_pics_cfg})"
+                )
+            except (ValueError, KeyError) as exc:
+                print(
+                    "Error: --global_prompt_source_dataset omitted and no official T-PICS "
+                    f"source for {args.dataset}: {exc}"
+                )
+                return
+        else:
+            print(
+                "Error: --global_prompt_source_program and --global_prompt_source_dataset "
+                "must be set together."
+            )
+            return
     if g_prog and not args.global_phase:
         print("Error: --global_prompt_source_program requires --global_phase.")
         return
@@ -13557,13 +13871,67 @@ def main():
     global_elite_for_handoff: Optional[List[Tuple[Any, ...]]] = None
     has_initial_pool = bool(args.initial_pool_programs or args.initial_pool_dir)
     global_prompt_suffix = None
+    source_best_loglik: Optional[float] = None
+    global_client = teh_client
+    t_pics_source = getattr(args, "t_pics_source", None)
+    if t_pics_source:
+        if seed_program_path is None:
+            print("Error: --t_pics_source requires a seed program (--seed_path or dataset default).")
+            if wandb is not None:
+                wandb.finish()
+            return
+        try:
+            source_pids, clamp_note = resolve_t_pics_source_participant_ids(
+                source_dataset=str(t_pics_source),
+                repo_root=_REPO_ROOT,
+                participant_scope=args.participant_scope,
+                single_participant_id=args.single_participant_id,
+                range_start_ordinal=args.range_start_ordinal,
+                range_end_ordinal=args.range_end_ordinal,
+                all_max_participants=args.all_max_participants,
+                participant_ordinals=args.ordinals,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                split_ratio=args.split_ratio,
+                split_seed=args.split_seed,
+                psych_dataset_split=psych_dataset_split,
+                local_dataset=args.local_dataset,
+                mixed_gambles_csv=args.mixed_gambles_csv,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}")
+            if wandb is not None:
+                wandb.finish()
+            return
+        if clamp_note:
+            print(f"[T-PICS] {clamp_note}")
+        try:
+            source_best, source_best_loglik = _run_t_pics_source_population(
+                source_dataset=str(t_pics_source),
+                source_participants=source_pids,
+                output_dir=Path(base_run_dir) / "source_population",
+                seed_program_path=seed_program_path,
+                args=args,
+                client=global_client,
+                wandb_module=wandb,
+                psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}")
+            if wandb is not None:
+                wandb.finish()
+            return
+        args.global_prompt_source_program = str(source_best)
+        args.global_prompt_source_dataset = str(t_pics_source)
     if args.global_prompt_source_program:
         try:
-            global_prompt_suffix = build_rank1_explore_prompt_suffix(
+            global_prompt_suffix = _cross_task_source_suffix(
                 source_dataset=str(args.global_prompt_source_dataset),
                 program_path=str(args.global_prompt_source_program),
-                split_seed=int(args.split_seed),
+                args=args,
                 psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                best_loglik=source_best_loglik,
             )
         except (FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}")
@@ -13595,7 +13963,6 @@ def main():
             if wandb is not None:
                 wandb.finish()
             return
-        global_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
         global_elite_for_handoff = run_global_evolution_phase(
             dataset=args.dataset,
             participants=[int(p) for p in participants_to_process],
@@ -13651,11 +14018,12 @@ def main():
     explore_prompt_suffix = None
     if args.explore_prompt_source_program:
         try:
-            explore_prompt_suffix = build_rank1_explore_prompt_suffix(
+            explore_prompt_suffix = _cross_task_source_suffix(
                 source_dataset=str(args.explore_prompt_source_dataset),
                 program_path=str(args.explore_prompt_source_program),
-                split_seed=int(args.split_seed),
+                args=args,
                 psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
             )
         except (FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}")

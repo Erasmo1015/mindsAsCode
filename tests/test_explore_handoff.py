@@ -176,13 +176,25 @@ def test_cli_help_exposes_stage_e_f_flags():
     assert "--explore_prompt_source_dataset" in proc.stdout
     assert "--global_prompt_source_program" in proc.stdout
     assert "--global_prompt_source_dataset" in proc.stdout
+    assert "--t_pics_source" in proc.stdout
+    assert "--t_pics" in proc.stdout
 
 
-def test_cli_rejects_global_prompt_source_without_dataset():
+def test_cli_reuse_program_without_dataset_auto_selects_source():
     proc = _run_teh(
-        "--global_phase",
         "--global_prompt_source_program",
         "missing.py",
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "auto source dataset for reuse -> 11enkavi2019recentprobes" in combined
+    assert "requires --global_phase" in combined
+
+
+def test_cli_rejects_global_prompt_source_dataset_without_program():
+    proc = _run_teh(
+        "--global_phase",
+        "--global_prompt_source_dataset",
+        "11enkavi2019recentprobes",
     )
     combined = (proc.stdout or "") + (proc.stderr or "")
     assert "must be set together" in combined

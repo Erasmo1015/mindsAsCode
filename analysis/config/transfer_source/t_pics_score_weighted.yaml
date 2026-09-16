@@ -1,0 +1,29 @@
+# Official T-PICS source per target (self excluded).
+# Copied from score-weighted motif cosine (softmax on pool global_fitness, T=0.05);
+# ties → lexicographic source id.
+#
+# Evidence:
+#   analysis_2026Sep/mem/population_motif_pilot_emnlp_r1/phase3/SCORE_WEIGHTED_BEST_SOURCE_REPORT.md
+# EMNLP-10 also have transfer GT in that report; five_new are selection-only (no transfer GT).
+
+method: score_weighted_motif_cosine
+tie_break: lexicographic_source_id
+evidence: analysis_2026Sep/mem/population_motif_pilot_emnlp_r1/phase3/SCORE_WEIGHTED_BEST_SOURCE_REPORT.md
+
+# target_alias: source_alias
+sources:
+  1peterson2021using: 11enkavi2019recentprobes
+  2plonsky2018when: 11enkavi2019recentprobes
+  3frey2017cct: 10frey2017risk
+  4wulff2018description: 11enkavi2019recentprobes
+  5speekenbrink2008learning: 12badham2017deficits
+  7hilbig2014generalized: 2plonsky2018when
+  10frey2017risk: 11enkavi2019recentprobes
+  11enkavi2019recentprobes: 1peterson2021using
+  12badham2017deficits: 5speekenbrink2008learning
+  mixed_gambles: 11enkavi2019recentprobes
+  bergert_nosofsky_2007: 11enkavi2019recentprobes
+  guan_2020_stopping: 11enkavi2019recentprobes
+  steyvers_2009_bandit: 7hilbig2014generalized
+  13schulz2020finding: 11enkavi2019recentprobes
+  14kool2016when: 1peterson2021using

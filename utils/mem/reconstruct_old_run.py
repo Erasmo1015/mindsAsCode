@@ -169,12 +169,12 @@ def _pool_best(pool: Sequence[PoolProgram]) -> Optional[PoolProgram]:
 
 
 def _parent_record(prog: PoolProgram) -> Dict[str, Any]:
+    # Slim mem_trace: ids + scores only; annotate resolves code from run artifacts.
     return {
         "program_id": prog.program_id,
         "selection_score": prog.selection_score,
         "train_loglik": prog.train_loglik,
         "val_loglik": prog.val_loglik,
-        "code": prog.code,
     }
 
 

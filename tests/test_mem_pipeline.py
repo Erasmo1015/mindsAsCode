@@ -18,9 +18,12 @@ from utils.mem.trace import (
     build_iteration_context_record,
     compute_delta_f,
     estimate_tokens_char4,
+    hydrate_parent_record,
+    hydrate_trace_code_fields,
     json_safe_value,
     parent_record_from_elite_tuple,
     record_contains_test_metrics,
+    resolve_program_code,
     selection_score_from_elite_tuple,
     split_annotation_batches,
     validate_annotation_response,
@@ -61,6 +64,7 @@ def test_parent_and_candidate_records_exclude_test_metrics():
         train_loglik=-0.25,
     )
     assert not record_contains_test_metrics(parent)
+    assert "code" not in parent  # slim default
     ctx = build_iteration_context_record(
         dataset="1peterson2021using",
         participant_id=0,
@@ -73,6 +77,7 @@ def test_parent_and_candidate_records_exclude_test_metrics():
         best_selected_parent_id="baseline",
     )
     assert not record_contains_test_metrics(ctx)
+    assert ctx.get("mem_trace_format") == "slim_path_ref_v1"
     cand = build_candidate_record(
         dataset="1peterson2021using",
         participant_id=0,
@@ -98,6 +103,33 @@ def test_parent_and_candidate_records_exclude_test_metrics():
     assert not record_contains_test_metrics(cand)
     assert "test_loglik" not in cand
     assert "test_acc" not in cand
+    assert "code" not in cand  # slim: path ref only
+    assert cand["code_path"] == "iteration_1/candidates/candidate_0.py"
+
+    fat = build_candidate_record(
+        dataset="1peterson2021using",
+        participant_id=0,
+        run_id="run_x",
+        split_seed=0,
+        phase="evolution",
+        iteration=1,
+        candidate_id="iteration_1_candidate_0",
+        candidate_idx=0,
+        source="normal",
+        code="return 0.5",
+        runtime_valid=True,
+        train_loglik=-0.2,
+        val_loglik=-0.25,
+        selection_score=-0.22,
+        reference_parent_id="baseline",
+        reference_parent_score=-0.2,
+        reference_kind="best_selected_parent",
+        delta_f=-0.02,
+        survived_elite_truncation=True,
+        evolution_selection_score="train_val",
+        embed_code=True,
+    )
+    assert fat.get("code") == "return 0.5"
 
 
 def test_mem_logging_helpers_do_not_mutate_search_inputs(tmp_path: Path):
@@ -342,3 +374,49 @@ def test_build_dataset_filters(tmp_path: Path):
     assert out[0]["candidate_id"] == "iteration_1_candidate_0"
     assert out[0]["history_added"] == 1
     assert "primary_edit" not in out[0]
+
+
+def test_slim_trace_resolves_code_from_participant_artifacts(tmp_path: Path):
+    pdir = tmp_path / "participant_0"
+    cand_dir = pdir / "iteration_2" / "candidates"
+    cand_dir.mkdir(parents=True)
+    code = "def choose(problem, history):\n    return 0.42\n"
+    (cand_dir / "candidate_3.py").write_text(code, encoding="utf-8")
+    pool = pdir / "initial_pool_from_global"
+    pool.mkdir(parents=True)
+    baseline = "def choose(problem, history):\n    return 0.5\n"
+    (pool / "000_global_baseline.py").write_text(baseline, encoding="utf-8")
+
+    slim = build_candidate_record(
+        dataset="toy",
+        participant_id=0,
+        run_id="run",
+        split_seed=0,
+        phase="evolution",
+        iteration=2,
+        candidate_id="iteration_2_candidate_3",
+        candidate_idx=3,
+        source="normal",
+        runtime_valid=True,
+        train_loglik=-0.1,
+        val_loglik=-0.1,
+        selection_score=-0.1,
+        reference_parent_id="baseline",
+        reference_parent_score=-0.2,
+        reference_kind="best_prompted_parent",
+        delta_f=0.1,
+        survived_elite_truncation=False,
+        evolution_selection_score="train_val",
+    )
+    assert "code" not in slim
+    hydrated = hydrate_trace_code_fields(slim, pdir)
+    assert hydrated["code"] == code
+
+    parent = {"program_id": "baseline", "selection_score": -0.2}
+    assert hydrate_parent_record(parent, pdir)["code"] == baseline
+    assert resolve_program_code(pdir, program_id="iteration_2_candidate_3") == code
+
+    # Legacy fat traces still preferred when embedded code is present.
+    fat = dict(slim)
+    fat["code"] = "EMBEDDED"
+    assert hydrate_trace_code_fields(fat, pdir)["code"] == "EMBEDDED"

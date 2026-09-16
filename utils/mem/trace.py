@@ -42,9 +42,154 @@ _TEST_METRIC_KEYS = frozenset(
     }
 )
 
+# Slim traces omit embedded program text; annotate resolves code from run artifacts.
+# Legacy fat traces with a non-empty "code" field remain supported.
+MEM_TRACE_FORMAT = "slim_path_ref_v1"
+DEFAULT_EMBED_CODE = False
+
 
 def mem_trace_path(participant_dir: Path | str) -> Path:
     return Path(participant_dir) / "mem_trace.jsonl"
+
+
+def candidate_code_relpath(
+    *,
+    phase: str,
+    iteration: int,
+    candidate_idx: int,
+    source: Optional[str] = None,
+) -> str:
+    """Participant-relative path where TEH writes candidate_*.py."""
+    if str(phase) == "explore" or str(source) == "explore":
+        return f"explore_phase/candidates/candidate_{int(candidate_idx)}.py"
+    return f"iteration_{int(iteration)}/candidates/candidate_{int(candidate_idx)}.py"
+
+
+def resolve_program_code(
+    participant_dir: Path | str,
+    *,
+    program_id: Optional[str] = None,
+    code_path: Optional[str] = None,
+    phase: Optional[str] = None,
+    iteration: Optional[Any] = None,
+    candidate_idx: Optional[Any] = None,
+    source: Optional[str] = None,
+    embedded_code: Optional[str] = None,
+) -> Optional[str]:
+    """Load program source for annotation.
+
+    Preference order:
+      1) non-empty embedded_code (legacy fat traces)
+      2) explicit code_path (relative to participant_dir, or absolute)
+      3) phase/iteration/candidate_idx layout
+      4) program_id heuristics (baseline / explore_candidate_N / iteration_X_candidate_Y /
+         elite or initial pool filenames containing the id)
+    """
+    if isinstance(embedded_code, str) and embedded_code.strip():
+        return embedded_code
+
+    root = Path(participant_dir)
+    candidates: List[Path] = []
+
+    if code_path:
+        p = Path(code_path)
+        candidates.append(p if p.is_absolute() else root / p)
+
+    if candidate_idx is not None and (phase is not None or source is not None):
+        rel = candidate_code_relpath(
+            phase=str(phase or ""),
+            iteration=int(iteration or 0),
+            candidate_idx=int(candidate_idx),
+            source=source,
+        )
+        candidates.append(root / rel)
+
+    pid = str(program_id) if program_id is not None else ""
+    if pid:
+        if pid in ("baseline", "global_baseline"):
+            pool = root / "initial_pool_from_global"
+            for name in (
+                "000_global_baseline.py",
+                "001_global_baseline.py",
+                "000_baseline.py",
+            ):
+                candidates.append(pool / name)
+            if pool.is_dir():
+                candidates.extend(sorted(pool.glob("*baseline*.py")))
+        elif pid.startswith("explore_candidate_"):
+            try:
+                idx = int(pid.rsplit("_", 1)[-1])
+                candidates.append(root / f"explore_phase/candidates/candidate_{idx}.py")
+            except ValueError:
+                pass
+        elif pid.startswith("iteration_") and "_candidate_" in pid:
+            # iteration_{N}_candidate_{K}
+            try:
+                mid = pid[len("iteration_") :]
+                it_s, cand_s = mid.split("_candidate_", 1)
+                candidates.append(
+                    root / f"iteration_{int(it_s)}/candidates/candidate_{int(cand_s)}.py"
+                )
+            except ValueError:
+                pass
+
+        for pool_name in ("evolution_elite_pool", "initial_pool_from_global"):
+            pool = root / pool_name
+            if not pool.is_dir():
+                continue
+            # Ranked files are typically NNN_<program_id>.py
+            candidates.extend(sorted(pool.glob(f"*_{pid}.py")))
+            candidates.extend(sorted(pool.glob(f"*{pid}*.py")))
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            if text.strip():
+                return text
+    return None
+
+
+def hydrate_trace_code_fields(
+    rec: Dict[str, Any],
+    participant_dir: Path | str,
+) -> Dict[str, Any]:
+    """Return a shallow copy with ``code`` filled when missing (slim traces)."""
+    out = dict(rec)
+    code = resolve_program_code(
+        participant_dir,
+        program_id=out.get("candidate_id") or out.get("program_id"),
+        code_path=out.get("code_path"),
+        phase=out.get("phase"),
+        iteration=out.get("iteration"),
+        candidate_idx=out.get("candidate_idx"),
+        source=out.get("source"),
+        embedded_code=out.get("code"),
+    )
+    if code is not None:
+        out["code"] = code
+    return out
+
+
+def hydrate_parent_record(
+    parent: Dict[str, Any],
+    participant_dir: Path | str,
+) -> Dict[str, Any]:
+    """Fill parent ``code`` from disk when absent."""
+    out = dict(parent)
+    code = resolve_program_code(
+        participant_dir,
+        program_id=out.get("program_id"),
+        code_path=out.get("code_path"),
+        embedded_code=out.get("code"),
+    )
+    if code is not None:
+        out["code"] = code
+    return out
 
 
 def json_safe_value(value: Any) -> Any:
@@ -105,8 +250,13 @@ def parent_record_from_elite_tuple(
     *,
     val_loglik: Optional[float] = None,
     train_loglik: Optional[float] = None,
+    embed_code: bool = DEFAULT_EMBED_CODE,
+    code_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Serialize one selected parent for iteration_context (no test metrics)."""
+    """Serialize one selected parent for iteration_context (no test metrics).
+
+    Default is slim: program_id + scores only (no embedded code).
+    """
     program_id = str(parent_tuple[3]) if len(parent_tuple) > 3 else ""
     code = parent_tuple[0] if parent_tuple else ""
     selection_score = selection_score_from_elite_tuple(parent_tuple)
@@ -119,7 +269,7 @@ def parent_record_from_elite_tuple(
     if train_ll is None and selection_score is not None and val_loglik is None:
         # train-only ranking: index 1 is train loglik
         train_ll = selection_score
-    record = {
+    record: Dict[str, Any] = {
         "program_id": program_id,
         "selection_score": selection_score,
         "train_loglik": train_ll if train_ll is not None and math.isfinite(float(train_ll)) else None,
@@ -128,8 +278,11 @@ def parent_record_from_elite_tuple(
             if val_loglik is not None and math.isfinite(float(val_loglik))
             else None
         ),
-        "code": code if isinstance(code, str) else ("" if code is None else str(code)),
     }
+    if code_path:
+        record["code_path"] = str(code_path)
+    if embed_code:
+        record["code"] = code if isinstance(code, str) else ("" if code is None else str(code))
     return record
 
 
@@ -323,9 +476,11 @@ def build_iteration_context_record(
     evolution_selection_score: str,
     selected_parents: Sequence[Dict[str, Any]],
     best_selected_parent_id: Optional[str],
+    mem_trace_format: str = MEM_TRACE_FORMAT,
 ) -> Dict[str, Any]:
     return {
         "record_type": "iteration_context",
+        "mem_trace_format": mem_trace_format,
         "dataset": dataset,
         "participant_id": participant_id,
         "run_id": run_id,
@@ -349,7 +504,7 @@ def build_candidate_record(
     candidate_id: str,
     candidate_idx: int,
     source: str,
-    code: str,
+    code: str = "",
     runtime_valid: bool,
     train_loglik: Optional[float],
     val_loglik: Optional[float],
@@ -364,13 +519,23 @@ def build_candidate_record(
     reference_id: Optional[str] = None,
     reference_is_exact: Optional[bool] = None,
     prompted_parent_ids: Optional[Sequence[str]] = None,
+    embed_code: bool = DEFAULT_EMBED_CODE,
+    code_path: Optional[str] = None,
+    mem_trace_format: str = MEM_TRACE_FORMAT,
 ) -> Dict[str, Any]:
     from utils.mem.reference_types import enrich_candidate_reference_fields
 
     ref_type = str(reference_type or reference_kind)
     ref_id = reference_id if reference_id is not None else reference_parent_id
-    base = {
+    rel = code_path or candidate_code_relpath(
+        phase=phase,
+        iteration=iteration,
+        candidate_idx=candidate_idx,
+        source=source,
+    )
+    base: Dict[str, Any] = {
         "record_type": "candidate",
+        "mem_trace_format": mem_trace_format,
         "dataset": dataset,
         "participant_id": participant_id,
         "run_id": run_id,
@@ -381,13 +546,15 @@ def build_candidate_record(
         "candidate_id": candidate_id,
         "candidate_idx": int(candidate_idx),
         "source": source,
-        "code": code,
+        "code_path": rel,
         "runtime_valid": bool(runtime_valid),
         "train_loglik": train_loglik,
         "val_loglik": val_loglik,
         "selection_score": selection_score,
         "survived_elite_truncation": bool(survived_elite_truncation),
     }
+    if embed_code:
+        base["code"] = code
     if prompted_parent_ids is not None:
         base["prompted_parent_ids"] = [str(x) for x in prompted_parent_ids]
     return enrich_candidate_reference_fields(
