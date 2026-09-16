@@ -1,0 +1,94 @@
+# Canonical TEH/PICS dataset names for EMNLP-10 + five-new (the 15).
+#
+# This is the name list for job names, tables, and submitters.
+# CLI `--dataset` still uses `alias` (loaders / output folders). Do not
+# rename bergert/guan/steyvers aliases — that would break paths.
+# Slurm job names: t_<job_alias>  (e.g. t_1peterson2021using, t_20bergert).
+#
+# `analysis/config/ablation/config.yaml` is ablation *run paths* for the
+# original 10, not this name registry. `config_fix_data_rerun1.yaml` is
+# method-output paths for the EMNLP-10 compare table.
+#
+# Numeric prefixes 1–14 are the existing Psych-101 aliases (6 and 8/9 unused
+# in the 15). Five-new externals had no number → start at 20.
+# Schulz/Kool already have 13/14; do not renumber them.
+
+datasets:
+  # --- EMNLP-10 ---
+  - id: 1
+    alias: 1peterson2021using
+    job_alias: 1peterson2021using
+    display: Choice13k
+    group: emnlp10
+  - id: 2
+    alias: 2plonsky2018when
+    job_alias: 2plonsky2018when
+    display: CPC18
+    group: emnlp10
+  - id: 3
+    alias: 3frey2017cct
+    job_alias: 3frey2017cct
+    display: Frey CCT
+    group: emnlp10
+  - id: 4
+    alias: 4wulff2018description
+    job_alias: 4wulff2018description
+    display: Wulff description
+    group: emnlp10
+  - id: 5
+    alias: 5speekenbrink2008learning
+    job_alias: 5speekenbrink2008learning
+    display: Speekenbrink
+    group: emnlp10
+  - id: 7
+    alias: 7hilbig2014generalized
+    job_alias: 7hilbig2014generalized
+    display: Hilbig
+    group: emnlp10
+  - id: 10
+    alias: 10frey2017risk
+    job_alias: 10frey2017risk
+    display: Frey Risk
+    group: emnlp10
+  - id: 11
+    alias: 11enkavi2019recentprobes
+    job_alias: 11enkavi2019recentprobes
+    display: Enkavi
+    group: emnlp10
+  - id: 12
+    alias: 12badham2017deficits
+    job_alias: 12badham2017deficits
+    display: Badham
+    group: emnlp10
+  - id: 0
+    alias: mixed_gambles
+    job_alias: mixed_gambles
+    display: mixed gambles
+    group: emnlp10
+
+  # --- five new (PICS 15) ---
+  - id: 20
+    alias: bergert_nosofsky_2007
+    job_alias: 20bergert
+    display: Bergert–Nosofsky
+    group: five_new
+  - id: 21
+    alias: guan_2020_stopping
+    job_alias: 21guan
+    display: Guan stopping
+    group: five_new
+  - id: 22
+    alias: steyvers_2009_bandit
+    job_alias: 22steyvers
+    display: Steyvers bandit
+    group: five_new
+  - id: 13
+    alias: 13schulz2020finding
+    job_alias: 13schulz2020finding
+    display: Schulz bandit
+    group: five_new
+  - id: 14
+    alias: 14kool2016when
+    job_alias: 14kool2016when
+    display: Kool two-step
+    group: five_new

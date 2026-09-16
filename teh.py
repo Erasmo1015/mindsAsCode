@@ -12907,10 +12907,11 @@ def main():
     parser.add_argument(
         "--mem_trace",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
-            "When enabled, write passive MEM traces to participant_*/mem_trace.jsonl "
-            "(iteration_context + candidate rows; no LLM calls; default: disabled)."
+            "Write passive MEM traces to participant_*/mem_trace.jsonl "
+            "(iteration_context + candidate rows; no extra LLM calls; default: on). "
+            "Disable with --no-mem_trace."
         ),
     )
     parser.add_argument(

@@ -162,6 +162,8 @@ def test_cli_help_exposes_t_pics_source():
     assert "--t_pics" in proc.stdout
     assert "--t_pics_source_config" in proc.stdout
     assert "t_pics_score_weighted_temp_fix.yaml" in proc.stdout
+    assert "--mem_trace" in proc.stdout
+    assert "--no-mem_trace" in proc.stdout
 
 
 def test_cli_rejects_t_pics_source_without_global_phase():

@@ -410,7 +410,7 @@ There is no single-parent ancestry. For each candidate:
 
 ### 1) Passive trace logging (`teh.py`)
 
-- CLI: `--mem_trace` / `--no-mem-trace` (default **off**).
+- CLI: `--mem_trace` / `--no-mem_trace` (default **on** from Sep 17 2026). Disable with `--no-mem_trace`.
 - When on, appends `participant_*/mem_trace.jsonl` (UTF-8) during the **participant evolution** loop only (not global/refine).
 - Record types:
   - `iteration_context` — after parent selection: parents (id, selection score, train/val LL, full code), best selected parent id.
@@ -583,11 +583,11 @@ Same four targets/sources as E/F. Reuses **live Stage E source 10-iter rank-1** 
 
 ## Short update (Sep 17 2026 — T-PICS = G + SA40 + 10 person iters)
 
-T-PICS is Method G with **SA40 on every phase including the source population**, **10 person iters**, explore 50 from the target transfer-pop rank-1, elite 50, no refine. E/F/G remain independent methods (each retrains its own source pop). Do **not** reuse E source jobs 254340–254342 (full data, not SA40). Do not submit from this note.
+T-PICS is Method G with **SA40 on every phase including the source population**, **10 person iters**, explore 50 from the target transfer-pop rank-1, elite 50, no refine. E/F/G remain independent methods (each retrains its own source pop). Do **not** reuse E source jobs 254340–254342 (full data, not SA40). `--mem_trace` is **default on** (person-loop `participant_*/mem_trace.jsonl` only). Dataset names: `analysis/config/teh_datasets.yaml` (Slurm `t_<job_alias>`). Step 1 H100: `bash cluster/2026Sep17_T_PICS/submit_t_pics_step1.sh`. Step 1 L40S: `bash cluster/2026Sep17_T_PICS/submit_t_pics_step1_other_gpu.sh`. Enkavi H100 **256219** (`tpsrcenk`); Choice13k/Hilbig moved off H100.
 
 Default target→source map: `analysis/config/transfer_source/t_pics_score_weighted_temp_fix.yaml` (score-weighted cosine, then skip pre-fix CPC18 / Speekenbrink / Frey Risk / Badham programs). Unfiltered ranking stays in `t_pics_score_weighted.yaml`. Unique G.1 sources after the filter: **Enkavi, Choice13k, Hilbig**.
 
 - **Independent (one command, trains G.1 then G.2+G.3):** `--t_pics` or `--t_pics_source` / `--t_pics_source auto` plus `--global_phase --explore_from_population_parents --explore_population_top_k 1 --explore_candidates 50 --no-refinement_phase --limited_data_protocol structure_aware --limited_train_val 40`. Source is **not** in the person explore prompt (that is E).
-- **Reuse (Step 1 = 3 source pops, then 15 targets):** source-pop job is population-only (`n_iterations 0`, explore 0). Target job passes `--global_prompt_source_program <source>/global_phase/best_program.py` (dataset auto-fills from the yaml). `--t_pics_source_config` overrides the map.
+- **Reuse (Step 1 = 3 source pops, then 15 targets):** source-pop job is population-only (`n_iterations 0`, explore 0; `--mem_trace` is a no-op until people run). Target job passes `--global_prompt_source_program <source>/global_phase/best_program.py` (dataset auto-fills from the yaml). `--t_pics_source_config` overrides the map.
 - **SA40 leak check:** structure-aware 40 is forwarded into source-example trials in the global-prompt suffix (`utils/teh/explore_source_prompt.py`). Paper wording: **obs** = train+val (40), **test** reserved first — not “40 train” and not 8:2.
 - Lookup/CLI: `utils/teh/t_pics_sources.py`, `teh.py` `--t_pics` / `--t_pics_source` / `--t_pics_source_config`. Tests: `tests/test_t_pics.py`, `tests/test_explore_handoff.py`.
