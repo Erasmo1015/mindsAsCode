@@ -8,6 +8,10 @@ Evaluates held-out test trials with explicit trial log-likelihood (PICS-fair Opt
 
 Supports Psych-101 binaries, Kool/Schulz, and external Bergert/Guan/Steyvers.
 Sparse / limited-data protocol matches TEH/MLE (caps train+val; test untouched).
+SA40 / sequential tasks: prefixes are built on the concatenated train+val+test
+timeline; only test indices are scored. Do not pass a test-only list when
+history is longer than the test index (Python negative wrap leaks later test
+problems).
 
 Model loading / suffix scoring follows reference_repos/Llama-3.1-Centaur-70B/test_adapter.py
 (Unsloth FastLanguageModel, teacher-forcing loss on suffix tokens only — not trainer.evaluate()).
@@ -31,7 +35,7 @@ import socket
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -192,6 +196,38 @@ def centaur_output_base_dir(
         return f"generated_outputs/external/{alias}/centaur/run_{timestamp}"
     split = normalize_psych_dataset_split(psych_dataset_split)
     return f"generated_outputs/psych101_{split}/centaur/{alias}/run_{timestamp}"
+
+
+def _centaur_history_span(
+    trials: List[Dict[str, Any]], trial_index: int
+) -> Tuple[int, List[Dict[str, Any]]]:
+    """Map ``history`` onto earlier rows in ``trials``. Reject negative wrap."""
+    if trial_index < 0 or trial_index >= len(trials):
+        raise ValueError(
+            f"Centaur prefix trial_index={trial_index} out of range 0..{len(trials) - 1}"
+        )
+    hist = list(trials[trial_index].get("history") or [])
+    start = trial_index - len(hist)
+    if start < 0:
+        raise ValueError(
+            f"Centaur prefix: history_len={len(hist)} exceeds trial_index={trial_index} "
+            f"in a {len(trials)}-trial list. Score test trials on the concatenated "
+            f"train+val+test timeline so history maps onto earlier rows "
+            f"(Python negative wrap would leak later test problems)."
+        )
+    return start, hist
+
+
+def _centaur_prompt_timeline(
+    train_trials: Sequence[Dict[str, Any]],
+    val_trials: Sequence[Dict[str, Any]],
+    test_trials: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[int]]:
+    """Full split timeline for prefixes; indices to score (test only)."""
+    prompt = list(train_trials) + list(val_trials) + list(test_trials)
+    test_start = len(train_trials) + len(val_trials)
+    score_indices = list(range(test_start, test_start + len(test_trials)))
+    return prompt, score_indices
 
 
 def _task_instruction_for_participant(
@@ -383,9 +419,7 @@ def _build_gamble_prefix(
     trials: List[Dict[str, Any]], trial_index: int, *, instruction: str = ""
 ) -> str:
     cur = trials[trial_index]["problem"]
-    hist = trials[trial_index]["history"]
-    L = len(hist)
-    start = trial_index - L
+    start, hist = _centaur_history_span(trials, trial_index)
     parts: List[str] = []
     intro = instruction.strip() if instruction else GAMBLE_TASK_INTRO.rstrip()
     parts.append(intro)
@@ -401,9 +435,7 @@ def _build_cct_prefix(
 ) -> str:
     cur = trials[trial_index]["problem"]
     keys = cur["option_keys"]
-    hist = trials[trial_index]["history"]
-    L = len(hist)
-    start = trial_index - L
+    start, hist = _centaur_history_span(trials, trial_index)
     parts: List[str] = []
     if instruction.strip():
         parts.append(instruction.strip()[:2000])
@@ -442,9 +474,7 @@ def _build_schema_b_prefix(
 ) -> str:
     cur = trials[trial_index]["problem"]
     subtype = _schema_b_subtype(cur)
-    hist = trials[trial_index]["history"]
-    L = len(hist)
-    start = trial_index - L
+    start, hist = _centaur_history_span(trials, trial_index)
     parts: List[str] = []
     if instruction.strip():
         parts.append(instruction.strip()[:2000])
@@ -497,13 +527,16 @@ def _build_bandit_prefix(
     trials: List[Dict[str, Any]], trial_index: int, *, instruction: str = ""
 ) -> str:
     cur = trials[trial_index]["problem"]
-    hist = trials[trial_index]["history"]
+    start, hist = _centaur_history_span(trials, trial_index)
     L = len(hist)
-    start = trial_index - L
     parts: List[str] = []
     if instruction.strip():
         parts.append(instruction.strip()[:2000])
-    if L == 0 or trials[start - 1]["problem"].get("game_id") != cur.get("game_id"):
+    if (
+        start == 0
+        or L == 0
+        or trials[start - 1]["problem"].get("game_id") != cur.get("game_id")
+    ):
         parts.append(_bandit_game_header(cur))
     for j, h in enumerate(hist):
         parts.append(_bandit_history_line(h))
@@ -515,13 +548,16 @@ def _build_balloon_prefix(
     trials: List[Dict[str, Any]], trial_index: int, *, instruction: str = ""
 ) -> str:
     cur = trials[trial_index]["problem"]
-    hist = trials[trial_index]["history"]
+    start, hist = _centaur_history_span(trials, trial_index)
     L = len(hist)
-    start = trial_index - L
     parts: List[str] = []
     if instruction.strip():
         parts.append(instruction.strip()[:2000])
-    if L == 0 or trials[start - 1]["problem"].get("balloon_id") != cur.get("balloon_id"):
+    if (
+        start == 0
+        or L == 0
+        or trials[start - 1]["problem"].get("balloon_id") != cur.get("balloon_id")
+    ):
         parts.append(_balloon_problem_line(cur))
     for j, h in enumerate(hist):
         parts.append(_balloon_history_line(trials[start + j]["problem"], h))
@@ -534,9 +570,7 @@ def _build_generic_prefix(
 ) -> str:
     cur = trials[trial_index]["problem"]
     keys = cur.get("option_keys", [])
-    hist = trials[trial_index]["history"]
-    L = len(hist)
-    start = trial_index - L
+    start, hist = _centaur_history_span(trials, trial_index)
     parts: List[str] = []
     if instruction.strip():
         parts.append(instruction.strip()[:2000])
@@ -707,8 +741,18 @@ def evaluate_centaur_on_trials(
     n_seeds: int = 1,
     debug_prob: bool = False,
     debug_limit: int = 5,
+    score_indices: Optional[Sequence[int]] = None,
 ) -> Dict[str, Any]:
-    total = len(trials)
+    if score_indices is None:
+        indices = list(range(len(trials)))
+    else:
+        indices = [int(i) for i in score_indices]
+        for i in indices:
+            if i < 0 or i >= len(trials):
+                raise ValueError(
+                    f"Centaur score index {i} out of range 0..{len(trials) - 1}"
+                )
+    total = len(indices)
     seed_avg_logliks: List[float] = []
     seed_avg_accs: List[float] = []
 
@@ -716,7 +760,7 @@ def evaluate_centaur_on_trials(
         loglik_acc = 0.0
         correct = 0
         errors = 0
-        for i in range(total):
+        for pos, i in enumerate(indices):
             y = int(trials[i]["action"])
             try:
                 probs = chooser.action_probs_from_suffixes(trials, i)
@@ -735,7 +779,7 @@ def evaluate_centaur_on_trials(
             p_obs = min(max(p_obs, 1e-9), 1.0 - 1e-9)
             loglik_acc += math.log(p_obs)
             correct += int(pred == y)
-            if debug_prob and seed_idx == 0 and i < debug_limit:
+            if debug_prob and seed_idx == 0 and pos < debug_limit:
                 print(f"  [debug] trial={i} y={y} p_obs={p_obs:.6f} dbg={chooser.last_prob_debug}")
         avg_ll = loglik_acc / total if total else 0.0
         acc = correct / total if total else 0.0
@@ -761,9 +805,15 @@ def collect_centaur_predictions(
     participant_id: int,
     dataset: str,
     split_name: str,
+    score_indices: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, Any]]:
+    if score_indices is None:
+        indices = list(range(len(trials)))
+    else:
+        indices = [int(i) for i in score_indices]
     rows: List[Dict[str, Any]] = []
-    for i, t in enumerate(trials):
+    for local_i, i in enumerate(indices):
+        t = trials[i]
         y = int(t["action"])
         keys = centaur_display_keys(t["problem"])
         p_obs: Optional[float] = None
@@ -783,7 +833,8 @@ def collect_centaur_predictions(
                 "participant_id": participant_id,
                 "dataset": dataset,
                 "split": split_name,
-                "trial_index": i,
+                "trial_index": local_i,
+                "prompt_trial_index": i,
                 "option_key_0": keys[0] if len(keys) > 0 else "",
                 "option_key_1": keys[1] if len(keys) > 1 else "",
                 "n_keys": len(keys),
@@ -998,16 +1049,24 @@ def run_smoke_prompt_check(
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
     )
-    trials = test or val or train
-    if not trials:
+    prompt_trials, score_indices = _centaur_prompt_timeline(
+        train, val, test
+    )
+    if not prompt_trials:
         raise ValueError("No trials available for smoke check.")
+    if score_indices:
+        sample_idx = score_indices[: min(n_trials, len(score_indices))]
+    else:
+        sample_idx = list(range(min(n_trials, len(prompt_trials))))
     samples = []
-    for i in range(min(n_trials, len(trials))):
-        prob = trials[i]["problem"]
+    for i in sample_idx:
+        prob = prompt_trials[i]["problem"]
         keys = centaur_display_keys(prob)
         if len(keys) < 2:
             raise ValueError(f"Trial {i}: expected >=2 display keys, got {keys!r}")
-        prefix = build_centaur_prompt_prefix_indexed(trials, i, instruction=instruction)
+        prefix = build_centaur_prompt_prefix_indexed(
+            prompt_trials, i, instruction=instruction
+        )
         if not prefix.rstrip().endswith("You press"):
             raise ValueError(f"Trial {i}: prefix must end with 'You press ', got tail={prefix[-40:]!r}")
         samples.append(
@@ -1017,8 +1076,8 @@ def run_smoke_prompt_check(
                 "dataset_alias": prob.get("dataset_alias"),
                 "option_keys": prob.get("option_keys"),
                 "display_keys": keys,
-                "action": trials[i]["action"],
-                "history_len": len(trials[i].get("history", [])),
+                "action": prompt_trials[i]["action"],
+                "history_len": len(prompt_trials[i].get("history", [])),
                 "prefix_tail": prefix[-400:],
                 "suffixes": [f"<<{k}>>." for k in keys],
             }
@@ -1069,25 +1128,31 @@ def _evaluate_participant(
     if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
         append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
     chooser.task_instruction = instruction
+    prompt_trials, score_indices = _centaur_prompt_timeline(
+        train_trials, val_trials, test_trials
+    )
     print(
         f"[Split] {dataset} participant row {participant_row_index}: "
         f"train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)} "
-        f"(ratio={split_ratio:.3f}, seed={split_seed}; Centaur evaluates test only; "
-        f"protocol={manifest.protocol})"
+        f"(ratio={split_ratio:.3f}, seed={split_seed}; "
+        f"Centaur prefix on train+val+test n={len(prompt_trials)}, "
+        f"scores test only n={len(score_indices)}; protocol={manifest.protocol})"
     )
     test_eval = evaluate_centaur_on_trials(
         chooser,
-        test_trials,
+        prompt_trials,
         n_seeds=n_eval_seeds,
         debug_prob=debug_prob,
         debug_limit=debug_limit,
+        score_indices=score_indices,
     )
     preds = collect_centaur_predictions(
         chooser,
-        test_trials,
+        prompt_trials,
         participant_id=participant_row_index,
         dataset=normalize_psych101_dataset_alias(dataset),
         split_name="test",
+        score_indices=score_indices,
     )
     summary = {
         "participant_id": participant_row_index,

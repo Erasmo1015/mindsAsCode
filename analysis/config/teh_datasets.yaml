@@ -5,6 +5,18 @@
 # rename bergert/guan/steyvers aliases — that would break paths.
 # Slurm job names: t_<job_alias>  (e.g. t_1peterson2021using, t_20bergert).
 #
+# EMNLP participant ordinals (inclusive, into valid_participant_ids.json):
+# `range_start_ordinal` / `range_end_ordinal`. Default table is first 50
+# people (0..49). Exceptions match cluster/all_in_teh.sh + June TEH:
+#   Wulff 1290-1339 (higher-trial cohort, not 0-49)
+#   Speekenbrink 0-22 (only 23 valid people)
+#   Badham 0-9 (EMNLP table is 10 people; the valid list is longer)
+# Five-new all have >=50 valid people, so 0-49 is the 50-person table.
+# `9wilson2014humans` (0-27) is not in the 15.
+#
+# Cluster jobs must read these fields (see utils.teh.teh_datasets.emnlp_ordinal_range).
+# Do not hardcode 0-49 on Speekenbrink / Badham / Wulff.
+#
 # `analysis/config/ablation/config.yaml` is ablation *run paths* for the
 # original 10, not this name registry. `config_fix_data_rerun1.yaml` is
 # method-output paths for the EMNLP-10 compare table.
@@ -20,51 +32,71 @@ datasets:
     job_alias: 1peterson2021using
     display: Choice13k
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 2
     alias: 2plonsky2018when
     job_alias: 2plonsky2018when
     display: CPC18
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 3
     alias: 3frey2017cct
     job_alias: 3frey2017cct
     display: Frey CCT
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 4
     alias: 4wulff2018description
     job_alias: 4wulff2018description
     display: Wulff description
     group: emnlp10
+    range_start_ordinal: 1290
+    range_end_ordinal: 1339
   - id: 5
     alias: 5speekenbrink2008learning
     job_alias: 5speekenbrink2008learning
     display: Speekenbrink
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 22
   - id: 7
     alias: 7hilbig2014generalized
     job_alias: 7hilbig2014generalized
     display: Hilbig
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 10
     alias: 10frey2017risk
     job_alias: 10frey2017risk
     display: Frey Risk
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 11
     alias: 11enkavi2019recentprobes
     job_alias: 11enkavi2019recentprobes
     display: Enkavi
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 12
     alias: 12badham2017deficits
     job_alias: 12badham2017deficits
     display: Badham
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 9
   - id: 0
     alias: mixed_gambles
     job_alias: mixed_gambles
     display: mixed gambles
     group: emnlp10
+    range_start_ordinal: 0
+    range_end_ordinal: 49
 
   # --- five new (PICS 15) ---
   - id: 20
@@ -72,23 +104,33 @@ datasets:
     job_alias: 20bergert
     display: Bergert–Nosofsky
     group: five_new
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 21
     alias: guan_2020_stopping
     job_alias: 21guan
     display: Guan stopping
     group: five_new
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 22
     alias: steyvers_2009_bandit
     job_alias: 22steyvers
     display: Steyvers bandit
     group: five_new
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 13
     alias: 13schulz2020finding
     job_alias: 13schulz2020finding
     display: Schulz bandit
     group: five_new
+    range_start_ordinal: 0
+    range_end_ordinal: 49
   - id: 14
     alias: 14kool2016when
     job_alias: 14kool2016when
     display: Kool two-step
     group: five_new
+    range_start_ordinal: 0
+    range_end_ordinal: 49

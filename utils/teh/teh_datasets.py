@@ -3,8 +3,9 @@ TEH dataset registry: Psych-101 binary aliases + local mixed_gambles + external 
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
-from typing import FrozenSet, Optional
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
@@ -165,3 +166,71 @@ def dataset_display_name(dataset: str) -> str:
         return external_dataset_display_name(dataset)
     alias = normalize_psych101_dataset_alias(dataset)
     return PSYCH101_BINARY_DATASETS[alias]["display_name"]
+
+
+TEH_DATASETS_YAML = (
+    Path(__file__).resolve().parents[2] / "analysis" / "config" / "teh_datasets.yaml"
+)
+
+
+@lru_cache(maxsize=1)
+def load_teh_dataset_registry() -> List[Dict[str, object]]:
+    """Rows from analysis/config/teh_datasets.yaml (the 15)."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError(
+            "PyYAML is required to load analysis/config/teh_datasets.yaml"
+        ) from exc
+    if not TEH_DATASETS_YAML.is_file():
+        raise FileNotFoundError(f"TEH dataset registry not found: {TEH_DATASETS_YAML}")
+    payload = yaml.safe_load(TEH_DATASETS_YAML.read_text(encoding="utf-8")) or {}
+    rows = payload.get("datasets") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"teh_datasets.yaml has no datasets list: {TEH_DATASETS_YAML}")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _registry_lookup_keys(dataset: str) -> Tuple[str, ...]:
+    key = str(dataset).strip()
+    keys = [key]
+    if is_mixed_gambles_dataset(key) or is_external_dataset(key):
+        return tuple(dict.fromkeys(keys))
+    try:
+        keys.append(normalize_psych101_dataset_alias(key))
+    except Exception:
+        pass
+    return tuple(dict.fromkeys(keys))
+
+
+def teh_dataset_row(dataset: str) -> Dict[str, object]:
+    """Registry row for an alias, job_alias, or Psych-101 short name."""
+    keys = set(_registry_lookup_keys(dataset))
+    for row in load_teh_dataset_registry():
+        aliases = {
+            str(row.get("alias") or ""),
+            str(row.get("job_alias") or ""),
+        }
+        if keys & aliases:
+            return row
+    raise KeyError(
+        f"Unknown TEH dataset {dataset!r}. Add it to {TEH_DATASETS_YAML}"
+    )
+
+
+def emnlp_ordinal_range(dataset: str) -> Tuple[int, int]:
+    """Inclusive EMNLP table ordinals from teh_datasets.yaml."""
+    row = teh_dataset_row(dataset)
+    try:
+        start = int(row["range_start_ordinal"])
+        end = int(row["range_end_ordinal"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise KeyError(
+            f"{dataset!r} missing range_start_ordinal/range_end_ordinal in "
+            f"{TEH_DATASETS_YAML}"
+        ) from exc
+    if start < 0 or end < start:
+        raise ValueError(
+            f"{dataset!r} invalid EMNLP ordinals [{start}, {end}] in {TEH_DATASETS_YAML}"
+        )
+    return start, end
