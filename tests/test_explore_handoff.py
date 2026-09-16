@@ -174,3 +174,26 @@ def test_cli_help_exposes_stage_e_f_flags():
     assert "--explore_seed_candidates" in proc.stdout
     assert "--explore_prompt_source_program" in proc.stdout
     assert "--explore_prompt_source_dataset" in proc.stdout
+    assert "--global_prompt_source_program" in proc.stdout
+    assert "--global_prompt_source_dataset" in proc.stdout
+
+
+def test_cli_rejects_global_prompt_source_without_dataset():
+    proc = _run_teh(
+        "--global_phase",
+        "--global_prompt_source_program",
+        "missing.py",
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "must be set together" in combined
+
+
+def test_cli_rejects_global_prompt_source_without_global_phase():
+    proc = _run_teh(
+        "--global_prompt_source_program",
+        "missing.py",
+        "--global_prompt_source_dataset",
+        "11enkavi2019recentprobes",
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "requires --global_phase" in combined

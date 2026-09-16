@@ -566,3 +566,15 @@ Skip J (empty in the 15); skip Speekenbrink/Badham (no 7-subset selector); skip 
 - CLI: `--explore_prompt_source_program` / `--explore_prompt_source_dataset`, `--explore_seed_candidates`, multi `--initial_pool_dir`.
 - Submit (prints a Notion markdown JobID table): `bash cluster/2026Sep16_StageEF/submit_stage_ef.sh`
 - Outputs: `generated_outputs/psych101_train/teh/<dataset>/stage_{e,f}_*/job_<id>/`
+
+---
+
+## Short update (Sep 16 2026 — Stage G live transfer-pop + Stage D explore)
+
+Same four targets/sources as E/F. Reuses **live Stage E source 10-iter rank-1** (jobs 254340 Enkavi, 254341 CPC18, 254342 Choice13k) — never A–D / June.
+
+- **Population:** 10-iter **target** global starting from vanilla seed, with the live source rank-1 **in the global prompt** (`--global_prompt_source_program` / `--global_prompt_source_dataset`). Not a vanilla target pop.
+- **Explore (Stage D):** 50 candidates from that transfer rank-1 as the **sole parent** (`--explore_from_population_parents --explore_population_top_k 1`). Source is not in the explore prompt (that is E).
+- **Person:** 1 iter, no refine.
+- Submit (Notion JobID table): `bash cluster/2026Sep16_StageEF/submit_stage_g.sh`
+- Outputs: `generated_outputs/psych101_train/teh/<dataset>/stage_g/job_<id>/`

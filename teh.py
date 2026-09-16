@@ -3003,11 +3003,14 @@ def run_global_evolution_phase(
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
     mdl_lambda: float = 0.0,
+    prompt_suffix: Optional[str] = None,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
 
     Runs before per-participant evolution when ``--global_phase`` and ``--phase all``.
+    ``prompt_suffix`` (Stage G) injects a live source rank-1 into every global
+    generation prompt; evolution still starts from the vanilla seed.
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     mdl_lambda = normalize_mdl_lambda(mdl_lambda)
@@ -3057,6 +3060,8 @@ def run_global_evolution_phase(
         )
     )
     print(f"{'='*80}")
+    if prompt_suffix:
+        print("[INFO] Global prompt includes a cross-task source rank-1 suffix (Stage G).")
 
     global_dir = output_dir / "global_phase"
     if save_artifacts:
@@ -3256,6 +3261,7 @@ def run_global_evolution_phase(
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
             "error_feedback_mode": error_feedback_mode,
+            "prompt_suffix": prompt_suffix,
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -12584,6 +12590,25 @@ def main():
         help="Dataset alias for --explore_prompt_source_program (task description + example trial).",
     )
     parser.add_argument(
+        "--global_prompt_source_program",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Stage G: inject this live source rank-1 choose() program into the "
+            "target population (global) prompt. Global still starts from --seed_path. "
+            "Requires --global_phase and --global_prompt_source_dataset. "
+            "Does not apply to participant explore."
+        ),
+    )
+    parser.add_argument(
+        "--global_prompt_source_dataset",
+        type=str,
+        default=None,
+        metavar="DATASET",
+        help="Dataset alias for --global_prompt_source_program.",
+    )
+    parser.add_argument(
         "--num_episodes",
         type=int,
         default=10,
@@ -13103,6 +13128,17 @@ def main():
     if src_prog and int(args.explore_candidates) <= 0:
         print("Error: --explore_prompt_source_program requires --explore_candidates > 0.")
         return
+    g_prog = getattr(args, "global_prompt_source_program", None)
+    g_ds = getattr(args, "global_prompt_source_dataset", None)
+    if bool(g_prog) != bool(g_ds):
+        print(
+            "Error: --global_prompt_source_program and --global_prompt_source_dataset "
+            "must be set together."
+        )
+        return
+    if g_prog and not args.global_phase:
+        print("Error: --global_prompt_source_program requires --global_phase.")
+        return
     if args.explore_from_population_parents:
         if not (args.global_phase or bool(args.initial_pool_programs or args.initial_pool_dir)):
             print(
@@ -13520,6 +13556,24 @@ def main():
 
     global_elite_for_handoff: Optional[List[Tuple[Any, ...]]] = None
     has_initial_pool = bool(args.initial_pool_programs or args.initial_pool_dir)
+    global_prompt_suffix = None
+    if args.global_prompt_source_program:
+        try:
+            global_prompt_suffix = build_rank1_explore_prompt_suffix(
+                source_dataset=str(args.global_prompt_source_dataset),
+                program_path=str(args.global_prompt_source_program),
+                split_seed=int(args.split_seed),
+                psych_dataset_split=psych_dataset_split,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}")
+            if wandb is not None:
+                wandb.finish()
+            return
+        print(
+            "[INFO] Stage G population prompt includes live source rank-1 "
+            f"({args.global_prompt_source_dataset}: {args.global_prompt_source_program})"
+        )
     if has_initial_pool:
         try:
             global_elite_for_handoff = _load_initial_pool_from_cli(
@@ -13587,6 +13641,7 @@ def main():
             limited_data_protocol=args.limited_data_protocol,
             limited_train_val=args.limited_train_val,
             mdl_lambda=args.mdl_lambda,
+            prompt_suffix=global_prompt_suffix,
         )
 
     explore_from_handoff_parents = resolve_explore_from_handoff_parents(

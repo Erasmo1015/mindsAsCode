@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List, Optional
 
+from utils.teh.prompt_sanitize import _marker_present
 from utils.teh_transfer.prompts import (
     build_transfer_source_suffix,
     make_source_context,
@@ -35,6 +36,21 @@ def _load_source_example_trials(
         return []
 
 
+def _source_program_has_choose(code: str) -> bool:
+    """Same bar as TEH candidate validity: a callable ``choose``, not a byte match on ``def choose(``.
+
+    LLM best_program.py often has ``def choose (problem ,history ):`` (spaces).
+    """
+    if not _marker_present(code, "def choose("):
+        return False
+    ns: dict = {}
+    try:
+        exec(code, {"__builtins__": __builtins__}, ns)
+    except Exception:
+        return False
+    return callable(ns.get("choose"))
+
+
 def build_rank1_explore_prompt_suffix(
     *,
     source_dataset: str,
@@ -50,8 +66,8 @@ def build_rank1_explore_prompt_suffix(
     if not path.is_file():
         raise FileNotFoundError(f"Explore source program not found: {path}")
     code = path.read_text(encoding="utf-8")
-    if "def choose(" not in code:
-        raise ValueError(f"Explore source program has no choose(): {path}")
+    if not _source_program_has_choose(code):
+        raise ValueError(f"Explore source program has no callable choose(): {path}")
     loglik = float(best_loglik) if best_loglik is not None else 0.0
     example_trials: List[Any] = _load_source_example_trials(
         source_dataset,
