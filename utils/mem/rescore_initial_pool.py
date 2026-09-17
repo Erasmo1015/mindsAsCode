@@ -63,47 +63,9 @@ def compute_evolution_selection_score(
 
 def compile_choose(code_str: str) -> Optional[Callable]:
     """Minimal TEH-compatible compile of choose(problem, history)."""
-    import math as _math
+    from utils.teh.sandbox_builtins import compile_choose_with_error
 
-    safe_builtins = {
-        "zip": zip,
-        "len": len,
-        "range": range,
-        "enumerate": enumerate,
-        "reversed": reversed,
-        "sum": sum,
-        "abs": abs,
-        "min": min,
-        "max": max,
-        "float": float,
-        "int": int,
-        "str": str,
-        "list": list,
-        "dict": dict,
-        "tuple": tuple,
-        "bool": bool,
-        "isinstance": isinstance,
-        "hasattr": hasattr,
-        "getattr": getattr,
-        "__import__": __import__,
-    }
-    global_ns = {
-        "__builtins__": safe_builtins,
-        "__import__": __import__,
-        "math": _math,
-    }
-    local_ns: Dict[str, Any] = {}
-    try:
-        exec(code_str, global_ns, local_ns)
-    except Exception:
-        return None
-    choose_fn = local_ns.get("choose") or global_ns.get("choose")
-    if not callable(choose_fn):
-        return None
-    try:
-        setattr(choose_fn, "__teh_source_code", str(code_str or ""))
-    except Exception:
-        pass
+    choose_fn, _err = compile_choose_with_error(code_str)
     return choose_fn
 
 
@@ -259,6 +221,7 @@ def score_program_on_splits(
     train_trials: List[Dict[str, Any]],
     val_trials: List[Dict[str, Any]],
     *,
+    dataset: str = "",
     n_eval_seeds: int = 3,
     evolution_selection_score: str = "train_val",
 ) -> Dict[str, Any]:
@@ -271,12 +234,26 @@ def score_program_on_splits(
             "train_loglik": None,
             "val_loglik": None,
         }
-    train_eval = evaluate_binary_loglik(choose_fn, train_trials, n_seeds=n_eval_seeds)
-    val_eval = (
-        evaluate_binary_loglik(choose_fn, val_trials, n_seeds=n_eval_seeds)
-        if val_trials
-        else None
-    )
+    from utils.teh.teh_datasets import is_categorical_output_dataset
+
+    if dataset and is_categorical_output_dataset(dataset):
+        from utils.teh_psych.categorical_eval import evaluate_categorical_program
+
+        train_eval = evaluate_categorical_program(
+            choose_fn, train_trials, n_seeds=n_eval_seeds
+        )
+        val_eval = (
+            evaluate_categorical_program(choose_fn, val_trials, n_seeds=n_eval_seeds)
+            if val_trials
+            else None
+        )
+    else:
+        train_eval = evaluate_binary_loglik(choose_fn, train_trials, n_seeds=n_eval_seeds)
+        val_eval = (
+            evaluate_binary_loglik(choose_fn, val_trials, n_seeds=n_eval_seeds)
+            if val_trials
+            else None
+        )
     train_ll = float(train_eval["avg_loglik"])
     val_ll = float(val_eval["avg_loglik"]) if val_eval is not None else None
     sel = compute_evolution_selection_score(
@@ -406,6 +383,7 @@ def rescore_initial_pool_for_participant(
             prog["code"],
             train_trials,
             val_trials,
+            dataset=dataset,
             n_eval_seeds=n_eval_seeds,
             evolution_selection_score=evolution_selection_score,
         )

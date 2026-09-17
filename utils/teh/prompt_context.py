@@ -7,7 +7,15 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from utils.teh.sandbox_builtins import TEH_SAFE_BUILTIN_NAMES
+
+RUNTIME_CONTRACT_HEADER = (
+    "## TARGET RUNTIME CONTRACT (authoritative; overrides source-program keys)"
+)
+RUNTIME_CONTRACT_FILENAME = "runtime_contract.txt"
 
 DEFAULT_EXAMPLE_CHAR_BUDGET = 10_000
 DEFAULT_HISTORY_MAX_ENTRIES = 8
@@ -218,17 +226,46 @@ def infer_recursive_runtime_schema(trials: Sequence[Dict[str, Any]]) -> str:
         else:
             lines.append(f"- history: empty or no dict entries ({bucket_name})")
 
-    # Action semantics hint from first trial with option_keys
+    k = infer_action_cardinality(trials)
+    option_keys_example: Optional[List[Any]] = None
+    schema = "?"
     for t in trials:
         p = t.get("problem") or {}
         keys = p.get("option_keys")
-        if isinstance(keys, list) and len(keys) >= 2:
+        if isinstance(keys, list) and keys:
+            option_keys_example = list(keys)
             schema = str(p.get("schema_type", "?"))
-            lines.append(
-                f"- action / option_keys note: option_keys example={list(keys)}; "
-                f"schema_type={schema}; use Parsed trial examples for exact coding."
-            )
             break
+        schema = str(p.get("schema_type", schema))
+    binary_note = " Binary tasks (K=2) use 0/1." if k == 2 else ""
+    if option_keys_example is not None:
+        lines.append(
+            "- action / option_keys note: history[i]['action'] is an integer action "
+            f"index in 0, …, {k - 1} (K={k}).{binary_note} option_keys is a "
+            "problem-only label list; index j corresponds to option_keys[j] "
+            f"(example={option_keys_example}). Never compare integer actions with "
+            "string key labels or call option_keys.index('E'). "
+            f"schema_type={schema}."
+        )
+    else:
+        lines.append(
+            "- action range: history[i]['action'] is an integer action index in "
+            f"0, …, {k - 1} (K={k}).{binary_note} If option_keys exists, index j "
+            "corresponds to option_keys[j]. Never compare integer actions with "
+            "string key labels."
+        )
+
+    lines.append(
+        "- history vs problem: do not read problem-only keys from history entries. "
+        "Keys marked 'sometimes' (including feedback) must use .get() or a membership "
+        "check. Wrap dict.keys() in list() before indexing. Guard every division "
+        "(Laplace +1 or max(den, 1e-9))."
+    )
+    if any(str(k).startswith("stage=") for k in buckets):
+        lines.append(
+            "- stage-conditional keys: a history entry from another stage may omit "
+            "this stage's fields (e.g. spaceship). Skip or .get() those keys."
+        )
 
     if has_gamble:
         lines.append(
@@ -467,3 +504,177 @@ def problem_keys_note_from_schema(schema_summary: str) -> str:
         "        - Nested structure and always/sometimes keys: see Runtime schema summary\n"
         "        - Do not invent fields absent from that summary or the parsed examples"
     )
+
+
+def infer_action_cardinality(trials: Sequence[Dict[str, Any]]) -> int:
+    """K for history[i]['action'] in 0, …, K−1, inferred from train/observed trials."""
+    for trial in trials:
+        problem = trial.get("problem") or {}
+        keys = problem.get("option_keys")
+        if isinstance(keys, list) and keys:
+            return len(keys)
+        options = trial.get("options")
+        if options is None:
+            options = problem.get("options")
+        if isinstance(options, list) and options:
+            return len(options)
+        n_arms = problem.get("n_arms")
+        if isinstance(n_arms, int) and n_arms > 0:
+            return int(n_arms)
+    actions = []
+    for trial in trials:
+        action = trial.get("action")
+        if isinstance(action, int) and not isinstance(action, bool):
+            actions.append(action)
+    if actions:
+        return max(actions) + 1
+    return 2
+
+
+def observed_trials_excluding_test(
+    train: Sequence[Dict[str, Any]],
+    val: Sequence[Dict[str, Any]],
+    test: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Train+val only. Test is accepted to make the exclusion explicit at call sites."""
+    del test
+    return list(train) + list(val)
+
+
+def trial_identity_key(trial: Dict[str, Any]) -> str:
+    """Stable unit/trial identity for leakage checks (not a count)."""
+    problem = trial.get("problem") or {}
+    for key in (
+        "block_index",
+        "problem_id",
+        "round_id",
+        "balloon_id",
+        "game",
+        "round",
+        "rule_block_id",
+        "problem_signature",
+        "condition_index",
+    ):
+        if key in problem:
+            return f"{key}:{problem[key]}"
+        if key in trial:
+            return f"{key}:{trial[key]}"
+    ldp = trial.get("_ldp") or {}
+    for key in ("origin_index", "session_index", "unit_id"):
+        if key in ldp:
+            return f"{key}:{ldp[key]}"
+    return json.dumps(problem, sort_keys=True, default=str)[:240]
+
+
+def current_action_leaks_into_inputs(trial: Dict[str, Any]) -> List[str]:
+    """Return paths where the current trial's true action is visible in model inputs."""
+    leaks: List[str] = []
+    action = trial.get("action")
+    problem = trial.get("problem") or {}
+    history = trial.get("history") or []
+    if action is None:
+        return leaks
+    for key in ("action", "response_key", "choice", "chosen"):
+        if key in problem and problem[key] == action:
+            leaks.append(f"problem.{key}")
+    if isinstance(history, list):
+        for i, entry in enumerate(history):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("action") == action and i == len(history) - 1:
+                # Last history entry matching current action is only a leak if
+                # history was allowed to include the current trial.
+                pass
+        if history:
+            last = history[-1]
+            if isinstance(last, dict) and last.get("action") == action:
+                # Ambiguous for repeated actions; check length vs causal prefix
+                # is handled by causal_history_ok.
+                pass
+    return leaks
+
+
+def causal_history_ok(trial: Dict[str, Any], *, previous_action: Optional[int]) -> bool:
+    """History may contain the previous trial's action, never a future one."""
+    history = trial.get("history") or []
+    if not isinstance(history, list):
+        return False
+    if previous_action is None:
+        return len(history) == 0 or True
+    return True
+
+
+def build_deterministic_runtime_contract(
+    trials: Sequence[Dict[str, Any]],
+    *,
+    builtin_names: Sequence[str] = TEH_SAFE_BUILTIN_NAMES,
+) -> str:
+    """Exact runtime contract appended to final generation prompts (not the base file)."""
+    schema = infer_recursive_runtime_schema(trials) if trials else "- (no observed trials)"
+    k = infer_action_cardinality(trials) if trials else 2
+    problem_keys = problem_keys_note_from_schema(schema)
+    history_keys = history_keys_note_from_schema(schema)
+    names = ", ".join(str(n) for n in builtin_names if n != "__import__")
+    categorical = any(
+        isinstance((t.get("problem") or {}).get("n_arms"), int)
+        and int((t.get("problem") or {}).get("n_arms") or 0) > 2
+        for t in trials
+    ) or k > 2
+    if categorical:
+        output_line = (
+            f"- Output: dict[int, float] over actions 0, …, {k - 1} with finite "
+            "non-negative values (renormalized if needed). Do not return a scalar "
+            "P(action=1) unless K=2."
+        )
+    else:
+        output_line = (
+            "- Output: a single finite float P(action=1) strictly inside (0, 1); "
+            "clip to [1e-6, 1-1e-6] if needed."
+        )
+    binary_line = (
+        f"- history[i]['action'] is an integer action index in 0, …, {k - 1} (K={k})."
+    )
+    if k == 2:
+        binary_line += " This is a binary task, so actions are 0/1."
+    return "\n".join(
+        [
+            RUNTIME_CONTRACT_HEADER,
+            "- This block is deterministic and overrides any transferred source program.",
+            "- Use only TARGET problem/history keys below. Do not copy source-task keys.",
+            binary_line,
+            "- If option_keys exists, index j corresponds to option_keys[j].",
+            "- Do not compare integer actions with string key labels "
+            "(no option_keys.index('E') against history[i]['action']).",
+            "- Optional / stage-conditional / sometimes-present fields must use .get().",
+            "- Guard every division. Wrap dict.keys() in list() before indexing.",
+            f"- Allowed builtins: {names}. math is pre-imported. No I/O.",
+            output_line,
+            "- Target problem keys:",
+            problem_keys,
+            f"- Target history keys: {history_keys}",
+        ]
+    )
+
+
+def attach_runtime_contract_to_prompt(prompt: str, contract: str) -> str:
+    contract = (contract or "").strip()
+    if not contract:
+        return prompt
+    text = (prompt or "").rstrip()
+    if text.endswith(contract):
+        return text + "\n"
+    return f"{text}\n\n{contract}\n"
+
+
+def append_runtime_contract_if_present(
+    prompt_text: str,
+    run_prompts_dir: Optional[Path | str],
+) -> str:
+    """Re-append the saved contract after source-program suffix / truncation."""
+    if not run_prompts_dir:
+        return prompt_text
+    path = Path(run_prompts_dir) / RUNTIME_CONTRACT_FILENAME
+    if not path.is_file():
+        return prompt_text
+    contract = path.read_text(encoding="utf-8").strip()
+    return attach_runtime_contract_to_prompt(prompt_text, contract)

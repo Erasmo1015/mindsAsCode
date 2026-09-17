@@ -92,6 +92,7 @@ from utils.teh.prompt_context import (
     DEFAULT_EXAMPLE_CHAR_BUDGET,
     DEFAULT_HISTORY_MAX_ENTRIES,
     DEFAULT_MAX_EXAMPLES,
+    append_runtime_contract_if_present,
 )
 from utils.teh.dataset_prompt_evolution import (
     aggregate_pics_style_prompt_scores,
@@ -2107,49 +2108,9 @@ def _mutate_dataset_prompt_via_llm(
 
 def compile_program_with_error(code_str: str) -> Tuple[Optional[Callable], Optional[BaseException]]:
     """Safely compile program code; return (choose_fn, compile_error)."""
-    # Provide minimal safe builtins needed for the program to run
-    # Only include what's necessary for pure Python computation
-    import math
-    safe_builtins = {
-        'zip': zip,
-        'len': len,
-        'range': range,
-        'enumerate': enumerate,
-        'reversed': reversed,
-        'sum': sum,
-        'abs': abs,
-        'min': min,
-        'max': max,
-        'float': float,
-        'int': int,
-        'str': str,
-        'list': list,
-        'dict': dict,
-        'tuple': tuple,
-        'bool': bool,
-        'isinstance': isinstance,
-        'hasattr': hasattr,
-        'getattr': getattr,
-        '__import__': __import__,  # Needed for dynamic imports like __import__("math")
-    }
-    global_ns = {
-        "__builtins__": safe_builtins,
-        "__import__": __import__,  # Make __import__ directly available in global namespace
-        "math": math,  # Pre-import math module for convenience
-    }
-    local_ns = {}
-    try:
-        exec(code_str, global_ns, local_ns)
-    except Exception as e:
-        return None, e
-    choose_fn = local_ns.get("choose") or global_ns.get("choose")
-    if callable(choose_fn):
-        try:
-            setattr(choose_fn, "__teh_source_code", str(code_str or ""))
-        except Exception:
-            pass
-        return choose_fn, None
-    return None, TypeError("missing callable choose(problem, history)")
+    from utils.teh.sandbox_builtins import compile_choose_with_error
+
+    return compile_choose_with_error(code_str)
 
 
 def compile_program(code_str: str) -> Optional[Callable]:
@@ -3703,8 +3664,16 @@ def _run_t_pics_source_population(
             getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
-        prefer_auto_llm_prompt=False,
+        prefer_auto_llm_prompt=bool(getattr(args, "prefer_auto_llm_prompt", False))
+        or int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0) > 0,
         dataset_prompt_file=None,
+        split_ratio=float(args.split_ratio),
+        split_seed=int(args.split_seed),
+        speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        data_dir=getattr(args, "data_dir", None),
+        limited_data_protocol=str(args.limited_data_protocol),
+        limited_train_val=args.limited_train_val,
+        max_observed_trials_per_participant=args.max_observed_trials_per_participant,
     )
     source_seed = str(source_prompts_dir / "seed_program.py")
     print(
@@ -8549,6 +8518,8 @@ Provide only the code for choose(...) as a complete function body.
         except PromptBudgetExceededError:
             raise
 
+    prompt_text = append_runtime_contract_if_present(prompt_text, run_prompts_dir)
+
     _llm_call_counter = [0]
     debug_captures: List[Dict[str, Any]] = []
     explain_artifact_by_idx: Dict[int, Dict[str, Any]] = {}
@@ -12550,6 +12521,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--prefer_auto_llm_prompt",
+        action="store_true",
+        help=(
+            "Skip registered hand-written dataset prompts and generate the evolution "
+            "prompt from task metadata plus observed train+val examples. "
+            "Implied when --dataset_prompt_evolution_iterations > 0."
+        ),
+    )
+    parser.add_argument(
         "--base_prompt",
         type=str,
         default="prompts/teh/infer_single_choice.txt",
@@ -13116,7 +13096,8 @@ def main():
         default=1200,
         help=(
             "Max characters reserved for compact past invalid-program errors in each "
-            "evolution prompt (0 disables the section)."
+            "evolution prompt (0 disables the section). Default: 1200 (legacy). "
+            "T-PICS workers pass 0 explicitly."
         ),
     )
     parser.add_argument(
@@ -13818,8 +13799,15 @@ def main():
             getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
-        prefer_auto_llm_prompt=evo_iters > 0,
+        prefer_auto_llm_prompt=bool(evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False)),
         dataset_prompt_file=getattr(args, "dataset_prompt_file", None),
+        split_ratio=float(args.split_ratio),
+        split_seed=int(args.split_seed),
+        speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        data_dir=getattr(args, "data_dir", None),
+        limited_data_protocol=str(args.limited_data_protocol),
+        limited_train_val=args.limited_train_val,
+        max_observed_trials_per_participant=args.max_observed_trials_per_participant,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")

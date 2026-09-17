@@ -1,0 +1,30 @@
+# Schema-v4 T-PICS run config (SA40 source pops for all 15 datasets).
+# G.1 submit path: L40S TP=2 via cluster/2026Sep17_T_PICS/submit_t_pics_step1_other_gpu.sh
+# (H100 NVL is full). Not H100 job_t_pics_source_pop.sh.
+#
+# Slot list is complete. Fill job_id / run_dir / best_program after G.1 jobs
+# finish. Empty job_id values make Step 2 reuse lookup fail on purpose.
+#
+# source_map is omitted until analysis/config/transfer_source/t_pics_schema4.yaml
+# exists. Do not submit target T-PICS jobs against this file yet.
+
+step1:
+  protocol: structure_aware
+  limited_train_val: 40
+  kind: t_pics_source_pop10
+  source_pops:
+    1peterson2021using: {job_id: "", run_dir: "", best_program: ""}
+    2plonsky2018when: {job_id: "", run_dir: "", best_program: ""}
+    3frey2017cct: {job_id: "", run_dir: "", best_program: ""}
+    4wulff2018description: {job_id: "", run_dir: "", best_program: ""}
+    5speekenbrink2008learning: {job_id: "", run_dir: "", best_program: ""}
+    7hilbig2014generalized: {job_id: "", run_dir: "", best_program: ""}
+    10frey2017risk: {job_id: "", run_dir: "", best_program: ""}
+    11enkavi2019recentprobes: {job_id: "", run_dir: "", best_program: ""}
+    12badham2017deficits: {job_id: "", run_dir: "", best_program: ""}
+    mixed_gambles: {job_id: "", run_dir: "", best_program: ""}
+    bergert_nosofsky_2007: {job_id: "", run_dir: "", best_program: ""}
+    guan_2020_stopping: {job_id: "", run_dir: "", best_program: ""}
+    steyvers_2009_bandit: {job_id: "", run_dir: "", best_program: ""}
+    13schulz2020finding: {job_id: "", run_dir: "", best_program: ""}
+    14kool2016when: {job_id: "", run_dir: "", best_program: ""}

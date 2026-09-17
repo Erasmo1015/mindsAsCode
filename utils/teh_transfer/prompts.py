@@ -59,7 +59,10 @@ def build_transfer_source_suffix(sources: List[SourceTransferContext]) -> str:
         "",
         "The following source datasets have population-level cognitive programs evolved "
         "on pooled train+validation trials across all participants. Adapt useful ideas to "
-        "the target task described above.",
+        "the target task described above. Do not copy source problem keys: rewrite "
+        "choose() to the TARGET runtime schema or it will KeyError. "
+        "history[i]['action'] is an integer action id, never a press-key letter from "
+        "option_keys.",
         "",
     ]
     for idx, src in enumerate(sources, start=1):

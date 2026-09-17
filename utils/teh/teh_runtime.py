@@ -11,13 +11,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from openai import OpenAI
 
-from data_modules.mixed_gambles import DEFAULT_CSV_PATH, load_mixed_gambles_trials
+from data_modules.mixed_gambles import DEFAULT_CSV_PATH
 from data_modules.external import (
     is_bergert_nosofsky_2007_dataset,
     is_guan_2020_stopping_dataset,
     is_steyvers_2009_bandit_dataset,
     is_external_dataset,
-    load_external_loglik_trials,
     external_default_data_dir,
     external_reference_prompt_path,
 )
@@ -33,7 +32,6 @@ from data_modules.external.steyvers_2009_bandit import (
 from data_modules.psych101_binary import (
     PSYCH101_BINARY_DATASETS,
     experiment_id_for_alias,
-    experiment_to_trial_dicts,
     format_trials_for_prompt,
     get_psych101_binary_experiment,
     normalize_psych101_dataset_alias,
@@ -42,10 +40,19 @@ from utils.teh.prompt_context import (
     DEFAULT_EXAMPLE_CHAR_BUDGET,
     DEFAULT_HISTORY_MAX_ENTRIES,
     DEFAULT_MAX_EXAMPLES,
+    RUNTIME_CONTRACT_FILENAME,
+    attach_runtime_contract_to_prompt,
+    build_deterministic_runtime_contract,
     history_keys_note_from_schema,
     infer_recursive_runtime_schema,
     problem_keys_note_from_schema,
+    select_diverse_train_trials,
     serialize_train_trials_for_prompt_generation,
+)
+from utils.teh.limited_data_protocol import load_participant_limited_splits
+from utils.teh.limited_data_registry import (
+    LIMITED_DATA_PROTOCOL_OFF,
+    normalize_limited_data_protocol,
 )
 from utils.teh.dataset_prompt_evolution import ensure_task_knowledge_in_prompt
 from utils.teh.prompt_sanitize import strip_embedded_choose_from_evolution_prompt
@@ -124,7 +131,10 @@ _GENERIC_PROMPT_REQUIREMENTS = """Requirements:
   Do not use incorrect forms such as 1 / (1 + 1 / (1 + x)).
 - Keep all helper logic used by `choose(...)` inside `choose(...)` (nested functions are allowed).
 - Do not rely on top-level helper functions outside `choose(...)`.
-- Ensure every variable used in expressions is defined on all branches."""
+- Ensure every variable used in expressions is defined on all branches.
+- History entries do not copy all problem keys. Use .get() for sometimes-present fields such as feedback.
+- history[i]["action"] is an integer action id, never a press-key letter from option_keys (option_keys is problem-only).
+- Guard every division (empty counts / missing feedback). Wrap dict.keys() in list() before indexing."""
 
 _GAMBLE_LEAK_RE = re.compile(
     r'problem\["gamble_[AB]"\]|problem\[\'gamble_[AB]\'\]|'
@@ -203,6 +213,8 @@ def _build_schema_neutral_base_prompt(
 - Avoid numerical errors such as division by zero, overflow, or invalid operations.
 - Do not use `pow(...)`; use `**` for exponentiation.
 - Keep all helper logic used by `choose(...)` inside `choose(...)`.
+- Guard every division (Laplace +1 or max(den, 1e-9)). Wrap dict.keys() in list() before indexing.
+- History entries do not copy all problem keys; use .get() for sometimes-present fields.
 """
         behavioral = (
             "Behavioral requirements:\n"
@@ -514,7 +526,8 @@ def build_prompt_generation_llm_user_content(
         safety_line = (
             "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
             "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
-            "variables defined on all branches.\n"
+            "variables defined on all branches. Runtime builtins include "
+            "set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
         )
     elif is_categorical_output_dataset(dataset_alias):
         adapt_instructions = (
@@ -530,9 +543,10 @@ def build_prompt_generation_llm_user_content(
             "probabilities over every option['action'] (renormalized if needed).\n"
         )
         safety_line = (
-            "- Preserve generic safety: pure Python, no imports, deterministic, non-negative "
-            "finite probabilities, no randomness, no pow() (use **), helpers inside choose(), "
-            "variables defined on all branches.\n"
+            "- Preserve generic safety: pure Python, no imports, deterministic, "
+            "non-negative finite probabilities, no randomness, no pow() (use **), "
+            "helpers inside choose(), variables defined on all branches. Runtime "
+            "builtins include set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
         )
     else:
         adapt_instructions = (
@@ -548,7 +562,8 @@ def build_prompt_generation_llm_user_content(
         safety_line = (
             "- Preserve generic safety: pure Python, no imports, deterministic, clip to "
             "[1e-6, 1-1e-6], no randomness, no pow() (use **), helpers inside choose(), "
-            "variables defined on all branches.\n"
+            "variables defined on all branches. Runtime builtins include "
+            "set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
         )
 
     return (
@@ -641,6 +656,107 @@ def _generate_prompt_via_llm(
     return text
 
 
+def _prompt_trial_fingerprint(trial: Dict[str, Any]) -> str:
+    """Instance fingerprint for prompt-example leakage checks (problem + history)."""
+    return json.dumps(
+        {"problem": trial.get("problem"), "history": trial.get("history")},
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _prompt_sample_pid_and_instruction(
+    dataset_alias: str,
+    *,
+    local_dataset: Optional[str] = None,
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = "train",
+) -> Tuple[int, str]:
+    """Dataset-level instruction plus the participant used for prompt examples."""
+    from utils.teh.participant_ids import load_valid_participant_ids
+
+    if is_mixed_gambles_dataset(dataset_alias):
+        valid_ids = load_valid_participant_ids(
+            dataset_alias,
+            REPO_ROOT,
+            filter_mixed_gambles=filter_mixed_gambles,
+            mixed_gambles_csv=mixed_gambles_csv,
+        )
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for mixed_gambles dataset {dataset_alias!r}")
+        instruction = (
+            "Mixed gambles: Option A is a 50/50 gamble (gain/loss); Option B is certain. "
+            "action=0 gamble, action=1 certain; choose(problem, history) returns P(action=1)."
+        )
+        return int(valid_ids[0]), instruction
+    if is_bergert_nosofsky_2007_dataset(dataset_alias):
+        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
+        return int(valid_ids[0]), BERGERT_TASK_DESCRIPTION
+    if is_guan_2020_stopping_dataset(dataset_alias):
+        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
+        return int(valid_ids[0]), GUAN_TASK_DESCRIPTION
+    if is_steyvers_2009_bandit_dataset(dataset_alias):
+        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
+        if not valid_ids:
+            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
+        return int(valid_ids[0]), STEYVERS_TASK_DESCRIPTION
+    exp = get_psych101_binary_experiment(
+        dataset_alias,
+        0,
+        split=psych_dataset_split,
+        local_dataset=local_dataset,
+    )
+    return 0, exp.instruction
+
+
+def _load_prompt_observation_trials(
+    dataset_alias: str,
+    sample_pid: int,
+    *,
+    split_ratio: float,
+    split_seed: int,
+    filter_mixed_gambles: bool = False,
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    psych_dataset_split: str = "train",
+    local_dataset: Optional[str] = None,
+    speekenbrink_split: str = "chronological",
+    data_dir: Optional[str] = None,
+    limited_data_protocol: object = LIMITED_DATA_PROTOCOL_OFF,
+    limited_train_val: Optional[int] = None,
+    max_observed_trials_per_participant: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Any]:
+    """Observed train+val used for prompt examples.
+
+    When the limited-data protocol is on, this is the exact retained subset
+    used for scoring (same manifest/fingerprints). Test is never included.
+    """
+    resolved = data_dir
+    if resolved is None and is_external_dataset(dataset_alias):
+        resolved = str(REPO_ROOT / external_default_data_dir(dataset_alias))
+    train, val, test, _audit, manifest = load_participant_limited_splits(
+        dataset_alias,
+        int(sample_pid),
+        split_ratio=float(split_ratio),
+        split_seed=int(split_seed),
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
+        data_dir=resolved,
+    )
+    observed = list(train) + list(val)
+    return observed, list(test), manifest
+
+
 def setup_teh_run_prompts(
     run_dir: Path,
     dataset_alias: str,
@@ -660,17 +776,28 @@ def setup_teh_run_prompts(
     max_examples: int = DEFAULT_MAX_EXAMPLES,
     prefer_auto_llm_prompt: bool = False,
     dataset_prompt_file: Optional[Path | str] = None,
+    split_ratio: float = 0.6,
+    split_seed: int = 0,
+    speekenbrink_split: str = "chronological",
+    data_dir: Optional[str] = None,
+    limited_data_protocol: object = LIMITED_DATA_PROTOCOL_OFF,
+    limited_train_val: Optional[int] = None,
+    max_observed_trials_per_participant: Optional[int] = None,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
 
     Returns path to prompts directory.
 
-    When prefer_auto_llm_prompt is True (dataset-prompt evolution pilot), skip hand-written
-    reference prompts so the run starts from the auto LLM prompt.
+    When prefer_auto_llm_prompt is True (T-PICS / dataset-prompt evolution), skip
+    hand-written reference prompts so the run starts from the auto LLM prompt.
 
     When dataset_prompt_file is set, copy that file as infer_single_choice.txt (skips
     reference / LLM / merge). Used for hand-designed comparison prompts.
+
+    When limited_data_protocol is enabled, parsed behavioral prompt examples are
+    taken only from the retained limited-data train+val subset (same manifest as
+    scoring). Task descriptions and schema notes remain dataset-level metadata.
     """
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
@@ -678,83 +805,28 @@ def setup_teh_run_prompts(
     if not resolved_base_prompt.is_file():
         raise FileNotFoundError(f"Base prompt not found: {resolved_base_prompt}")
 
-    if is_mixed_gambles_dataset(dataset_alias):
-        from utils.teh.participant_ids import load_valid_participant_ids
-
-        valid_ids = load_valid_participant_ids(
-            dataset_alias,
-            REPO_ROOT,
-            filter_mixed_gambles=filter_mixed_gambles,
-            mixed_gambles_csv=mixed_gambles_csv,
-        )
-        if not valid_ids:
-            raise ValueError(f"No valid participant ids for mixed_gambles dataset {dataset_alias!r}")
-        sample_pid = int(valid_ids[0])
-        train_trials, _, _, _ = load_mixed_gambles_trials(
-            sample_pid,
-            csv_path=mixed_gambles_csv,
-            filter_gain_loss_only=filter_mixed_gambles,
-        )
-        sample_trial_list = train_trials[:8]
-        instruction = (
-            "Mixed gambles: Option A is a 50/50 gamble (gain/loss); Option B is certain. "
-            "action=0 gamble, action=1 certain; choose(problem, history) returns P(action=1)."
-        )
-    elif is_bergert_nosofsky_2007_dataset(dataset_alias):
-        from utils.teh.participant_ids import load_valid_participant_ids
-
-        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
-        if not valid_ids:
-            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
-        sample_pid = int(valid_ids[0])
-        train_trials, _, _, _ = load_external_loglik_trials(
-            dataset_alias,
-            sample_pid,
-            data_dir=str(REPO_ROOT / external_default_data_dir(dataset_alias)),
-        )
-        sample_trial_list = train_trials[:8]
-        instruction = BERGERT_TASK_DESCRIPTION
-    elif is_guan_2020_stopping_dataset(dataset_alias):
-        from utils.teh.participant_ids import load_valid_participant_ids
-
-        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
-        if not valid_ids:
-            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
-        sample_pid = int(valid_ids[0])
-        train_trials, _, _, _ = load_external_loglik_trials(
-            dataset_alias,
-            sample_pid,
-            data_dir=str(REPO_ROOT / external_default_data_dir(dataset_alias)),
-        )
-        sample_trial_list = train_trials[:8]
-        instruction = GUAN_TASK_DESCRIPTION
-    elif is_steyvers_2009_bandit_dataset(dataset_alias):
-        from utils.teh.participant_ids import load_valid_participant_ids
-
-        valid_ids = load_valid_participant_ids(dataset_alias, REPO_ROOT)
-        if not valid_ids:
-            raise ValueError(f"No valid participant ids for dataset {dataset_alias!r}")
-        sample_pid = int(valid_ids[0])
-        train_trials, _, _, _ = load_external_loglik_trials(
-            dataset_alias,
-            sample_pid,
-            data_dir=str(REPO_ROOT / external_default_data_dir(dataset_alias)),
-        )
-        sample_trial_list = train_trials[:8]
-        instruction = STEYVERS_TASK_DESCRIPTION
-    else:
-        exp = get_psych101_binary_experiment(
-            dataset_alias,
-            0,
-            split=psych_dataset_split,
-            local_dataset=local_dataset,
-        )
-        sample_trial_list = experiment_to_trial_dicts(
-            exp,
-            dataset_alias=dataset_alias,
-            experiment_id=experiment_id_for_alias(dataset_alias),
-        )
-        instruction = exp.instruction
+    sample_pid, instruction = _prompt_sample_pid_and_instruction(
+        dataset_alias,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+    )
+    sample_trial_list, _test_trials, limited_manifest = _load_prompt_observation_trials(
+        dataset_alias,
+        sample_pid,
+        split_ratio=float(split_ratio),
+        split_seed=int(split_seed),
+        filter_mixed_gambles=filter_mixed_gambles,
+        mixed_gambles_csv=mixed_gambles_csv,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        speekenbrink_split=speekenbrink_split,
+        data_dir=data_dir,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+    )
 
     infer_path = prompts_dir / "infer_single_choice.txt"
     generated = False
@@ -826,6 +898,18 @@ def setup_teh_run_prompts(
         infer_path.write_text(merged, encoding="utf-8")
         print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
 
+    contract = build_deterministic_runtime_contract(sample_trial_list)
+    (prompts_dir / RUNTIME_CONTRACT_FILENAME).write_text(
+        contract + "\n", encoding="utf-8"
+    )
+    infer_path.write_text(
+        attach_runtime_contract_to_prompt(
+            infer_path.read_text(encoding="utf-8"), contract
+        ),
+        encoding="utf-8",
+    )
+    print(f"[TEH] Appended deterministic runtime contract -> {infer_path}")
+
     shutil.copy2(BASE_REFINE_PROMPT, prompts_dir / "refine.txt")
     seed_src = seed_program_path.expanduser().resolve()
     if not seed_src.is_file():
@@ -848,6 +932,27 @@ def setup_teh_run_prompts(
         "history_max_entries": int(history_max_entries),
         "max_examples": int(max_examples),
         "prefer_auto_llm_prompt": bool(prefer_auto_llm_prompt),
+        "n_prompt_example_trials": len(sample_trial_list),
+        "prompt_examples_exclude_test": True,
+        "runtime_contract_appended": True,
+        "limited_data_protocol": normalize_limited_data_protocol(limited_data_protocol),
+        "limited_train_val": None if limited_train_val is None else int(limited_train_val),
+        "prompt_examples_from_retained_observed": (
+            normalize_limited_data_protocol(limited_data_protocol) != LIMITED_DATA_PROTOCOL_OFF
+        ),
+        "prompt_sample_pid": int(sample_pid),
+        "observed_subset_fingerprint": getattr(limited_manifest, "subset_fingerprint", None),
+        "observed_train_fingerprint": getattr(limited_manifest, "train_fingerprint", None),
+        "observed_val_fingerprint": getattr(limited_manifest, "val_fingerprint", None),
+        "observed_test_fingerprint": getattr(limited_manifest, "test_fingerprint", None),
+        "retained_n_train": getattr(limited_manifest, "retained_n_train", None),
+        "retained_n_val": getattr(limited_manifest, "retained_n_val", None),
+        "selected_example_fingerprints": [
+            _prompt_trial_fingerprint(t)
+            for t in select_diverse_train_trials(
+                sample_trial_list, max_examples=int(max_examples)
+            )
+        ],
     }
     if is_mixed_gambles_dataset(dataset_alias):
         meta["mixed_gambles_csv"] = mixed_gambles_csv
