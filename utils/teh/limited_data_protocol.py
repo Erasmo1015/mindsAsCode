@@ -6,6 +6,9 @@ Default protocol is ``off``: loaders keep the legacy TEH split and
 ``--limited_data_protocol structure_aware`` with budget 40 means at most 40
 combined train+validation observations per participant. Test is reserved first
 and is never counted toward the 40.
+
+Speekenbrink uses a chronological session split by default (full data and SA40).
+Pass ``--speekenbrink_split legacy`` for the old shuffled pseudo-blocks.
 """
 from __future__ import annotations
 
@@ -60,7 +63,28 @@ LIMITED_DATA_MANIFEST_CSV_FILENAME = "limited_data_manifest.csv"
 
 SPEEKENBRINK_ALIAS = "5speekenbrink2008learning"
 KOOL_ALIAS = "14kool2016when"
+SPEEKENBRINK_SPLIT_CHRONOLOGICAL = "chronological"
+SPEEKENBRINK_SPLIT_LEGACY = "legacy"
+SPEEKENBRINK_SPLITS = (
+    SPEEKENBRINK_SPLIT_CHRONOLOGICAL,
+    SPEEKENBRINK_SPLIT_LEGACY,
+)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def normalize_speekenbrink_split(value: object) -> str:
+    raw = str(value if value is not None else SPEEKENBRINK_SPLIT_CHRONOLOGICAL).strip().lower()
+    if raw in {"", "default", "chrono", "chronological"}:
+        return SPEEKENBRINK_SPLIT_CHRONOLOGICAL
+    if raw in {"legacy", "pseudo", "pseudo_block", "emnlp"}:
+        return SPEEKENBRINK_SPLIT_LEGACY
+    raise ValueError(
+        f"Unknown --speekenbrink_split {value!r}; expected one of {SPEEKENBRINK_SPLITS}"
+    )
+
+
+def use_speekenbrink_chronological_split(speekenbrink_split: object = None) -> bool:
+    return normalize_speekenbrink_split(speekenbrink_split) == SPEEKENBRINK_SPLIT_CHRONOLOGICAL
 
 
 @dataclass
@@ -151,8 +175,20 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
             "--max_observed_trials_per_participant. "
             "'structure_aware' keeps complete resetting units (plus a validated "
             "chronological prefix), samples IID trials, and uses a contiguous "
-            "pre-test segment for continuous sessions. Speekenbrink is split "
-            "chronologically only under structure_aware."
+            "pre-test segment for continuous sessions. Speekenbrink's session split "
+            "is chronological by default (see --speekenbrink_split), independent of "
+            "this protocol."
+        ),
+    )
+    parser.add_argument(
+        "--speekenbrink_split",
+        type=str,
+        default=SPEEKENBRINK_SPLIT_CHRONOLOGICAL,
+        choices=list(SPEEKENBRINK_SPLITS),
+        help=(
+            "Speekenbrink train/val/test split. 'chronological' (default) is a "
+            "contiguous session suffix for test, used for full data and SA40. "
+            "'legacy' restores shuffled TEH pseudo-blocks."
         ),
     )
     parser.add_argument(
@@ -621,11 +657,11 @@ def load_raw_participant_splits(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     limited_data_protocol: object = LIMITED_DATA_PROTOCOL_OFF,
+    speekenbrink_split: object = SPEEKENBRINK_SPLIT_CHRONOLOGICAL,
     data_dir: Optional[str] = None,
     filtered_split: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], str]:
-    """Load the pre-cap split. Speekenbrink chronological only if structure_aware."""
-    proto = normalize_limited_data_protocol(limited_data_protocol)
+    """Load the pre-cap split. Speekenbrink is chronological by default."""
     alias = normalize_limited_dataset_alias(dataset)
     split_kind = "legacy_unit_shuffle"
     if is_mixed_gambles_dataset(alias):
@@ -655,12 +691,14 @@ def load_raw_participant_splits(
             local_dataset=local_dataset,
             filtered_split=filtered_split,
         )
-        if proto == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE and alias == SPEEKENBRINK_ALIAS:
+        if alias == SPEEKENBRINK_ALIAS and use_speekenbrink_chronological_split(
+            speekenbrink_split
+        ):
             all_trials = experiment_to_trial_dicts(exp)
             train, val, test = split_continuous_session_chronological(
                 all_trials, split_ratio
             )
-            split_kind = "structure_aware_chronological_session"
+            split_kind = "chronological_session"
         else:
             train, val, test, _ = split_psych_experiment(
                 exp, split_ratio=split_ratio, split_seed=split_seed
@@ -709,6 +747,14 @@ def _legacy_result(
         used_partial_unit=False,
         fallback_reason="",
         history_consistency="legacy_not_rebuilt",
+        test_set_differs_from_legacy=(
+            spec.dataset == SPEEKENBRINK_ALIAS and "chronological" in str(split_kind)
+        ),
+        test_diff_reason=(
+            "speekenbrink_chronological_split_replaces_legacy_pseudo_blocks"
+            if spec.dataset == SPEEKENBRINK_ALIAS and "chronological" in str(split_kind)
+            else ""
+        ),
         subset_fingerprint=audit.subset_fingerprint,
         train_fingerprint=sparse_subset_fingerprint(
             dataset=dataset,
@@ -1029,6 +1075,7 @@ def load_participant_limited_splits(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: object = LIMITED_DATA_PROTOCOL_OFF,
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: object = SPEEKENBRINK_SPLIT_CHRONOLOGICAL,
     data_dir: Optional[str] = None,
     filtered_split: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], SparseObservationAudit, LimitedDataManifest]:
@@ -1042,6 +1089,7 @@ def load_participant_limited_splits(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         limited_data_protocol=limited_data_protocol,
+        speekenbrink_split=speekenbrink_split,
         data_dir=data_dir,
         filtered_split=filtered_split,
     )

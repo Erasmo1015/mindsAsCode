@@ -44,10 +44,14 @@ def test_mle_trials_for_participant_applies_sparse_helper(monkeypatch):
     def fake_split(*_args, **_kwargs):
         return train, val, test, {}
 
-    monkeypatch.setattr(MLE, "is_mixed_gambles_dataset", lambda _d: False)
-    monkeypatch.setattr(MLE, "is_psych101_dataset", lambda _d: True)
-    monkeypatch.setattr(MLE, "get_psych101_binary_experiment", lambda *a, **k: object())
-    monkeypatch.setattr(MLE, "split_psych_experiment", fake_split)
+    monkeypatch.setattr("utils.teh.limited_data_protocol.is_mixed_gambles_dataset", lambda _d: False)
+    monkeypatch.setattr("utils.teh.limited_data_protocol.is_external_dataset", lambda _d: False)
+    monkeypatch.setattr("utils.teh.limited_data_protocol.is_psych101_dataset", lambda _d: True)
+    monkeypatch.setattr(
+        "utils.teh.limited_data_protocol.get_psych101_binary_experiment",
+        lambda *a, **k: object(),
+    )
+    monkeypatch.setattr("utils.teh.limited_data_protocol.split_psych_experiment", fake_split)
 
     out_train, out_val, out_test, audit = MLE.trials_for_participant(
         "1peterson2021using",
@@ -90,10 +94,14 @@ def test_prospect_theory_uses_same_sparse_subset(monkeypatch):
     def fake_split(*_args, **_kwargs):
         return train, val, test, {}
 
-    monkeypatch.setattr(pt, "is_mixed_gambles_dataset", lambda _d: False)
-    monkeypatch.setattr(pt, "is_psych101_dataset", lambda _d: True)
-    monkeypatch.setattr(pt, "get_psych101_binary_experiment", lambda *a, **k: object())
-    monkeypatch.setattr(pt, "split_psych_experiment", fake_split)
+    monkeypatch.setattr("utils.teh.limited_data_protocol.is_mixed_gambles_dataset", lambda _d: False)
+    monkeypatch.setattr("utils.teh.limited_data_protocol.is_external_dataset", lambda _d: False)
+    monkeypatch.setattr("utils.teh.limited_data_protocol.is_psych101_dataset", lambda _d: True)
+    monkeypatch.setattr(
+        "utils.teh.limited_data_protocol.get_psych101_binary_experiment",
+        lambda *a, **k: object(),
+    )
+    monkeypatch.setattr("utils.teh.limited_data_protocol.split_psych_experiment", fake_split)
 
     out = pt.trials_for_participant(
         "1peterson2021using",

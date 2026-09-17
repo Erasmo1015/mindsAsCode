@@ -20,7 +20,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TRANSFER_SOURCE_DIR = _REPO_ROOT / "analysis/config/transfer_source"
 DEFAULT_T_PICS_SOURCE_CONFIG = _TRANSFER_SOURCE_DIR / "t_pics_score_weighted_temp_fix.yaml"
 UNFILTERED_T_PICS_SOURCE_CONFIG = _TRANSFER_SOURCE_DIR / "t_pics_score_weighted.yaml"
+DEFAULT_T_PICS_RUN_CONFIG = (
+    _REPO_ROOT / "analysis/config/misc/Sep17_T-PICS/config_T-PICS.yaml"
+)
 _AUTO_SOURCE_TOKENS = frozenset({"", "auto", "__auto__"})
+_STEP1_META_KEYS = frozenset({"protocol", "limited_train_val", "kind"})
 
 # Fallback if the yaml is missing; must match DEFAULT_T_PICS_SOURCE_CONFIG.
 _FALLBACK_T_PICS_SOURCES = {
@@ -51,25 +55,153 @@ def _normalize_source_map(raw: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
+def _resolve_config_path(config_path: Optional[Path], default: Path) -> Path:
+    path = Path(config_path) if config_path is not None else default
+    if not path.is_absolute():
+        path = _REPO_ROOT / path
+    return path
+
+
+def _read_yaml_mapping(path: Path) -> Dict[str, object]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError(
+            f"PyYAML is required to load T-PICS config ({path}). pip install pyyaml"
+        ) from exc
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"T-PICS config is not a mapping: {path}")
+    return payload
+
+
+def _repo_path(value: str) -> Path:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = _REPO_ROOT / path
+    return path
+
+
 def load_t_pics_official_sources(
     config_path: Optional[Path] = None,
+    *,
+    _seen: Optional[frozenset] = None,
 ) -> Dict[str, str]:
-    """Load target → source aliases from the transfer_source config yaml."""
-    path = Path(config_path) if config_path is not None else DEFAULT_T_PICS_SOURCE_CONFIG
-    if path.is_file():
-        try:
-            import yaml
-        except ImportError as exc:
-            raise ImportError(
-                "PyYAML is required to load T-PICS source config "
-                f"({path}). pip install pyyaml"
-            ) from exc
-        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        raw = payload.get("sources") if isinstance(payload, dict) else None
-        if not isinstance(raw, dict) or not raw:
-            raise ValueError(f"T-PICS source config has no sources mapping: {path}")
+    """Load target → source aliases from a transfer_source yaml or a run config.
+
+    A run config may set ``sources:`` directly, or ``source_map:`` pointing at
+    ``t_pics_score_weighted_temp_fix.yaml``.
+    """
+    path = _resolve_config_path(config_path, DEFAULT_T_PICS_SOURCE_CONFIG)
+    if not path.is_file():
+        return dict(_FALLBACK_T_PICS_SOURCES)
+    payload = _read_yaml_mapping(path)
+    raw = payload.get("sources")
+    if isinstance(raw, dict) and raw:
         return _normalize_source_map({str(k): str(v) for k, v in raw.items()})
-    return dict(_FALLBACK_T_PICS_SOURCES)
+    nested = payload.get("source_map")
+    if nested:
+        nested_path = _repo_path(str(nested)).resolve()
+        seen = _seen or frozenset()
+        resolved = path.resolve()
+        if nested_path in seen or nested_path == resolved:
+            raise ValueError(f"T-PICS source_map cycle at {path}")
+        return load_t_pics_official_sources(
+            nested_path, _seen=seen | {resolved}
+        )
+    raise ValueError(f"T-PICS source config has no sources mapping: {path}")
+
+
+def load_t_pics_step1_source_pops(
+    config_path: Optional[Path] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Load Step 1 source-pop job dirs / rank-1 paths from a T-PICS run config."""
+    path = _resolve_config_path(config_path, DEFAULT_T_PICS_RUN_CONFIG)
+    if not path.is_file():
+        raise FileNotFoundError(f"T-PICS run config not found: {path}")
+    payload = _read_yaml_mapping(path)
+    step1 = payload.get("step1") or payload.get("step1_source_pops") or {}
+    if not isinstance(step1, dict) or not step1:
+        raise ValueError(f"T-PICS run config has no step1.source_pops: {path}")
+    raw_pops = step1.get("source_pops")
+    if not isinstance(raw_pops, dict) or not raw_pops:
+        raw_pops = {
+            k: v
+            for k, v in step1.items()
+            if str(k) not in _STEP1_META_KEYS and isinstance(v, dict)
+        }
+    if not raw_pops:
+        raise ValueError(f"T-PICS run config has no step1.source_pops: {path}")
+    out: Dict[str, Dict[str, str]] = {}
+    for alias, entry in raw_pops.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"Step 1 source pop {alias!r} is not a mapping in {path}")
+        source = normalize_limited_dataset_alias(str(alias))
+        run_dir = str(entry.get("run_dir") or "").strip()
+        best = str(entry.get("best_program") or "").strip()
+        job_id = str(entry.get("job_id") or "").strip()
+        if not best and run_dir:
+            best = str(Path(run_dir) / "global_phase" / "best_program.py")
+        if not job_id or not best:
+            raise ValueError(
+                f"Step 1 source pop {source!r} needs job_id and best_program in {path}"
+            )
+        out[source] = {
+            "job_id": job_id,
+            "run_dir": run_dir,
+            "best_program": best,
+        }
+    return out
+
+
+def has_t_pics_step1_source_pops(config_path: Optional[Path] = None) -> bool:
+    try:
+        return bool(load_t_pics_step1_source_pops(config_path))
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_t_pics_reuse_source(
+    target_dataset: str,
+    config_path: Optional[Path] = None,
+) -> Tuple[str, Path, str]:
+    """Official source alias, absolute rank-1 path, and Step 1 job id."""
+    source_cfg = (
+        _resolve_config_path(config_path, DEFAULT_T_PICS_SOURCE_CONFIG)
+        if config_path is not None
+        else DEFAULT_T_PICS_SOURCE_CONFIG
+    )
+    pop_cfg = (
+        _resolve_config_path(config_path, DEFAULT_T_PICS_RUN_CONFIG)
+        if config_path is not None
+        else DEFAULT_T_PICS_RUN_CONFIG
+    )
+    source = official_t_pics_source(target_dataset, config_path=source_cfg)
+    pops = load_t_pics_step1_source_pops(pop_cfg)
+    entry = pops.get(source)
+    if entry is None:
+        raise KeyError(
+            f"No Step 1 source-pop path for {source!r} in {pop_cfg} "
+            f"(known: {sorted(pops)})"
+        )
+    return source, _repo_path(entry["best_program"]), entry["job_id"]
+
+
+def t_pics_step1_best_program(
+    source_dataset: str,
+    config_path: Optional[Path] = None,
+) -> Path:
+    """Absolute rank-1 path for a Step 1 source dataset (not a target lookup)."""
+    alias = normalize_t_pics_dataset(source_dataset)
+    pops = load_t_pics_step1_source_pops(
+        config_path if config_path is not None else DEFAULT_T_PICS_RUN_CONFIG
+    )
+    entry = pops.get(alias)
+    if entry is None:
+        raise KeyError(
+            f"No Step 1 source-pop path for {alias!r} (known: {sorted(pops)})"
+        )
+    return _repo_path(entry["best_program"])
 
 
 # Imported by tests; always the yaml map when the file exists.
@@ -205,3 +337,26 @@ def resolve_t_pics_source_participant_ids(
             return valid[: max(0, int(all_max_participants))], note
         return list(valid), note
     raise ValueError(f"Unknown participant_scope for T-PICS source: {participant_scope!r}")
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="utils.teh.t_pics_sources")
+    parser.add_argument("command", choices=("reuse", "step1-best"))
+    parser.add_argument("dataset")
+    parser.add_argument("config", nargs="?", default=None)
+    args = parser.parse_args(argv)
+    cfg = Path(args.config) if args.config else None
+    if args.command == "reuse":
+        src, best, job_id = resolve_t_pics_reuse_source(args.dataset, cfg)
+        print(src)
+        print(best)
+        print(job_id)
+        return 0
+    print(t_pics_step1_best_program(args.dataset, cfg))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

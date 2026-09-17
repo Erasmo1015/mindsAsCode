@@ -351,6 +351,7 @@ def trials_for_participant(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     return_manifest: bool = False,
 ):
     """Train/val/test with optional sparse/limited-data protocol (same as TEH/MLE)."""
@@ -366,6 +367,7 @@ def trials_for_participant(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
     )
     if return_manifest:
         return train_trials, val_trials, test_trials, audit, manifest
@@ -1411,6 +1413,7 @@ def run_participant(
         ),
         limited_data_protocol=getattr(args, "limited_data_protocol", "off"),
         limited_train_val=getattr(args, "limited_train_val", None),
+        speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
         return_manifest=True,
     )
     manifest_jsonl = run_dir / "log" / LIMITED_DATA_MANIFEST_JSONL_FILENAME

@@ -198,6 +198,52 @@ def centaur_output_base_dir(
     return f"generated_outputs/psych101_{split}/centaur/{alias}/run_{timestamp}"
 
 
+def check_centaur_runtime_deps(*, load_unsloth_api: bool = True) -> Dict[str, Any]:
+    """Import the Centaur scoring stack without loading the 70B weights or requiring CUDA."""
+    report: Dict[str, Any] = {"ok": True, "packages": [], "cuda_available": None}
+    specs = [
+        ("numpy", "numpy"),
+        ("torch", "torch"),
+        ("transformers", "transformers"),
+        ("unsloth", "unsloth"),
+        ("bitsandbytes", "bitsandbytes"),
+        ("peft", "peft"),
+        ("accelerate", "accelerate"),
+    ]
+    for label, mod in specs:
+        entry: Dict[str, Any] = {"package": label, "ok": False, "version": None, "error": None}
+        try:
+            m = __import__(mod)
+            entry["ok"] = True
+            entry["version"] = getattr(m, "__version__", None)
+        except Exception as e:
+            report["ok"] = False
+            entry["error"] = f"{type(e).__name__}: {e}"
+        report["packages"].append(entry)
+    try:
+        import torch
+
+        report["cuda_available"] = bool(torch.cuda.is_available())
+    except Exception:
+        report["cuda_available"] = False
+    if load_unsloth_api:
+        api: Dict[str, Any] = {
+            "package": "unsloth.FastLanguageModel",
+            "ok": False,
+            "version": None,
+            "error": None,
+        }
+        try:
+            from unsloth import FastLanguageModel  # noqa: F401
+
+            api["ok"] = True
+        except Exception as e:
+            report["ok"] = False
+            api["error"] = f"{type(e).__name__}: {e}"
+        report["packages"].append(api)
+    return report
+
+
 def _centaur_history_span(
     trials: List[Dict[str, Any]], trial_index: int
 ) -> Tuple[int, List[Dict[str, Any]]]:
@@ -867,6 +913,7 @@ def _load_centaur_trials(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     data_dir: Optional[str] = None,
 ) -> Tuple[
     List[Dict[str, Any]],
@@ -888,6 +935,7 @@ def _load_centaur_trials(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
         data_dir=data_dir,
     )
     instruction = _task_instruction_for_participant(
@@ -1036,6 +1084,7 @@ def run_smoke_prompt_check(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
 ) -> Dict[str, Any]:
     """Validate loaders, display keys, and prompt prefixes without loading the model."""
     train, val, test, instruction, manifest = _load_centaur_trials(
@@ -1048,6 +1097,7 @@ def run_smoke_prompt_check(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
     )
     prompt_trials, score_indices = _centaur_prompt_timeline(
         train, val, test
@@ -1112,6 +1162,7 @@ def _evaluate_participant(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     manifest_jsonl_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     train_trials, val_trials, test_trials, instruction, manifest = _load_centaur_trials(
@@ -1124,6 +1175,7 @@ def _evaluate_participant(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
     )
     if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
         append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
@@ -1219,6 +1271,14 @@ def main() -> None:
     )
     add_limited_data_cli_arguments(parser)
     parser.add_argument(
+        "--check_deps",
+        action="store_true",
+        help=(
+            "Import Centaur runtime packages (torch/transformers/unsloth/...) without "
+            "loading the model or requiring a GPU. Exit 1 if any import fails."
+        ),
+    )
+    parser.add_argument(
         "--smoke_prompt_only",
         action="store_true",
         help="Validate parsing/prompts for participant 0 (or --single_participant_id) without GPU.",
@@ -1234,6 +1294,23 @@ def main() -> None:
         help="Like --smoke_all_datasets but only the five new focus datasets.",
     )
     args = parser.parse_args()
+
+    if args.check_deps:
+        report = check_centaur_runtime_deps()
+        print(json.dumps(report, indent=2))
+        if not report["ok"]:
+            missing = [
+                p["package"] for p in report["packages"] if not p.get("ok")
+            ]
+            print(
+                "[ERROR] Centaur deps missing: "
+                + ", ".join(missing)
+                + ". Install with: pip install -e '.[centaur]' (see setup_env.sh --with-centaur).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print("[INFO] Centaur import check passed (model not loaded).")
+        return
 
     if args.fitness_metric != "loglik":
         print("Only --fitness_metric loglik is supported.")
@@ -1260,6 +1337,7 @@ def main() -> None:
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
         limited_data_protocol=args.limited_data_protocol,
         limited_train_val=args.limited_train_val,
+        speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
     )
 
     smoke_aliases: List[str] = []

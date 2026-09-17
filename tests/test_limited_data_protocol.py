@@ -218,6 +218,94 @@ def test_speekenbrink_structure_aware_contiguous_suffix():
     assert manifest.history_consistency == "pass"
 
 
+def test_speekenbrink_full_data_defaults_to_chronological(monkeypatch):
+    from data_modules.psych101_binary import PsychBlock, PsychExperiment, ParsedTrial
+    from utils.teh.limited_data_protocol import load_raw_participant_splits
+
+    trials = [
+        ParsedTrial(action=i % 2, feedback=1.0, problem_fields={"cards": [i]})
+        for i in range(200)
+    ]
+    exp = PsychExperiment(
+        instruction="x",
+        blocks=[
+            PsychBlock(
+                trials=trials,
+                option_keys=["A", "B"],
+                problem_static={"schema_type": "B"},
+                schema_type="B",
+            )
+        ],
+        dataset_alias="5speekenbrink2008learning",
+        schema_type="B",
+    )
+    monkeypatch.setattr(
+        "utils.teh.limited_data_protocol.get_psych101_binary_experiment",
+        lambda *a, **k: exp,
+    )
+    train, val, test, kind = load_raw_participant_splits(
+        "5speekenbrink2008learning",
+        0,
+        split_ratio=0.6,
+        split_seed=0,
+        limited_data_protocol="off",
+    )
+    assert kind == "chronological_session"
+    assert [t["problem"]["cards"][0] for t in train + val + test] == list(range(200))
+    assert len(train) == 120
+    assert len(val) == 40
+    assert len(test) == 40
+    _, _, _, _audit, manifest = apply_limited_data_protocol(
+        train,
+        val,
+        test,
+        dataset="5speekenbrink2008learning",
+        participant_id=0,
+        split_seed=0,
+        split_ratio=0.6,
+        limited_data_protocol="off",
+        split_kind=kind,
+    )
+    assert manifest.test_set_differs_from_legacy is True
+    assert manifest.split_kind == "chronological_session"
+
+
+def test_speekenbrink_legacy_split_still_opt_in(monkeypatch):
+    from data_modules.psych101_binary import PsychBlock, PsychExperiment, ParsedTrial
+    from utils.teh.limited_data_protocol import load_raw_participant_splits
+
+    trials = [
+        ParsedTrial(action=i % 2, feedback=1.0, problem_fields={"cards": [i]})
+        for i in range(200)
+    ]
+    exp = PsychExperiment(
+        instruction="x",
+        blocks=[
+            PsychBlock(
+                trials=trials,
+                option_keys=["A", "B"],
+                problem_static={"schema_type": "B"},
+                schema_type="B",
+            )
+        ],
+        dataset_alias="5speekenbrink2008learning",
+        schema_type="B",
+    )
+    monkeypatch.setattr(
+        "utils.teh.limited_data_protocol.get_psych101_binary_experiment",
+        lambda *a, **k: exp,
+    )
+    _train, _val, _test, kind = load_raw_participant_splits(
+        "5speekenbrink2008learning",
+        0,
+        split_ratio=0.6,
+        split_seed=0,
+        limited_data_protocol="off",
+        speekenbrink_split="legacy",
+    )
+    assert kind == "legacy_pseudo_block_shuffle"
+
+
 def test_legacy_speekenbrink_still_uses_pseudo_blocks():
     from data_modules.psych101_binary import PsychBlock, PsychExperiment, ParsedTrial
 

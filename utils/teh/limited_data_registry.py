@@ -116,7 +116,8 @@ LIMITED_DATA_REGISTRY: Dict[str, LimitedDataSpec] = {
         prefix_valid=True,
         chronological_split=True,
         notes="Single 200-trial weather-learning sequence; history does not reset. "
-        "Legacy TEH shuffles pseudo-blocks; structure-aware uses a chronological split.",
+        "Default split is chronological (contiguous test suffix). "
+        "--speekenbrink_split legacy restores shuffled TEH pseudo-blocks.",
     ),
     "7hilbig2014generalized": _spec(
         "7hilbig2014generalized",

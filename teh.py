@@ -136,8 +136,10 @@ from utils.teh.explore_source_prompt import build_rank1_explore_prompt_suffix
 from utils.teh.t_pics_sources import (
     DEFAULT_T_PICS_SOURCE_CONFIG,
     official_t_pics_source,
+    has_t_pics_step1_source_pops,
     is_auto_t_pics_source_token,
     normalize_t_pics_dataset,
+    resolve_t_pics_reuse_source,
     resolve_t_pics_source_participant_ids,
 )
 from utils.teh.mdl_selection import (
@@ -3746,6 +3748,7 @@ def _run_t_pics_source_population(
         error_feedback_mode=args.error_feedback_mode,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
         limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
         limited_train_val=args.limited_train_val,
         mdl_lambda=args.mdl_lambda,
         prompt_suffix=None,
@@ -5537,6 +5540,7 @@ def _trials_for_loglik_participant(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     return_audit: bool = False,
     return_manifest: bool = False,
 ):
@@ -5553,6 +5557,7 @@ def _trials_for_loglik_participant(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
     )
     if return_manifest:
         return train_trials, val_trials, test_trials, audit, manifest
@@ -9243,6 +9248,7 @@ def run_evolution(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     explore_from_handoff_parents: bool = False,
     explore_population_top_k: int = 0,
     mdl_lambda: float = 0.0,
@@ -9363,16 +9369,12 @@ def run_evolution(
             SPEEKENBRINK_ALIAS as _SPEEKEN_ALIAS,
             apply_limited_data_protocol,
             split_continuous_session_chronological,
-        )
-        from utils.teh.limited_data_registry import (
-            LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE as _LDP_SA,
-            normalize_limited_data_protocol as _norm_ldp,
+            use_speekenbrink_chronological_split as _use_speeken_chrono,
         )
         from data_modules.psych101_binary import experiment_to_trial_dicts as _exp_to_trials
 
-        if (
-            _norm_ldp(limited_data_protocol) == _LDP_SA
-            and str(dataset).strip() == _SPEEKEN_ALIAS
+        if str(dataset).strip() == _SPEEKEN_ALIAS and _use_speeken_chrono(
+            speekenbrink_split
         ):
             all_trials = _exp_to_trials(exp)
             train_trials, val_trials, test_trials = split_continuous_session_chronological(
@@ -9381,7 +9383,7 @@ def run_evolution(
             options = list(train_trials[0]["options"]) if train_trials else list(
                 (test_trials[0]["options"] if test_trials else [])
             )
-            _split_kind = "structure_aware_chronological_session"
+            _split_kind = "chronological_session"
         else:
             train_trials, val_trials, test_trials, options = split_psych_experiment(
                 exp, split_ratio=split_ratio, split_seed=split_seed
@@ -12803,10 +12805,14 @@ def main():
         default=None,
         metavar="PATH",
         help=(
-            "YAML target→source map for T-PICS auto-select. Default: "
-            "analysis/config/transfer_source/t_pics_score_weighted_temp_fix.yaml "
+            "YAML target→source map for T-PICS auto-select, or a run config "
+            "with source_map + step1.source_pops (e.g. "
+            "analysis/config/misc/Sep17_T-PICS/config_T-PICS.yaml). "
+            "Default map: analysis/config/transfer_source/"
+            "t_pics_score_weighted_temp_fix.yaml "
             "(skips pre-fix CPC18 / Speekenbrink / Frey Risk / Badham). "
-            "Pass t_pics_score_weighted.yaml for the unfiltered cosine ranking."
+            "A run config also fills --global_prompt_source_program from the "
+            "recorded Step 1 rank-1 when that flag is omitted."
         ),
     )
     parser.add_argument(
@@ -13343,6 +13349,27 @@ def main():
     else:
         t_pics_cfg = DEFAULT_T_PICS_SOURCE_CONFIG
     want_independent = t_pics_flag or t_pics_source_raw is not None
+    if (
+        not want_independent
+        and t_pics_cfg_raw
+        and not g_prog
+        and args.global_phase
+        and has_t_pics_step1_source_pops(t_pics_cfg)
+    ):
+        try:
+            src, best, jid = resolve_t_pics_reuse_source(
+                str(args.dataset), config_path=t_pics_cfg
+            )
+        except (ValueError, KeyError, FileNotFoundError) as exc:
+            print(f"Error: T-PICS run config cannot resolve Step 1 reuse: {exc}")
+            return
+        args.global_prompt_source_program = str(best)
+        args.global_prompt_source_dataset = src
+        g_prog = args.global_prompt_source_program
+        g_ds = src
+        print(
+            f"[T-PICS] reuse Step 1 {src} job {jid} -> {best} ({t_pics_cfg})"
+        )
     if want_independent:
         try:
             if is_auto_t_pics_source_token(t_pics_source_raw):
@@ -14007,6 +14034,7 @@ def main():
             error_feedback_mode=args.error_feedback_mode,
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
             limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
             limited_train_val=args.limited_train_val,
             mdl_lambda=args.mdl_lambda,
             prompt_suffix=global_prompt_suffix,
@@ -14109,6 +14137,7 @@ def main():
                 error_feedback_mode=args.error_feedback_mode,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
                 limited_train_val=args.limited_train_val,
                 mdl_lambda=args.mdl_lambda,
             )
@@ -14229,6 +14258,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
                 limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
@@ -14327,6 +14357,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
                 limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
@@ -14730,6 +14761,7 @@ def main():
                         mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
                 limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
@@ -15019,6 +15051,7 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 limited_data_protocol=args.limited_data_protocol,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
                 limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,

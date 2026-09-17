@@ -8,13 +8,18 @@ from unittest.mock import patch
 
 from utils.teh.limited_data_registry import LIMITED_DATA_REGISTRY
 from utils.teh.t_pics_sources import (
+    DEFAULT_T_PICS_RUN_CONFIG,
     DEFAULT_T_PICS_SOURCE_CONFIG,
     T_PICS_OFFICIAL_SOURCES,
     UNFILTERED_T_PICS_SOURCE_CONFIG,
     _FALLBACK_T_PICS_SOURCES,
+    has_t_pics_step1_source_pops,
     load_t_pics_official_sources,
+    load_t_pics_step1_source_pops,
     official_t_pics_source,
+    resolve_t_pics_reuse_source,
     resolve_t_pics_source_participant_ids,
+    t_pics_step1_best_program,
 )
 
 _PRE_FIX_SOURCES = {
@@ -65,6 +70,52 @@ def test_temp_fix_skips_pre_fix_sources():
     assert official_t_pics_source("5speekenbrink2008learning") == "11enkavi2019recentprobes"
     assert official_t_pics_source("7hilbig2014generalized") == "11enkavi2019recentprobes"
     assert official_t_pics_source("12badham2017deficits") == "11enkavi2019recentprobes"
+
+
+def test_run_config_source_map_matches_temp_fix():
+    assert DEFAULT_T_PICS_RUN_CONFIG.is_file()
+    from_run = load_t_pics_official_sources(DEFAULT_T_PICS_RUN_CONFIG)
+    from_map = load_t_pics_official_sources(DEFAULT_T_PICS_SOURCE_CONFIG)
+    assert from_run == from_map
+    assert official_t_pics_source(
+        "1peterson2021using", DEFAULT_T_PICS_RUN_CONFIG
+    ) == "11enkavi2019recentprobes"
+    assert official_t_pics_source(
+        "11enkavi2019recentprobes", DEFAULT_T_PICS_RUN_CONFIG
+    ) == "1peterson2021using"
+    assert official_t_pics_source(
+        "steyvers_2009_bandit", DEFAULT_T_PICS_RUN_CONFIG
+    ) == "7hilbig2014generalized"
+
+
+def test_sa40_step1_source_pops_in_run_config():
+    assert has_t_pics_step1_source_pops(DEFAULT_T_PICS_RUN_CONFIG)
+    assert not has_t_pics_step1_source_pops(DEFAULT_T_PICS_SOURCE_CONFIG)
+    pops = load_t_pics_step1_source_pops()
+    assert set(pops) == {
+        "11enkavi2019recentprobes",
+        "1peterson2021using",
+        "7hilbig2014generalized",
+    }
+    src, best, jid = resolve_t_pics_reuse_source(
+        "1peterson2021using", DEFAULT_T_PICS_RUN_CONFIG
+    )
+    assert src == "11enkavi2019recentprobes"
+    assert jid == "256219"
+    assert best == t_pics_step1_best_program(
+        "11enkavi2019recentprobes", DEFAULT_T_PICS_RUN_CONFIG
+    )
+    assert best.is_file()
+    assert t_pics_step1_best_program("1peterson2021using").name == "best_program.py"
+    assert t_pics_step1_best_program("1peterson2021using").is_file()
+    assert t_pics_step1_best_program("7hilbig2014generalized").is_file()
+    kool_src, kool_best, kool_jid = resolve_t_pics_reuse_source("14kool2016when")
+    assert kool_src == "1peterson2021using"
+    assert kool_jid == "256229"
+    assert kool_best.is_file()
+    stey_src, _, stey_jid = resolve_t_pics_reuse_source("steyvers_2009_bandit")
+    assert stey_src == "7hilbig2014generalized"
+    assert stey_jid == "256230"
 
 
 def test_source_range_clamps_with_patched_valid_ids():
@@ -292,6 +343,25 @@ def test_cli_t_pics_source_config_unfiltered_uses_pre_fix_cct_source():
     combined = (proc.stdout or "") + (proc.stderr or "")
     assert "auto source for 3frey2017cct -> 10frey2017risk" in combined
     assert "requires --global_phase" in combined
+
+
+def test_cli_run_config_still_auto_selects_source_alias():
+    proc = _run_teh(
+        "--t_pics",
+        "--t_pics_source_config",
+        "analysis/config/misc/Sep17_T-PICS/config_T-PICS.yaml",
+        "--explore_from_population_parents",
+        "--explore_population_top_k",
+        "1",
+        "--explore_candidates",
+        "50",
+        "--no-refinement_phase",
+        dataset="14kool2016when",
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "auto source for 14kool2016when -> 1peterson2021using" in combined
+    assert "requires --global_phase" in combined
+    assert "reuse Step 1" not in combined
 
 
 def test_cli_t_pics_flag_cct_defaults_to_enkavi_not_frey_risk():

@@ -591,3 +591,11 @@ Default target→source map: `analysis/config/transfer_source/t_pics_score_weigh
 - **Reuse (Step 1 = 3 source pops, then 15 targets):** source-pop job is population-only (`n_iterations 0`, explore 0; `--mem_trace` is a no-op until people run). Target job passes `--global_prompt_source_program <source>/global_phase/best_program.py` (dataset auto-fills from the yaml). `--t_pics_source_config` overrides the map.
 - **SA40 leak check:** structure-aware 40 is forwarded into source-example trials in the global-prompt suffix (`utils/teh/explore_source_prompt.py`). Paper wording: **obs** = train+val (40), **test** reserved first — not “40 train” and not 8:2.
 - Lookup/CLI: `utils/teh/t_pics_sources.py`, `teh.py` `--t_pics` / `--t_pics_source` / `--t_pics_source_config`. Tests: `tests/test_t_pics.py`, `tests/test_explore_handoff.py`.
+
+---
+
+## Short update (Sep 17 2026 — T-PICS run config + Speekenbrink chrono default)
+
+SA40 Step 1 rank-1 paths live in `analysis/config/misc/Sep17_T-PICS/config_T-PICS.yaml` (`step1.source_pops`: Enkavi **256219**, Choice13k **256229**, Hilbig **256230**). Step 2 looks up the official source **and** that exact `best_program.py` from this file (`T_PICS_CONFIG`; default this yaml). `teh.py --t_pics_source_config` on the same file follows `source_map` (temp-fix cosine yaml) and, on reuse `--global_phase` without `--global_prompt_source_program`, fills the recorded rank-1.
+
+Speekenbrink chronological session split is now **default** for TEH / LM / PT / Centaur / OpenEvolve, including full data. `--speekenbrink_split legacy` restores shuffled pseudo-blocks.

@@ -216,6 +216,7 @@ def trials_for_participant(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     return_audit: bool = False,
     return_manifest: bool = False,
 ):
@@ -231,6 +232,7 @@ def trials_for_participant(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
     )
     if return_manifest:
         return train_trials, val_trials, test_trials, audit, manifest
@@ -1190,6 +1192,7 @@ def main() -> None:
             max_observed_trials_per_participant=args.max_observed_trials_per_participant,
             limited_data_protocol=args.limited_data_protocol,
             limited_train_val=args.limited_train_val,
+            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
             return_manifest=True,
         )
         if reference_by_pid is not None:
