@@ -5,7 +5,8 @@
 # (KIND=t_pics_full_source_pop10). Do not mix with SA40 job_256219/229/230.
 #
 # Step 1: LIMITED_DATA_PROTOCOL=off, H100 NVL only, 10 global iters, elite 50.
-# Unique G.1s: Enkavi 256668, Choice13k 256669, Hilbig 256670.
+# Unique G.1s: Enkavi 256763, Choice13k 256764, Hilbig 256765
+# (256668/256669/256670 FAILED on speekenbrink_split kwarg; do not reuse).
 # Rank-1 files appear after those jobs finish.
 
 source_map: analysis/config/transfer_source/t_pics_score_weighted_temp_fix.yaml
@@ -15,17 +16,17 @@ step1:
   kind: t_pics_full_source_pop10
   source_pops:
     11enkavi2019recentprobes:
-      job_id: 256668
+      job_id: 256763
       gpu: h100nvl
-      run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_full_source_pop10/job_256668
-      best_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_full_source_pop10/job_256668/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_full_source_pop10/job_256763
+      best_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_full_source_pop10/job_256763/global_phase/best_program.py
     1peterson2021using:
-      job_id: 256669
+      job_id: 256764
       gpu: h100nvl
-      run_dir: generated_outputs/psych101_train/teh/1peterson2021using/t_pics_full_source_pop10/job_256669
-      best_program: generated_outputs/psych101_train/teh/1peterson2021using/t_pics_full_source_pop10/job_256669/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/1peterson2021using/t_pics_full_source_pop10/job_256764
+      best_program: generated_outputs/psych101_train/teh/1peterson2021using/t_pics_full_source_pop10/job_256764/global_phase/best_program.py
     7hilbig2014generalized:
-      job_id: 256670
+      job_id: 256765
       gpu: h100nvl
-      run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_full_source_pop10/job_256670
-      best_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_full_source_pop10/job_256670/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_full_source_pop10/job_256765
+      best_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_full_source_pop10/job_256765/global_phase/best_program.py

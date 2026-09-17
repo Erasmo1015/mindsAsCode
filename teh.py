@@ -2707,6 +2707,7 @@ def _collect_pooled_split_trials_for_participants(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     audits_out: Optional[List[SparseObservationAudit]] = None,
 ) -> List[Dict[str, Any]]:
     """Concatenate per-participant train or val splits (same splits as evolution uses)."""
@@ -2728,6 +2729,7 @@ def _collect_pooled_split_trials_for_participants(
             max_observed_trials_per_participant=max_observed_trials_per_participant,
             limited_data_protocol=limited_data_protocol,
             limited_train_val=limited_train_val,
+            speekenbrink_split=speekenbrink_split,
             return_audit=True,
         )
         pooled.extend((train_trials, val_trials)[split_idx])
@@ -2750,6 +2752,7 @@ def _collect_pooled_train_trials_for_participants(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     audits_out: Optional[List[SparseObservationAudit]] = None,
 ) -> List[Dict[str, Any]]:
     """Concatenate per-participant train splits (same splits as evolution uses)."""
@@ -2767,6 +2770,7 @@ def _collect_pooled_train_trials_for_participants(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
         audits_out=audits_out,
     )
 
@@ -3011,6 +3015,7 @@ def run_global_evolution_phase(
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
     mdl_lambda: float = 0.0,
     prompt_suffix: Optional[str] = None,
 ) -> List[Tuple[Any, ...]]:
@@ -3038,6 +3043,7 @@ def run_global_evolution_phase(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
         audits_out=sparse_audits,
     )
     pooled_val = _collect_pooled_split_trials_for_participants(
@@ -3054,6 +3060,7 @@ def run_global_evolution_phase(
         max_observed_trials_per_participant=max_observed_trials_per_participant,
         limited_data_protocol=limited_data_protocol,
         limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
     )
     budget_n = normalize_max_observed_trials(max_observed_trials_per_participant)
     print(f"\n{'='*80}")
