@@ -231,4 +231,4 @@ wandb_local_old_ignore/
 logs/
 logs
 wandb/
-wandb
+wandbtests/
