@@ -186,6 +186,7 @@ scripts/*
 *.gif
 
 wandb/
+wandb
 generated_outputs/
 generated_outputs_old/
 generated_outputs_ablation/
@@ -230,5 +231,4 @@ generated_outputs_teh_psych
 wandb_local_old_ignore/
 logs/
 logs
-wandb/
-wandbtests/
+tests/
