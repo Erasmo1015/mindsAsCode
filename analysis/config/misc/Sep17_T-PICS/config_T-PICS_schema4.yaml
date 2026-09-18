@@ -1,30 +1,76 @@
 # Schema-v4 T-PICS run config (SA40 source pops for all 15 datasets).
 # G.1 submit path: L40S TP=2 via cluster/2026Sep17_T_PICS/submit_t_pics_step1_other_gpu.sh
-# (H100 NVL is full). Not H100 job_t_pics_source_pop.sh.
-#
-# Slot list is complete. Fill job_id / run_dir / best_program after G.1 jobs
-# finish. Empty job_id values make Step 2 reuse lookup fail on purpose.
+# Jobs 257174–257188; all COMPLETED. Do not reuse Stage A–D / June / E 254340–254342
+# or the temp-fix 3-source map (256219 / 256229 / 256230).
 #
 # source_map is omitted until analysis/config/transfer_source/t_pics_schema4.yaml
-# exists. Do not submit target T-PICS jobs against this file yet.
+# exists. Do not inspect or produce that ranking from these G.1 programs.
+# 6×6 transfer jobs look up rank-1 paths here; they do not pass this file as
+# --t_pics_source_config (that would require a source_map).
 
 step1:
   protocol: structure_aware
   limited_train_val: 40
   kind: t_pics_source_pop10
+  gpu: l40s
   source_pops:
-    1peterson2021using: {job_id: "", run_dir: "", best_program: ""}
-    2plonsky2018when: {job_id: "", run_dir: "", best_program: ""}
-    3frey2017cct: {job_id: "", run_dir: "", best_program: ""}
-    4wulff2018description: {job_id: "", run_dir: "", best_program: ""}
-    5speekenbrink2008learning: {job_id: "", run_dir: "", best_program: ""}
-    7hilbig2014generalized: {job_id: "", run_dir: "", best_program: ""}
-    10frey2017risk: {job_id: "", run_dir: "", best_program: ""}
-    11enkavi2019recentprobes: {job_id: "", run_dir: "", best_program: ""}
-    12badham2017deficits: {job_id: "", run_dir: "", best_program: ""}
-    mixed_gambles: {job_id: "", run_dir: "", best_program: ""}
-    bergert_nosofsky_2007: {job_id: "", run_dir: "", best_program: ""}
-    guan_2020_stopping: {job_id: "", run_dir: "", best_program: ""}
-    steyvers_2009_bandit: {job_id: "", run_dir: "", best_program: ""}
-    13schulz2020finding: {job_id: "", run_dir: "", best_program: ""}
-    14kool2016when: {job_id: "", run_dir: "", best_program: ""}
+    1peterson2021using:
+      job_id: "257174"
+      run_dir: generated_outputs/psych101_train/teh/1peterson2021using/t_pics_source_pop10/job_257174
+      best_program: generated_outputs/psych101_train/teh/1peterson2021using/t_pics_source_pop10/job_257174/global_phase/best_program.py
+    2plonsky2018when:
+      job_id: "257175"
+      run_dir: generated_outputs/psych101_train/teh/2plonsky2018when/t_pics_source_pop10/job_257175
+      best_program: generated_outputs/psych101_train/teh/2plonsky2018when/t_pics_source_pop10/job_257175/global_phase/best_program.py
+    3frey2017cct:
+      job_id: "257176"
+      run_dir: generated_outputs/psych101_train/teh/3frey2017cct/t_pics_source_pop10/job_257176
+      best_program: generated_outputs/psych101_train/teh/3frey2017cct/t_pics_source_pop10/job_257176/global_phase/best_program.py
+    4wulff2018description:
+      job_id: "257177"
+      run_dir: generated_outputs/psych101_train/teh/4wulff2018description/t_pics_source_pop10/job_257177
+      best_program: generated_outputs/psych101_train/teh/4wulff2018description/t_pics_source_pop10/job_257177/global_phase/best_program.py
+    5speekenbrink2008learning:
+      job_id: "257178"
+      run_dir: generated_outputs/psych101_train/teh/5speekenbrink2008learning/t_pics_source_pop10/job_257178
+      best_program: generated_outputs/psych101_train/teh/5speekenbrink2008learning/t_pics_source_pop10/job_257178/global_phase/best_program.py
+    7hilbig2014generalized:
+      job_id: "257179"
+      run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_source_pop10/job_257179
+      best_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_source_pop10/job_257179/global_phase/best_program.py
+    10frey2017risk:
+      job_id: "257180"
+      run_dir: generated_outputs/psych101_train/teh/10frey2017risk/t_pics_source_pop10/job_257180
+      best_program: generated_outputs/psych101_train/teh/10frey2017risk/t_pics_source_pop10/job_257180/global_phase/best_program.py
+    11enkavi2019recentprobes:
+      job_id: "257181"
+      run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_source_pop10/job_257181
+      best_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_source_pop10/job_257181/global_phase/best_program.py
+    12badham2017deficits:
+      job_id: "257182"
+      run_dir: generated_outputs/psych101_train/teh/12badham2017deficits/t_pics_source_pop10/job_257182
+      best_program: generated_outputs/psych101_train/teh/12badham2017deficits/t_pics_source_pop10/job_257182/global_phase/best_program.py
+    mixed_gambles:
+      job_id: "257183"
+      run_dir: generated_outputs/psych101_train/teh/mixed_gambles/t_pics_source_pop10/job_257183
+      best_program: generated_outputs/psych101_train/teh/mixed_gambles/t_pics_source_pop10/job_257183/global_phase/best_program.py
+    bergert_nosofsky_2007:
+      job_id: "257184"
+      run_dir: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/t_pics_source_pop10/job_257184
+      best_program: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/t_pics_source_pop10/job_257184/global_phase/best_program.py
+    guan_2020_stopping:
+      job_id: "257185"
+      run_dir: generated_outputs/psych101_train/teh/guan_2020_stopping/t_pics_source_pop10/job_257185
+      best_program: generated_outputs/psych101_train/teh/guan_2020_stopping/t_pics_source_pop10/job_257185/global_phase/best_program.py
+    steyvers_2009_bandit:
+      job_id: "257186"
+      run_dir: generated_outputs/psych101_train/teh/steyvers_2009_bandit/t_pics_source_pop10/job_257186
+      best_program: generated_outputs/psych101_train/teh/steyvers_2009_bandit/t_pics_source_pop10/job_257186/global_phase/best_program.py
+    13schulz2020finding:
+      job_id: "257187"
+      run_dir: generated_outputs/psych101_train/teh/13schulz2020finding/t_pics_source_pop10/job_257187
+      best_program: generated_outputs/psych101_train/teh/13schulz2020finding/t_pics_source_pop10/job_257187/global_phase/best_program.py
+    14kool2016when:
+      job_id: "257188"
+      run_dir: generated_outputs/psych101_train/teh/14kool2016when/t_pics_source_pop10/job_257188
+      best_program: generated_outputs/psych101_train/teh/14kool2016when/t_pics_source_pop10/job_257188/global_phase/best_program.py

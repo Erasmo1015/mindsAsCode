@@ -188,35 +188,49 @@ class LegacyArgparseTests(unittest.TestCase):
         self.assertEqual(found, 1200)
 
     def test_t_pics_scripts_pass_max_error_zero(self) -> None:
-        root = Path("cluster/2026Sep17_T_PICS")
         scripts = [
-            "job_t_pics_target.sh",
-            "job_t_pics_target_other_gpu.sh",
-            "job_t_pics_source_pop.sh",
-            "job_t_pics_source_pop_other_gpu.sh",
-        ]
-        for name in scripts:
-            text = (root / name).read_text(encoding="utf-8")
-            self.assertIn("--max_error_prompt_chars 0", text, msg=name)
+            Path("cluster/2026Sep17_T_PICS") / name
+            for name in (
+                "job_t_pics_target.sh",
+                "job_t_pics_target_other_gpu.sh",
+                "job_t_pics_source_pop.sh",
+                "job_t_pics_source_pop_other_gpu.sh",
+            )
+        ] + [Path("cluster/2026Sep18_T_PICS_6x6/_6x6_common.sh")]
+        for path in scripts:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("--max_error_prompt_chars 0", text, msg=str(path))
 
     def test_t_pics_scripts_pass_train_val_and_fresh_ten(self) -> None:
-        root = Path("cluster/2026Sep17_T_PICS")
-        scripts = [
-            "job_t_pics_target.sh",
-            "job_t_pics_target_other_gpu.sh",
-            "job_t_pics_source_pop.sh",
-            "job_t_pics_source_pop_other_gpu.sh",
+        paths = [
+            Path("cluster/2026Sep17_T_PICS") / name
+            for name in (
+                "job_t_pics_target.sh",
+                "job_t_pics_target_other_gpu.sh",
+                "job_t_pics_source_pop.sh",
+                "job_t_pics_source_pop_other_gpu.sh",
+            )
+        ] + [
+            Path("cluster/2026Sep18_T_PICS_6x6/_6x6_common.sh"),
+            Path("cluster/2026Sep18_T_PICS_6x6/job_6x6_h100.sh"),
+            Path("cluster/2026Sep18_T_PICS_6x6/job_6x6_l40s.sh"),
         ]
-        for name in scripts:
-            text = (root / name).read_text(encoding="utf-8")
-            self.assertIn("--evolution_selection_score train_val", text, msg=name)
-            self.assertIn("--fresh_n_candidates 10", text, msg=name)
-            self.assertIn("--prefer_auto_llm_prompt", text, msg=name)
-            self.assertIn('SEED_PATH="${SEED_PATH:-$(t_pics_seed_path "${DATASET}")}"', text, msg=name)
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            if path.name != "job_6x6_h100.sh" and path.name != "job_6x6_l40s.sh":
+                self.assertIn("--evolution_selection_score train_val", text, msg=str(path))
+                self.assertIn("--fresh_n_candidates 10", text, msg=str(path))
+                self.assertIn("--prefer_auto_llm_prompt", text, msg=str(path))
+            if path.name != "_6x6_common.sh":
+                self.assertIn(
+                    'SEED_PATH="${SEED_PATH:-$(t_pics_seed_path "${DATASET}")}"',
+                    text,
+                    msg=str(path),
+                )
             self.assertNotIn(
                 "--seed_path persona_code_example/te_vanilla/choices13k.py",
                 text,
-                msg=name,
+                msg=str(path),
             )
 
     def test_t_pics_seed_path_helper(self) -> None:
@@ -249,6 +263,55 @@ t_pics_seed_path 14kool2016when
         runtime = Path("utils/teh/teh_runtime.py").read_text(encoding="utf-8")
         self.assertIn("load_participant_limited_splits", runtime)
         self.assertIn("prompt_examples_from_retained_observed", runtime)
+
+
+class MemTraceDefaultOnTests(unittest.TestCase):
+    def test_argparse_mem_trace_default_true(self) -> None:
+        tree = ast.parse(Path("teh.py").read_text(encoding="utf-8"))
+        found = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "add_argument":
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and first.value == "--mem_trace":
+                for kw in node.keywords:
+                    if kw.arg == "default":
+                        found = ast.literal_eval(kw.value)
+        self.assertIs(found, True)
+
+    def test_run_evolution_and_global_phase_default_true(self) -> None:
+        import inspect
+
+        self.assertIs(
+            inspect.signature(teh.run_evolution).parameters["mem_trace"].default,
+            True,
+        )
+        self.assertIs(
+            inspect.signature(teh.run_global_evolution_phase)
+            .parameters["mem_trace"]
+            .default,
+            True,
+        )
+
+    def test_source_and_target_global_calls_pass_args_mem_trace(self) -> None:
+        text = Path("teh.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(text.count("mem_trace=args.mem_trace"), 6)
+        source_fn = text[
+            text.find("def _run_t_pics_source_population") : text.find(
+                "def _refinement_pool_best_metrics"
+            )
+        ]
+        self.assertIn("mem_trace=args.mem_trace", source_fn)
+        self.assertNotIn("mem_trace=False", source_fn)
+        self.assertNotRegex(
+            text,
+            r"if\s+[^\n]*dataset[^\n]*:\s*\n\s*.*mem_trace\s*=\s*False",
+        )
 
 
 if __name__ == "__main__":

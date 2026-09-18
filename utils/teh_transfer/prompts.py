@@ -27,14 +27,24 @@ class SourceTransferContext:
 
 
 def task_description_for_dataset(dataset_alias: str, *, instruction: str = "") -> str:
-    """High-level task description for a dataset (Psych-101 metadata or mixed gambles)."""
+    """High-level task description for a dataset (Psych-101, external, or mixed gambles)."""
     if is_mixed_gambles_dataset(dataset_alias):
         return instruction.strip() or (
             "Mixed gambles: Option A is a 50/50 gamble (gain/loss); Option B is certain. "
             "action=0 gamble, action=1 certain; choose(problem, history) returns P(action=1)."
         )
+    from data_modules.external import (
+        external_dataset_task_description,
+        is_external_dataset,
+    )
+
+    if is_external_dataset(dataset_alias):
+        return instruction.strip() or external_dataset_task_description(dataset_alias)
     alias = normalize_psych101_dataset_alias(dataset_alias)
-    return PSYCH101_BINARY_DATASETS[alias]["task_description"]
+    spec = PSYCH101_BINARY_DATASETS.get(alias)
+    if spec and spec.get("task_description"):
+        return str(spec["task_description"])
+    return instruction.strip() or f"Dataset `{dataset_alias}`."
 
 
 def one_example_trial_text(

@@ -605,3 +605,12 @@ Speekenbrink chronological session split is now **default** for TEH / LM / PT / 
 ## Short update (Sep 17 2026 — fair TEH runtime/prompt guards)
 
 Did **not** edit `prompts/teh/infer_single_choice.txt`. Live SA40 T-PICS error logs (14 jobs): `NameError any` 3263 / `set` 1232 / `sorted` 201 / `ord` 86 / `all` 64 (Frey CCT/Risk, Enkavi, Speekenbrink, Kool). `teh.py` `compile_program_with_error` now exposes those pure-Python builtins (not `hash`). Auto-prompt schema notes (`utils/teh/prompt_context.py`) and transfer suffix (`utils/teh_transfer/prompts.py`) now state: `history['action']` is int 0/1, `option_keys` is problem-only, `.get()` for sometimes-keys, `list(dict.keys())`, guard division. Error-feedback section **off by default** (`--max_error_prompt_chars 0`): same crash types persist after being injected; CPC18 ablation `7_error_feedback` had no fitness gain; do not switch to `--error-feedback-mode new`. T-PICS job scripts pass `0`. Steyvers rerun **257093** was submitted before this change.
+
+---
+
+## Short update (Sep 18 2026 — schema-v4 T-PICS source-pop annotation)
+
+Annotate all runtime-valid global candidates (iters 1–10) on the 15 SA40 G.1 source runs in `config_T-PICS_schema4.yaml` (jobs **257174–257188**; 1385 programs → 8 L40S TP=2 shards). Motifs: `history`, `value`, `probability_used`, `feedback`, `learning`, `explicit_risk_mechanism`. Prompt `population_transition_v4_2`: reference + modified + complete `motif_details`; `candidate_motif_state` derived from details. Harden: preserve resume skips (723 ok overnight), batch→singleton retry, `max_tokens=8192`, reject missing/malformed/truncated JSON, exit 75 + bounded vLLM restart. Resume key: `dataset|run|iteration|candidate|parent`.
+
+Global phase never wrote `mem_trace.jsonl`; lineage reconstructed from `metrics.json` (`fresh`→`global_baseline` exact; `normal`→pool-best exact only when `best_k>=1`, else `pool_best_proxy`). Primary fitness-effect MEM: **exact rows only**. Manifests/lineage: `analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/`. Submit: `bash cluster/2026Sep18_T_PICS_PopAnnot_v4/submit_pop_annot_v4_l40s.sh --submit`.
+

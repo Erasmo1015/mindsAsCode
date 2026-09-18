@@ -2978,6 +2978,7 @@ def run_global_evolution_phase(
     limited_train_val: Optional[int] = None,
     speekenbrink_split: str = "chronological",
     mdl_lambda: float = 0.0,
+    mem_trace: bool = True,
     prompt_suffix: Optional[str] = None,
 ) -> List[Tuple[Any, ...]]:
     """
@@ -2986,6 +2987,8 @@ def run_global_evolution_phase(
     Runs before per-participant evolution when ``--global_phase`` and ``--phase all``.
     ``prompt_suffix`` (Stage G) injects a live source rank-1 into every global
     generation prompt; evolution still starts from the vanilla seed.
+    ``mem_trace`` (default on) writes ``global_phase/mem_trace.jsonl`` for both
+    source-population and target global runs. Disable with ``--no-mem_trace``.
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     mdl_lambda = normalize_mdl_lambda(mdl_lambda)
@@ -3115,6 +3118,14 @@ def run_global_evolution_phase(
         error_feedback_mode
     )
     error_history_path = global_dir / "error_history.jsonl"
+    mem_trace_file: Optional[Path] = None
+    mem_run_id = ""
+    if bool(mem_trace) and save_artifacts:
+        if not global_dir.exists():
+            global_dir.mkdir(parents=True, exist_ok=True)
+        mem_trace_file = mem_trace_path(global_dir)
+        mem_run_id = output_dir.name
+        print(f"MEM trace logging enabled: {mem_trace_file}")
     if early_stop_patience is not None:
         print(
             f"Global early stop enabled: patience={early_stop_patience}, "
@@ -3162,6 +3173,7 @@ def run_global_evolution_phase(
         else:
             num_parents_to_use = min(sample_size, pool_size)
             selected_parents = elite_parents[:num_parents_to_use]
+            parent_idxs = list(range(num_parents_to_use))
             print(f"\nUsing top {num_parents_to_use} global parent(s):")
 
         for i, parent_tuple in enumerate(selected_parents):
@@ -3171,6 +3183,46 @@ def run_global_evolution_phase(
 
         parent_codes = [p[0] for p in selected_parents]
         parent_train_lls = [_train_loglik_from_elite_tuple(p) for p in selected_parents]
+
+        mem_selected_parent_records: List[Dict[str, Any]] = []
+        mem_best_parent_rec: Optional[Dict[str, Any]] = None
+        mem_seed_selection_score: Optional[float] = None
+        if mem_trace_file is not None:
+            for parent_tuple in selected_parents:
+                train_ll = _train_loglik_from_elite_tuple(
+                    parent_tuple, evolution_selection_score=evolution_selection_score
+                )
+                mem_selected_parent_records.append(
+                    parent_record_from_elite_tuple(
+                        parent_tuple,
+                        train_loglik=train_ll,
+                    )
+                )
+            mem_best_parent_rec = best_reference_parent(mem_selected_parent_records)
+            for ep in elite_parents:
+                if str(ep[3]) == "global_baseline":
+                    mem_seed_selection_score = float(ep[1]) if ep[1] is not None else None
+                    break
+            if mem_seed_selection_score is None:
+                mem_seed_selection_score = float(baseline_fitness)
+            append_mem_trace_record(
+                mem_trace_file,
+                build_iteration_context_record(
+                    dataset=dataset,
+                    participant_id="global",
+                    run_id=mem_run_id,
+                    split_seed=int(split_seed),
+                    phase="global_evolution",
+                    iteration=iteration_step,
+                    evolution_selection_score=evolution_selection_score,
+                    selected_parents=mem_selected_parent_records,
+                    best_selected_parent_id=(
+                        str(mem_best_parent_rec["program_id"])
+                        if mem_best_parent_rec is not None
+                        else None
+                    ),
+                ),
+            )
 
         prompt_stats_path = (
             iter_dir / "prompt_stats.json" if iter_dir is not None else None
@@ -3427,6 +3479,82 @@ def run_global_evolution_phase(
                 else ")"
             )
         )
+
+        if mem_trace_file is not None:
+            elite_ids_after = {str(p[3]) for p in elite_parents}
+            ref_parent_id = (
+                str(mem_best_parent_rec["program_id"])
+                if mem_best_parent_rec is not None
+                else None
+            )
+            ref_parent_score = (
+                mem_best_parent_rec.get("selection_score")
+                if mem_best_parent_rec is not None
+                else None
+            )
+            for result in selected_results:
+                idx = int(result["idx"])
+                program_id = f"global_iteration_{iteration_step}_candidate_{idx}"
+                source = (
+                    candidate_sources[idx]
+                    if idx < len(candidate_sources)
+                    else "normal"
+                )
+                if source == "fresh":
+                    reference_kind = "seed_baseline"
+                    cand_ref_id = "global_baseline"
+                    cand_ref_score = mem_seed_selection_score
+                    prompted_ids = ["global_baseline"]
+                    ref_exact = True
+                else:
+                    reference_kind = "best_prompted_parent"
+                    cand_ref_id = ref_parent_id
+                    cand_ref_score = ref_parent_score
+                    prompted_ids = [
+                        str(p.get("program_id"))
+                        for p in mem_selected_parent_records
+                        if p.get("program_id") is not None
+                    ]
+                    ref_exact = True
+                cand_score = result.get("selection_score")
+                if cand_score is None:
+                    cand_score = result.get("fitness")
+                    if cand_score is not None and not use_train_val:
+                        cand_score = result.get("train_loglik", cand_score)
+                append_mem_trace_record(
+                    mem_trace_file,
+                    build_candidate_record(
+                        dataset=dataset,
+                        participant_id="global",
+                        run_id=mem_run_id,
+                        split_seed=int(split_seed),
+                        phase="global_evolution",
+                        iteration=iteration_step,
+                        candidate_id=program_id,
+                        candidate_idx=idx,
+                        source=str(source),
+                        code=result.get("code") or "",
+                        runtime_valid=bool(result.get("runtime_valid", False)),
+                        train_loglik=_safe_float(result.get("train_loglik")),
+                        val_loglik=_safe_float(result.get("val_loglik")),
+                        selection_score=_safe_float(cand_score),
+                        reference_parent_id=cand_ref_id,
+                        reference_parent_score=_safe_float(cand_ref_score),
+                        reference_kind=reference_kind,
+                        reference_type=reference_kind,
+                        reference_id=cand_ref_id,
+                        reference_is_exact=ref_exact,
+                        delta_f=compute_delta_f(
+                            _safe_float(cand_score), _safe_float(cand_ref_score)
+                        ),
+                        survived_elite_truncation=program_id in elite_ids_after,
+                        evolution_selection_score=evolution_selection_score,
+                        prompted_parent_ids=prompted_ids,
+                        code_path=(
+                            f"iteration_{iteration_step}/candidates/candidate_{idx}.py"
+                        ),
+                    ),
+                )
 
         if iter_dir is not None:
             metrics = {
@@ -3727,6 +3855,7 @@ def _run_t_pics_source_population(
             speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
         limited_train_val=args.limited_train_val,
         mdl_lambda=args.mdl_lambda,
+        mem_trace=args.mem_trace,
         prompt_suffix=None,
     )
     best_path = output_dir / "global_phase" / BEST_PROGRAM_FILENAME
@@ -9222,7 +9351,7 @@ def run_evolution(
     evolution_selection_score: str = "train_val",
     max_error_prompt_chars: int = 1200,
     error_feedback_mode: str = DEFAULT_ERROR_FEEDBACK_MODE,
-    mem_trace: bool = False,
+    mem_trace: bool = True,
     max_observed_trials_per_participant: Optional[int] = None,
     limited_data_protocol: str = "off",
     limited_train_val: Optional[int] = None,
@@ -12902,8 +13031,9 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Write passive MEM traces to participant_*/mem_trace.jsonl "
-            "(iteration_context + candidate rows; no extra LLM calls; default: on). "
+            "Write passive MEM traces for source population and target evolution "
+            "(global_phase/mem_trace.jsonl and participant_*/mem_trace.jsonl; "
+            "iteration_context + candidate rows; no extra LLM calls; default: on). "
             "Disable with --no-mem_trace."
         ),
     )
@@ -14032,6 +14162,7 @@ def main():
             speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
             limited_train_val=args.limited_train_val,
             mdl_lambda=args.mdl_lambda,
+            mem_trace=args.mem_trace,
             prompt_suffix=global_prompt_suffix,
         )
 

@@ -1,0 +1,47 @@
+# Prospective 6×6 T-PICS transfer (prepare only; do not submit from this file).
+#
+# 6 family representatives. Each target job packs 1 control + 5 directed
+# transfers (no same-dataset transfer). Knobs: 5 target-pop iters, explore 50,
+# 5 person iters. Sources are schema-v4 G.1 rank-1s.
+#
+# This file has no source_map. Do not inspect transfer-source predictions.
+# Workers must not pass this or schema4 as --t_pics_source_config.
+
+kind: t_pics_6x6
+run_tag: schema4_g5e50p5
+step1_config: analysis/config/misc/Sep17_T-PICS/config_T-PICS_schema4.yaml
+
+knobs:
+  global_iters: 5
+  n_iterations: 5
+  explore_candidates: 50
+  elite_pool_size: 50
+  limited_data_protocol: structure_aware
+  limited_train_val: 40
+  split_mode: within_participant
+  split_ratio: 0.6
+  split_seed: 0
+  prefer_auto_llm_prompt: true
+  evolution_selection_score: train_val
+  fresh_n_candidates: 10
+  max_error_prompt_chars: 0
+  refinement: false
+
+representatives:
+  - 1peterson2021using        # Choice13k — gamble choice
+  - guan_2020_stopping        # sequential stopping/risk
+  - steyvers_2009_bandit      # sequential learning
+  - bergert_nosofsky_2007     # cue-based choice
+  - 11enkavi2019recentprobes  # recognition/recall
+  - 12badham2017deficits      # category learning
+
+# Packed jobs (6). H100 NVL is busy; 2 longest loops go there (5-day).
+# Remaining 4 are L40S TP=2: researchlong 5-day for Guan/Steyvers,
+# researchshort 2-day for Enkavi/Badham.
+jobs:
+  1peterson2021using: {gpu: h100nvl, partition: pradeepresearch, wall: 05-00:00:00}
+  bergert_nosofsky_2007: {gpu: h100nvl, partition: pradeepresearch, wall: 05-00:00:00}
+  guan_2020_stopping: {gpu: l40s_tp2, partition: researchlong, wall: 05-00:00:00}
+  steyvers_2009_bandit: {gpu: l40s_tp2, partition: researchlong, wall: 05-00:00:00}
+  11enkavi2019recentprobes: {gpu: l40s_tp2, partition: researchshort, wall: 2-00:00:00}
+  12badham2017deficits: {gpu: l40s_tp2, partition: researchshort, wall: 2-00:00:00}
