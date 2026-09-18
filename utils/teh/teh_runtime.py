@@ -3,6 +3,7 @@ TEH run setup: prompts, output paths, WandB naming, valid participant id paths.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -603,6 +604,7 @@ def _generate_prompt_via_llm(
     example_char_budget: int = DEFAULT_EXAMPLE_CHAR_BUDGET,
     history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
     max_examples: int = DEFAULT_MAX_EXAMPLES,
+    llm_decoding_seed: Optional[int] = None,
 ) -> str:
     user_content = build_prompt_generation_llm_user_content(
         dataset_alias,
@@ -618,9 +620,9 @@ def _generate_prompt_via_llm(
     if save_llm_input_to is not None:
         save_llm_input_to.parent.mkdir(parents=True, exist_ok=True)
         save_llm_input_to.write_text(user_content, encoding="utf-8")
-    resp = client.chat.completions.create(
-        model=model_name,
-        messages=[
+    create_kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "messages": [
             {
                 "role": "system",
                 "content": (
@@ -630,9 +632,12 @@ def _generate_prompt_via_llm(
             },
             {"role": "user", "content": user_content},
         ],
-        max_tokens=max_tokens,
-        temperature=0.2,
-    )
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    }
+    if llm_decoding_seed is not None:
+        create_kwargs["seed"] = int(llm_decoding_seed)
+    resp = client.chat.completions.create(**create_kwargs)
     text = (resp.choices[0].message.content or "").strip()
     if not text:
         raise ValueError("LLM prompt generation returned empty text.")
@@ -783,6 +788,8 @@ def setup_teh_run_prompts(
     limited_data_protocol: object = LIMITED_DATA_PROTOCOL_OFF,
     limited_train_val: Optional[int] = None,
     max_observed_trials_per_participant: Optional[int] = None,
+    require_auto_llm_prompt: bool = False,
+    llm_decoding_seed: Optional[int] = None,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
@@ -801,6 +808,38 @@ def setup_teh_run_prompts(
     """
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
+    infer_path = prompts_dir / "infer_single_choice.txt"
+    meta_path = prompts_dir / "prompt_meta.json"
+    if require_auto_llm_prompt and (infer_path.exists() or meta_path.exists()):
+        if not (infer_path.is_file() and meta_path.is_file()):
+            raise RuntimeError(
+                f"T-PICS gated found incomplete prompt artifacts under {prompts_dir}; "
+                "refusing to silently regenerate a different target prompt."
+            )
+        try:
+            existing_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"T-PICS gated prompt_meta.json is unreadable ({meta_path}): {exc}"
+            ) from exc
+        existing_text = infer_path.read_text(encoding="utf-8")
+        digest = hashlib.sha256(existing_text.encode("utf-8")).hexdigest()
+        seed_copy = prompts_dir / "seed_program.py"
+        if not (
+            isinstance(existing_meta, dict)
+            and existing_meta.get("prompt_mode") == "auto_llm"
+            and existing_meta.get("llm_generated") is True
+            and bool(existing_text.strip())
+            and existing_meta.get("infer_prompt_sha256") == digest
+            and seed_copy.is_file()
+        ):
+            raise RuntimeError(
+                f"T-PICS gated found stale or invalid prompt artifacts under {prompts_dir}; "
+                "refusing to silently regenerate a different target prompt."
+            )
+        print(f"[TEH] Reusing gated automatic target prompt -> {infer_path}")
+        return prompts_dir
+
     resolved_base_prompt = resolve_base_loglik_prompt_path(base_prompt_path)
     if not resolved_base_prompt.is_file():
         raise FileNotFoundError(f"Base prompt not found: {resolved_base_prompt}")
@@ -850,7 +889,7 @@ def setup_teh_run_prompts(
         print(f"[TEH]   source: {forced_prompt}")
 
     reference_prompt = resolve_dataset_reference_prompt_path(dataset_alias)
-    if prefer_auto_llm_prompt or used_dataset_prompt_file:
+    if prefer_auto_llm_prompt or used_dataset_prompt_file or require_auto_llm_prompt:
         reference_prompt = None
     if not used_dataset_prompt_file and reference_prompt is not None:
         text = strip_embedded_choose_from_evolution_prompt(
@@ -873,6 +912,7 @@ def setup_teh_run_prompts(
                 example_char_budget=example_char_budget,
                 history_max_entries=history_max_entries,
                 max_examples=max_examples,
+                llm_decoding_seed=llm_decoding_seed,
             )
             infer_path.write_text(
                 strip_embedded_choose_from_evolution_prompt(infer_text), encoding="utf-8"
@@ -880,9 +920,18 @@ def setup_teh_run_prompts(
             generated = True
             print(f"[TEH] Wrote LLM-generated prompt -> {infer_path}")
         except Exception as e:
+            if require_auto_llm_prompt:
+                raise RuntimeError(
+                    f"Automatic target-prompt generation failed for {dataset_alias!r}: {e}"
+                ) from e
             print(f"[TEH] LLM prompt generation failed ({e}); using merge fallback.")
 
     if not generated and not used_reference and not used_dataset_prompt_file:
+        if require_auto_llm_prompt:
+            raise RuntimeError(
+                f"T-PICS gated requires a valid automatic LLM target prompt for "
+                f"{dataset_alias!r}; refusing merge fallback."
+            )
         merged = _merge_prompt_fallback(
             dataset_alias,
             instruction,
@@ -916,9 +965,34 @@ def setup_teh_run_prompts(
         raise FileNotFoundError(f"Seed program not found: {seed_src}")
     shutil.copy2(seed_src, prompts_dir / "seed_program.py")
 
+    infer_text_final = infer_path.read_text(encoding="utf-8")
+    if require_auto_llm_prompt:
+        if not generated or used_reference or used_dataset_prompt_file:
+            raise RuntimeError(
+                f"T-PICS gated requires prompt_mode=auto_llm for {dataset_alias!r}; "
+                f"got generated={generated} reference={used_reference} "
+                f"dataset_file={used_dataset_prompt_file}."
+            )
+        if not infer_text_final.strip():
+            raise RuntimeError(
+                f"T-PICS gated automatic target prompt is empty: {infer_path}"
+            )
+    if generated:
+        prompt_mode = "auto_llm"
+    elif used_reference:
+        prompt_mode = "reference"
+    elif used_dataset_prompt_file:
+        prompt_mode = "dataset_prompt_file"
+    else:
+        prompt_mode = "merge_fallback"
+    infer_sha256 = hashlib.sha256(infer_text_final.encode("utf-8")).hexdigest()
+
     meta: Dict[str, Any] = {
         "dataset_alias": dataset_alias,
         "llm_generated": generated,
+        "prompt_mode": prompt_mode,
+        "infer_prompt_path": str(infer_path.resolve()),
+        "infer_prompt_sha256": infer_sha256,
         "used_reference_prompt": used_reference,
         "used_dataset_prompt_file": used_dataset_prompt_file,
         "dataset_prompt_file": str(forced_prompt) if used_dataset_prompt_file else None,
@@ -932,6 +1006,8 @@ def setup_teh_run_prompts(
         "history_max_entries": int(history_max_entries),
         "max_examples": int(max_examples),
         "prefer_auto_llm_prompt": bool(prefer_auto_llm_prompt),
+        "require_auto_llm_prompt": bool(require_auto_llm_prompt),
+        "llm_decoding_seed": None if llm_decoding_seed is None else int(llm_decoding_seed),
         "n_prompt_example_trials": len(sample_trial_list),
         "prompt_examples_exclude_test": True,
         "runtime_contract_appended": True,

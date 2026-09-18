@@ -614,3 +614,19 @@ Annotate all runtime-valid global candidates (iters 1–10) on the 15 SA40 G.1 s
 
 Global phase never wrote `mem_trace.jsonl`; lineage reconstructed from `metrics.json` (`fresh`→`global_baseline` exact; `normal`→pool-best exact only when `best_k>=1`, else `pool_best_proxy`). Primary fitness-effect MEM: **exact rows only**. Manifests/lineage: `analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/`. Submit: `bash cluster/2026Sep18_T_PICS_PopAnnot_v4/submit_pop_annot_v4_l40s.sh --submit`.
 
+---
+
+## Short update (Sep 18 2026 — default method name: T-PICS)
+
+**ICLR default “our method”** is the latest gated T-PICS design, not EMNLP PICS. In chat, **PICS / T-PICS / tpics / our method** all mean that design unless the user says **old PICS**, **old TEH**, or **EMNLP method**.
+
+Launcher is still `teh.py --t_pics_gated_transfer`. Frozen source map: `analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml`. Pipeline: reuse 10-iter G.1 sources; two matched 5-iter target-pop arms (control vs transfer); train_val gate (transfer only if strictly better); G.3 explore 50 from the retained **target rank-1** (`--explore_population_top_k 1`); full winner elite stays in the person pool; 10 person iters with decaying seed-parented fresh candidates. Optional `--t_pics_gated_independent` still reads the official selected **source dataset** from that YAML but trains a live 10-iter G.1 in-run (no frozen program reuse); G.2/G.3/person stay gated. Cluster: `INDEPENDENT=1` writes KIND `t_pics_gated_independent`. **Gated person-evolution candidate prompts inject that person’s observed train+validation** via `extra_prompt_trials` (generic TEH stays train-only; test never enters prompts). Helpers: `utils/teh/t_pics_gated_transfer.py`. Submit wrapper (do not sbatch unless asked): `cluster/2026Sep18_T_PICS_gated/submit_gated.sh`. Leftover `--t_pics` is a different non-gated live-source CLI, not this flag.
+
+---
+
+## Short update (Sep 18 2026 — gated T-PICS record + suffix pid + people/MG)
+
+Authoritative method file: `analysis/config/T-PICS/Documentation.md`. G.2 transfer injects **one** source TV trial from the **first source EMNLP person** (`pids[start]`, not `valid[0]`). Only Hilbig / mixed_gambles needed a rerun (Wulff source; jobs **258112** / **258113**). G.1 and Occurrence-EB unchanged.
+
+People: valid list = non-empty train∧test after split (all 15, including five-new); then EMNLP slice. Five-new are 0–49. Wulff **1290–1339** is the only high-trial exception. Production mixed gambles uses **all** trial types (`gain_loss` + `gain_only`); no `--filter_mixed_gambles` on gated/G.1 argv.
+

@@ -1,0 +1,964 @@
+{
+  "manifest_name": "schema4_occurrence_eb_freeze",
+  "created_utc": "2026-09-18T13:23:12.806031+00:00",
+  "repo_head_at_manifest_creation": "9f066f143ae561305946380823d56ffada20b758",
+  "authoritative_runtime_map": "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml",
+  "selector_name": "occurrence_eb_schema4_iter10",
+  "schema_version": 4,
+  "prompt_version": "population_transition_v4_2",
+  "annotation_kind": "population_program_motif_transition",
+  "n_annotated_programs": 1385,
+  "source_population_jobs": [
+    257174,
+    257175,
+    257176,
+    257177,
+    257178,
+    257179,
+    257180,
+    257181,
+    257182,
+    257183,
+    257184,
+    257185,
+    257186,
+    257187,
+    257188
+  ],
+  "source_selection_job": "257756",
+  "peeked_transfer_at_freeze": false,
+  "iteration_prefix": "1-10",
+  "motifs": [
+    "history",
+    "value",
+    "probability_used",
+    "feedback",
+    "learning",
+    "explicit_risk_mechanism"
+  ],
+  "six_source_allowlist": [
+    "1peterson2021using",
+    "3frey2017cct",
+    "4wulff2018description",
+    "7hilbig2014generalized",
+    "11enkavi2019recentprobes",
+    "mixed_gambles"
+  ],
+  "documentation": "analysis/config/T-PICS/Documentation.md#frozen-schema-v4-annotation-and-occurrence-eb-source-selection",
+  "future_development_policy": [
+    "Frozen schema-v4 source-selection files and artifacts must remain unchanged because they define the main ICLR method.",
+    "Future participant-program annotation or MEM changes must use a new versioned directory/module and new output paths.",
+    "If existing logic is reused, copy or import it into that new analysis version without overwriting frozen source-selection artifacts.",
+    "Any future taxonomy or model change must receive a new schema/model name and must not silently regenerate occurrence_eb_schema4_iter10.yaml."
+  ],
+  "analysis_2026Sep_note": "Workspace path analysis_2026Sep is a symlink to /careAIDrive/zichang/repo/mindsAsCode/analysis_2026Sep; freeze content is content-addressed by sha256 below.",
+  "files": [
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml",
+      "sha256": "e207232ab77f78ae267b69d35011c8a2708ce58ba49907832f2664225acb1689",
+      "bytes": 15580,
+      "role": "frozen_runtime_source_map",
+      "git_commit": "9f066f143ae561305946380823d56ffada20b758",
+      "git_tracked": true,
+      "runtime_required": true,
+      "notes": "Sole runtime source-selection map for gated T-PICS; peeked_transfer_at_freeze=false"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/10frey2017risk/t_pics_source_pop10/job_257180/global_phase/best_program.py",
+      "sha256": "78393eb5c1cd9665e76a63a9bc24076e3d9f40e461d236d7870d5065b10a8016",
+      "bytes": 1966,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257180 rank-1 for source=10frey2017risk; n_annotated=94"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/t_pics_source_pop10/job_257181/global_phase/best_program.py",
+      "sha256": "98b9df3828a739bd7ea40dc1edcd893c049b718830e4f8ad2e6508a867879c6e",
+      "bytes": 575,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257181 rank-1 for source=11enkavi2019recentprobes; n_annotated=100"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/12badham2017deficits/t_pics_source_pop10/job_257182/global_phase/best_program.py",
+      "sha256": "41f00382d52dfc29ade98f635080a1baa91b9bf4d08621a0c6abf3065a823c40",
+      "bytes": 1917,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257182 rank-1 for source=12badham2017deficits; n_annotated=83"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/13schulz2020finding/t_pics_source_pop10/job_257187/global_phase/best_program.py",
+      "sha256": "e5ab1755f60bff158ca29055288feeb45bf972ff76b75e41ff7af69ff1b93884",
+      "bytes": 1077,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257187 rank-1 for source=13schulz2020finding; n_annotated=96"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/14kool2016when/t_pics_source_pop10/job_257188/global_phase/best_program.py",
+      "sha256": "7bd18389b77b3b8103af1034ee22dd9d2e5df6bf30bf074d5844e4b1598e6688",
+      "bytes": 1743,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257188 rank-1 for source=14kool2016when; n_annotated=82"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/1peterson2021using/t_pics_source_pop10/job_257174/global_phase/best_program.py",
+      "sha256": "1232f4dc44c2dcbfc3f637a5ac77ee373ead212b198d78f385a83bf3b6b06947",
+      "bytes": 1008,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257174 rank-1 for source=1peterson2021using; n_annotated=86"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/2plonsky2018when/t_pics_source_pop10/job_257175/global_phase/best_program.py",
+      "sha256": "a159b44e3e8acde39cb8a8b4fc08e3ba638879733c39c75523a5f8c10892b2e1",
+      "bytes": 1529,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257175 rank-1 for source=2plonsky2018when; n_annotated=81"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/3frey2017cct/t_pics_source_pop10/job_257176/global_phase/best_program.py",
+      "sha256": "a22e02998850c84b4a368c6753bf71edbee7271f4ef37b8df2bbe6bcd057638a",
+      "bytes": 1200,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257176 rank-1 for source=3frey2017cct; n_annotated=84"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/4wulff2018description/t_pics_source_pop10/job_257177/global_phase/best_program.py",
+      "sha256": "eeff51f860862102f01f978112a20f00704dac34e829af577f85b52917ab2695",
+      "bytes": 516,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257177 rank-1 for source=4wulff2018description; n_annotated=98"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/5speekenbrink2008learning/t_pics_source_pop10/job_257178/global_phase/best_program.py",
+      "sha256": "cda804863be95d0b0b0e5d8c400596c519153e35bcecb0f825eacf9be597fb27",
+      "bytes": 1186,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257178 rank-1 for source=5speekenbrink2008learning; n_annotated=90"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/7hilbig2014generalized/t_pics_source_pop10/job_257179/global_phase/best_program.py",
+      "sha256": "dc71a392dde2e9ac540d56e1c6e50b1d7923b327548ee4fb9f0e4afa375317da",
+      "bytes": 469,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257179 rank-1 for source=7hilbig2014generalized; n_annotated=100"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/t_pics_source_pop10/job_257184/global_phase/best_program.py",
+      "sha256": "25b51240f6d87504224e644c0d8c8db502783208b91a356a3f821219ecdafa1d",
+      "bytes": 414,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257184 rank-1 for source=bergert_nosofsky_2007; n_annotated=100"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/guan_2020_stopping/t_pics_source_pop10/job_257185/global_phase/best_program.py",
+      "sha256": "fc5ad1b5a04794843b9a9f804eb4e3bfb796d334e312790d71f41f09711c401a",
+      "bytes": 541,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257185 rank-1 for source=guan_2020_stopping; n_annotated=98"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/mixed_gambles/t_pics_source_pop10/job_257183/global_phase/best_program.py",
+      "sha256": "020a2b24d952c7d0c452d9b4ca2b7235b470445edbbb088b6cc5e1b81c30f0c5",
+      "bytes": 825,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257183 rank-1 for source=mixed_gambles; n_annotated=100"
+    },
+    {
+      "path": "generated_outputs/psych101_train/teh/steyvers_2009_bandit/t_pics_source_pop10/job_257186/global_phase/best_program.py",
+      "sha256": "04eb84acd78347658ed391e2b22d7b993812a238ea4118fd92577c4cefa29d30",
+      "bytes": 778,
+      "role": "frozen_g1_rank1_program",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": true,
+      "notes": "G.1 job 257186 rank-1 for source=steyvers_2009_bandit; n_annotated=93"
+    },
+    {
+      "path": "utils/mem/schema_population_motif_v4.py",
+      "sha256": "e52f3190fcf130b69efd26d7ea6a73ce8a2ef64fb9447efba049d11048d2964d",
+      "bytes": 13313,
+      "role": "schema_v4_motif_definitions_and_validation",
+      "git_commit": "9f066f143ae561305946380823d56ffada20b758",
+      "git_tracked": true,
+      "runtime_required": false,
+      "notes": "Authoritative motif defs, applicability, guided schema, resume_key, validate_program_motif_response"
+    },
+    {
+      "path": "analysis/mem/annotate_population_programs.py",
+      "sha256": "b6e70ecb817c3fbb0bd72677225fb63ad2f706fc876920a160af054b16e24373",
+      "bytes": 27389,
+      "role": "annotation_driver_script",
+      "git_commit": "11f2ba8f53a04f2652dba8d572a7a416c9528b09",
+      "git_tracked": true,
+      "runtime_required": false,
+      "notes": "LLM annotation CLI; schema_version=4; prompt_version population_transition_v4_2"
+    },
+    {
+      "path": "utils/mem/reconstruct_global_pop_lineage.py",
+      "sha256": "aa2d0556f183eb261437bd1c675755ba59378e695a2bf7ed62a1b84a8e7698eb",
+      "bytes": 11933,
+      "role": "lineage_reconstruction_module",
+      "git_commit": "11f2ba8f53a04f2652dba8d572a7a416c9528b09",
+      "git_tracked": true,
+      "runtime_required": false,
+      "notes": "Parent reconstruction when global mem_trace.jsonl absent"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/build_manifest.py",
+      "sha256": "f7a34232593ecce09cd7ed139ba01ba542bafff62e282df86ca479f9e8ed14ad",
+      "bytes": 9392,
+      "role": "program_manifest_builder",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Builds program_manifest_all.json + shard manifests"
+    },
+    {
+      "path": "analysis/mem/pop_v4_source_selection/run_source_selection_v4.py",
+      "sha256": "9cc8935c939edcb566bc62a904190ac945f9719adce4c8bd83de8c9272a187c0",
+      "bytes": 51660,
+      "role": "occurrence_eb_fit_eval_pipeline",
+      "git_commit": "9f066f143ae561305946380823d56ffada20b758",
+      "git_tracked": true,
+      "runtime_required": false,
+      "notes": "Job 257756 entrypoint: panel, Occurrence-EB, fitness/combined, freeze ranks, 6x6 eval-only"
+    },
+    {
+      "path": "analysis/mem/pop_v4_source_selection/__init__.py",
+      "sha256": "c9a89dc8fff26190c768e4238eee10bdb65563a5eb5cbd05cbc537e8c5ffa61b",
+      "bytes": 90,
+      "role": "package_init",
+      "git_commit": "9f066f143ae561305946380823d56ffada20b758",
+      "git_tracked": true,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis/config/misc/Sep17_T-PICS/config_T-PICS_schema4.yaml",
+      "sha256": "83e395848180b7dfad68554fae48a2d5f2aa1c75ad764e7be7f626206c89271d",
+      "bytes": 5018,
+      "role": "g1_run_index_config",
+      "git_commit": "11f2ba8f53a04f2652dba8d572a7a416c9528b09",
+      "git_tracked": true,
+      "runtime_required": false,
+      "notes": "Lists the 15 G.1 source-pop jobs/paths used for annotation manifests"
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/README.md",
+      "sha256": "4734ec77f61af277db9ea930b6671e4faf2879d0c36670c61b9c35aee56bc9a7",
+      "bytes": 3288,
+      "role": "popannot_readme",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/submit_pop_annot_v4_l40s.sh",
+      "sha256": "0236a1151494495a5b753ad22835adba182113001aa703e962d4d6dd1c123f12",
+      "bytes": 4005,
+      "role": "popannot_submit_primary",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "8-shard submit (L40S+H100 split)"
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/job_pop_annot_v4_l40s.sh",
+      "sha256": "58849b2a1c20a69fedc9b0f1fea40be6f07bb3e856b0a7e9990bd2b6e6c19134",
+      "bytes": 8812,
+      "role": "popannot_job_l40s",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/job_pop_annot_v4_h100nvl.sh",
+      "sha256": "667a9036744d4219aaae2a3c58a2b11376ab3b36b2e09de26924b0d483c59a33",
+      "bytes": 8800,
+      "role": "popannot_job_h100",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/job_pop_annot_v4_dataset.sh",
+      "sha256": "b2a013dd1e28947f671e6229ae5800b7dff00014ac037565c3ae07c2b5bd48a7",
+      "bytes": 9403,
+      "role": "popannot_job_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Per-dataset annotation worker used for remaining/xfermap fills"
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/submit_pop_annot_v4_rest.sh",
+      "sha256": "41d03c07158ee019ac1af22a1577f449bc0edb9ef3a720d720c1f20f1a1f3aed",
+      "bytes": 3844,
+      "role": "popannot_submit_rest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_PopAnnot_v4/submit_pop_annot_v4_xfermap.sh",
+      "sha256": "e74798862ac8c087da8794e2f9fe5caf7e454251a72412a70f5d88757b4f9996",
+      "bytes": 3765,
+      "role": "popannot_submit_xfermap",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_SourceSelect_v4/submit_source_select_v4_cpu.sh",
+      "sha256": "8abd033e6a733a139cb69f95ffed54ef89b1a7ca4a2244a6ef30dc85b72d6503",
+      "bytes": 1208,
+      "role": "sourceselect_submit",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "CPU job 257756 submitter"
+    },
+    {
+      "path": "cluster/2026Sep18_T_PICS_SourceSelect_v4/job_source_select_v4_cpu.sh",
+      "sha256": "db2137fcc551d95a645016e4cd3a8859aece37c7abb5aba5351a308a89c5c80a",
+      "bytes": 1695,
+      "role": "sourceselect_job",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Invokes run_source_selection_v4.py"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/program_manifest_all.json",
+      "sha256": "9048549df3366872e29792d91c069b80fae7b21ea562307c835b0e4a0850e91a",
+      "bytes": 1814805,
+      "role": "annotation_program_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "n_programs=1385; prompt_version=population_transition_v4_2; schema_version=4"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/shard_plan.json",
+      "sha256": "a38a75da97a1a53fe1bd71fb819e753c4c5e84cf691a9c99c74c56c9d9d7cd22",
+      "bytes": 3794,
+      "role": "annotation_shard_plan",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "8 shards"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_01.json",
+      "sha256": "321ade3279ea29afbbc28ea5f503c62d7c35b7c58397c13cce6c3cf0b2307042",
+      "bytes": 237544,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 01"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_02.json",
+      "sha256": "6e25aa6c1a989e184ce0fecc7fa5848494f8201886081cfe42826e26feb3d96d",
+      "bytes": 238940,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 02"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_03.json",
+      "sha256": "6933baa2943d9d0d39958a1f9dc1e74c44ee266dd775b2b55325fb1a950d3c68",
+      "bytes": 237766,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 03"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_04.json",
+      "sha256": "3853c7a94b52583139f46027ab60680b63cd4c687829ae7010e931db4d61befe",
+      "bytes": 239474,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 04"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_05.json",
+      "sha256": "e7c6f5d9e45324a0404680e16ba94ec6955264849a291a17d1ac97249903c0a5",
+      "bytes": 241462,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 05"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_06.json",
+      "sha256": "ee295348ff033ae3c0e057a577d236b9beac95e5558f767b2fe39c142bff1038",
+      "bytes": 247854,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 06"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_07.json",
+      "sha256": "4c8ff6af11a8f57e9713b0f33f68bbd90a8ee110f1116b2a80d9f8c76bd012a5",
+      "bytes": 247729,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 07"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/manifest_shard_08.json",
+      "sha256": "3fe6b7a72aa7d6ddfc7707a3b62df3ef77aacaeff4f461b9bdfd7b045e68a37e",
+      "bytes": 120997,
+      "role": "annotation_shard_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "shard 08"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/10frey2017risk/annotations_population_v4.jsonl",
+      "sha256": "7541ccd01429902fea713c88ab115a66eb77fbf864c8d64ebe98a9cd0367ad56",
+      "bytes": 666900,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/11enkavi2019recentprobes/annotations_population_v4.jsonl",
+      "sha256": "6e7a698dd54999c8243908a74fc63346230704a7cac0cff5918440a2ee932999",
+      "bytes": 626423,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/12badham2017deficits/annotations_population_v4.jsonl",
+      "sha256": "5dbc830a01eb50c87426096ede3ec3ff00adeb55ddd50b2372b92ce1f3db62a6",
+      "bytes": 623958,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/13schulz2020finding/annotations_population_v4.jsonl",
+      "sha256": "1cefeff57e5c5674a228fe032ee483853958337f2f7989288b66da92c859a15a",
+      "bytes": 536161,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/14kool2016when/annotations_population_v4.jsonl",
+      "sha256": "331f87d03ba7ee360c1ee4798eca1c4814fb9441e565968f793df2a91357fd06",
+      "bytes": 518916,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/1peterson2021using/annotations_population_v4.jsonl",
+      "sha256": "ad6f28c812846401817f0633be59ea9e8c99f790c07348d3e21fda326d8f8bb0",
+      "bytes": 529437,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/2plonsky2018when/annotations_population_v4.jsonl",
+      "sha256": "e598fd2d2ecd192643cc435d9d24033583cb651b1ef636c77f6c5d3cd2485c7d",
+      "bytes": 438523,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/3frey2017cct/annotations_population_v4.jsonl",
+      "sha256": "f4f7f40dd0a11af35ce70085e8dc36b2378c9ea11dfb69c251a3983c515ea597",
+      "bytes": 484327,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/4wulff2018description/annotations_population_v4.jsonl",
+      "sha256": "eb38f9bc4ec3b6ccfa3ce3c50557160dffd0a18b49ef5e948e3bc203452a021d",
+      "bytes": 629347,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/5speekenbrink2008learning/annotations_population_v4.jsonl",
+      "sha256": "0e931ed462b851ca306e897524f3521b1aea7fa17364be4193d70ecd919d09b8",
+      "bytes": 618820,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/bergert_nosofsky_2007/annotations_population_v4.jsonl",
+      "sha256": "411a70e182efbd6bad9055f281535dc829efcdcb3be4107c99340c54880d2a78",
+      "bytes": 492651,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/guan_2020_stopping/annotations_population_v4.jsonl",
+      "sha256": "d2730651fec58980498497f64435edeb4a0bc70125abecf316affbb4362cb2d7",
+      "bytes": 508383,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/mixed_gambles/annotations_population_v4.jsonl",
+      "sha256": "399586df6fdd4b3c042025d86b10de6d0034e4e7aefc4c7c231c33684e7b0545",
+      "bytes": 592781,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/by_dataset/steyvers_2009_bandit/annotations_population_v4.jsonl",
+      "sha256": "7af7c976f36028f83b0b36919816ee0eac38ee536cf6a8b50f8316b904c00ed7",
+      "bytes": 513663,
+      "role": "merged_annotation_by_dataset",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Preferred layer in load_annotations_union(prefer_by_dataset=True)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_01/annotations_population_v4.jsonl",
+      "sha256": "011f44f8648d8a19248382dd054830aae0090714b65dd5eb97ab1c605d5c5089",
+      "bytes": 820130,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Includes 7hilbig2014generalized (100 keys only in shards, not by_dataset)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_02/annotations_population_v4.jsonl",
+      "sha256": "380601245f2387184a5bbb1c78f52c3ba8eacdedadc8219ddfd172e2bb3c58d0",
+      "bytes": 993581,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_03/annotations_population_v4.jsonl",
+      "sha256": "852e95319fe62d229075f20cff2a61c2992e8c79b7504f76f336a3e28f07d445",
+      "bytes": 1019555,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_04/annotations_population_v4.jsonl",
+      "sha256": "02b92e2ca5ca2e2e92f4f5af7ddbe81fdc55297103ec798b28f8f4c2fdfae474",
+      "bytes": 583604,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_05/annotations_population_v4.jsonl",
+      "sha256": "c445e7eee12c4a2030dad658aafb4142ba1396c023885b9f351dd8e70a9d008f",
+      "bytes": 697570,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_06/annotations_population_v4.jsonl",
+      "sha256": "c99f726c893c282eabfda2f395e54a628f838f7ae8e81e13f8bf668ae4c9f9ab",
+      "bytes": 493486,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_07/annotations_population_v4.jsonl",
+      "sha256": "e2f9cbbeed25ed64797cad479c0e7f938d2bc3b5e9681bbd607c19109fe29a90",
+      "bytes": 533260,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/annotations/shard_08/annotations_population_v4.jsonl",
+      "sha256": "8b59d8ce9243584f8680cdc72364701e6aba624f962f1c9f2bad33ab527a462f",
+      "bytes": 183441,
+      "role": "annotation_shard_jsonl",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Shard outputs; Hilbig (100) exists only here in the union"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/FROZEN_SPEC.json",
+      "sha256": "fd95482fa215d2599a6ca7ff69c72cc8f1f98569f066dfec5fd926e5fa80c5c8",
+      "bytes": 5383,
+      "role": "freeze_spec",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "peeked_transfer_at_freeze=false; three methods recorded; occurrence chosen for ICLR map"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/occurrence_signatures.csv",
+      "sha256": "f88e5200a5e6c2d754e607e5fd90fb9259c488e6518c1f66e666e644973c1a81",
+      "bytes": 2333,
+      "role": "occurrence_signatures",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "6-dim EB signatures used for cosine ranking"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/occurrence_signatures.json",
+      "sha256": "d9240ab17a6dfc6e546f77453e81a886a4a474ed64357948dbcb769bc4f04710",
+      "bytes": 5997,
+      "role": "occurrence_signatures_json",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/occurrence_dataset_eb.csv",
+      "sha256": "18379205ca981d83cedd30729e06f7da92ca27a7a33329a28d80c398dbc51273",
+      "bytes": 22434,
+      "role": "occurrence_dataset_eb_table",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/occurrence_model_summary.csv",
+      "sha256": "dc5bcb343d6dc1415f3466ddd89ca2db6fdf947b0a761cebbd3d8a686ee1d5df",
+      "bytes": 1397,
+      "role": "occurrence_model_summary",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/occurrence_model_summary.json",
+      "sha256": "227bbfd1102e985a12067c47c2a5850385e6455cb2794bfdae23218de81a8f58",
+      "bytes": 3994,
+      "role": "occurrence_model_summary_json",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/frozen_ranks_15targets_occurrence.csv",
+      "sha256": "b5d1100b12ea68a1257d1940ac0eb54d15505041d61a8b4a01270cd8e76806a1",
+      "bytes": 3467,
+      "role": "frozen_ranks_15_occurrence",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Direct numeric source of YAML sources/targets map"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/frozen_ranks_6x6_occurrence.csv",
+      "sha256": "1efd252f2e8a604bdfb8bd9118208a415f044c1eb8ea076814bb922543ac5574",
+      "bytes": 1473,
+      "role": "frozen_ranks_6x6_occurrence",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Eval-only ranks on SIX"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/analysis_panel.csv",
+      "sha256": "c9ed7fc14a5e75bc58a34f71e910264d888ede777c58fb9291e5eb7ab8a9a779",
+      "bytes": 399228,
+      "role": "analysis_panel",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "1385 rows; occurrence uses presence cols; fitness uses 744 \u0394F rows"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/panel_stats.json",
+      "sha256": "4242d0bad7e2233da5621b717fcd0ebad190dca99ef5e5818682b2432e38d4ea",
+      "bytes": 1279,
+      "role": "panel_stats",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Contains absolute careAIDrive ann_root path (mutable symlink target)"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/SOURCE_SELECTION_V4_REPORT.md",
+      "sha256": "8c588a6e774d65179ce24f2c31d9289644d3f47a6e8287c26d4e6a131ad51e0a",
+      "bytes": 3705,
+      "role": "selection_report",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/eval_6x6_summary.json",
+      "sha256": "f3802aca5be6d6614a02b2769cd871df22f267bce144527e9fd958cdeae1fdbc",
+      "bytes": 2058,
+      "role": "eval_6x6_summary",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Transfer GT used ONLY at eval; not at freeze"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/eval_6x6_detail_occurrence.csv",
+      "sha256": "141a31444bca084dcd46925a1d78374d248ce29bc99f60474839458aa4a4939d",
+      "bytes": 1858,
+      "role": "eval_6x6_detail_occurrence",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Eval-only"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/meeting_report/MEETING_REPORT_OCCURRENCE_EB.md",
+      "sha256": "d4ffb44006223e8874f1e8dfbaf0cab088841273ce9999193181c4f92fe15f46",
+      "bytes": 7319,
+      "role": "meeting_report_occurrence_eb",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": ""
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/fitness_signatures.csv",
+      "sha256": "d094ed429ecc711d7c0ce9648954ce713cbf25c6662281c4daef18c36c135926",
+      "bytes": 4395,
+      "role": "fitness_signatures_not_selected",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/fitness_support.json",
+      "sha256": "3e303f0e4a3ec8e173454682f8c12a7dd3dee2860b9e073d3b76f0c0eecdc61c",
+      "bytes": 5068,
+      "role": "fitness_support_audit",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/fitness_model_fits.json",
+      "sha256": "db1c4f441aa4cdc2fa0b86b6d2d2a84571564bf1d1e4520fd33e2840d403e9bc",
+      "bytes": 7929,
+      "role": "fitness_model_fits",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/fitness_slopes.csv",
+      "sha256": "893c482d2709b7208a24a4d93c2cf6c7d5f13ce40cd1f3b75af464c13b7c3d09",
+      "bytes": 15690,
+      "role": "fitness_slopes",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/combined_signatures.csv",
+      "sha256": "463d7f64ebc50dc6886d55242f52cd41bf1075fb8be7f444ebaa0f115a101cdc",
+      "bytes": 6218,
+      "role": "combined_signatures_not_selected",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/frozen_ranks_15targets_fitness.csv",
+      "sha256": "395c636bf3f3b568953cb2d6bcc8a177fd97fac82c49f9836f156e13efe1171f",
+      "bytes": 3418,
+      "role": "frozen_ranks_15_fitness_not_selected",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/frozen_ranks_15targets_combined.csv",
+      "sha256": "2193d4f408ae218a79d38afca3c3a8ba05ddb9f3960d99e302c3495a97edc20c",
+      "bytes": 3440,
+      "role": "frozen_ranks_15_combined_not_selected",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/eval_6x6_detail_fitness.csv",
+      "sha256": "9b3736f8f0b6446beb7d9e8f5ac93334e45c5bd8eb6f267bd253278b9a0ac86f",
+      "bytes": 1823,
+      "role": "eval_6x6_detail_fitness",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis_2026Sep/mem/t_pics_source_pop10_schema_v4/source_selection_v4/eval_6x6_detail_combined.csv",
+      "sha256": "12c0bc161536e5d233b3af43a8aa972279674fe7f143fef8f122be9588e83aa8",
+      "bytes": 1856,
+      "role": "eval_6x6_detail_combined",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Produced by job 257756; not the ICLR Occurrence-EB selector"
+    },
+    {
+      "path": "analysis/config/T-PICS/Documentation.md",
+      "sha256": "bee2a1dedacd4cb81e2715adcb4d50332ed00829003e07251f479f2a6be5cb68",
+      "bytes": 51978,
+      "role": "authoritative_method_documentation",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Contains section Frozen schema-v4 annotation and Occurrence-EB source selection"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/schema4_occurrence_eb_freeze/README.md",
+      "sha256": "ff98b3cc765b8211ba1db500e44d446298305f4386e9fcb22b9beac5aaf4f459",
+      "bytes": 1553,
+      "role": "freeze_manifest_readme",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Points back to Documentation.md"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/schema4_occurrence_eb_freeze/freeze_manifest.json",
+      "sha256": "4ec71b1dcdb8fd347eb563f0cc13d32ae95bd7137b447eff9d8e7db3e1b200a7",
+      "bytes": 40927,
+      "role": "freeze_manifest",
+      "git_commit": null,
+      "git_tracked": false,
+      "runtime_required": false,
+      "notes": "Self-entry: use content_sha256_excluding_self as stable id; sha256 is tip hash after manifest write",
+      "content_sha256_excluding_self": "55473e825cae82f0c98d466a933ea3c20daa5e44c92a06ac7daf0197b86a2a78"
+    }
+  ],
+  "n_files": 90,
+  "n_runtime_required": 16,
+  "n_provenance_only": 73,
+  "n_git_tracked": 7,
+  "n_git_untracked": 82,
+  "updated_utc": "2026-09-18T13:25:21.551238+00:00"
+}

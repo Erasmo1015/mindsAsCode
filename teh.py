@@ -9,6 +9,7 @@ external Bernoulli adapters (e.g. bergert_nosofsky_2007). Legacy choice13k/cpc18
 gridworld entrypoints are not supported here (use dataset aliases instead of choice13k).
 """
 
+import hashlib
 import math
 import os
 import re
@@ -22,7 +23,7 @@ import threading
 import traceback
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any, Callable, Optional, Tuple, Set, Sequence
+from typing import List, Dict, Any, Callable, Optional, Tuple, Set, Sequence, Mapping
 from datetime import datetime
 import numpy as np
 from openai import OpenAI
@@ -70,6 +71,7 @@ from utils.teh.teh_datasets import (
     MIXED_GAMBLES,
     PARTICIPANT_DATASETS,
     dataset_output_type,
+    emnlp_ordinal_range,
     is_binary_loglik_dataset,
     is_categorical_output_dataset,
     is_mixed_gambles_dataset,
@@ -143,6 +145,33 @@ from utils.teh.t_pics_sources import (
     resolve_t_pics_reuse_source,
     resolve_t_pics_source_participant_ids,
 )
+from utils.teh.t_pics_gated_transfer import (
+    GATE_NAME,
+    GATE_SCORE_FIELD,
+    GATE_TIE_TOLERANCE,
+    SOURCE_POPULATION_ITERS,
+    apply_gated_cli_defaults,
+    argv_source_conditioning_flags,
+    build_control_argv,
+    build_transfer_argv,
+    decide_gate,
+    default_seed_path,
+    evaluate_mean_train_val_loglik,
+    gated_independent_enabled,
+    gated_run_metadata,
+    gate_record_payload,
+    load_frozen_transfer_config,
+    participant_run_is_complete,
+    population_arm_is_complete,
+    program_has_valid_choose,
+    resolve_gated_transfer_source_rank1,
+    run_layout,
+    selected_source_for_target,
+    selected_stage_is_complete,
+    validate_frozen_transfer_config,
+    write_gate_record,
+)
+from utils.teh.t_pics_gated_wandb import init_gated_wandb_reporter
 from utils.teh.mdl_selection import (
     apply_mdl_to_scored_elite,
     attach_mdl_fields,
@@ -1439,7 +1468,7 @@ def _resolve_default_seed_program_path(args: Any, participant_id: int) -> Option
 
 def _parallel_generate_children(
     n_children: int,
-    generate_one: Callable[[], str],
+    generate_one: Callable[..., str],
     *,
     max_workers: int = 5,
     desc: str = "Generating candidate programs",
@@ -1449,17 +1478,35 @@ def _parallel_generate_children(
         return []
     workers = max(1, min(int(max_workers), n_children))
     if workers == 1:
-        return [generate_one() for _ in tqdm(range(n_children), desc=desc)]
+        return [generate_one(i) for i in tqdm(range(n_children), desc=desc)]
 
     results: List[Optional[str]] = [None] * n_children
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_idx = {pool.submit(generate_one): i for i in range(n_children)}
+        future_to_idx = {pool.submit(generate_one, i): i for i in range(n_children)}
         with tqdm(total=n_children, desc=f"{desc} (workers={workers})") as pbar:
             for fut in as_completed(future_to_idx):
                 idx = future_to_idx[fut]
                 results[idx] = fut.result()
                 pbar.update(1)
     return [r if r is not None else "" for r in results]
+
+
+def _phase_llm_decoding_seed_base(
+    *,
+    split_seed: int,
+    iteration_step: int,
+    participant_id: Optional[int] = None,
+    batch_offset: int = 0,
+) -> int:
+    """Deterministic per-request seed base. Matched across G.2 arms (no arm id)."""
+    pid_key = int(participant_id) if participant_id is not None else 0
+    return (
+        int(split_seed)
+        + 80_000
+        + int(iteration_step) * 1_000_003
+        + pid_key * 17_179
+        + int(batch_offset)
+    )
 
 
 def load_valid_participant_ids_from_json(
@@ -3026,6 +3073,21 @@ def run_global_evolution_phase(
         limited_train_val=limited_train_val,
         speekenbrink_split=speekenbrink_split,
     )
+    pooled_test = _collect_pooled_test_trials_for_participants_diagnostic(
+        dataset,
+        participant_ids,
+        split_ratio=split_ratio,
+        split_seed=split_seed,
+        data_path=data_path,
+        filter_mixed_gambles=filter_mixed_gambles,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=mixed_gambles_csv,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
+    )
     budget_n = normalize_max_observed_trials(max_observed_trials_per_participant)
     print(f"\n{'='*80}")
     print(
@@ -3114,6 +3176,7 @@ def run_global_evolution_phase(
     early_stop_patience = _normalize_early_stop_iters(early_stop_iters)
     last_significant_best = baseline_fitness
     stagnant_iters = 0
+    diagnostic_test_by_iteration: List[Dict[str, Any]] = []
     invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
         error_feedback_mode
     )
@@ -3291,6 +3354,10 @@ def run_global_evolution_phase(
             "max_error_prompt_chars": max_error_prompt_chars,
             "error_feedback_mode": error_feedback_mode,
             "prompt_suffix": prompt_suffix,
+            "llm_decoding_seed_base": _phase_llm_decoding_seed_base(
+                split_seed=int(split_seed),
+                iteration_step=int(iteration_step),
+            ),
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -3479,6 +3546,22 @@ def run_global_evolution_phase(
                 else ")"
             )
         )
+        pool_best_test_record = _passive_diagnostic_test_of_program(
+            dataset=dataset,
+            code=elite_parents[0][0],
+            test_trials=pooled_test,
+            n_eval_seeds=n_eval_seeds,
+            program_id=str(elite_parents[0][3]),
+            phase="global_evolution",
+            iteration=iteration_step,
+        )
+        diagnostic_test_by_iteration.append(pool_best_test_record)
+        if pool_best_test_record.get("test_loglik") is not None:
+            print(
+                f"  Diagnostic test loglik of pool-best {pool_best_test_record['program_id']}: "
+                f"{float(pool_best_test_record['test_loglik']):.6f} "
+                "(passive; not used for ranking)"
+            )
 
         if mem_trace_file is not None:
             elite_ids_after = {str(p[3]) for p in elite_parents}
@@ -3567,6 +3650,7 @@ def run_global_evolution_phase(
                 "pool_best_program_id": elite_parents[0][3],
                 "pool_best_global_train_loglik": pool_best_ll,
                 "evolution_selection_score": evolution_selection_score,
+                "diagnostic_test": pool_best_test_record,
             }
             if use_train_val:
                 metrics["pool_best_selection_score"] = pool_best_selection
@@ -3621,6 +3705,8 @@ def run_global_evolution_phase(
                 "global/train_loglik": pool_best_ll,
                 "global/pool_size": len(elite_parents),
                 "global/iteration": iteration_step,
+                "global/diagnostic_test_loglik": pool_best_test_record.get("test_loglik"),
+                "global/diagnostic_test_program_id": pool_best_test_record.get("program_id"),
             }
             if use_train_val:
                 global_log["global/selection_score"] = pool_best_selection
@@ -3692,6 +3778,7 @@ def run_global_evolution_phase(
             "pool_best_selection_score": pool_best_selection_score,
             "evolution_selection_score": evolution_selection_score,
             "baseline_global_train_loglik": baseline_ll,
+            "diagnostic_test_by_iteration": diagnostic_test_by_iteration,
         }
         if mdl_enabled(mdl_lambda):
             global_results["mdl_lambda"] = float(mdl_lambda)
@@ -3737,6 +3824,7 @@ def _cross_task_source_suffix(
     psych_dataset_split: str,
     filter_mixed_gambles: bool,
     best_loglik: Optional[float] = None,
+    require_source_examples: bool = False,
 ) -> str:
     """Build the G/E source-program suffix using the same obs protocol as this run."""
     return build_rank1_explore_prompt_suffix(
@@ -3751,7 +3839,9 @@ def _cross_task_source_suffix(
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
-        filter_mixed_gambles=filter_mixed_gambles,
+        filter_mixed_gambles=bool(filter_mixed_gambles)
+        or str(source_dataset) == "mixed_gambles",
+        require_source_examples=bool(require_source_examples),
     )
 
 
@@ -3766,6 +3856,9 @@ def _run_t_pics_source_population(
     wandb_module: Optional[Any],
     psych_dataset_split: str,
     filter_mixed_gambles: bool,
+    n_iterations: Optional[int] = None,
+    require_auto_llm_prompt: bool = False,
+    llm_decoding_seed: Optional[int] = None,
 ) -> Tuple[Path, Optional[float]]:
     """G.1: live source-dataset population under the same knobs/obs protocol as the target.
 
@@ -3773,6 +3866,9 @@ def _run_t_pics_source_population(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    source_iters = (
+        int(n_iterations) if n_iterations is not None else int(args.global_iters)
+    )
     source_prompts_dir = setup_teh_run_prompts(
         output_dir,
         source_dataset,
@@ -3793,7 +3889,8 @@ def _run_t_pics_source_population(
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
         prefer_auto_llm_prompt=bool(getattr(args, "prefer_auto_llm_prompt", False))
-        or int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0) > 0,
+        or int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0) > 0
+        or bool(require_auto_llm_prompt),
         dataset_prompt_file=None,
         split_ratio=float(args.split_ratio),
         split_seed=int(args.split_seed),
@@ -3802,18 +3899,20 @@ def _run_t_pics_source_population(
         limited_data_protocol=str(args.limited_data_protocol),
         limited_train_val=args.limited_train_val,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+        require_auto_llm_prompt=bool(require_auto_llm_prompt),
+        llm_decoding_seed=llm_decoding_seed,
     )
     source_seed = str(source_prompts_dir / "seed_program.py")
     print(
         f"[T-PICS] Training source population on {source_dataset}: "
-        f"{len(source_participants)} participant(s), global_iters={args.global_iters}, "
+        f"{len(source_participants)} participant(s), global_iters={source_iters}, "
         f"protocol={args.limited_data_protocol}, limited_train_val={args.limited_train_val}"
     )
     elite = run_global_evolution_phase(
         dataset=source_dataset,
         participants=[int(p) for p in source_participants],
         seed_program_path=source_seed,
-        n_iterations=args.global_iters,
+        n_iterations=source_iters,
         n_candidates_per_iteration=args.n_candidates,
         fresh_n_candidates=args.fresh_n_candidates,
         sample_size=args.sample_size,
@@ -3867,7 +3966,7 @@ def _run_t_pics_source_population(
         "source_dataset": source_dataset,
         "n_participants": len(source_participants),
         "participant_ids": [int(p) for p in source_participants],
-        "global_iters": int(args.global_iters),
+        "global_iters": int(source_iters),
         "limited_data_protocol": str(args.limited_data_protocol),
         "limited_train_val": args.limited_train_val,
         "max_observed_trials_per_participant": args.max_observed_trials_per_participant,
@@ -3888,6 +3987,409 @@ def _run_t_pics_source_population(
         )
     print(f"[T-PICS] Source rank-1 -> {best_path}")
     return best_path, best_ll
+
+
+def _gated_global_phase_kwargs(
+    args: Any,
+    *,
+    participants: List[int],
+    seed_program_path: str,
+    client: OpenAI,
+    wandb_module: Optional[Any],
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+    run_prompts_dir: str,
+    output_dir: Path,
+    prompt_suffix: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "dataset": args.dataset,
+        "participants": [int(p) for p in participants],
+        "seed_program_path": seed_program_path,
+        "n_iterations": int(args.global_iters),
+        "n_candidates_per_iteration": args.n_candidates,
+        "fresh_n_candidates": args.fresh_n_candidates,
+        "sample_size": args.sample_size,
+        "sample_parents": args.sample_parents,
+        "sampled_parents_decay": args.sampled_parents_decay,
+        "elite_pool_size": args.elite_pool_size,
+        "model_name": args.model_name,
+        "client": client,
+        "split_ratio": args.split_ratio,
+        "split_seed": args.split_seed,
+        "data_path": args.data_path,
+        "filter_mixed_gambles": filter_mixed_gambles,
+        "max_prompt_train_trials": args.max_prompt_train_trials,
+        "max_prompt_trials_per_problem": args.max_prompt_trials_per_problem,
+        "llm_max_tokens": args.llm_max_tokens,
+        "max_workers": args.max_workers,
+        "n_eval_seeds": args.n_eval_seeds,
+        "output_dir": Path(output_dir),
+        "save_artifacts": True,
+        "wandb_module": wandb_module,
+        "run_prompts_dir": str(run_prompts_dir),
+        "psych_dataset_split": psych_dataset_split,
+        "local_dataset": args.local_dataset,
+        "mixed_gambles_csv": args.mixed_gambles_csv,
+        "max_parent_chars": args.max_parent_chars,
+        "warn_parent_truncation_ratio": args.warn_parent_truncation_ratio,
+        "early_stop_iters": args.early_stop_iters,
+        "hard_prompt_token_cap": args.hard_prompt_token_cap,
+        "strict_prompt_budget": args.strict_prompt_budget,
+        "prompt_token_estimator": args.prompt_token_estimator,
+        "prompt_debug": args.prompt_debug,
+        "prompt_debug_on_no_valid": args.prompt_debug_on_no_valid,
+        "prompt_debug_exit": args.prompt_debug_exit,
+        "evolution_selection_score": args.evolution_selection_score,
+        "max_error_prompt_chars": args.max_error_prompt_chars,
+        "error_feedback_mode": args.error_feedback_mode,
+        "max_observed_trials_per_participant": args.max_observed_trials_per_participant,
+        "limited_data_protocol": args.limited_data_protocol,
+        "speekenbrink_split": getattr(args, "speekenbrink_split", "chronological"),
+        "limited_train_val": args.limited_train_val,
+        "mdl_lambda": args.mdl_lambda,
+        "mem_trace": args.mem_trace,
+        "prompt_suffix": prompt_suffix,
+    }
+
+
+def _write_arm_intended_argv(path: Path, argv: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(" ".join(str(x) for x in argv) + "\n", encoding="utf-8")
+
+
+def _load_gated_arm_pool(arm_dir: Path) -> List[Tuple[Any, ...]]:
+    return _load_one_initial_pool_dir(str(Path(arm_dir) / "global_phase" / "global_elite_pool"))
+
+
+def _ensure_gated_independent_source_population(
+    *,
+    args: Any,
+    source_dataset: str,
+    output_dir: Path,
+    client: OpenAI,
+    wandb_module: Optional[Any],
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+) -> Tuple[Path, Optional[float]]:
+    """Live G.1 for gated independent runs. Does not read frozen YAML rank-1 programs."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expected_iters = int(SOURCE_POPULATION_ITERS)
+    if population_arm_is_complete(output_dir, expected_global_iters=expected_iters):
+        best = output_dir / "global_phase" / "best_program.py"
+        print(f"[T-PICS gated] skip complete independent G.1 -> {best}")
+        return best, None
+    source_filter = bool(filter_mixed_gambles) or str(source_dataset) == "mixed_gambles"
+    source_start, source_end = emnlp_ordinal_range(str(source_dataset))
+    source_pids, clamp_note = resolve_t_pics_source_participant_ids(
+        source_dataset=str(source_dataset),
+        repo_root=_REPO_ROOT,
+        participant_scope="range",
+        single_participant_id=args.single_participant_id,
+        range_start_ordinal=source_start,
+        range_end_ordinal=source_end,
+        all_max_participants=args.all_max_participants,
+        participant_ordinals=args.ordinals,
+        filter_mixed_gambles=source_filter,
+        split_ratio=args.split_ratio,
+        split_seed=args.split_seed,
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=args.local_dataset,
+        mixed_gambles_csv=args.mixed_gambles_csv,
+    )
+    if clamp_note:
+        print(f"[T-PICS gated] independent G.1 {clamp_note}")
+    source_seed = default_seed_path(str(source_dataset))
+    print(
+        f"[T-PICS gated] independent G.1 live source population "
+        f"dataset={source_dataset} n={len(source_pids)} "
+        f"source_emnlp_range={source_start}-{source_end} iters={expected_iters} "
+        f"(not reusing frozen G.1 programs)"
+    )
+    return _run_t_pics_source_population(
+        source_dataset=str(source_dataset),
+        source_participants=source_pids,
+        output_dir=output_dir,
+        seed_program_path=source_seed,
+        args=args,
+        client=client,
+        wandb_module=wandb_module,
+        psych_dataset_split=psych_dataset_split,
+        filter_mixed_gambles=source_filter,
+        n_iterations=expected_iters,
+        require_auto_llm_prompt=True,
+        llm_decoding_seed=int(args.split_seed) + 90_000,
+    )
+
+
+def _run_t_pics_gated_population_arms(
+    *,
+    args: Any,
+    run_root: Path,
+    participants: List[int],
+    seed_program_path: str,
+    client: OpenAI,
+    wandb_module: Optional[Any],
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+    run_prompts_dir: str,
+) -> List[Tuple[Any, ...]]:
+    """Matched G.2 control vs transfer arms, train_val observed-data gate, retain winner elite pool."""
+    cfg_path = Path(str(args.t_pics_source_config))
+    if not cfg_path.is_absolute():
+        cfg_path = (_REPO_ROOT / cfg_path).resolve()
+    cfg = load_frozen_transfer_config(cfg_path)
+    entry = selected_source_for_target(str(args.dataset), config=cfg)
+    layout = run_layout(Path(run_root))
+    independent = gated_independent_enabled(args)
+    for key in ("control", "transfer", "gate", "selected"):
+        layout[key].mkdir(parents=True, exist_ok=True)
+    if independent:
+        layout["source_population"].mkdir(parents=True, exist_ok=True)
+        live_best, live_ll = _ensure_gated_independent_source_population(
+            args=args,
+            source_dataset=str(entry.selected_source),
+            output_dir=layout["source_population"],
+            client=client,
+            wandb_module=wandb_module,
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+        )
+        source_rank1 = Path(live_best)
+        source_best_loglik = live_ll
+    else:
+        source_rank1 = Path(entry.rank1_program)
+        source_best_loglik = None
+
+    seed_path = str(args.seed_path or default_seed_path(str(args.dataset)))
+    control_argv = build_control_argv(
+        dataset=str(args.dataset),
+        output_dir=str(layout["control"]),
+        seed_path=seed_path,
+    )
+    transfer_argv = build_transfer_argv(
+        dataset=str(args.dataset),
+        output_dir=str(layout["transfer"]),
+        seed_path=seed_path,
+        source_program=str(source_rank1),
+        source_dataset=entry.selected_source,
+    )
+    _write_arm_intended_argv(layout["control"] / "INTENDED_ARGV.txt", control_argv)
+    _write_arm_intended_argv(layout["transfer"] / "INTENDED_ARGV.txt", transfer_argv)
+    control_src = argv_source_conditioning_flags(control_argv)
+    if control_src:
+        raise RuntimeError(f"control argv leaked source-conditioning flags: {control_src}")
+    print(
+        f"[T-PICS gated] target={args.dataset} selected_source={entry.selected_source} "
+        f"rank-1={source_rank1} config={cfg.path} "
+        f"g1={'live independent' if independent else 'frozen YAML reuse'}"
+    )
+    print(
+        f"[T-PICS gated] G.2 sequential matched arms "
+        f"(global_iters={args.global_iters}, shared automatic target prompt); "
+        f"gate={GATE_NAME} field={GATE_SCORE_FIELD} tolerance={GATE_TIE_TOLERANCE}"
+    )
+
+    expected_iters = int(args.global_iters)
+    if hasattr(wandb_module, "set_g2_arm"):
+        wandb_module.set_g2_arm("control")
+    control_ok = population_arm_is_complete(
+        layout["control"], expected_global_iters=expected_iters
+    )
+    if control_ok:
+        print(f"[T-PICS gated] skip complete control G.2 -> {layout['control']}")
+        control_pool = _load_gated_arm_pool(layout["control"])
+        if hasattr(wandb_module, "maybe_backfill_g2_arm"):
+            wandb_module.maybe_backfill_g2_arm("control", layout["control"])
+    else:
+        control_pool = run_global_evolution_phase(
+            **_gated_global_phase_kwargs(
+                args,
+                participants=participants,
+                seed_program_path=seed_program_path,
+                client=client,
+                wandb_module=wandb_module,
+                psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=filter_mixed_gambles,
+                run_prompts_dir=run_prompts_dir,
+                output_dir=layout["control"],
+                prompt_suffix=None,
+            )
+        )
+        control_ok = population_arm_is_complete(
+            layout["control"], expected_global_iters=expected_iters
+        )
+    if not control_ok or not control_pool:
+        raise RuntimeError(
+            f"T-PICS gated control arm failed to produce a complete G.2 pool: {layout['control']}"
+        )
+
+    if hasattr(wandb_module, "set_g2_arm"):
+        wandb_module.set_g2_arm("transfer")
+    transfer_ok = population_arm_is_complete(
+        layout["transfer"], expected_global_iters=expected_iters
+    )
+    transfer_program_ok = False
+    transfer_failed = False
+    if transfer_ok:
+        print(f"[T-PICS gated] skip complete transfer G.2 -> {layout['transfer']}")
+        transfer_program_ok, _ = program_has_valid_choose(layout["transfer_rank1"])
+        if hasattr(wandb_module, "maybe_backfill_g2_arm"):
+            wandb_module.maybe_backfill_g2_arm("transfer", layout["transfer"])
+        try:
+            _load_gated_arm_pool(layout["transfer"])
+        except (FileNotFoundError, ValueError):
+            transfer_ok = False
+            transfer_failed = True
+    else:
+        try:
+            transfer_suffix = _cross_task_source_suffix(
+                source_dataset=str(entry.selected_source),
+                program_path=str(source_rank1),
+                args=args,
+                psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=filter_mixed_gambles,
+                best_loglik=source_best_loglik,
+                require_source_examples=True,
+            )
+            print(
+                "[T-PICS gated] transfer G.2 prompt includes "
+                f"{'live independent' if independent else 'frozen YAML'} rank-1 "
+                f"({entry.selected_source}: {source_rank1})"
+            )
+            run_global_evolution_phase(
+                **_gated_global_phase_kwargs(
+                    args,
+                    participants=participants,
+                    seed_program_path=seed_program_path,
+                    client=client,
+                    wandb_module=wandb_module,
+                    psych_dataset_split=psych_dataset_split,
+                    filter_mixed_gambles=filter_mixed_gambles,
+                    run_prompts_dir=run_prompts_dir,
+                    output_dir=layout["transfer"],
+                    prompt_suffix=transfer_suffix,
+                )
+            )
+            transfer_ok = population_arm_is_complete(
+                layout["transfer"], expected_global_iters=expected_iters
+            )
+            transfer_program_ok, _ = program_has_valid_choose(layout["transfer_rank1"])
+        except Exception as exc:
+            transfer_failed = True
+            transfer_ok = False
+            transfer_program_ok = False
+            fail_path = layout["transfer"] / "FAILED.json"
+            fail_path.write_text(
+                json.dumps({"error": str(exc), "type": type(exc).__name__}, indent=2)
+                + "\n",
+                encoding="utf-8",
+            )
+            print(f"[T-PICS gated] transfer arm failed; selecting control. {exc}")
+
+    control_score = None
+    transfer_score = None
+    if control_ok:
+        control_score = evaluate_mean_train_val_loglik(
+            layout["control_rank1"],
+            dataset=str(args.dataset),
+            participant_ids=participants,
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+            n_eval_seeds=int(args.n_eval_seeds),
+            limited_data_protocol=str(args.limited_data_protocol),
+            limited_train_val=args.limited_train_val,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        )
+    if control_score is None or not math.isfinite(float(control_score)):
+        raise RuntimeError(
+            f"T-PICS gated control arm did not produce a finite {GATE_SCORE_FIELD}: "
+            f"{control_score} ({layout['control_rank1']})"
+        )
+    if transfer_ok and transfer_program_ok:
+        transfer_score = evaluate_mean_train_val_loglik(
+            layout["transfer_rank1"],
+            dataset=str(args.dataset),
+            participant_ids=participants,
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+            n_eval_seeds=int(args.n_eval_seeds),
+            limited_data_protocol=str(args.limited_data_protocol),
+            limited_train_val=args.limited_train_val,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        )
+
+    decision = decide_gate(
+        control_score=control_score,
+        transfer_score=transfer_score,
+        control_arm_ok=control_ok,
+        transfer_arm_ok=transfer_ok and not transfer_failed,
+        transfer_program_ok=transfer_program_ok,
+        tie_tolerance=GATE_TIE_TOLERANCE,
+    )
+    retained_pool = (
+        layout["transfer_pool"] if decision.selected_arm == "transfer" else layout["control_pool"]
+    )
+    transfer_rank1 = layout["transfer_rank1"] if layout["transfer_rank1"].is_file() else None
+    record = gate_record_payload(
+        target=str(args.dataset),
+        selected_source=entry.selected_source,
+        decision=decision,
+        control_rank1=layout["control_rank1"],
+        transfer_rank1=transfer_rank1,
+        retained_pool=retained_pool,
+        config_path=cfg.path,
+        selector_name=cfg.selector_name,
+        selected_source_rank1=source_rank1,
+    )
+    write_gate_record(layout["gate_record"], record)
+    if hasattr(wandb_module, "publish_gate_record"):
+        wandb_module.publish_gate_record(layout["gate_record"])
+    _merge_run_metadata(
+        Path(run_root),
+        {
+            "gate_record_path": str(layout["gate_record"]),
+            "gate": record,
+            "mean_train_val_loglik_control": decision.control_score,
+            "mean_train_val_loglik_transfer": decision.transfer_score,
+            "gate_reason": decision.reason,
+            "selected_arm": decision.selected_arm,
+            "retained_pool_path": str(retained_pool),
+            "g2_arms_shared_target_prompt": True,
+        },
+    )
+    print(
+        f"[T-PICS gated] gate selected={decision.selected_arm} reason={decision.reason} "
+        f"control_{GATE_SCORE_FIELD}={decision.control_score} "
+        f"transfer_{GATE_SCORE_FIELD}={decision.transfer_score} "
+        f"diff={decision.score_difference}"
+    )
+
+    selected_link = layout["selected_pool"]
+    if selected_link.exists() or selected_link.is_symlink():
+        if selected_link.is_symlink() or selected_link.is_file():
+            selected_link.unlink()
+        else:
+            shutil.rmtree(selected_link)
+    try:
+        selected_link.symlink_to(retained_pool.resolve())
+    except OSError:
+        shutil.copytree(retained_pool, selected_link)
+    (layout["selected"] / "SELECTED_ARM.txt").write_text(
+        decision.selected_arm + "\n", encoding="utf-8"
+    )
+    return _load_one_initial_pool_dir(str(retained_pool))
 
 
 def _refinement_pool_best_metrics(
@@ -4297,6 +4799,32 @@ def _compress_prompt_whitespace(text: str) -> str:
         prev_blank = blank
     out = "\n".join(lines)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+def _prompt_example_split_diagnostic_fields(
+    *,
+    train_before: int,
+    train_after: int,
+    val_before: int,
+    val_after: int,
+) -> Dict[str, Any]:
+    """Record which observed splits were serialized into an LLM candidate prompt.
+
+    Test is never a prompt-example source; the flag is stored so audits can prove it.
+    """
+    n_train_b = int(train_before)
+    n_train_a = int(train_after)
+    n_val_b = int(val_before)
+    n_val_a = int(val_after)
+    return {
+        "train_trials_before": n_train_b,
+        "train_trials_after": n_train_a,
+        "val_trials_before": n_val_b,
+        "val_trials_after": n_val_a,
+        "observed_union_trials_before": n_train_b + n_val_b,
+        "observed_union_trials_after": n_train_a + n_val_a,
+        "test_examples_included": False,
+    }
 
 
 def _append_prompt_diagnostic(record: Dict[str, Any], diagnostics_dir: Optional[Path]) -> None:
@@ -5463,6 +5991,131 @@ def _clear_gated_test_loglik_in_loglik_rows(rows: List[Dict[str, Any]]) -> None:
     """Remove prior-run gated_test_loglik so a new refine experiment starts fresh."""
     for row in rows:
         row["gated_test_loglik"] = None
+
+
+def _passive_diagnostic_test_eval(
+    *,
+    dataset: str,
+    choose_fn: Any,
+    test_trials: Optional[List[Dict[str, Any]]],
+    n_eval_seeds: int,
+) -> Dict[str, Any]:
+    """Held-out test metrics for logging only. Never used for selection."""
+    empty = {
+        "avg_loglik": None,
+        "accuracy": None,
+        "errors": 0,
+        "correct": 0,
+        "total": 0 if not test_trials else len(test_trials),
+    }
+    if choose_fn is None or not test_trials:
+        return empty
+    try:
+        return _evaluate_loglik_for_dataset(
+            dataset, choose_fn, list(test_trials), n_seeds=n_eval_seeds
+        )
+    except (AssertionError, TypeError, ValueError):
+        return {
+            "avg_loglik": None,
+            "accuracy": None,
+            "errors": 1,
+            "correct": 0,
+            "total": len(test_trials),
+        }
+
+
+def _passive_test_record(
+    *,
+    program_id: str,
+    test_eval: Mapping[str, Any],
+    phase: str,
+    iteration: Optional[int] = None,
+    n_test_trials: Optional[int] = None,
+    program_sha256: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Metadata tying one diagnostic test score to the exact selected program."""
+    return {
+        "diagnostic_only": True,
+        "not_used_for_selection": True,
+        "phase": phase,
+        "iteration": None if iteration is None else int(iteration),
+        "program_id": str(program_id),
+        "program_sha256": program_sha256,
+        "test_loglik": _safe_float(test_eval.get("avg_loglik")),
+        "test_accuracy": _safe_float(test_eval.get("accuracy")),
+        "n_test_trials": (
+            int(n_test_trials)
+            if n_test_trials is not None
+            else int(test_eval.get("total") or 0)
+        ),
+    }
+
+
+def _passive_diagnostic_test_of_program(
+    *,
+    dataset: str,
+    code: Optional[str],
+    test_trials: Optional[List[Dict[str, Any]]],
+    n_eval_seeds: int,
+    program_id: str,
+    phase: str,
+    iteration: Optional[int] = None,
+) -> Dict[str, Any]:
+    source = code or ""
+    choose_fn = compile_program(source)
+    test_eval = _passive_diagnostic_test_eval(
+        dataset=dataset,
+        choose_fn=choose_fn,
+        test_trials=test_trials,
+        n_eval_seeds=n_eval_seeds,
+    )
+    return _passive_test_record(
+        program_id=program_id,
+        test_eval=test_eval,
+        phase=phase,
+        iteration=iteration,
+        n_test_trials=len(test_trials or []),
+        program_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest() if source else None,
+    )
+
+
+def _collect_pooled_test_trials_for_participants_diagnostic(
+    dataset: str,
+    participant_ids: List[int],
+    *,
+    split_ratio: float,
+    split_seed: int,
+    data_path: str = "data",
+    filter_mixed_gambles: bool = False,
+    psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
+    local_dataset: Optional[str] = None,
+    mixed_gambles_csv: str = DEFAULT_CSV_PATH,
+    max_observed_trials_per_participant: Optional[int] = None,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
+) -> List[Dict[str, Any]]:
+    """Concatenate per-person test splits for passive pool-best diagnostics only."""
+    pooled: List[Dict[str, Any]] = []
+    for pid in participant_ids:
+        _train, _val, test_trials = _trials_for_loglik_participant(
+            dataset,
+            int(pid),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            data_path=data_path,
+            filter_mixed_gambles=filter_mixed_gambles,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv,
+            max_observed_trials_per_participant=max_observed_trials_per_participant,
+            limited_data_protocol=limited_data_protocol,
+            limited_train_val=limited_train_val,
+            speekenbrink_split=speekenbrink_split,
+        )
+        del _train, _val
+        pooled.extend(list(test_trials or []))
+    return pooled
 
 
 def _write_global_phase_summary_loglik_csv(
@@ -7481,7 +8134,7 @@ Output ONLY runnable Python code (no explanations, no markdown fences, no preamb
 
     _gw_call_idx = [0]
 
-    def _generate_one() -> str:
+    def _generate_one(_cand_idx: int = 0) -> str:
         cand_idx = _gw_call_idx[0]
         _gw_call_idx[0] += 1
         try:
@@ -7573,7 +8226,7 @@ Prefix accuracy: {correct_count} / {GRIDWORLD_PREFIX_LEN}
     fallback = parent_codes[0] if parent_codes else ""
     _gw_call_idx = [0]
 
-    def _generate_one() -> str:
+    def _generate_one(_cand_idx: int = 0) -> str:
         cand_idx = _gw_call_idx[0]
         _gw_call_idx[0] += 1
         try:
@@ -7956,7 +8609,7 @@ Generate the variant now:"""
     best_parent = parent_codes[0] if parent_codes else ""
     _gw_call_idx = [0]
 
-    def _generate_one() -> str:
+    def _generate_one(_cand_idx: int = 0) -> str:
         cand_idx = _gw_call_idx[0]
         _gw_call_idx[0] += 1
         try:
@@ -8315,6 +8968,9 @@ def _generate_iteration_candidate_codes(
         sources.extend(["fresh"] * len(fresh_codes))
     if n_normal > 0:
         normal_kw = dict(variant_kwargs)
+        seed_base = normal_kw.get("llm_decoding_seed_base")
+        if seed_base is not None:
+            normal_kw["llm_decoding_seed_base"] = int(seed_base) + int(fresh_n)
         normal_kw.update(
             client=client,
             model_name=model_name,
@@ -8377,6 +9033,7 @@ def generate_program_variants(
     explain_mode: bool = False,
     explain_suffix: Optional[str] = None,
     explain_artifacts_out: Optional[List[Dict[str, Any]]] = None,
+    llm_decoding_seed_base: Optional[int] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -8408,6 +9065,10 @@ def generate_program_variants(
         base_prompt = open(prompt_path).read()
         code_template = load_single_code_template(code_template_path)
     except FileNotFoundError as e:
+        if run_prompts_dir:
+            raise FileNotFoundError(
+                f"Required run prompt files missing under {run_prompts_dir}: {e}"
+            ) from e
         print(f"Warning: Could not load prompt files: {e}")
         print("Falling back to hardcoded prompts.")
         # Fallback to hardcoded prompts
@@ -8604,6 +9265,12 @@ Provide only the code for choose(...) as a complete function body.
         "prompt_token_estimator": prompt_token_estimator,
         "truncation_steps": trunc_steps,
         **trunc_diag,
+        **_prompt_example_split_diagnostic_fields(
+            train_before=int(trunc_diag.get("train_trials_before") or 0),
+            train_after=int(trunc_diag.get("train_trials_after") or 0),
+            val_before=int(trunc_diag.get("val_trials_before") or 0),
+            val_after=int(trunc_diag.get("val_trials_after") or 0),
+        ),
     }
     _warn_prompt_truncation(diag_base)
 
@@ -8649,16 +9316,23 @@ Provide only the code for choose(...) as a complete function body.
 
     prompt_text = append_runtime_contract_if_present(prompt_text, run_prompts_dir)
 
-    _llm_call_counter = [0]
     debug_captures: List[Dict[str, Any]] = []
     explain_artifact_by_idx: Dict[int, Dict[str, Any]] = {}
 
-    def _generate_one() -> str:
+    def _generate_one(cand_idx: int = 0) -> str:
         if not prompt_text:
             return ""
-        cand_idx = _llm_call_counter[0]
-        _llm_call_counter[0] += 1
-        call_diag = {**diag_base, "candidate_index": cand_idx}
+        cand_idx = int(cand_idx)
+        request_seed = (
+            None
+            if llm_decoding_seed_base is None
+            else int(llm_decoding_seed_base) + cand_idx
+        )
+        call_diag = {
+            **diag_base,
+            "candidate_index": cand_idx,
+            "llm_decoding_seed": request_seed,
+        }
         tokens = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
         if tokens > hard_prompt_token_cap:
             try:
@@ -8693,13 +9367,16 @@ Provide only the code for choose(...) as a complete function body.
         raw_content = ""
         sanitize_reason = "llm_not_called"
         try:
-            resp = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt_text}],
-                temperature=0.7,
-                top_p=0.95,
-                max_tokens=max_tokens,
-            )
+            create_kwargs: Dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt_text}],
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "max_tokens": max_tokens,
+            }
+            if request_seed is not None:
+                create_kwargs["seed"] = int(request_seed)
+            resp = client.chat.completions.create(**create_kwargs)
             raw_content = resp.choices[0].message.content or ""
             if explain_mode:
                 from utils.teh_transfer.explain_parse import parse_explain_response
@@ -8966,6 +9643,12 @@ def _run_pre_evolution_explore_phase(
             participant_id=int(participant_id),
             iteration=None,
             prompt_suffix=prompt_suffix,
+            llm_decoding_seed_base=_phase_llm_decoding_seed_base(
+                split_seed=int(split_seed),
+                iteration_step=0,
+                participant_id=int(participant_id),
+                batch_offset=int(parent_i) * 10_007,
+            ),
         )
         candidate_codes.extend(variants)
         candidate_prompt_parent_ids.extend([str(parent_id)] * len(variants))
@@ -8983,7 +9666,7 @@ def _run_pre_evolution_explore_phase(
             row: Dict[str, Any] = {
                 "idx": idx,
                 "train_loglik": float("-inf"),
-                "test_loglik": float("-inf"),
+                "test_loglik": None,
                 "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
                 "runtime_valid": False,
             }
@@ -8996,7 +9679,7 @@ def _run_pre_evolution_explore_phase(
             row = {
                 "idx": idx,
                 "train_loglik": float("-inf"),
-                "test_loglik": float("-inf"),
+                "test_loglik": None,
                 "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
                 "runtime_valid": False,
             }
@@ -9019,7 +9702,7 @@ def _run_pre_evolution_explore_phase(
             row = {
                 "idx": idx,
                 "train_loglik": float("-inf"),
-                "test_loglik": float("-inf"),
+                "test_loglik": None,
                 "fitness": float("-inf") if fitness_metric == "loglik" else 0.0,
                 "runtime_valid": False,
             }
@@ -9027,20 +9710,7 @@ def _run_pre_evolution_explore_phase(
                 row["val_loglik"] = float("-inf")
             candidate_results.append(row)
             continue
-        try:
-            test_eval = _evaluate_loglik_for_dataset(
-                dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
-            )
-        except (AssertionError, TypeError, ValueError):
-            test_eval = {
-                "accuracy": 0.0,
-                "avg_loglik": float("-inf"),
-                "errors": 1,
-                "correct": 0,
-                "total": len(test_trials),
-            }
         train_loglik = float(train_eval["avg_loglik"])
-        test_loglik = float(test_eval["avg_loglik"])
         val_loglik = float(val_eval["avg_loglik"]) if val_eval is not None else None
         runtime_valid = train_eval.get("errors", 0) == 0
         if fitness_metric == "loglik":
@@ -9062,9 +9732,9 @@ def _run_pre_evolution_explore_phase(
             "idx": idx,
             "code": code,
             "train_acc": float(train_eval["accuracy"]),
-            "test_acc": float(test_eval["accuracy"]),
+            "test_acc": None,
             "train_loglik": train_loglik,
-            "test_loglik": test_loglik,
+            "test_loglik": None,
             "fitness": fitness,
             "runtime_valid": runtime_valid,
         }
@@ -9085,13 +9755,27 @@ def _run_pre_evolution_explore_phase(
 
     selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
     sort_candidates(selected_results, mdl_lambda)
+    best_explore_test_record: Optional[Dict[str, Any]] = None
+    if selected_results and fitness_metric == "loglik":
+        best_explore_test_record = _passive_diagnostic_test_of_program(
+            dataset=dataset,
+            code=selected_results[0].get("code"),
+            test_trials=test_trials,
+            n_eval_seeds=n_eval_seeds,
+            program_id=f"explore_candidate_{selected_results[0]['idx']}",
+            phase="explore",
+            iteration=None,
+        )
+        selected_results[0]["test_loglik"] = best_explore_test_record.get("test_loglik")
+        selected_results[0]["test_acc"] = best_explore_test_record.get("test_accuracy")
+        selected_results[0]["diagnostic_test"] = best_explore_test_record
     for result in selected_results:
         program_id = f"explore_candidate_{result['idx']}"
         elite_parents.append(
             _elite_tuple_for_ranking(
                 result["code"],
                 result["fitness"],
-                result["test_acc"],
+                result.get("test_acc"),
                 program_id,
                 result["train_loglik"] if use_train_val else result["train_acc"],
                 mdl_lambda=mdl_lambda,
@@ -9129,6 +9813,12 @@ def _run_pre_evolution_explore_phase(
                 f"Best exploration train log-likelihood: "
                 f"{float(selected_results[0]['train_loglik']):.6f}"
             )
+            if best_explore_test_record and best_explore_test_record.get("test_loglik") is not None:
+                print(
+                    f"Best exploration diagnostic test log-likelihood: "
+                    f"{float(best_explore_test_record['test_loglik']):.6f} "
+                    f"(program {best_explore_test_record['program_id']}; passive)"
+                )
         else:
             print(
                 f"Best exploration train accuracy: "
@@ -9192,6 +9882,8 @@ def _run_pre_evolution_explore_phase(
                     metrics["best_explore_mdl_score"] = selected_results[0].get("mdl_score")
             else:
                 metrics["best_explore_train_acc"] = selected_results[0].get("train_acc")
+        if best_explore_test_record is not None:
+            metrics["diagnostic_test"] = best_explore_test_record
         (explore_dir / "metrics.json").write_text(
             json.dumps(metrics, indent=2), encoding="utf-8"
         )
@@ -9291,6 +9983,23 @@ def _run_pre_evolution_explore_phase(
             )
 
 
+def _person_evolution_extra_prompt_trials(
+    *,
+    t_pics_gated_transfer: bool,
+    val_trials: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Gated person-evolution only: serialize observed validation into candidate prompts.
+
+    Generic TEH / historical PICS omit ``extra_prompt_trials`` (train-only examples).
+    Test trials are never accepted; callers must not pass them here.
+    """
+    if not t_pics_gated_transfer:
+        return None
+    if not val_trials:
+        return None
+    return list(val_trials)
+
+
 def run_evolution(
     seed_program_path: str,
     dataset: str = "choice13k",
@@ -9361,6 +10070,7 @@ def run_evolution(
     mdl_lambda: float = 0.0,
     explore_prompt_suffix: Optional[str] = None,
     explore_seed_candidates: int = 0,
+    t_pics_gated_transfer: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -10342,7 +11052,23 @@ def run_evolution(
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
             "error_feedback_mode": error_feedback_mode,
+            "llm_decoding_seed_base": _phase_llm_decoding_seed_base(
+                split_seed=int(split_seed),
+                iteration_step=int(iteration_step),
+                participant_id=int(participant_id) if participant_id is not None else None,
+            ),
         }
+        extra_prompt_trials = _person_evolution_extra_prompt_trials(
+            t_pics_gated_transfer=bool(t_pics_gated_transfer),
+            val_trials=val_trials,
+        )
+        if extra_prompt_trials is not None:
+            variant_kwargs["extra_prompt_trials"] = extra_prompt_trials
+            print(
+                f"[LLM prompt] Gated person evolution injects {len(train_trials)} train + "
+                f"{len(extra_prompt_trials)} validation trials "
+                f"(shared cap via max_prompt_train_trials={max_prompt_train_trials})."
+            )
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
             model_name=model_name,
@@ -10573,21 +11299,10 @@ def run_evolution(
                         _fail["val_loglik"] = float("-inf")
                     candidate_results.append(_fail)
                     continue
-                try:
-                    # Per-iteration held-out metrics for logging only.
-                    test_eval = evaluate_cpc18_split_program(choose_fn, test_trials, n_seeds=n_eval_seeds)
-                except (TypeError, ValueError, AssertionError):
-                    test_eval = {
-                        "accuracy": 0.0,
-                        "avg_loglik": float("-inf"),
-                        "errors": 1,
-                        "correct": 0,
-                        "total": len(test_trials),
-                    }
                 train_acc = train_eval["accuracy"]
-                test_acc = test_eval["accuracy"] if test_eval is not None else None
+                test_acc = None
                 train_loglik = train_eval["avg_loglik"]
-                test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
+                test_loglik = None
                 val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
                 runtime_valid = train_eval.get("errors", 0) == 0
                 if train_eval.get("errors", 0) != 0:
@@ -10641,9 +11356,9 @@ def run_evolution(
                     "test_loglik": test_loglik,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
-                    "test_correct": test_eval["correct"] if test_eval is not None else None,
+                    "test_correct": None,
                     "train_total": train_eval["total"],
-                    "test_total": test_eval["total"] if test_eval is not None else None,
+                    "test_total": None,
                     "valid": True,
                     "runtime_valid": runtime_valid,
                 }
@@ -10738,23 +11453,10 @@ def run_evolution(
                         _fail["val_loglik"] = float("-inf")
                     candidate_results.append(_fail)
                     continue
-                try:
-                    # Per-iteration held-out metrics for logging only.
-                    test_eval = _evaluate_loglik_for_dataset(
-                        dataset, choose_fn, test_trials, n_seeds=n_eval_seeds
-                    )
-                except (AssertionError, TypeError, ValueError):
-                    test_eval = {
-                        "accuracy": 0.0,
-                        "avg_loglik": float("-inf"),
-                        "errors": 1,
-                        "correct": 0,
-                        "total": len(test_trials),
-                    }
                 train_acc = train_eval["accuracy"]
-                test_acc = test_eval["accuracy"] if test_eval is not None else None
+                test_acc = None
                 train_loglik = train_eval["avg_loglik"]
-                test_loglik = test_eval["avg_loglik"] if test_eval is not None else None
+                test_loglik = None
                 val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
                 runtime_valid = train_eval.get("errors", 0) == 0
                 if train_eval.get("errors", 0) != 0:
@@ -10808,9 +11510,9 @@ def run_evolution(
                     "test_loglik": test_loglik,
                     "fitness": fitness,
                     "train_correct": train_eval["correct"],
-                    "test_correct": test_eval["correct"] if test_eval is not None else None,
+                    "test_correct": None,
                     "train_total": train_eval["total"],
-                    "test_total": test_eval["total"] if test_eval is not None else None,
+                    "test_total": None,
                     "valid": True,
                     "runtime_valid": runtime_valid,
                 }
@@ -10850,6 +11552,7 @@ def run_evolution(
             selected_results = [r for r in candidate_results if r.get("runtime_valid", False)]
         else:
             selected_results = list(compile_valid_results)
+        person_iter_test_record = None
         if selected_results:
             runtime_valid_evolved_found = True
             # Sort by fitness (for CPC18: -MSE, for others: accuracy)
@@ -11038,6 +11741,7 @@ def run_evolution(
             print(f"\nElite set updated: {len(elite_parents)} programs (elite_pool_cap={elite_cap})")
 
             # Use the updated elite-pool best for per-iteration reporting.
+            # Rank/select on train_val only; diagnostic-test the selected pool-best once.
             iter_best_code, iter_best_fitness, _, iter_best_program_id = elite_parents[0][:4]
             iter_best_selection_score = (
                 float(elite_parents[0][1])
@@ -11045,46 +11749,52 @@ def run_evolution(
                 else None
             )
             iter_best_train_acc = best_result["train_acc"]
-            iter_best_test_acc = best_result["test_acc"]
+            iter_best_test_acc = None
             iter_best_train_loglik = best_result.get("train_loglik")
-            iter_best_test_loglik = best_result.get("test_loglik")
+            iter_best_test_loglik = None
             iter_best_val_loglik = best_result.get("val_loglik")
+            person_iter_test_record = None
             if fitness_metric == "loglik" and (is_cpc18_split or is_binary_loglik_dataset(dataset)):
-                iter_best_fn = compile_program(iter_best_code)
-                if iter_best_fn is not None:
-                    if is_cpc18_split:
-                        iter_best_train_eval = evaluate_cpc18_split_program(
-                            iter_best_fn, train_trials, n_seeds=n_eval_seeds
-                        )
-                        iter_best_test_eval = evaluate_cpc18_split_program(
-                            iter_best_fn, test_trials, n_seeds=n_eval_seeds
-                        )
-                    else:
-                        iter_best_train_eval = _evaluate_loglik_for_dataset(
-                            dataset, iter_best_fn, train_trials, n_seeds=n_eval_seeds
-                        )
-                        iter_best_test_eval = _evaluate_loglik_for_dataset(
-                            dataset, iter_best_fn, test_trials, n_seeds=n_eval_seeds
-                        )
-                    iter_best_train_acc = iter_best_train_eval["accuracy"]
-                    iter_best_test_acc = iter_best_test_eval["accuracy"]
-                    iter_best_train_loglik = iter_best_train_eval["avg_loglik"]
-                    iter_best_test_loglik = iter_best_test_eval["avg_loglik"]
-                    if use_train_val_selection:
-                        iter_best_fitness = float(elite_parents[0][1])
-                        iter_best_selection_score = iter_best_fitness
-                    else:
-                        iter_best_fitness = iter_best_train_loglik
-                    if val_trials:
-                        iter_best_val_eval = _evaluate_loglik_for_dataset(
-                            dataset, iter_best_fn, val_trials, n_seeds=n_eval_seeds
-                        )
-                        iter_best_val_loglik = iter_best_val_eval["avg_loglik"]
-                else:
-                    # Should be rare; keep loop stable if a pool entry cannot recompile.
-                    iter_best_test_acc = None
-                    iter_best_test_loglik = None
-                    iter_best_val_loglik = None
+                iter_best_fitness = float(elite_parents[0][1])
+                if use_train_val_selection:
+                    iter_best_selection_score = iter_best_fitness
+                iter_best_train_loglik = _train_loglik_from_elite_tuple(
+                    elite_parents[0], evolution_selection_score=evolution_selection_score
+                )
+                if track_elite_val_loglik and elite_val_logliks:
+                    iter_best_val_loglik = elite_val_logliks[0]
+                pool_pid = str(iter_best_program_id)
+                matched = next(
+                    (
+                        r
+                        for r in selected_results
+                        if f"iteration_{iteration_step}_candidate_{r['idx']}" == pool_pid
+                    ),
+                    None,
+                )
+                if matched is not None:
+                    iter_best_train_acc = matched.get("train_acc", iter_best_train_acc)
+                    if matched.get("train_loglik") is not None:
+                        iter_best_train_loglik = matched.get("train_loglik")
+                    if matched.get("val_loglik") is not None:
+                        iter_best_val_loglik = matched.get("val_loglik")
+                person_iter_test_record = _passive_diagnostic_test_of_program(
+                    dataset=dataset,
+                    code=iter_best_code,
+                    test_trials=test_trials,
+                    n_eval_seeds=n_eval_seeds,
+                    program_id=pool_pid,
+                    phase="participant_evolution",
+                    iteration=iteration_step,
+                )
+                iter_best_test_acc = person_iter_test_record.get("test_accuracy")
+                iter_best_test_loglik = person_iter_test_record.get("test_loglik")
+                if person_iter_test_record.get("test_loglik") is not None:
+                    print(
+                        f"  Diagnostic test loglik of pool-best {pool_pid}: "
+                        f"{float(person_iter_test_record['test_loglik']):.6f} "
+                        "(passive; not used for ranking)"
+                    )
 
             if choice13k_simple_logging and is_binary_loglik_dataset(dataset) and save_artifacts and simple_iterations_dir is not None:
                 (simple_iterations_dir / f"iteration_{iteration_step}.py").write_text(iter_best_code or "")
@@ -11146,23 +11856,8 @@ def run_evolution(
                     }
                     if val_trials and fitness_metric == "loglik":
                         overall_best_train["val_loglik"] = iter_best_val_loglik
-                if fitness_metric == "loglik":
-                    _test_better2 = (
-                        iter_best_test_loglik is not None
-                        and iter_best_test_loglik > overall_best_test["test_loglik"]
-                    )
-                else:
-                    _test_better2 = best_result["test_acc"] > overall_best_test["test_accuracy"]
-                if _test_better2:
-                    overall_best_test = {
-                        "train_accuracy": iter_best_train_acc,
-                        "test_accuracy": iter_best_test_acc,
-                        "train_loglik": iter_best_train_loglik,
-                        "test_loglik": iter_best_test_loglik,
-                        "program_id": iter_best_program_id,
-                    }
-                    if val_trials and fitness_metric == "loglik":
-                        overall_best_test["val_loglik"] = iter_best_val_loglik
+                # Test is a passive diagnostic of the train_val-selected pool-best.
+                # Do not rank or overwrite overall_best_test from held-out test.
             elif is_binary_loglik_dataset(dataset):
                 if fitness_metric == "loglik":
                     _train_better = (
@@ -11181,23 +11876,8 @@ def run_evolution(
                     }
                     if val_trials:
                         overall_best_train["val_loglik"] = iter_best_val_loglik
-                if fitness_metric == "loglik":
-                    _test_better = (
-                        iter_best_test_loglik is not None
-                        and iter_best_test_loglik > overall_best_test["test_loglik"]
-                    )
-                else:
-                    _test_better = best_result["test_acc"] > overall_best_test["test_accuracy"]
-                if _test_better:
-                    overall_best_test = {
-                        "train_accuracy": iter_best_train_acc,
-                        "test_accuracy": iter_best_test_acc,
-                        "train_loglik": iter_best_train_loglik,
-                        "test_loglik": iter_best_test_loglik,
-                        "program_id": iter_best_program_id,
-                    }
-                    if val_trials:
-                        overall_best_test["val_loglik"] = iter_best_val_loglik
+                # Test is a passive diagnostic of the train_val-selected pool-best.
+                # Do not rank or overwrite overall_best_test from held-out test.
             else:
                 if best_result['train_acc'] > overall_best_train["train_accuracy"]:
                     overall_best_train = {
@@ -11483,6 +12163,8 @@ def run_evolution(
         metrics["num_invalid_candidates"] = num_invalid_candidates
         metrics["num_unique_errors_available"] = num_unique_errors_available
         metrics["error_prompt_chars_used"] = error_prompt_chars_used
+        if person_iter_test_record is not None:
+            metrics["diagnostic_test"] = person_iter_test_record
         if save_artifacts and iter_dir is not None:
             (iter_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
         
@@ -12481,23 +13163,40 @@ def _write_command_line_log(run_dir: Path) -> Path:
     return path
 
 
-def _write_run_metadata(run_dir: Path, *, error_feedback_mode: str) -> Path:
+def _write_run_metadata(
+    run_dir: Path,
+    *,
+    error_feedback_mode: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Path:
     """Persist resolved defaults that may be absent from command.txt."""
     log_dir = run_dir / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / "run_metadata.json"
-    path.write_text(
-        json.dumps(
-            {
-                "error_feedback_mode": _normalize_error_feedback_mode(
-                    error_feedback_mode
-                )
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    payload: Dict[str, Any] = {
+        "error_feedback_mode": _normalize_error_feedback_mode(error_feedback_mode)
+    }
+    if extra:
+        payload.update(extra)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _merge_run_metadata(run_dir: Path, extra: Mapping[str, Any]) -> Path:
+    """Update log/run_metadata.json in place without dropping prior keys."""
+    log_dir = Path(run_dir) / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "run_metadata.json"
+    payload: Dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            payload = loaded
+    payload.update(dict(extra))
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
 
@@ -12894,7 +13593,35 @@ def main():
         default=False,
         help=(
             "Independent T-PICS: train the source population in this run, then the target. "
-            "If --t_pics_source is omitted, look up the official source for --dataset."
+            "If --t_pics_source is omitted, look up the official source for --dataset. "
+            "Not the gated dual-arm transfer pipeline (see --t_pics_gated_transfer)."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_gated_transfer",
+        action="store_true",
+        default=False,
+        help=(
+            "Final default T-PICS transfer pipeline: reuse frozen G.1 source pops from "
+            "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml "
+            "(unless --t_pics_gated_independent); "
+            "run two matched 5-iter target-population arms (control vs transfer); "
+            "select transfer only if mean target train_val (train+val) loglik is "
+            "strictly greater; "
+            "explore 50 from the retained target rank-1; then 10 person iterations. "
+            "Does not change generic TEH defaults."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_gated_independent",
+        action="store_true",
+        default=False,
+        help=(
+            "Optional gated T-PICS mode: look up only the official selected source "
+            "dataset from --t_pics_source_config, then train a live 10-iter G.1 "
+            "source population in this run. Does not reuse frozen G.1 programs. "
+            "Requires --t_pics_gated_transfer. G.2 dual-arm gate, G.3 rank-1 "
+            "explore, and person evolution stay the same."
         ),
     )
     parser.add_argument(
@@ -12928,7 +13655,9 @@ def main():
             "t_pics_score_weighted_temp_fix.yaml "
             "(skips pre-fix CPC18 / Speekenbrink / Frey Risk / Badham). "
             "A run config also fills --global_prompt_source_program from the "
-            "recorded Step 1 rank-1 when that flag is omitted."
+            "recorded Step 1 rank-1 when that flag is omitted. "
+            "--t_pics_gated_transfer defaults this path to "
+            "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml."
         ),
     )
     parser.add_argument(
@@ -13363,6 +14092,20 @@ def main():
     )
 
     args = parser.parse_args()
+    t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
+    t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
+    if t_pics_gated_independent and not t_pics_gated:
+        print("Error: --t_pics_gated_independent requires --t_pics_gated_transfer.")
+        return
+    if t_pics_gated:
+        if bool(getattr(args, "t_pics", False)) or getattr(args, "t_pics_source", None) is not None:
+            print(
+                "Error: --t_pics_gated_transfer cannot be combined with "
+                "--t_pics / --t_pics_source (those are the leftover non-gated live-source "
+                "pipeline). Use --t_pics_gated_independent for a live G.1 inside gated T-PICS."
+            )
+            return
+        apply_gated_cli_defaults(args)
     if args.ablation is not None:
         args.ablation = args.ablation.strip()
         if not args.ablation:
@@ -13372,6 +14115,73 @@ def main():
             print("Error: --ablation label must not contain path separators ('/' or '\\').")
             return
     args.dataset = normalize_psych101_dataset_alias(args.dataset)
+    if t_pics_gated:
+        if getattr(args, "global_prompt_source_program", None) or getattr(
+            args, "global_prompt_source_dataset", None
+        ):
+            print(
+                "Error: --t_pics_gated_transfer sets source-conditioning on the transfer arm "
+                "from the frozen YAML; do not pass --global_prompt_source_program / "
+                "--global_prompt_source_dataset."
+            )
+            return
+        if getattr(args, "explore_prompt_source_program", None):
+            print(
+                "Error: --t_pics_gated_transfer cannot be combined with "
+                "--explore_prompt_source_program (discarded arm must not leak into explore)."
+            )
+            return
+        if int(args.explore_population_top_k) != 1:
+            print(
+                "Error: --t_pics_gated_transfer requires --explore_population_top_k 1 "
+                f"(sole retained target rank-1 parent; got {args.explore_population_top_k})."
+            )
+            return
+        if not args.explore_from_population_parents:
+            print(
+                "Error: --t_pics_gated_transfer requires --explore_from_population_parents."
+            )
+            return
+        if args.refinement_phase:
+            print("Error: --t_pics_gated_transfer requires --no-refinement_phase.")
+            return
+        if not args.global_phase:
+            print("Error: --t_pics_gated_transfer requires --global_phase.")
+            return
+        if int(args.explore_candidates) <= 0:
+            print("Error: --t_pics_gated_transfer requires --explore_candidates > 0.")
+            return
+        try:
+            cfg_path = Path(str(args.t_pics_source_config))
+            if not cfg_path.is_absolute():
+                cfg_path = (_REPO_ROOT / cfg_path).resolve()
+            cfg = load_frozen_transfer_config(cfg_path)
+            errors = validate_frozen_transfer_config(
+                cfg, require_files=not t_pics_gated_independent
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"Error: T-PICS gated transfer config failed: {exc}")
+            return
+        if errors:
+            print("Error: T-PICS gated transfer config failed validation:")
+            for err in errors:
+                print(f"  - {err}")
+            return
+        try:
+            selected_source_for_target(str(args.dataset), config=cfg)
+        except (ValueError, KeyError) as exc:
+            print(f"Error: {exc}")
+            return
+        print(
+            f"[T-PICS gated] preflight OK ({cfg.path}; "
+            f"{len(cfg.targets)} targets, {len(cfg.source_runs)} source runs"
+            + (
+                "; independent live G.1, YAML source-dataset lookup only"
+                if t_pics_gated_independent
+                else "; rank-1 choose() validated; no GPU yet"
+            )
+            + ")"
+        )
     if args.fitness_metric == "loglik" and not is_binary_loglik_dataset(args.dataset) and not (
         args.dataset == "cpc18" and not args.cpc18_official_mse
     ):
@@ -13730,11 +14540,11 @@ def main():
     output_root_dir = "generated_outputs_ablation" if args.ablation else "generated_outputs"
     run_dir_name = args.ablation if args.ablation else f"run_{timestamp}"
     
-    # Optional wandb setup
+    # Optional wandb setup (gated T-PICS inits later, after output_dir exists).
     wandb_enabled = False
     wandb = None
     log_file_path = None
-    if not args.no_log:
+    if not args.no_log and not t_pics_gated:
         try:
             import wandb as _wandb
             wandb = _wandb
@@ -13801,7 +14611,7 @@ def main():
         else:
             participants_to_process = list(range(args.num_agents_to_sample))
 
-    if wandb is not None and args.dataset in _PARTICIPANT_DATASETS:
+    if wandb is not None and args.dataset in _PARTICIPANT_DATASETS and not t_pics_gated:
         for pid in participants_to_process:
             wandb.define_metric(f"p{pid}_step")
             wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
@@ -13901,8 +14711,40 @@ def main():
 
     cmd_log = _write_command_line_log(Path(base_run_dir))
     print(f"Wrote full command line to {cmd_log}")
+    gated_meta: Optional[Dict[str, Any]] = None
+    if t_pics_gated:
+        cfg_path = Path(str(args.t_pics_source_config))
+        if not cfg_path.is_absolute():
+            cfg_path = (_REPO_ROOT / cfg_path).resolve()
+        _gated_cfg = load_frozen_transfer_config(cfg_path)
+        _gated_entry = selected_source_for_target(str(args.dataset), config=_gated_cfg)
+        _gated_rank1 = resolve_gated_transfer_source_rank1(
+            independent=t_pics_gated_independent,
+            entry=_gated_entry,
+            run_root=Path(base_run_dir),
+        )
+        gated_meta = gated_run_metadata(
+            config_path=_gated_cfg.path,
+            target=str(args.dataset),
+            selected_source=_gated_entry.selected_source,
+            selected_source_rank1=_gated_rank1,
+            selector_name=_gated_cfg.selector_name,
+            extra={
+                "error_feedback_mode": _normalize_error_feedback_mode(
+                    args.error_feedback_mode
+                ),
+                "global_iters": int(args.global_iters),
+                "n_iterations": int(args.n_iterations),
+                "explore_candidates": int(args.explore_candidates),
+                "explore_population_top_k": int(args.explore_population_top_k),
+                "independent_source_population": bool(t_pics_gated_independent),
+                "reused_frozen_g1_rank1": not bool(t_pics_gated_independent),
+            },
+        )
     metadata_log = _write_run_metadata(
-        Path(base_run_dir), error_feedback_mode=args.error_feedback_mode
+        Path(base_run_dir),
+        error_feedback_mode=args.error_feedback_mode,
+        extra=gated_meta,
     )
     print(f"Wrote resolved run metadata to {metadata_log}")
 
@@ -13929,7 +14771,9 @@ def main():
             getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
-        prefer_auto_llm_prompt=bool(evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False)),
+        prefer_auto_llm_prompt=bool(
+            evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False) or t_pics_gated
+        ),
         dataset_prompt_file=getattr(args, "dataset_prompt_file", None),
         split_ratio=float(args.split_ratio),
         split_seed=int(args.split_seed),
@@ -13938,9 +14782,64 @@ def main():
         limited_data_protocol=str(args.limited_data_protocol),
         limited_train_val=args.limited_train_val,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+        require_auto_llm_prompt=bool(t_pics_gated),
+        llm_decoding_seed=(int(args.split_seed) + 90_000) if t_pics_gated else None,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")
+    prompt_meta_path = Path(run_prompts_dir) / "prompt_meta.json"
+    prompt_meta: Dict[str, Any] = {}
+    if prompt_meta_path.is_file():
+        try:
+            loaded_prompt_meta = json.loads(prompt_meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded_prompt_meta = {}
+        if isinstance(loaded_prompt_meta, dict):
+            prompt_meta = loaded_prompt_meta
+            _merge_run_metadata(
+                Path(base_run_dir),
+                {
+                    "prompt_provenance": {
+                        "prompt_mode": prompt_meta.get("prompt_mode"),
+                        "infer_prompt_path": prompt_meta.get("infer_prompt_path"),
+                        "infer_prompt_sha256": prompt_meta.get("infer_prompt_sha256"),
+                        "require_auto_llm_prompt": prompt_meta.get(
+                            "require_auto_llm_prompt"
+                        ),
+                        "llm_decoding_seed": prompt_meta.get("llm_decoding_seed"),
+                        "shared_by_g2_arms": bool(t_pics_gated),
+                    }
+                },
+            )
+
+    if t_pics_gated:
+        wandb = init_gated_wandb_reporter(
+            args=args,
+            output_root=Path(base_run_dir),
+            project=str(getattr(args, "wandb_project", None) or "teh_t_pics_gated"),
+            selected_source=str(_gated_entry.selected_source),
+            source_job_id=(
+                "live" if t_pics_gated_independent else str(_gated_entry.job_id)
+            ),
+            source_rank1=Path(_gated_rank1),
+            source_config_path=Path(_gated_cfg.path),
+            source_config_sha256=(gated_meta or {}).get("t_pics_source_config_sha256"),
+            prompt_mode=prompt_meta.get("prompt_mode"),
+            expected_participant_ids=[int(p) for p in participants_to_process],
+            selected_dir=run_layout(Path(base_run_dir))["selected"],
+            repo_root=_REPO_ROOT,
+            enabled=not bool(args.no_log),
+        )
+        wandb_enabled = bool(getattr(wandb, "_enabled", False))
+        _merge_run_metadata(
+            Path(base_run_dir),
+            {
+                "wandb_run_id": getattr(wandb, "run_id", None),
+                "wandb_project": getattr(wandb, "project", None),
+                "wandb_group": "t_pics_gated_main",
+                "wandb_job_type": "t_pics_gated",
+            },
+        )
 
     if evo_iters > 0:
         valid_for_prompt = load_valid_participant_ids_from_json(
@@ -14110,6 +15009,50 @@ def main():
             f"Loaded {len(global_elite_for_handoff)} initial-pool program(s) for "
             f"participant handoff: {[p[3] for p in global_elite_for_handoff]}"
         )
+    elif t_pics_gated:
+        if seed_program_path is None:
+            print("Error: --t_pics_gated_transfer requires a seed program (--seed_path or dataset default).")
+            if wandb is not None:
+                wandb.finish()
+            return
+        try:
+            global_elite_for_handoff = _run_t_pics_gated_population_arms(
+                args=args,
+                run_root=Path(base_run_dir),
+                participants=[int(p) for p in participants_to_process],
+                seed_program_path=seed_program_path,
+                client=global_client,
+                wandb_module=wandb,
+                psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=mixed_gambles_gain_loss_only,
+                run_prompts_dir=str(run_prompts_dir),
+            )
+        except (FileNotFoundError, ValueError, RuntimeError, KeyError, OSError) as exc:
+            print(f"Error: {exc}")
+            if wandb is not None:
+                if hasattr(wandb, "finish"):
+                    try:
+                        wandb.finish(completed=False, failure_reason=str(exc))
+                    except Exception:
+                        wandb.finish()
+            raise
+        selected_dir = run_layout(Path(base_run_dir))["selected"]
+        selected_dir.mkdir(parents=True, exist_ok=True)
+        base_run_dir = str(selected_dir)
+        print(
+            f"[T-PICS gated] downstream explore+person from retained pool only "
+            f"({len(global_elite_for_handoff)} programs) -> {base_run_dir}"
+        )
+        if hasattr(wandb, "attach_context"):
+            wandb.attach_context(
+                expected_participant_ids=[int(p) for p in participants_to_process],
+                selected_dir=Path(base_run_dir),
+                n_iterations=int(args.n_iterations),
+                explore_candidates=int(args.explore_candidates),
+                output_root=Path(base_run_dir).parent,
+            )
+        if hasattr(wandb, "sync_progress_from_disk"):
+            wandb.sync_progress_from_disk()
     elif args.global_phase and args.phase == "all" and args.dataset in _PARTICIPANT_DATASETS:
         if seed_program_path is None:
             print("Error: --global_phase requires a seed program (--seed_path or dataset default).")
@@ -14391,6 +15334,7 @@ def main():
                 mdl_lambda=args.mdl_lambda,
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
+                t_pics_gated_transfer=bool(t_pics_gated),
             )
         finally:
             if wandb is not None:
@@ -14490,6 +15434,7 @@ def main():
                 mdl_lambda=args.mdl_lambda,
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
+                t_pics_gated_transfer=bool(t_pics_gated),
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -14894,6 +15839,7 @@ def main():
                 mdl_lambda=args.mdl_lambda,
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
+                t_pics_gated_transfer=bool(t_pics_gated),
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -15039,6 +15985,8 @@ def main():
                 if args.participant_scope in ("range", "ordinals"):
                     participants_loglik_summary.append(_loglik_row_from_summary(participant_summary))
                 _write_main_loop_experiment_csvs()
+            if t_pics_gated and hasattr(wandb, "sync_progress_from_disk"):
+                wandb.sync_progress_from_disk()
 
         def _flush_main_loop_csvs_from_completed(
             completed: Dict[int, Optional[Dict[str, Any]]],
@@ -15056,6 +16004,8 @@ def main():
                     if args.participant_scope in ("range", "ordinals"):
                         participants_loglik_summary.append(_loglik_row_from_summary(summary))
                 _write_main_loop_experiment_csvs()
+            if t_pics_gated and hasattr(wandb, "sync_progress_from_disk"):
+                wandb.sync_progress_from_disk()
 
         def _run_main_loop_participant(participant_id: int) -> Optional[Dict[str, Any]]:
             print(f"\n{'='*80}")
@@ -15064,6 +16014,34 @@ def main():
             participant_output_dir = _participant_output_dir(participant_id)
             if not parallel_participants:
                 _ensure_summary_paths_from_participant_dir(participant_output_dir)
+            if t_pics_gated and participant_output_dir is not None:
+                if participant_run_is_complete(
+                    Path(participant_output_dir),
+                    expected_n_iterations=int(args.n_iterations),
+                    expected_explore_candidates=int(args.explore_candidates),
+                ):
+                    print(
+                        f"[T-PICS gated] skip complete participant {participant_id} -> "
+                        f"{participant_output_dir}"
+                    )
+                    try:
+                        payload = json.loads(
+                            (Path(participant_output_dir) / "results.json").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        payload = {}
+                    best = payload.get("overall_best_train") or {}
+                    summary = {
+                        "participant_id": int(participant_id),
+                        "train_loglik": best.get("train_loglik"),
+                        "val_loglik": best.get("val_loglik"),
+                        "test_loglik": best.get("test_loglik"),
+                        "train_fitness": best.get("train_loglik", best.get("train_fitness")),
+                        "test_fitness": best.get("test_loglik", best.get("test_fitness")),
+                    }
+                    return summary
 
             seed_program_path_local = _resolve_default_seed_program_path(args, participant_id)
             if seed_program_path_local is None:
@@ -15177,17 +16155,31 @@ def main():
                 mem_trace=args.mem_trace,
                 max_observed_trials_per_participant=args.max_observed_trials_per_participant,
                 limited_data_protocol=args.limited_data_protocol,
-            speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
+                speekenbrink_split=getattr(args, "speekenbrink_split", "chronological"),
                 limited_train_val=args.limited_train_val,
                 explore_from_handoff_parents=explore_from_handoff_parents,
                 explore_population_top_k=args.explore_population_top_k,
                 mdl_lambda=args.mdl_lambda,
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
+                t_pics_gated_transfer=bool(t_pics_gated),
             )
 
         try:
-            if parallel_participants:
+            skip_all_people = bool(
+                t_pics_gated
+                and selected_stage_is_complete(
+                    Path(base_run_dir),
+                    [int(p) for p in participants_to_process],
+                    expected_n_iterations=int(args.n_iterations),
+                    expected_explore_candidates=int(args.explore_candidates),
+                )
+            )
+            if skip_all_people:
+                print(
+                    f"[T-PICS gated] skip complete selected-arm person stage -> {base_run_dir}"
+                )
+            elif parallel_participants:
                 if summary_file is None and base_run_dir is not None:
                     summary_file = Path(base_run_dir) / "participants_summary.csv"
                     summary_loglik_file = Path(base_run_dir) / "summary_loglik.csv"
@@ -15213,9 +16205,46 @@ def main():
                 for participant_id in tqdm(participants_to_process, desc="Participants"):
                     participant_summary = _run_main_loop_participant(int(participant_id))
                     _append_main_loop_summaries(participant_summary)
+            if t_pics_gated and selected_stage_is_complete(
+                Path(base_run_dir),
+                [int(p) for p in participants_to_process],
+                expected_n_iterations=int(args.n_iterations),
+                expected_explore_candidates=int(args.explore_candidates),
+            ):
+                marker = Path(base_run_dir) / "STAGE_COMPLETE.json"
+                marker.write_text(
+                    json.dumps(
+                        {
+                            "stage": "selected",
+                            "n_iterations": int(args.n_iterations),
+                            "explore_candidates": int(args.explore_candidates),
+                            "participant_ids": [int(p) for p in participants_to_process],
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                if hasattr(wandb, "publish_final"):
+                    wandb.publish_final()
         finally:
             if wandb is not None:
-                wandb.finish()
+                if t_pics_gated:
+                    exc = sys.exc_info()[1]
+                    wandb.finish(
+                        completed=(
+                            exc is None
+                            and selected_stage_is_complete(
+                                Path(base_run_dir),
+                                [int(p) for p in participants_to_process],
+                                expected_n_iterations=int(args.n_iterations),
+                                expected_explore_candidates=int(args.explore_candidates),
+                            )
+                        ),
+                        failure_reason=None if exc is None else str(exc),
+                    )
+                else:
+                    wandb.finish()
 
 
 if __name__ == "__main__":

@@ -19,9 +19,10 @@ OpenEvolve baseline for Psych-101 binary datasets (vanilla prompt, full OpenEvol
 Uses reference_repos/openevolve as a library. Does NOT use TEH prompt engineering;
 task text comes from prompts/openevolve_vanilla/choices13k/infer_single_choice.txt only.
 
-Evolution optimizes split-weighted train+validation log-likelihood (combined_score).
-Per-split train_loglik and val_loglik are logged separately. Test log-likelihood is
-computed only after evolution on the participant's best-by-train-loglik program.
+Evolution optimizes trial-pooled mean log-likelihood on the observed train+val union
+(combined_score). Per-split train_loglik and val_loglik are logged separately. Test
+log-likelihood is computed only after evolution on the participant's
+best-by-observed-union program.
 
 OpenEvolve still uses islands / MAP-Elites / archive for parent selection, but the
 LLM prompt is intentionally vanilla/minimal (not OpenEvolve's rich history prompt):
@@ -110,6 +111,8 @@ DEFAULT_CATEGORICAL_SEED_PATH = _REPO_ROOT / "persona_code_example" / "teh" / "c
 DEFAULT_BASE_PROMPT = (
     _REPO_ROOT / "prompts" / "openevolve_vanilla" / "choices13k" / "infer_single_choice.txt"
 )
+# Five-new aliases (loaders/prompts/seeds are registered via PARTICIPANT_DATASETS;
+# this set is documentation only and does not gate CLI or evaluation).
 FOCUS_DATASETS = frozenset(
     {
         "14kool2016when",
@@ -118,6 +121,15 @@ FOCUS_DATASETS = frozenset(
         "guan_2020_stopping",
         "steyvers_2009_bandit",
     }
+)
+CHOOSE_API_BERNOULLI = (
+    "Implement `def choose(problem, history)` returning a float in [0,1]: "
+    "P(action=1) for the second option_keys entry."
+)
+CHOOSE_API_CATEGORICAL = (
+    "Implement `def choose(problem, history)` returning a dict[int, float] over "
+    "valid action ids (problem['options'][*]['action'] or option_keys), "
+    "probabilities summing to 1. Do not return a single Bernoulli float when K>2."
 )
 
 _SHARED_CSV_LOCK = threading.Lock()
@@ -236,6 +248,26 @@ def _safe_float(x: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return v if math.isfinite(v) else None
+
+
+def _pooled_observed_loglik(
+    train_ll: float,
+    val_ll: float,
+    n_train: int,
+    n_val: int,
+) -> float:
+    """Trial-count-weighted mean loglik on the observed train+val union."""
+    n_tr = max(0, int(n_train))
+    n_vl = max(0, int(n_val))
+    denom = n_tr + n_vl
+    if denom <= 0:
+        return float(train_ll)
+    if n_vl <= 0:
+        return float(train_ll)
+    val_f = _safe_float(val_ll)
+    if val_f is None:
+        return float(train_ll)
+    return (n_tr * float(train_ll) + n_vl * val_f) / denom
 
 
 def _round_floats_for_csv_row(row: Dict[str, Any], ndigits: int = 4) -> Dict[str, Any]:
@@ -570,25 +602,39 @@ def _compact_gamble(problem: Dict[str, Any]) -> str:
     return f"A=({list(ga.get('probs') or [])},{list(ga.get('rewards') or [])}) B=({list(gb.get('probs') or [])},{list(gb.get('rewards') or [])})"
 
 
+def _compact_history_entry(h: Dict[str, Any]) -> str:
+    """Prior-trial compact token. Includes observed reward/value; never current-trial labels."""
+    bits = [f"a{int(h.get('action', 0))}"]
+    if h.get("stage") is not None:
+        bits.append(f"st{h.get('stage')}")
+    if h.get("position") is not None:
+        bits.append(f"pos={h.get('position')}")
+    fb = h.get("feedback")
+    reward = h.get("reward")
+    if isinstance(fb, dict):
+        if "correct_category" in fb:
+            bits.append(f"corr={fb.get('correct_category')}")
+            bits.append(f"ok={int(bool(fb.get('is_correct')))}")
+        if fb.get("planet") is not None:
+            bits.append(f"pl={fb.get('planet')}")
+    elif fb is not None:
+        bits.append(f"r{fb}")
+        if reward is not None and reward != fb:
+            bits.append(f"r{reward}")
+    elif reward is not None:
+        bits.append(f"r{reward}")
+    if h.get("value") is not None:
+        bits.append(f"v{h.get('value')}")
+    if h.get("planet") is not None and not (isinstance(fb, dict) and fb.get("planet") is not None):
+        bits.append(f"pl={h.get('planet')}")
+    return ",".join(bits)
+
+
 def _compact_history(history: List[Dict[str, Any]], max_items: int = 6) -> str:
     if not history:
         return "[]"
     tail = history[-max_items:]
-    parts = []
-    for h in tail:
-        fb = h.get("feedback")
-        if fb is None:
-            parts.append(f"a{int(h.get('action',0))}")
-        elif isinstance(fb, dict):
-            if "correct_category" in fb:
-                parts.append(
-                    f"a{int(h.get('action',0))},corr={fb.get('correct_category')},"
-                    f"ok={int(bool(fb.get('is_correct')))}"
-                )
-            else:
-                parts.append(f"a{int(h.get('action',0))},r{fb}")
-        else:
-            parts.append(f"a{int(h.get('action',0))},r{fb}")
+    parts = [_compact_history_entry(h) if isinstance(h, dict) else str(h) for h in tail]
     return "[" + ";".join(parts) + "]"
 
 
@@ -625,7 +671,31 @@ def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
         core = (
             f"kool stage={problem.get('stage')} day={problem.get('presented_day')} "
             f"keys={list(problem.get('option_keys') or [])} "
+            f"spaceship={problem.get('spaceship_options') or problem.get('spaceship')} "
+            f"aliens={problem.get('alien_options')} "
+            f"s1={problem.get('stage1_action')} "
             f"planet={problem.get('planet')}"
+        )
+    elif "balloon_id" in problem and "pump_count_before" in problem:
+        core = (
+            f"balloon={problem.get('balloon_id')} "
+            f"pump_n={problem.get('pump_count_before')} "
+            f"acc={problem.get('accumulated_points_before')}"
+        )
+    elif alias == "3frey2017cct" or "cards_flipped" in problem:
+        core = (
+            f"cct round={problem.get('round_id')} flipped={problem.get('cards_flipped')} "
+            f"score={problem.get('current_score')} "
+            f"remain={problem.get('n_cards_remaining')}/{problem.get('n_cards_total')} "
+            f"loss_n={problem.get('n_loss_cards')} "
+            f"gain={problem.get('gain_amount')} loss={problem.get('loss_amount')} "
+            f"keys={list(problem.get('option_keys') or [])}"
+        )
+    elif "ratings_A" in problem or "option_A_features" in problem:
+        core = (
+            f"hilbig A={problem.get('option_A_features')} B={problem.get('option_B_features')} "
+            f"ratA={problem.get('ratings_A')} ratB={problem.get('ratings_B')} "
+            f"keys={list(problem.get('option_keys') or [])}"
         )
     elif "memory_set_letters" in problem and "probe_letter" in problem:
         core = (
@@ -643,12 +713,6 @@ def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
             f"stim=({sf.get('size')},{sf.get('color')},{sf.get('shape')}) "
             f"keys={list(keys)} "
             f"rule_block={problem.get('rule_block_id')}"
-        )
-    elif "balloon_id" in problem and "pump_count_before" in problem:
-        core = (
-            f"balloon={problem.get('balloon_id')} "
-            f"pump_n={problem.get('pump_count_before')} "
-            f"acc={problem.get('accumulated_points_before')}"
         )
     elif "cards" in problem:
         core = f"cards={list(problem.get('cards') or [])} keys={list(problem.get('option_keys') or [])}"
@@ -693,6 +757,7 @@ def truncate_vanilla_messages(
     max_prompt_tokens: int,
     reserved_completion_tokens: int,
     model_context_len: int,
+    categorical: bool = False,
 ) -> Tuple[Dict[str, str], TruncationState]:
     """
     Deterministically shrink prompt until estimated tokens <= max_prompt_tokens.
@@ -724,7 +789,7 @@ def truncate_vanilla_messages(
             task_text.strip(),
             "",
             "# API",
-            "Implement `def choose(problem, history)` returning a float in [0,1]: P(action=1) for the second option_keys entry.",
+            CHOOSE_API_CATEGORICAL if categorical else CHOOSE_API_BERNOULLI,
             "",
             "# Output format (required for parser)",
             _FULL_REWRITE_OUTPUT_FORMAT.strip(),
@@ -869,6 +934,7 @@ def _patched_build_prompt(
         max_prompt_tokens=max_prompt_tokens,
         reserved_completion_tokens=reserved,
         model_context_len=model_len,
+        categorical=bool(ctx.get("categorical", False)),
     )
     state.prompt_train_trials = int(ctx.get("prompt_train_trials", 0))
     state.prompt_val_trials = int(ctx.get("prompt_val_trials", 0))
@@ -1054,6 +1120,7 @@ class VanillaProcessParallelController(ProcessParallelController):
             "max_model_len": ctx["max_model_len"],
             "prompt_train_trials": n_train,
             "prompt_val_trials": n_val,
+            "categorical": bool(ctx.get("categorical", False)),
             "diagnostics_path": ctx.get("diagnostics_path"),
         }
         return snap
@@ -1122,7 +1189,7 @@ def _render_evaluator_py(
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
     categorical_lit = "True" if categorical else "False"
-    return f'''"""Auto-generated OpenEvolve evaluator (train+val objective; no test access)."""
+    return f'''"""Auto-generated OpenEvolve evaluator (observed-union objective; no test access)."""
 import json
 import math
 from pathlib import Path
@@ -1134,16 +1201,15 @@ CHOICE13K_LOGLIK_EPS = {CHOICE13K_LOGLIK_EPS}
 CATEGORICAL = {categorical_lit}
 
 
-def _train_val_ratios() -> Tuple[float, float]:
-    train_ratio = float(SPLIT_RATIO)
-    val_ratio = (1.0 - train_ratio) / 2.0
-    return train_ratio, val_ratio
-
-
-def _combined_train_val_loglik(train_ll: float, val_ll: float) -> float:
-    train_ratio, val_ratio = _train_val_ratios()
-    denom = train_ratio + val_ratio
-    return (train_ratio * float(train_ll) + val_ratio * float(val_ll)) / denom
+def _pooled_observed_loglik(train_ll: float, val_ll: float, n_train: int, n_val: int) -> float:
+    n_tr = max(0, int(n_train))
+    n_vl = max(0, int(n_val))
+    denom = n_tr + n_vl
+    if denom <= 0 or n_vl <= 0:
+        return float(train_ll)
+    if not math.isfinite(float(val_ll)):
+        return float(train_ll)
+    return (n_tr * float(train_ll) + n_vl * float(val_ll)) / denom
 
 
 def _load_splits():
@@ -1233,7 +1299,7 @@ def _coerce_categorical(probs_raw: Any, valid_ids: List[int]) -> Dict[int, float
 
 def evaluate_trials(choose_fn: Callable, trials: List[Dict[str, Any]]) -> Dict[str, float]:
     if not trials:
-        return {{"avg_loglik": float("-inf"), "errors": 1}}
+        return {{"avg_loglik": float("-inf"), "errors": 1, "n": 0}}
     ll = 0.0
     errors = 0
     if CATEGORICAL:
@@ -1252,7 +1318,7 @@ def evaluate_trials(choose_fn: Callable, trials: List[Dict[str, Any]]) -> Dict[s
                 errors += 1
                 p = _clamp(1.0 / max(1, len(valid_ids)))
             ll += math.log(p)
-        return {{"avg_loglik": float(ll / len(trials)), "errors": errors}}
+        return {{"avg_loglik": float(ll / len(trials)), "errors": errors, "n": len(trials)}}
     for t in trials:
         y = int(t["action"])
         try:
@@ -1262,7 +1328,7 @@ def evaluate_trials(choose_fn: Callable, trials: List[Dict[str, Any]]) -> Dict[s
             p = 0.5
             p = _clamp(p)
         ll += y * math.log(p) + (1 - y) * math.log(1.0 - p)
-    return {{"avg_loglik": float(ll / len(trials)), "errors": errors}}
+    return {{"avg_loglik": float(ll / len(trials)), "errors": errors, "n": len(trials)}}
 
 
 def evaluate(program_path: str) -> Dict[str, float]:
@@ -1270,24 +1336,40 @@ def evaluate(program_path: str) -> Dict[str, float]:
     code = path.read_text(encoding="utf-8")
     choose_fn = compile_program(code)
     if choose_fn is None:
-        return {{"combined_score": float("-inf"), "train_loglik": float("-inf"), "val_loglik": float("-inf"), "error": "no choose()"}}
-    train_trials, val_trials = _load_splits()
-    train_eval = evaluate_trials(choose_fn, train_trials)
-    val_eval = evaluate_trials(choose_fn, val_trials)
-    if train_eval.get("errors", 0) > 0 and len(train_trials) > 0:
         return {{
             "combined_score": float("-inf"),
+            "observed_loglik": float("-inf"),
             "train_loglik": float("-inf"),
             "val_loglik": float("-inf"),
+            "n_train": 0,
+            "n_val": 0,
+            "error": "no choose()",
+        }}
+    train_trials, val_trials = _load_splits()
+    n_train = len(train_trials)
+    n_val = len(val_trials)
+    train_eval = evaluate_trials(choose_fn, train_trials)
+    val_eval = evaluate_trials(choose_fn, val_trials)
+    if train_eval.get("errors", 0) > 0 and n_train > 0:
+        return {{
+            "combined_score": float("-inf"),
+            "observed_loglik": float("-inf"),
+            "train_loglik": float("-inf"),
+            "val_loglik": float("-inf"),
+            "n_train": n_train,
+            "n_val": n_val,
             "error": "invalid_on_train",
         }}
     train_ll = float(train_eval["avg_loglik"])
-    val_ll = float(val_eval["avg_loglik"])
-    combined = _combined_train_val_loglik(train_ll, val_ll)
+    val_ll = float(val_eval["avg_loglik"]) if n_val > 0 else train_ll
+    combined = _pooled_observed_loglik(train_ll, val_ll, n_train, n_val)
     return {{
         "combined_score": combined,
+        "observed_loglik": combined,
         "train_loglik": train_ll,
         "val_loglik": val_ll,
+        "n_train": float(n_train),
+        "n_val": float(n_val),
     }}
 '''
 
@@ -1319,7 +1401,7 @@ def _build_config(args, iterations: int) -> Config:
     cfg.llm.rebuild_models()
 
     cfg.prompt.system_message = (
-        "Evolve Python code for human binary choice prediction. Return a complete program file."
+        "Evolve Python code for human choice prediction. Return a complete program file."
     )
     cfg.prompt.num_top_programs = args.num_top_programs
     cfg.prompt.num_diverse_programs = args.num_diverse_programs
@@ -1347,7 +1429,8 @@ def _build_config(args, iterations: int) -> Config:
     return cfg
 
 
-def _find_best_program_by_train_loglik(checkpoint_dir: Path) -> Tuple[Optional[Path], Optional[float]]:
+def _find_best_program_by_observed_loglik(checkpoint_dir: Path) -> Tuple[Optional[Path], Optional[float]]:
+    """Select the reported program by observed-union combined_score (never test)."""
     programs_dir = checkpoint_dir / "programs"
     if not programs_dir.is_dir():
         return None, None
@@ -1359,13 +1442,22 @@ def _find_best_program_by_train_loglik(checkpoint_dir: Path) -> Tuple[Optional[P
         except Exception:
             continue
         metrics = data.get("metrics") or {}
-        train_ll = _safe_float(metrics.get("train_loglik"))
-        if train_ll is None:
-            train_ll = _safe_float(metrics.get("combined_score"))
-        if train_ll is None:
+        observed_ll = _safe_float(metrics.get("combined_score"))
+        if observed_ll is None:
+            observed_ll = _safe_float(metrics.get("observed_loglik"))
+        if observed_ll is None:
+            n_train = int(metrics.get("n_train") or 0)
+            n_val = int(metrics.get("n_val") or 0)
+            train_ll = _safe_float(metrics.get("train_loglik"))
+            val_ll = _safe_float(metrics.get("val_loglik"))
+            if train_ll is not None:
+                observed_ll = _pooled_observed_loglik(
+                    train_ll, val_ll if val_ll is not None else train_ll, n_train, n_val
+                )
+        if observed_ll is None:
             continue
-        if best_ll is None or train_ll > best_ll:
-            best_ll = train_ll
+        if best_ll is None or observed_ll > best_ll:
+            best_ll = observed_ll
             code = data.get("code")
             if code:
                 best_path = prog_file
@@ -1377,15 +1469,41 @@ def _program_code_from_json(prog_json: Path) -> str:
     return data.get("code") or ""
 
 
-def _wandb_log_participant(wandb_module: Any, participant_id: int, metrics: Dict[str, Any], step: int) -> None:
-    pid = int(participant_id)
-    payload: Dict[str, Any] = {f"p{pid}_step": int(step)}
-    for suffix in ("train_loglik", "val_loglik", "test_loglik"):
-        if metrics.get(suffix) is not None:
-            payload[f"p{pid}_{suffix}"] = metrics[suffix]
-            payload[f"p{pid}/{suffix}"] = metrics[suffix]
+def _mean_loglik_rows(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
+    vals = []
+    for r in rows:
+        v = _safe_float(r.get(key))
+        if v is not None:
+            vals.append(v)
+    return float(np.mean(vals)) if vals else None
+
+
+def _wandb_log_loglik_summary(
+    wandb_module: Any,
+    rows: List[Dict[str, Any]],
+    *,
+    last_row: Dict[str, Any],
+) -> None:
+    """Upload running equal-person means plus the latest person's scores. No run dumps."""
+    payload: Dict[str, Any] = {
+        "n_completed": len(rows),
+        "last_participant_id": last_row.get("participant_id"),
+        "last_test_loglik": _safe_float(last_row.get("test_loglik")),
+        "last_observed_loglik": _safe_float(last_row.get("observed_loglik")),
+        "last_train_loglik": _safe_float(last_row.get("train_loglik")),
+        "last_val_loglik": _safe_float(last_row.get("val_loglik")),
+        "avg_test_loglik": _mean_loglik_rows(rows, "test_loglik"),
+        "avg_observed_loglik": _mean_loglik_rows(rows, "observed_loglik"),
+        "avg_train_loglik": _mean_loglik_rows(rows, "train_loglik"),
+        "avg_val_loglik": _mean_loglik_rows(rows, "val_loglik"),
+    }
+    compact = {k: v for k, v in payload.items() if v is not None}
     with _WANDB_LOG_LOCK:
-        wandb_module.log(payload)
+        wandb_module.log(compact)
+        summary = getattr(wandb_module, "summary", None)
+        if summary is not None:
+            for k, v in compact.items():
+                summary[k] = v
 
 
 def run_participant(
@@ -1463,6 +1581,7 @@ def run_participant(
         "llm_max_tokens": args.llm_max_tokens,
         "max_model_len": args.max_model_len,
         "diagnostics_path": str(diagnostics_path),
+        "categorical": is_categorical_output_dataset(args.dataset),
     }
 
     oe_output = participant_dir / "openevolve_output"
@@ -1477,8 +1596,8 @@ def run_participant(
     error_msg = ""
     n_completed = 0
     best_program_path = participant_dir / "best_program.py"
-    train_ll = val_ll = test_ll = None
-    best_train_ll: Optional[float] = None
+    train_ll = val_ll = test_ll = observed_ll = None
+    best_observed_ll: Optional[float] = None
 
     _set_thread_participant_ctx(participant_ctx)
     try:
@@ -1493,7 +1612,7 @@ def run_participant(
         latest_ckpt = ckpt_dirs[-1] if ckpt_dirs else None
 
         if latest_ckpt is not None:
-            prog_json, best_train_ll = _find_best_program_by_train_loglik(latest_ckpt)
+            prog_json, best_observed_ll = _find_best_program_by_observed_loglik(latest_ckpt)
             if prog_json is not None:
                 code = _program_code_from_json(prog_json)
                 best_program_path.write_text(code, encoding="utf-8")
@@ -1515,6 +1634,13 @@ def run_participant(
             else:
                 train_ll = evaluate_loglik(choose_fn, train_trials, dataset=args.dataset)["avg_loglik"]
                 val_ll = evaluate_loglik(choose_fn, val_trials, dataset=args.dataset)["avg_loglik"]
+                observed_ll = _pooled_observed_loglik(
+                    float(train_ll),
+                    float(val_ll) if val_trials else float(train_ll),
+                    len(train_trials),
+                    len(val_trials),
+                )
+                # Held-out test is scored once, after program selection.
                 test_ll = evaluate_loglik(choose_fn, test_trials, dataset=args.dataset)["avg_loglik"]
         else:
             status = "failed"
@@ -1541,30 +1667,36 @@ def run_participant(
         "participant_ordinal": participant_ordinal,
         "train_loglik": train_ll,
         "val_loglik": val_ll,
+        "observed_loglik": observed_ll,
         "test_loglik": test_ll,
+        "n_train": len(train_trials),
+        "n_val": len(val_trials),
+        "n_test": len(test_trials),
         "n_iterations_requested": args.n_iterations,
         "n_iterations_completed": n_completed,
         "best_program_path": str(best_program_path) if best_program_path.is_file() else "",
         "status": status,
         "error": error_msg,
-        "best_train_loglik_in_pool": best_train_ll,
+        "best_observed_loglik_in_pool": best_observed_ll,
         "prompt_trials_resampled_per_candidate": True,
         "prompt_trials_source": "train+val_union",
     }
     (participant_dir / "results.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
-
-    if wandb_module is not None and train_ll is not None:
-        _wandb_log_participant(
-            wandb_module,
-            participant_id,
-            {"train_loglik": train_ll, "val_loglik": val_ll, "test_loglik": test_ll},
-            step=max(0, n_completed),
-        )
     return row
 
 
 def _write_experiment_csvs(run_dir: Path, detail_rows: List[Dict[str, Any]]) -> None:
-    details_fields = ["participant_id", "participant_ordinal", "train_loglik", "val_loglik", "test_loglik"]
+    details_fields = [
+        "participant_id",
+        "participant_ordinal",
+        "train_loglik",
+        "val_loglik",
+        "observed_loglik",
+        "test_loglik",
+        "n_train",
+        "n_val",
+        "n_test",
+    ]
     details_path = run_dir / "participant_details_loglik.csv"
     with details_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=details_fields, extrasaction="ignore")
@@ -1573,14 +1705,22 @@ def _write_experiment_csvs(run_dir: Path, detail_rows: List[Dict[str, Any]]) -> 
 
     train_vals = [r["train_loglik"] for r in detail_rows if r.get("train_loglik") is not None]
     val_vals = [r["val_loglik"] for r in detail_rows if r.get("val_loglik") is not None]
+    observed_vals = [r["observed_loglik"] for r in detail_rows if r.get("observed_loglik") is not None]
     test_vals = [r["test_loglik"] for r in detail_rows if r.get("test_loglik") is not None]
     summary_row = {
         "num_of_participants": len(detail_rows),
         "avg_train_loglik": float(np.mean(train_vals)) if train_vals else None,
         "avg_val_loglik": float(np.mean(val_vals)) if val_vals else None,
+        "avg_observed_loglik": float(np.mean(observed_vals)) if observed_vals else None,
         "avg_test_loglik": float(np.mean(test_vals)) if test_vals else None,
     }
-    summary_fields = ["num_of_participants", "avg_train_loglik", "avg_val_loglik", "avg_test_loglik"]
+    summary_fields = [
+        "num_of_participants",
+        "avg_train_loglik",
+        "avg_val_loglik",
+        "avg_observed_loglik",
+        "avg_test_loglik",
+    ]
     summary_path = run_dir / "summary_loglik.csv"
     with summary_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=summary_fields)
@@ -1593,7 +1733,11 @@ def _write_experiment_csvs(run_dir: Path, detail_rows: List[Dict[str, Any]]) -> 
         "participant_ordinal",
         "train_loglik",
         "val_loglik",
+        "observed_loglik",
         "test_loglik",
+        "n_train",
+        "n_val",
+        "n_test",
         "n_iterations_requested",
         "n_iterations_completed",
         "best_program_path",
@@ -1791,9 +1935,6 @@ def main() -> None:
                 reinit=False,
             )
             print(f"wandb run: {WANDB_PROJECT}/{run_name}")
-            for pid in participants:
-                wandb_module.define_metric(f"p{pid}_step")
-                wandb_module.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
         except Exception as e:
             print(f"wandb disabled (init failed): {e}")
 
@@ -1802,8 +1943,10 @@ def main() -> None:
     print(f"Participants: {len(participants)} | n_iterations={args.n_iterations} | output={run_dir}")
     print(
         "Split: split_ratio=0.6 -> 60% train, remainder 50/50 val/test blocks; "
-        "evolution combined_score = (0.6*train+0.2*val)/0.8 loglik; "
-        "prompt trials from train+val union; test post-hoc on best-by-train program."
+        "SA40 observed = retained train+val; evolution combined_score = trial-pooled "
+        "mean loglik on the complete observed union; prompt trials from train+val only; "
+        "test scored once after selecting the best-by-observed-union program; "
+        "dataset mean = equal-person mean of person-level test loglik."
     )
     print(
         "Prompt: vanilla/minimal (task + program + train/val trials + metrics). "
@@ -1838,6 +1981,11 @@ def main() -> None:
             sorted_rows = sorted(detail_rows, key=lambda r: int(r.get("participant_id", 0)))
             with _SHARED_CSV_LOCK:
                 _write_experiment_csvs(run_dir, sorted_rows)
+            if wandb_module is not None:
+                try:
+                    _wandb_log_loglik_summary(wandb_module, sorted_rows, last_row=row)
+                except Exception as e:
+                    print(f"wandb log failed: {e}")
 
     if parallel_participants > 1:
         with ThreadPoolExecutor(max_workers=parallel_participants) as pool:

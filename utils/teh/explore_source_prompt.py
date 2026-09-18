@@ -24,13 +24,38 @@ def _load_source_example_trials(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     filter_mixed_gambles: bool = False,
+    require: bool = False,
 ) -> List[dict]:
-    try:
+    def _load() -> List[dict]:
         from baseline_methods.MLE import trials_for_participant
+        from utils.teh.participant_ids import load_valid_participant_ids
+        from utils.teh.teh_datasets import emnlp_ordinal_range
 
+        repo = Path(__file__).resolve().parents[2]
+        pids = load_valid_participant_ids(
+            source_dataset,
+            repo,
+            filter_mixed_gambles=bool(filter_mixed_gambles),
+            split_ratio=float(split_ratio),
+            split_seed=int(split_seed),
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            mixed_gambles_csv=mixed_gambles_csv or DEFAULT_CSV_PATH,
+            auto_prepare=True,
+        )
+        if not pids:
+            raise ValueError(f"No valid participants for source dataset {source_dataset!r}")
+        start, _end = emnlp_ordinal_range(source_dataset)
+        if start >= len(pids):
+            raise ValueError(
+                f"Source {source_dataset!r} EMNLP start ordinal {start} is out of range "
+                f"for {len(pids)} valid participants"
+            )
+        # First person in the source G.1 EMNLP slice, not valid_participant_ids[0].
+        pid = int(pids[start])
         train, val, _test = trials_for_participant(
             source_dataset,
-            0,
+            pid,
             split_ratio=float(split_ratio),
             split_seed=int(split_seed),
             filter_mixed_gambles=bool(filter_mixed_gambles),
@@ -41,8 +66,19 @@ def _load_source_example_trials(
             limited_data_protocol=limited_data_protocol,
             limited_train_val=limited_train_val,
         )
+        del _test
         trials: List[dict] = list(train or []) + list(val or [])
+        if not trials:
+            raise ValueError(
+                f"Source {source_dataset!r} participant {pid} has no train+val examples "
+                "(test is never used)."
+            )
         return trials[:8]
+
+    if require:
+        return _load()
+    try:
+        return _load()
     except Exception:
         return []
 
@@ -76,6 +112,7 @@ def build_rank1_explore_prompt_suffix(
     local_dataset: Optional[str] = None,
     mixed_gambles_csv: str = DEFAULT_CSV_PATH,
     filter_mixed_gambles: bool = False,
+    require_source_examples: bool = False,
 ) -> str:
     """Cross-task block: source rank-1 code plus obs (train+val) example trials.
 
@@ -102,7 +139,13 @@ def build_rank1_explore_prompt_suffix(
         local_dataset=local_dataset,
         mixed_gambles_csv=mixed_gambles_csv,
         filter_mixed_gambles=filter_mixed_gambles,
+        require=bool(require_source_examples),
     )
+    if require_source_examples and not example_trials:
+        raise ValueError(
+            f"Required source train+val examples missing for {source_dataset!r} "
+            f"(source test is never used)."
+        )
     ctx = make_source_context(
         dataset_alias=source_dataset,
         example_trials=example_trials,

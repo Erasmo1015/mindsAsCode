@@ -196,7 +196,10 @@ class LegacyArgparseTests(unittest.TestCase):
                 "job_t_pics_source_pop.sh",
                 "job_t_pics_source_pop_other_gpu.sh",
             )
-        ] + [Path("cluster/2026Sep18_T_PICS_6x6/_6x6_common.sh")]
+        ] + [
+            Path("cluster/2026Sep18_T_PICS_6x6/_6x6_common.sh"),
+            Path("cluster/2026Sep18_T_PICS_gated/job_gated_l40s.sh"),
+        ]
         for path in scripts:
             text = path.read_text(encoding="utf-8")
             self.assertIn("--max_error_prompt_chars 0", text, msg=str(path))
@@ -214,6 +217,7 @@ class LegacyArgparseTests(unittest.TestCase):
             Path("cluster/2026Sep18_T_PICS_6x6/_6x6_common.sh"),
             Path("cluster/2026Sep18_T_PICS_6x6/job_6x6_h100.sh"),
             Path("cluster/2026Sep18_T_PICS_6x6/job_6x6_l40s.sh"),
+            Path("cluster/2026Sep18_T_PICS_gated/job_gated_l40s.sh"),
         ]
         for path in paths:
             text = path.read_text(encoding="utf-8")
@@ -312,6 +316,18 @@ class MemTraceDefaultOnTests(unittest.TestCase):
             text,
             r"if\s+[^\n]*dataset[^\n]*:\s*\n\s*.*mem_trace\s*=\s*False",
         )
+
+
+class GatedSourceExamplePidTests(unittest.TestCase):
+    def test_suffix_example_uses_emnlp_range_first_person_not_valid_zero(self) -> None:
+        from utils.teh.teh_datasets import emnlp_ordinal_range
+
+        text = Path("utils/teh/explore_source_prompt.py").read_text(encoding="utf-8")
+        self.assertIn("emnlp_ordinal_range(source_dataset)", text)
+        self.assertIn("pid = int(pids[start])", text)
+        self.assertNotIn("pid = int(pids[0])", text)
+        self.assertEqual(emnlp_ordinal_range("4wulff2018description"), (1290, 1339))
+        self.assertEqual(emnlp_ordinal_range("11enkavi2019recentprobes"), (0, 49))
 
 
 if __name__ == "__main__":

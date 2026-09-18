@@ -68,21 +68,22 @@ def build_transfer_source_suffix(sources: List[SourceTransferContext]) -> str:
         "## Cross-task transfer context",
         "",
         "The following source datasets have population-level cognitive programs evolved "
-        "on pooled train+validation trials across all participants. Adapt useful ideas to "
-        "the target task described above. Do not copy source problem keys: rewrite "
-        "choose() to the TARGET runtime schema or it will KeyError. "
-        "history[i]['action'] is an integer action id, never a press-key letter from "
-        "option_keys.",
+        "on pooled train+validation trials across all participants. "
+        "These blocks are SOURCE-dataset context only. They are not target observations. "
+        "Do not copy source problem keys: rewrite choose() to the TARGET runtime schema "
+        "or it will KeyError. history[i]['action'] is an integer action id, never a "
+        "press-key letter from option_keys. Source test trials are never included.",
         "",
     ]
     for idx, src in enumerate(sources, start=1):
         lines.extend(
             [
-                f"### Source dataset {idx}: {src.display_name} (`{src.dataset_alias}`)",
+                f"### SOURCE dataset {idx} (not the target): {src.display_name} (`{src.dataset_alias}`)",
                 "",
+                f"Source task / schema (dataset `{src.dataset_alias}`):",
                 src.task_description.strip(),
                 "",
-                "Example trial from source train+validation pool:",
+                "SOURCE example from source train+validation only (not source test, not target data):",
                 src.example_trial_text.strip(),
                 "",
                 f"Best population-level program (selection score / loglik: {src.best_loglik:.6f}):",

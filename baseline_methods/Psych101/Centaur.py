@@ -93,6 +93,7 @@ CENTAUR_FOCUS_DATASETS = frozenset(
 PSYCH101_CENTAUR_DATASETS = sorted(
     set(IMPLEMENTED_PSYCH101_ALIASES) | set(EXTERNAL_DATASETS)
 )
+WANDB_PROJECT = "centaur"
 
 
 def _effective_psych_dataset_split(psych_dataset_split: str) -> str:
@@ -982,6 +983,30 @@ def _safe_mean_numeric(values: List[Any]) -> Optional[float]:
     return float(np.mean(vals)) if vals else None
 
 
+def _wandb_log_loglik_summary(
+    wandb_module: Any,
+    rows: List[Dict[str, Any]],
+    *,
+    last_row: Dict[str, Any],
+) -> None:
+    """Upload running equal-person means plus the latest person's test loglik."""
+    te = [d.get("test_loglik") for d in rows]
+    payload = {
+        "n_completed": len(rows),
+        "last_participant_id": last_row.get("participant_id"),
+        "last_test_loglik": last_row.get("test_loglik"),
+        "avg_test_loglik": _safe_mean_numeric(te),
+        "avg_train_loglik": _safe_mean_numeric([d.get("train_loglik") for d in rows]),
+        "avg_val_loglik": _safe_mean_numeric([d.get("val_loglik") for d in rows]),
+    }
+    compact = {k: v for k, v in payload.items() if v is not None}
+    wandb_module.log(compact)
+    summary = getattr(wandb_module, "summary", None)
+    if summary is not None:
+        for k, v in compact.items():
+            summary[k] = v
+
+
 def _round_floats_for_csv_row(row: Dict[str, Any], ndigits: int = 4) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in row.items():
@@ -1271,6 +1296,12 @@ def main() -> None:
     )
     add_limited_data_cli_arguments(parser)
     parser.add_argument(
+        "--no_log",
+        action="store_true",
+        default=False,
+        help="Disable wandb (default: log avg/last test loglik to project centaur).",
+    )
+    parser.add_argument(
         "--check_deps",
         action="store_true",
         help=(
@@ -1412,6 +1443,35 @@ def main() -> None:
     print(f"Wrote full command line to {cmd_log}")
     manifest_jsonl = base_run_dir / "log" / LIMITED_DATA_MANIFEST_JSONL_FILENAME
 
+    wandb_module = None
+    if args.no_log:
+        os.environ["WANDB_DISABLED"] = "true"
+        print("wandb logging disabled (--no_log).")
+    else:
+        try:
+            import wandb as _wandb
+
+            wandb_module = _wandb
+            run_name = f"{dataset}_{timestamp}"
+            wandb_module.init(
+                project=WANDB_PROJECT,
+                name=run_name,
+                config={
+                    "dataset": dataset,
+                    "split_ratio": args.split_ratio,
+                    "split_seed": args.split_seed,
+                    "limited_data_protocol": args.limited_data_protocol,
+                    "limited_train_val": args.limited_train_val,
+                    "n_participants": len(participants),
+                    "output_dir": str(base_run_dir),
+                },
+                reinit=False,
+            )
+            print(f"wandb run: {WANDB_PROJECT}/{run_name}")
+        except Exception as e:
+            print(f"wandb disabled (init failed): {e}")
+            wandb_module = None
+
     chooser = CentaurChooser(args.centaur_model, max_seq_length=args.max_seq_length)
     participant_loglik: List[Dict[str, Any]] = []
     prediction_rows: List[Dict[str, Any]] = []
@@ -1433,12 +1493,28 @@ def main() -> None:
         )
         participant_loglik.append(summ)
         prediction_rows.extend(preds)
+        _write_loglik_csvs(base_run_dir, participant_loglik)
+        _write_predictions_csv(base_run_dir, prediction_rows)
+        print(
+            f"[checkpoint] {dataset} n={len(participant_loglik)}/{len(participants)} "
+            f"last_pid={pid} test_loglik={summ.get('test_loglik')}",
+            flush=True,
+        )
+        if wandb_module is not None:
+            try:
+                _wandb_log_loglik_summary(
+                    wandb_module, participant_loglik, last_row=summ
+                )
+            except Exception as e:
+                print(f"wandb log failed: {e}", flush=True)
 
     _write_loglik_csvs(base_run_dir, participant_loglik)
     _write_predictions_csv(base_run_dir, prediction_rows)
     rewrite_limited_data_csv_from_jsonl(
         manifest_jsonl, base_run_dir / "log" / LIMITED_DATA_MANIFEST_CSV_FILENAME
     )
+    if wandb_module is not None:
+        wandb_module.finish()
     print(f"Wrote participant_details_loglik.csv and summary_loglik.csv under {base_run_dir}")
 
 
