@@ -92,6 +92,11 @@ from utils.teh.limited_data_protocol import (
     should_persist_limited_data_manifest,
 )
 from utils.teh.participant_ids import load_valid_participant_ids
+from utils.teh.baseline_wandb_completion import (
+    apply_wandb_payload,
+    merge_wandb_payload,
+    wandb_completion_fields,
+)
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
     is_binary_loglik_dataset,
@@ -1483,9 +1488,11 @@ def _wandb_log_loglik_summary(
     rows: List[Dict[str, Any]],
     *,
     last_row: Dict[str, Any],
+    expected_n: int,
+    run_finished: bool = False,
 ) -> None:
-    """Upload running equal-person means plus the latest person's scores. No run dumps."""
-    payload: Dict[str, Any] = {
+    """Upload running diagnostic logliks plus the gated-style completion contract."""
+    diagnostic: Dict[str, Any] = {
         "n_completed": len(rows),
         "last_participant_id": last_row.get("participant_id"),
         "last_test_loglik": _safe_float(last_row.get("test_loglik")),
@@ -1497,13 +1504,15 @@ def _wandb_log_loglik_summary(
         "avg_train_loglik": _mean_loglik_rows(rows, "train_loglik"),
         "avg_val_loglik": _mean_loglik_rows(rows, "val_loglik"),
     }
-    compact = {k: v for k, v in payload.items() if v is not None}
+    completion = wandb_completion_fields(
+        rows,
+        expected_n=expected_n,
+        run_finished=run_finished,
+        distinguish_failures=True,
+    )
+    payload = merge_wandb_payload(diagnostic, completion)
     with _WANDB_LOG_LOCK:
-        wandb_module.log(compact)
-        summary = getattr(wandb_module, "summary", None)
-        if summary is not None:
-            for k, v in compact.items():
-                summary[k] = v
+        apply_wandb_payload(wandb_module, payload)
 
 
 def run_participant(
@@ -1935,6 +1944,18 @@ def main() -> None:
                 reinit=False,
             )
             print(f"wandb run: {WANDB_PROJECT}/{run_name}")
+            try:
+                apply_wandb_payload(
+                    wandb_module,
+                    wandb_completion_fields(
+                        [],
+                        expected_n=len(participants),
+                        run_finished=False,
+                        distinguish_failures=True,
+                    ),
+                )
+            except Exception as e:
+                print(f"wandb log failed: {e}")
         except Exception as e:
             print(f"wandb disabled (init failed): {e}")
 
@@ -1983,7 +2004,13 @@ def main() -> None:
                 _write_experiment_csvs(run_dir, sorted_rows)
             if wandb_module is not None:
                 try:
-                    _wandb_log_loglik_summary(wandb_module, sorted_rows, last_row=row)
+                    _wandb_log_loglik_summary(
+                        wandb_module,
+                        sorted_rows,
+                        last_row=row,
+                        expected_n=len(participants),
+                        run_finished=False,
+                    )
                 except Exception as e:
                     print(f"wandb log failed: {e}")
 
@@ -1997,6 +2024,17 @@ def main() -> None:
             _record_participant_row(_participant_row(pid))
 
     if wandb_module is not None:
+        try:
+            last = detail_rows[-1] if detail_rows else {}
+            _wandb_log_loglik_summary(
+                wandb_module,
+                detail_rows,
+                last_row=last,
+                expected_n=len(participants),
+                run_finished=True,
+            )
+        except Exception as e:
+            print(f"wandb log failed: {e}")
         wandb_module.finish()
 
     rewrite_limited_data_csv_from_jsonl(

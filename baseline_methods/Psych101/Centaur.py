@@ -79,6 +79,11 @@ from utils.teh.teh_datasets import (  # noqa: E402
     IMPLEMENTED_PSYCH101_ALIASES,
     is_binary_loglik_dataset,
 )
+from utils.teh.baseline_wandb_completion import (  # noqa: E402
+    apply_wandb_payload,
+    merge_wandb_payload,
+    wandb_completion_fields,
+)
 
 # Five new datasets + all implemented Psych-101 aliases.
 CENTAUR_FOCUS_DATASETS = frozenset(
@@ -988,10 +993,12 @@ def _wandb_log_loglik_summary(
     rows: List[Dict[str, Any]],
     *,
     last_row: Dict[str, Any],
+    expected_n: int,
+    run_finished: bool = False,
 ) -> None:
-    """Upload running equal-person means plus the latest person's test loglik."""
+    """Upload running diagnostic logliks plus the gated-style completion contract."""
     te = [d.get("test_loglik") for d in rows]
-    payload = {
+    diagnostic = {
         "n_completed": len(rows),
         "last_participant_id": last_row.get("participant_id"),
         "last_test_loglik": last_row.get("test_loglik"),
@@ -999,12 +1006,13 @@ def _wandb_log_loglik_summary(
         "avg_train_loglik": _safe_mean_numeric([d.get("train_loglik") for d in rows]),
         "avg_val_loglik": _safe_mean_numeric([d.get("val_loglik") for d in rows]),
     }
-    compact = {k: v for k, v in payload.items() if v is not None}
-    wandb_module.log(compact)
-    summary = getattr(wandb_module, "summary", None)
-    if summary is not None:
-        for k, v in compact.items():
-            summary[k] = v
+    completion = wandb_completion_fields(
+        rows,
+        expected_n=expected_n,
+        run_finished=run_finished,
+        distinguish_failures=False,
+    )
+    apply_wandb_payload(wandb_module, merge_wandb_payload(diagnostic, completion))
 
 
 def _round_floats_for_csv_row(row: Dict[str, Any], ndigits: int = 4) -> Dict[str, Any]:
@@ -1468,6 +1476,18 @@ def main() -> None:
                 reinit=False,
             )
             print(f"wandb run: {WANDB_PROJECT}/{run_name}")
+            try:
+                apply_wandb_payload(
+                    wandb_module,
+                    wandb_completion_fields(
+                        [],
+                        expected_n=len(participants),
+                        run_finished=False,
+                        distinguish_failures=False,
+                    ),
+                )
+            except Exception as e:
+                print(f"wandb log failed: {e}", flush=True)
         except Exception as e:
             print(f"wandb disabled (init failed): {e}")
             wandb_module = None
@@ -1503,7 +1523,11 @@ def main() -> None:
         if wandb_module is not None:
             try:
                 _wandb_log_loglik_summary(
-                    wandb_module, participant_loglik, last_row=summ
+                    wandb_module,
+                    participant_loglik,
+                    last_row=summ,
+                    expected_n=len(participants),
+                    run_finished=False,
                 )
             except Exception as e:
                 print(f"wandb log failed: {e}", flush=True)
@@ -1514,6 +1538,17 @@ def main() -> None:
         manifest_jsonl, base_run_dir / "log" / LIMITED_DATA_MANIFEST_CSV_FILENAME
     )
     if wandb_module is not None:
+        try:
+            last = participant_loglik[-1] if participant_loglik else {}
+            _wandb_log_loglik_summary(
+                wandb_module,
+                participant_loglik,
+                last_row=last,
+                expected_n=len(participants),
+                run_finished=True,
+            )
+        except Exception as e:
+            print(f"wandb log failed: {e}", flush=True)
         wandb_module.finish()
     print(f"Wrote participant_details_loglik.csv and summary_loglik.csv under {base_run_dir}")
 
