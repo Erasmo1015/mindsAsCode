@@ -10948,10 +10948,15 @@ def run_evolution(
         else:
             for i, parent_tuple in enumerate(selected_parents):
                 code, fitness, test_acc, prog_id, _, _, train_acc_prompt = elite_core(parent_tuple)
+                # Test metrics are often unset until the pool-best diagnostic eval.
+                test_acc_s = f"{test_acc:.4f}" if test_acc is not None else "N/A"
                 if fitness_metric == "loglik" and is_binary_loglik_dataset(dataset):
-                    print(f"  Parent {i+1}: {prog_id} (log-likelihood={fitness:.4f}, test_acc={test_acc:.4f})")
+                    print(f"  Parent {i+1}: {prog_id} (log-likelihood={fitness:.4f}, test_acc={test_acc_s})")
                 else:
-                    print(f"  Parent {i+1}: {prog_id} (train_acc={train_acc_prompt:.4f}, test_acc={test_acc:.4f})")
+                    train_s = (
+                        f"{train_acc_prompt:.4f}" if train_acc_prompt is not None else "N/A"
+                    )
+                    print(f"  Parent {i+1}: {prog_id} (train_acc={train_s}, test_acc={test_acc_s})")
         
         parent_train_accs = None
         parent_train_mses = None
