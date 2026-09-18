@@ -193,6 +193,13 @@ def candidate_state_from_details(details: Sequence[Dict[str, Any]]) -> List[str]
 
 
 def guided_json_schema_for_programs(expected_ids: Sequence[str]) -> Dict[str, Any]:
+    """JSON schema for vLLM guided decoding.
+
+    Avoid ``minimum``/``maximum`` (and similar) so xgrammar can stay active.
+    Numeric ranges are still enforced in ``validate_program_motif_response``.
+    Outlines fallback uses a shared SQLite cache that corrupts under concurrent
+    NFS writers — keep the guided schema xgrammar-compatible.
+    """
     motif_items = {"type": "string", "enum": list(BEHAVIORAL_MOTIFS)}
     detail_item = {
         "type": "object",
@@ -200,7 +207,7 @@ def guided_json_schema_for_programs(expected_ids: Sequence[str]) -> Dict[str, An
             "motif": {"type": "string", "enum": list(BEHAVIORAL_MOTIFS)},
             "presence": {"type": "boolean"},
             "applicability": {"type": "string", "enum": list(APPLICABILITY_VALUES)},
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "confidence": {"type": "number"},
             "rationale": {"type": "string"},
             "code_evidence": {"type": "array", "items": {"type": "string"}},
         },
@@ -221,7 +228,7 @@ def guided_json_schema_for_programs(expected_ids: Sequence[str]) -> Dict[str, An
             "reference_motif_state": {"type": "array", "items": motif_items},
             "modified_motifs": {"type": "array", "items": motif_items},
             "motif_details": {"type": "array", "items": detail_item},
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "confidence": {"type": "number"},
         },
         "required": list(REQUIRED_LLM_FIELDS),
         "additionalProperties": False,
