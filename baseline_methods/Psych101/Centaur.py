@@ -294,6 +294,8 @@ def _task_instruction_for_participant(
     local_dataset: Optional[str],
 ) -> str:
     alias = normalize_psych101_dataset_alias(dataset)
+    if is_mixed_gambles_dataset(dataset) or is_mixed_gambles_dataset(alias):
+        return GAMBLE_TASK_INTRO
     if is_external_dataset(alias):
         return external_dataset_task_description(alias)
     if is_psych101_dataset(alias):
@@ -305,6 +307,23 @@ def _task_instruction_for_participant(
         )
         return str(exp.instruction or "")
     return ""
+
+
+def _prepare_mixed_gambles_centaur_trials(
+    trials: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Match EMNLP Centaur.py: letter keys A/B and schema A so gamble text is scored."""
+    out: List[Dict[str, Any]] = []
+    for t in trials:
+        nt = dict(t)
+        p = dict(t.get("problem") or {})
+        p["option_keys"] = ["A", "B"]
+        p["schema_type"] = "A"
+        p["dataset_alias"] = MIXED_GAMBLES
+        nt["problem"] = p
+        nt["options"] = ["A", "B"]
+        out.append(nt)
+    return out
 
 
 # ----- Psych-101 transcript-style prompt construction -----
@@ -650,10 +669,10 @@ def build_centaur_prompt_prefix_indexed(
     if extended is not None:
         return extended
     schema = str(trials[trial_index]["problem"].get("schema_type", "?"))
-    if schema == "A" and (
-        "gamble_A" in trials[trial_index]["problem"]
-        or "gamble_B" in trials[trial_index]["problem"]
-    ):
+    problem = trials[trial_index]["problem"]
+    if "gamble_A" in problem and "gamble_B" in problem:
+        return _build_gamble_prefix(trials, trial_index, instruction=instruction)
+    if schema == "A" and ("gamble_A" in problem or "gamble_B" in problem):
         return _build_gamble_prefix(trials, trial_index, instruction=instruction)
     if schema == "D":
         if "balloon_id" in trials[trial_index]["problem"]:
@@ -948,6 +967,10 @@ def _load_centaur_trials(
         speekenbrink_split=speekenbrink_split,
         data_dir=data_dir,
     )
+    if is_mixed_gambles_dataset(dataset) or is_mixed_gambles_dataset(alias):
+        train_trials = _prepare_mixed_gambles_centaur_trials(train_trials)
+        val_trials = _prepare_mixed_gambles_centaur_trials(val_trials)
+        test_trials = _prepare_mixed_gambles_centaur_trials(test_trials)
     instruction = _task_instruction_for_participant(
         alias,
         int(participant_row_index),
