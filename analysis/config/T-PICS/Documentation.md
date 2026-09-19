@@ -768,3 +768,57 @@ Independent G.1 range (`teh.py` `_ensure_gated_independent_source_population`): 
 G.2 transfer example person (`utils/teh/explore_source_prompt.py` `_load_source_example_trials`): `pid = pids[emnlp_ordinal_range(source)[0]]`; SA40 train+val; `trials[:8]` pool; `one_example_trial_text` injects one trial.
 
 Valid-list builder (`utils/teh/participant_ids.py`): keep people with non-empty train **and** test after the within-person split. Mixed-gambles production omits `--filter_mixed_gambles` (all trial types).
+
+---
+
+## 21. Data splits, SA40, histories, and prompt examples
+
+Verified from the implementation (`utils/teh/limited_data_protocol.py`, `utils/teh/limited_data_registry.py`, `teh.py`) and from production W&B configuration. Production gated T-PICS uses:
+
+| Knob | Production value |
+| --- | --- |
+| Limited-data protocol | `--limited_data_protocol structure_aware` |
+| Observed train+validation cap | `--limited_train_val 40` |
+| Prompt example cap | `--max_prompt_train_trials 60` |
+| Split | `--split_ratio 0.6 --split_seed 0` (`within_participant`) |
+
+These knobs do not retune the method. They record how observations, runtime histories, and LLM examples are constructed.
+
+### Split then SA40
+
+The initial within-person train/validation/test split is **approximately 60/20/20** and respects dataset structure (whole problems/games/rounds where that is the unit; contiguous sessions for Speekenbrink and Kool). **Speekenbrink uses the chronological session split by default** (`--speekenbrink_split chronological`). Its difference from the legacy shuffled pseudo-block split is a **split-policy choice**, not an SA40 modification.
+
+SA40 then retains **at most 40 combined train+validation** observations per participant (complete resetting units, or a contiguous pre-test segment on continuous sessions—not a random 40-trial slice of the full series). **Test membership, problems, and actions are not capped or replaced.** Test is reserved first and is never counted toward the 40.
+
+In the final gated method, train+validation are conceptually the **observed** set. They remain **separate arrays** internally. Program fitness, ranking, and the observed-data gate use their **complete union** (`train_val`: trial-count-weighted mean of the two split averages).
+
+### Prompt examples vs evaluation data
+
+`--max_prompt_train_trials` is a **legacy argument name**. In gated T-PICS it does **not** mean “train only.” `_cap_prompt_train_and_val_trials` samples examples from the **combined observed train+validation union**. The production cap is **60** and affects **only LLM prompt examples**, never the fitness or evaluation set.
+
+- **Participant SA40 prompts** have at most **40** observed trials (the person already has ≤40 TV, so the 60 cap does not drop further).
+- **Pooled population prompts** (G.1 / G.2) may be subsampled to **60** from the pooled observed union.
+
+Gated person and G.3 prompts include that person’s val as well as train. Test never enters prompts.
+
+### Runtime histories (`choose(problem, history)`)
+
+Evaluation and fitness call `choose(problem, history)` on the **stored runtime trial lists**, not on prompt-formatted text.
+
+| Family | Datasets | Runtime history |
+| --- | --- | --- |
+| Independent | Wulff, Hilbig, Enkavi, mixed gambles, Bergert | Empty. |
+| Resetting | Choice13k, CPC18, Frey CCT, Frey balloon, Badham, Schulz, Guan, Steyvers | Rebuilt **within** each game/problem/round/balloon; **reset** across units. |
+| Continuous | Speekenbrink, Kool | Rebuilt over **retained observed trials followed by test trials** (one continuing sequence). |
+
+Reconstruction **removes references to observations omitted by SA40**. When predicting any test action, **only information preceding that action** may appear in history. Earlier observed actions—and, for a continuing sequence, **earlier test actions**—may be legitimate history. The **current and future test actions must never** be included.
+
+### Prompt-only formatting (not runtime inputs)
+
+These limits never rewrite the `history` list passed to `choose()`:
+
+- Candidate/person example **text** is a compact display (`history_len` / last feedback), not a dump of the full runtime history array.
+- Automatic dataset-prompt generation caps nested history entries and example count (`dataset_prompt_history_max_entries` / example char budget). That path writes the shared instruction; it is not per-iteration state.
+- Hard prompt token cap (`--hard_prompt_token_cap 14000`) may drop prompt examples after structured truncation; leftover over-cap raises under `--strict_prompt_budget`.
+
+G.2 transfer still injects **one** source train+validation trial (sampled from a first-eight pool of the source EMNLP-first person). That example is prompt context only; source test is never used.
