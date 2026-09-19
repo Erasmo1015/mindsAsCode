@@ -77,7 +77,9 @@ from utils.teh.limited_data_protocol import (  # noqa: E402
 from utils.teh.participant_ids import load_valid_participant_ids  # noqa: E402
 from utils.teh.teh_datasets import (  # noqa: E402
     IMPLEMENTED_PSYCH101_ALIASES,
+    MIXED_GAMBLES,
     is_binary_loglik_dataset,
+    is_mixed_gambles_dataset,
 )
 from utils.teh.baseline_wandb_completion import (  # noqa: E402
     apply_wandb_payload,
@@ -96,7 +98,7 @@ CENTAUR_FOCUS_DATASETS = frozenset(
     }
 )
 PSYCH101_CENTAUR_DATASETS = sorted(
-    set(IMPLEMENTED_PSYCH101_ALIASES) | set(EXTERNAL_DATASETS)
+    set(IMPLEMENTED_PSYCH101_ALIASES) | {MIXED_GAMBLES} | set(EXTERNAL_DATASETS)
 )
 WANDB_PROJECT = "centaur"
 
@@ -198,6 +200,8 @@ def centaur_output_base_dir(
     psych_dataset_split: str = DEFAULT_PSYCH_DATASET_SPLIT,
 ) -> str:
     alias = normalize_psych101_dataset_alias(dataset)
+    if is_mixed_gambles_dataset(dataset) or is_mixed_gambles_dataset(alias):
+        return f"generated_outputs/mixed_gambles/centaur/run_{timestamp}"
     if is_external_dataset(alias):
         return f"generated_outputs/external/{alias}/centaur/run_{timestamp}"
     split = normalize_psych_dataset_split(psych_dataset_split)
