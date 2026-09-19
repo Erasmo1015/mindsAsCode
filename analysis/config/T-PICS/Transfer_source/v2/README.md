@@ -6,6 +6,7 @@ This directory is the **v2** Occurrence-EB freeze. It does not overwrite
 
 | File | When it is written |
 | --- | --- |
+| `analysis/config/misc/Sep20_T-PICS_v2/config_T-PICS_schema4.yaml` | v2 G.1 path index (same role as Sep17 `config_T-PICS_schema4.yaml`). Fill as each source pop completes. |
 | `occurrence_eb_schema4_iter10_sa40_v2.yaml` | After v2 G.1 (15 source pops) + schema-v4 annotation of **new** G.1 programs + Occurrence-EB refit (same formulas, six-source allowlist, no-transfer-peek) |
 | `schema4_occurrence_eb_freeze/` | Same freeze package layout as v1, new paths only |
 
