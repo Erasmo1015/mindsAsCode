@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+# See documentation at baseline_methods/Psych101/docs/Documentation_Openevolve.md
 # OpenEvolve intentionally keeps vanilla/original prompt behavior independent from TEH prompt-generation.
+
 """
 Usage: 
 
@@ -10,26 +12,40 @@ python baseline_methods/Psych101/run_openevolve.py \
   --range_start_ordinal 0 \
   --range_end_ordinal 49 \
   --api_base http://localhost:8000/v1 \
-  --n_iterations 600 \
-  --parallel_participants 10 \
-  --parallel_evaluations 10
+  --n_iterations 350 \
+  --parallel_participants 1 \
+  --parallel_evaluations 4 \
+  --limited_data_protocol structure_aware \
+  --limited_train_val 40 \
+  --max_prompt_train_trials 60
 
-OpenEvolve baseline for Psych-101 binary datasets (vanilla prompt, full OpenEvolve machinery).
+OpenEvolve baseline for Psych-101 / ICLR datasets (vanilla prompt, full OpenEvolve machinery).
 
-Uses reference_repos/openevolve as a library. Does NOT use TEH prompt engineering;
-task text comes from prompts/openevolve_vanilla/choices13k/infer_single_choice.txt only.
+Uses reference_repos/openevolve as a library. Does NOT use TEH/PICS prompt engineering.
+Dataset description is the registry task text (Choice13k / mixed-gambles vanilla files
+only for those two schemas). The choose() interface is a short mechanically generated
+Bernoulli or categorical contract. Official island inspirations are prompt-only
+contextual examples (not co-parents) and are dropped before observed examples if
+the 14,000-token Qwen input ceiling is exceeded.
 
 Evolution optimizes trial-pooled mean log-likelihood on the observed train+val union
 (combined_score). Per-split train_loglik and val_loglik are logged separately. Test
 log-likelihood is computed only after evolution on the participant's
 best-by-observed-union program.
 
-OpenEvolve still uses islands / MAP-Elites / archive for parent selection, but the
-LLM prompt is intentionally vanilla/minimal (not OpenEvolve's rich history prompt):
-current program, vanilla task text, sampled train+val trials, and current metrics only.
-num_top_programs / num_diverse_programs config args are not injected into the patched prompt.
+OpenEvolve still uses islands / MAP-Elites / archive for parent selection. The LLM
+sees one current mutable parent plus official optional contextual blocks when they
+fit the 14,000-token Qwen input ceiling: previous-attempt history, artifacts when
+include_artifacts is on, num_top_programs=3, leftover diverse programs via official
+random.sample, then num_diverse_programs=2 island inspirations (not co-parents).
+Observed train+val examples outrank optional context. Optional blocks are dropped
+before examples are reduced. The complete MAP-Elites database is never serialized.
 
-Default --n_iterations 600 matches TEH candidate budget (40×10 + 20×10).
+ICLR freeze: --n_iterations 350, --parallel_participants 1, --parallel_evaluations 4,
+SA40 (--limited_data_protocol structure_aware --limited_train_val 40),
+--max_prompt_train_trials 60 (prompt display only; fitness uses the complete
+retained train+val union). Do not copy the obsolete 10×10 example or PICS
+--max_workers 100.
 """
 
 from __future__ import annotations
@@ -40,7 +56,9 @@ import csv
 import json
 import math
 import os
+import random
 import shutil
+import subprocess
 import sys
 import threading
 import traceback
@@ -69,14 +87,12 @@ from data_modules.psych101_binary import (
     PSYCH101_LEGACY_ALIASES,
     get_psych101_binary_experiment,
     hf_id_for_psych_dataset_split,
-    is_psych101_dataset,
     normalize_psych101_dataset_alias,
     normalize_psych_dataset_split,
     split_psych_experiment,
 )
 from data_modules.external import (
-    EXTERNAL_DATASETS,
-    external_reference_prompt_path,
+    EXTERNAL_DATASET_META,
     is_external_dataset,
 )
 # utils.teh.* here: dataset registry + participant-id paths only (not TEH prompts/runtime).
@@ -84,9 +100,12 @@ from utils.psych101_openevolve_pool import WORKER_VANILLA as _WORKER_VANILLA
 from utils.teh.limited_data_protocol import (
     LIMITED_DATA_MANIFEST_CSV_FILENAME,
     LIMITED_DATA_MANIFEST_JSONL_FILENAME,
+    LIMITED_DATA_PROTOCOL_OFF,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
     add_limited_data_cli_arguments,
     append_limited_data_manifest_jsonl,
     load_participant_limited_splits,
+    normalize_limited_data_protocol,
     resolve_limited_data_budget,
     rewrite_limited_data_csv_from_jsonl,
     should_persist_limited_data_manifest,
@@ -99,23 +118,88 @@ from utils.teh.baseline_wandb_completion import (
 )
 from utils.teh.teh_datasets import (
     PARTICIPANT_DATASETS,
+    dataset_task_description,
+    emnlp_ordinal_range,
     is_binary_loglik_dataset,
     is_categorical_output_dataset,
     is_mixed_gambles_dataset,
 )
 from utils.teh_psych.categorical_eval import evaluate_categorical_program
 
-from openevolve import OpenEvolve
-from openevolve.config import Config
-from openevolve.process_parallel import ProcessParallelController
+try:
+    from openevolve import OpenEvolve
+    from openevolve.config import Config
+    from openevolve.process_parallel import ProcessParallelController
+except ImportError:
+    # Allow --help / CPU tests without the gitignored checkout. Production main()
+    # still fail-fasts via require_openevolve_checkout() and never clones.
+    OpenEvolve = object  # type: ignore[misc,assignment]
+    Config = object  # type: ignore[misc,assignment]
+    ProcessParallelController = object  # type: ignore[misc,assignment]
 
 WANDB_PROJECT = "openevolve"
 CHOICE13K_LOGLIK_EPS = 1e-9
+# Clipped per-trial p is in [eps, 1-eps], so any valid mean loglik is
+# >= log(eps) ≈ -20.72. Official OpenEvolve checkpoint JSON uses json.dump
+# (IEEE -inf becomes non-standard `-Infinity`; the visualizer then sanitizes
+# it to None, which would drop combined_score and let error=0.0 win). Use a
+# finite failure floor strictly worse than any clipped observed mean.
+FAILED_COMBINED_SCORE = math.log(CHOICE13K_LOGLIK_EPS) - 1.0
 DEFAULT_SEED_PATH = _REPO_ROOT / "persona_code_example" / "openevolve_vanilla" / "choices13k.py"
 DEFAULT_CATEGORICAL_SEED_PATH = _REPO_ROOT / "persona_code_example" / "teh" / "categorical_uniform.py"
-DEFAULT_BASE_PROMPT = (
-    _REPO_ROOT / "prompts" / "openevolve_vanilla" / "choices13k" / "infer_single_choice.txt"
+# Deprecated runner may still load these; ICLR OE never reads them as # Task text.
+_LEGACY_VANILLA_TASK_FILES = frozenset(
+    (
+        (
+            _REPO_ROOT
+            / "prompts"
+            / "openevolve_vanilla"
+            / "choices13k"
+            / "infer_single_choice.txt"
+        ).resolve(),
+        (
+            _REPO_ROOT
+            / "prompts"
+            / "openevolve_vanilla"
+            / "mixed_gambles"
+            / "infer_single_choice.txt"
+        ).resolve(),
+    )
 )
+ICLR_FROZEN_N_ITERATIONS = 350
+ICLR_FROZEN_PARALLEL_PARTICIPANTS = 1
+ICLR_FROZEN_PARALLEL_EVALUATIONS = 4
+ICLR_FROZEN_LIMITED_DATA_PROTOCOL = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
+ICLR_FROZEN_LIMITED_TRAIN_VAL = 40
+ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS = 60  # T-PICS prompt-display cap on train+val union
+ICLR_FROZEN_SPLIT_RATIO = 0.6
+ICLR_FROZEN_SPLIT_SEED = 0
+ICLR_FROZEN_LLM_MAX_TOKENS = 1024
+ICLR_FROZEN_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
+ICLR_FROZEN_NUM_DIVERSE_PROGRAMS = 2  # official OpenEvolve PromptConfig default
+ICLR_FROZEN_NUM_TOP_PROGRAMS = 3  # official PromptConfig default; worker injects via top_programs=
+ICLR_FROZEN_INPUT_TOKEN_CEILING = 14000
+ICLR_FROZEN_INCLUDE_ARTIFACTS = True  # official PromptConfig.include_artifacts default
+ICLR_FROZEN_MAX_PROGRAM_CHARS = 10000  # audited production bound for packing tests
+EXPECTED_OPENEVOLVE_GIT_SHA = "411fb59c886c18704caaffb611e17cf9e7d824d2"
+# Token-budget example ladder used only after all optional contextual blocks are omitted.
+ICLR_PROMPT_EXAMPLE_REDUCTION_CAPS = (60, 40, 30, 20, 10, 5)
+ICLR_RANGE_ORDINAL_CLI_DEFAULTS = (0, 49)
+QWEN_TOKENIZER_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+_ARTIFACTS_MARKER = "# Evaluation artifacts (official OpenEvolve; parent artifacts, not co-parents)"
+_PREVIOUS_MARKER = "# Previous attempts (official OpenEvolve; contextual examples, not co-parents)"
+_TOP_MARKER = "# Top performing programs (official OpenEvolve; contextual examples, not co-parents)"
+_DIVERSE_MARKER = "# Diverse programs (official OpenEvolve; contextual examples, not co-parents)"
+_INSPIRATIONS_MARKER = "# Inspiration programs (official OpenEvolve; contextual examples, not co-parents)"
+_OPTIONAL_DROP_MARKERS = (
+    (_INSPIRATIONS_MARKER, "inspirations"),
+    (_DIVERSE_MARKER, "diverse"),
+    (_TOP_MARKER, "top"),
+    (_PREVIOUS_MARKER, "previous_attempts"),
+    (_ARTIFACTS_MARKER, "artifacts"),
+)
+_QWEN_TOKENIZER = None
+_QWEN_TOKENIZER_FAILED = False
 # Five-new aliases (loaders/prompts/seeds are registered via PARTICIPANT_DATASETS;
 # this set is documentation only and does not gate CLI or evaluation).
 FOCUS_DATASETS = frozenset(
@@ -127,15 +211,24 @@ FOCUS_DATASETS = frozenset(
         "steyvers_2009_bandit",
     }
 )
-CHOOSE_API_BERNOULLI = (
-    "Implement `def choose(problem, history)` returning a float in [0,1]: "
-    "P(action=1) for the second option_keys entry."
-)
-CHOOSE_API_CATEGORICAL = (
-    "Implement `def choose(problem, history)` returning a dict[int, float] over "
-    "valid action ids (problem['options'][*]['action'] or option_keys), "
-    "probabilities summing to 1. Do not return a single Bernoulli float when K>2."
-)
+# Tracked source of truth for the choose() contract. No disk interface templates.
+CHOOSE_API_BERNOULLI = """\
+Implement def choose(problem, history).
+- problem: dict of current-trial task features.
+- history: list of previously realized trials.
+- return: a Python float in [0, 1] equal to P(action=1).
+- Action mapping: action 0 is problem["option_keys"][0]; action 1 is problem["option_keys"][1].
+Do not return a dict.
+"""
+CHOOSE_API_CATEGORICAL = """\
+Implement def choose(problem, history).
+- problem: dict of current-trial task features.
+- history: list of previously realized trials.
+- Valid action ids: [opt["action"] for opt in problem["options"]] if problem["options"] is present, else problem["option_keys"].
+{n_actions_line}
+- return: dict[int, float] mapping every valid action id to a finite non-negative probability; values must sum to 1.
+Do not return a single Bernoulli float when there are more than two actions.
+"""
 
 _SHARED_CSV_LOCK = threading.Lock()
 _WANDB_LOG_LOCK = threading.Lock()
@@ -144,6 +237,7 @@ _OE_CONTROLLER_HOOKED = False
 
 _ORIG_BUILD_PROMPT = None
 _ORIG_GENERATE_WITH_CONTEXT = None
+_ORIG_EVALUATE_PROGRAM = None
 _TRUNCATION_WARN_COUNTS: Dict[int, int] = {}
 
 # Parser-only instructions (not TEH behavioral tricks); required for full-rewrite parsing.
@@ -160,12 +254,29 @@ def choose(problem, history):
 """
 
 
+class RequiredPromptOverflowError(RuntimeError):
+    """Raised when system/task/interface/current-parent cannot fit the input ceiling."""
+
+
 @dataclass
 class TruncationState:
     estimated_tokens: int = 0
+    examples_available: int = 0
+    examples_included: int = 0
     prompt_trial_count: int = 0
     prompt_train_trials: int = 0
     prompt_val_trials: int = 0
+    artifacts_requested: int = 0
+    artifacts_kept: int = 0
+    previous_attempts_requested: int = 0
+    previous_attempts_kept: int = 0
+    inspirations_requested: int = 0
+    inspirations_kept: int = 0
+    top_programs_requested: int = 0
+    top_programs_kept: int = 0
+    diverse_programs_requested: int = 0
+    diverse_programs_kept: int = 0
+    trim_reason: str = ""
     steps: List[str] = field(default_factory=list)
 
 
@@ -222,27 +333,189 @@ def resolve_openevolve_seed_and_prompt(
     seed_path: Optional[str] = None,
     base_prompt: Optional[str] = None,
 ) -> Tuple[Path, Path]:
-    """Pick seed/program prompt; auto-switch for categorical / focus datasets when defaults used."""
+    """Pick seed; keep CLI prompt path (TEH/PICS reference files are not OE vanilla)."""
     alias = normalize_psych101_dataset_alias(dataset)
     seed = Path(seed_path) if seed_path else DEFAULT_SEED_PATH
-    prompt = Path(base_prompt) if base_prompt else DEFAULT_BASE_PROMPT
+    prompt = Path(base_prompt) if base_prompt else Path()
     using_default_seed = Path(seed).resolve() == DEFAULT_SEED_PATH.resolve()
-    using_default_prompt = Path(prompt).resolve() == DEFAULT_BASE_PROMPT.resolve()
 
     if using_default_seed and is_categorical_output_dataset(alias):
         seed = DEFAULT_CATEGORICAL_SEED_PATH
-
-    if using_default_prompt:
-        ref: Optional[str] = None
-        if is_external_dataset(alias):
-            ref = external_reference_prompt_path(alias)
-        elif is_psych101_dataset(alias):
-            ref = PSYCH101_BINARY_DATASETS.get(alias, {}).get("reference_prompt")
-        if ref:
-            cand = _REPO_ROOT / str(ref)
-            if cand.is_file():
-                prompt = cand
     return seed, prompt
+
+
+def dataset_n_actions(dataset: str) -> Optional[int]:
+    alias = normalize_psych101_dataset_alias(dataset)
+    if is_external_dataset(alias):
+        n = EXTERNAL_DATASET_META.get(alias, {}).get("n_actions")
+        return int(n) if n is not None else None
+    spec = PSYCH101_BINARY_DATASETS.get(alias) or {}
+    if spec.get("n_actions") is not None:
+        return int(spec["n_actions"])
+    if is_categorical_output_dataset(alias):
+        return None
+    return 2
+
+
+def vanilla_dataset_description(dataset: str, *, base_prompt: Optional[str] = None) -> str:
+    """Registered task_description for all 15. Never loads TEH/PICS or vanilla infer files."""
+    if base_prompt:
+        custom = Path(base_prompt)
+        if custom.is_file() and custom.resolve() not in _LEGACY_VANILLA_TASK_FILES:
+            return custom.read_text(encoding="utf-8")
+    return dataset_task_description(dataset)
+
+
+def choose_api_text(*, categorical: bool, n_actions: Optional[int] = None) -> str:
+    """Evaluator-derived interface contract (Bernoulli vs categorical).
+
+    Tracked in-runner strings are the only source of truth. No disk interface
+    templates are read.
+    """
+    text = CHOOSE_API_CATEGORICAL if categorical else CHOOSE_API_BERNOULLI
+    if categorical:
+        n = int(n_actions) if n_actions else 0
+        if n > 0:
+            n_line = (
+                f"This dataset has K={n} actions; return a key for each valid id "
+                f"(typically 0..{n - 1})."
+            )
+        else:
+            n_line = (
+                "K is len(problem['options']) if present, else len(problem['option_keys'])."
+            )
+        text = text.replace("{n_actions_line}", n_line)
+    else:
+        text = text.replace("{n_actions_line}", "")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines).strip()
+
+
+def vanilla_llm_user_prefix(dataset: str, *, base_prompt: Optional[str] = None) -> str:
+    """Task + API sections actually sent to the LLM (before program/metrics/examples)."""
+    alias = normalize_psych101_dataset_alias(dataset)
+    categorical = is_categorical_output_dataset(alias)
+    return "\n".join(
+        [
+            "# Task (vanilla — no TEH prompt engineering)",
+            vanilla_dataset_description(alias, base_prompt=base_prompt).strip(),
+            "",
+            "# API",
+            choose_api_text(categorical=categorical, n_actions=dataset_n_actions(alias)),
+            "",
+            "# Output format (required for parser)",
+            _FULL_REWRITE_OUTPUT_FORMAT.strip(),
+        ]
+    )
+
+
+def apply_iclr_frozen_range_ordinals(args: Any) -> None:
+    """Replace leftover 0–49 CLI defaults with teh_datasets.yaml ranges."""
+    if getattr(args, "participant_scope", "range") != "range":
+        return
+    if getattr(args, "ordinals", None) is not None:
+        return
+    start = int(getattr(args, "range_start_ordinal", 0))
+    end = int(getattr(args, "range_end_ordinal", 49))
+    if (start, end) != ICLR_RANGE_ORDINAL_CLI_DEFAULTS:
+        return
+    yaml_start, yaml_end = emnlp_ordinal_range(args.dataset)
+    args.range_start_ordinal = yaml_start
+    args.range_end_ordinal = yaml_end
+
+
+def openevolve_checkout_sha(root: Path) -> str:
+    """Read HEAD of an existing OpenEvolve git checkout. Never clones or fetches."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise FileNotFoundError(
+            f"cannot read git HEAD at {root}: {err or 'git rev-parse failed'}"
+        )
+    sha = proc.stdout.strip()
+    if not sha:
+        raise FileNotFoundError(f"empty git HEAD at {root}")
+    return sha
+
+
+def require_openevolve_checkout(
+    *,
+    root: Optional[Path] = None,
+    expected_sha: str = EXPECTED_OPENEVOLVE_GIT_SHA,
+) -> str:
+    """Fail-fast before a production run. Does not clone, install, or modify the checkout."""
+    checkout = Path(root) if root is not None else _OPENVOLVE_ROOT
+    pkg = checkout / "openevolve"
+    if not checkout.is_dir() or not pkg.is_dir():
+        raise SystemExit(
+            f"OpenEvolve checkout missing at {checkout}. "
+            f"Clone https://github.com/codelion/openevolve.git to that path and "
+            f"checkout {expected_sha}. This runner will not clone or install it."
+        )
+    try:
+        sha = openevolve_checkout_sha(checkout)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"OpenEvolve checkout at {checkout} is not a git worktree ({exc}). "
+            f"Expected commit {expected_sha}. This runner will not modify it."
+        ) from exc
+    if sha != expected_sha:
+        raise SystemExit(
+            f"OpenEvolve at {checkout} is {sha}, expected {expected_sha}. "
+            "Checkout that commit before a production run. This runner will not "
+            "clone, fetch, or modify the dependency."
+        )
+    return sha
+
+
+def iclr_frozen_argv(dataset: str, *, api_base: str = "http://localhost:8000/v1") -> List[str]:
+    alias = normalize_psych101_dataset_alias(dataset)
+    start, end = emnlp_ordinal_range(alias)
+    return [
+        "--dataset",
+        alias,
+        "--psych_dataset_split",
+        "train",
+        "--participant_scope",
+        "range",
+        "--range_start_ordinal",
+        str(start),
+        "--range_end_ordinal",
+        str(end),
+        "--split_ratio",
+        str(ICLR_FROZEN_SPLIT_RATIO),
+        "--split_seed",
+        str(ICLR_FROZEN_SPLIT_SEED),
+        "--n_iterations",
+        str(ICLR_FROZEN_N_ITERATIONS),
+        "--parallel_participants",
+        str(ICLR_FROZEN_PARALLEL_PARTICIPANTS),
+        "--parallel_evaluations",
+        str(ICLR_FROZEN_PARALLEL_EVALUATIONS),
+        "--num_diverse_programs",
+        str(ICLR_FROZEN_NUM_DIVERSE_PROGRAMS),
+        "--num_top_programs",
+        str(ICLR_FROZEN_NUM_TOP_PROGRAMS),
+        "--limited_data_protocol",
+        ICLR_FROZEN_LIMITED_DATA_PROTOCOL,
+        "--limited_train_val",
+        str(ICLR_FROZEN_LIMITED_TRAIN_VAL),
+        "--max_prompt_train_trials",
+        str(ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS),
+        "--model",
+        ICLR_FROZEN_MODEL,
+        "--llm_max_tokens",
+        str(ICLR_FROZEN_LLM_MAX_TOKENS),
+        "--hard_prompt_token_cap",
+        str(ICLR_FROZEN_INPUT_TOKEN_CEILING),
+        "--api_base",
+        api_base,
+    ]
 
 
 def _safe_float(x: Any) -> Optional[float]:
@@ -564,30 +837,34 @@ def cap_and_subsample_prompt_trials(
     max_trials_per_problem: int,
     subsample_seed: int,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
-    """Sample from train+val union only (never test). Returns (trials, n_train, n_val).
+    """Prompt-display subsample from train+val union only (never test).
 
-    When ``max_trials_per_problem`` > 0, sample ``max_trials // max_trials_per_problem``
-    prompt groups, up to ``max_trials_per_problem`` trials each, then remainder slots, then
-    top up from the pool until ``max_trials`` (groups are often smaller than per_problem).
+    Fitness/evaluation still uses the complete retained train+val lists. This
+    cap matches gated T-PICS ``--max_prompt_train_trials`` on the combined
+    observed union. When the pool already has ``<= max_trials`` observations,
+    every example is kept (no per-problem subsample). Per-problem grouping
+    applies only when more than ``max_trials`` exist.
     """
     pool = list(train_trials) + list(val_trials)
     train_ids = {id(t) for t in train_trials}
     if max_trials <= 0 or not pool:
         return [], 0, 0
 
-    rng = np.random.default_rng(subsample_seed)
     orig_index = {id(t): i for i, t in enumerate(pool)}
 
     def _sort_chronological(selected: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return sorted(selected, key=lambda t: orig_index[id(t)])
 
+    if len(pool) <= max_trials:
+        selected = _sort_chronological(pool)
+        n_train = sum(1 for t in selected if id(t) in train_ids)
+        return selected, n_train, len(selected) - n_train
+
+    rng = np.random.default_rng(subsample_seed)
+
     if max_trials_per_problem <= 0:
-        if len(pool) <= max_trials:
-            selected = pool
-        else:
-            idx = rng.choice(len(pool), size=max_trials, replace=False)
-            selected = [pool[int(i)] for i in sorted(idx)]
-        selected = _sort_chronological(selected)
+        idx = rng.choice(len(pool), size=max_trials, replace=False)
+        selected = _sort_chronological([pool[int(i)] for i in idx])
         n_train = sum(1 for t in selected if id(t) in train_ids)
         return selected, n_train, len(selected) - n_train
 
@@ -791,6 +1068,7 @@ def format_trials_compact(
 
 
 def estimate_tokens(text: str) -> int:
+    """Fallback length estimator. Prefer chat_input_token_count for budget checks."""
     try:
         import tiktoken
 
@@ -798,6 +1076,237 @@ def estimate_tokens(text: str) -> int:
         return len(enc.encode(text))
     except Exception:
         return max(1, len(text) // 4)
+
+
+def get_qwen_tokenizer():
+    """Load the production Qwen tokenizer from the local HF cache (CPU, no download)."""
+    global _QWEN_TOKENIZER, _QWEN_TOKENIZER_FAILED
+    if _QWEN_TOKENIZER is not None:
+        return _QWEN_TOKENIZER
+    if _QWEN_TOKENIZER_FAILED:
+        return None
+    try:
+        from transformers import AutoTokenizer
+
+        _QWEN_TOKENIZER = AutoTokenizer.from_pretrained(
+            QWEN_TOKENIZER_NAME,
+            local_files_only=True,
+            trust_remote_code=True,
+        )
+        return _QWEN_TOKENIZER
+    except Exception:
+        _QWEN_TOKENIZER_FAILED = True
+        return None
+
+
+def conservative_chat_token_count(system: str, user: str) -> int:
+    """Upper-bound stand-in when the Qwen tokenizer is unavailable.
+
+    Qwen measured ~0.40 tokens/char on 10k-char Python; 0.5 tokens/char is safer.
+    """
+    return 16 + (len(system or "") + len(user or "") + 1) // 2
+
+
+def chat_input_token_count(system: str, user: str) -> int:
+    """Token count of the complete vLLM chat input, including template and generation prefix."""
+    tokenizer = get_qwen_tokenizer()
+    if tokenizer is None:
+        return conservative_chat_token_count(system, user)
+    ids = tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": system or ""},
+            {"role": "user", "content": user or ""},
+        ],
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    return int(len(ids))
+
+
+def _program_fitness_score(prog: Dict[str, Any]) -> str:
+    metrics = prog.get("metrics") or {}
+    score = metrics.get("combined_score")
+    try:
+        return f"{float(score):.4f}" if score is not None else "n/a"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def split_official_optional_programs(
+    top_programs: Optional[List[Dict[str, Any]]],
+    inspirations: Optional[List[Dict[str, Any]]],
+    *,
+    num_top: int,
+    num_diverse: int,
+    rng: Optional[random.Random] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split worker-supplied lists the way 411fb59 PromptSampler does.
+
+    ``top_programs`` is already the island-sorted slice
+    ``island_programs[:num_top + num_diverse]``. First ``num_top`` become the
+    Top Performing Programs section. The leftover is passed through
+    ``random.sample(..., num_diverse)`` (official sampler.py:399), preserving
+    seeded shuffle order rather than score-prefix order. Inspirations already
+    shown as top/diverse are dropped by id.
+    """
+
+    def _usable(prog: Any) -> bool:
+        return isinstance(prog, dict) and bool(str(prog.get("code") or "").strip())
+
+    tops_in = [p for p in (top_programs or []) if _usable(p)]
+    n_top = max(0, int(num_top))
+    n_div = max(0, int(num_diverse))
+    selected_top = tops_in[:n_top]
+    remaining = tops_in[n_top:]
+    k = min(n_div, len(remaining))
+    if k > 0:
+        sample_fn = rng.sample if rng is not None else random.sample
+        diverse = sample_fn(remaining, k)
+    else:
+        diverse = []
+    shown_ids = {p.get("id") for p in selected_top + diverse if p.get("id") is not None}
+    insp: List[Dict[str, Any]] = []
+    for prog in inspirations or []:
+        if not _usable(prog):
+            continue
+        pid = prog.get("id")
+        if pid is not None and pid in shown_ids:
+            continue
+        insp.append(prog)
+    return selected_top, diverse, insp
+
+
+def format_official_artifacts_section(artifacts: Optional[Dict[str, Any]]) -> str:
+    """411fb59 ``_render_artifacts`` under Last Execution Output."""
+    if not artifacts:
+        return ""
+    sections = [_ARTIFACTS_MARKER, "", "## Last Execution Output", ""]
+    for key, value in artifacts.items():
+        if isinstance(value, bytes):
+            try:
+                content = value.decode("utf-8", errors="replace")
+            except Exception:
+                content = f"<binary data: {len(value)} bytes>"
+        else:
+            content = str(value)
+        if len(content) > 20 * 1024:
+            content = content[: 20 * 1024] + "\n... (truncated)"
+        sections.append(f"### {key}\n```\n{content}\n```")
+    return "\n".join(sections).strip()
+
+
+def format_official_previous_attempts(programs: Optional[List[Dict[str, Any]]]) -> str:
+    """411fb59 previous-attempt template (changes/performance/outcome; not full code)."""
+    usable = [p for p in (programs or []) if isinstance(p, dict)]
+    if not usable:
+        return ""
+    selected = usable[-min(3, len(usable)) :]
+    blocks = [_PREVIOUS_MARKER, "", "## Previous Attempts", ""]
+    for i, program in enumerate(reversed(selected)):
+        attempt_number = len(usable) - i
+        changes = (
+            program.get("changes_description")
+            or (program.get("metadata") or {}).get("changes")
+            or "unknown changes"
+        )
+        metrics = program.get("metrics") or {}
+        parts: List[str] = []
+        for name, value in metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    parts.append(f"{name}: {float(value):.4f}")
+                except (TypeError, ValueError):
+                    parts.append(f"{name}: {value}")
+            else:
+                parts.append(f"{name}: {value}")
+        performance = ", ".join(parts) if parts else "n/a"
+        blocks.append(
+            f"### Attempt {attempt_number}\n"
+            f"- Changes: {changes}\n"
+            f"- Performance: {performance}\n"
+            f"- Outcome: combined_score comparison with parent metrics\n"
+        )
+    return "\n".join(blocks).strip()
+
+
+def format_official_top_section(programs: List[Dict[str, Any]]) -> str:
+    """411fb59 ``top_program`` template under a Top Performing Programs header."""
+    if not programs:
+        return ""
+    blocks = [_TOP_MARKER, "", "## Top Performing Programs", ""]
+    for i, prog in enumerate(programs):
+        code = str(prog.get("code") or "").strip()
+        if not code:
+            continue
+        blocks.append(
+            f"### Program {i + 1} (Score: {_program_fitness_score(prog)})\n"
+            f"```python\n{code}\n```\n"
+            "Key features: combined_score\n"
+        )
+    text = "\n".join(blocks).strip()
+    return text if "```python" in text else ""
+
+
+def format_official_diverse_section(programs: List[Dict[str, Any]]) -> str:
+    """411fb59 leftover island programs under the Diverse Programs fragment title."""
+    if not programs:
+        return ""
+    blocks = [_DIVERSE_MARKER, "", "## Diverse Programs", ""]
+    for i, prog in enumerate(programs):
+        code = str(prog.get("code") or "").strip()
+        if not code:
+            continue
+        blocks.append(
+            f"### Program D{i + 1} (Score: {_program_fitness_score(prog)})\n"
+            f"```python\n{code}\n```\n"
+            "Key features: Alternative approach to combined_score\n"
+        )
+    text = "\n".join(blocks).strip()
+    return text if "```python" in text else ""
+
+
+def format_official_inspiration_section(inspirations: List[Dict[str, Any]]) -> str:
+    """Official OpenEvolve inspiration examples (411fb59 templates). Empty if none kept."""
+    if not inspirations:
+        return ""
+    blocks = [
+        _INSPIRATIONS_MARKER,
+        "",
+        "## Inspiration Programs",
+        "",
+        "These programs represent diverse approaches and creative solutions that may inspire new ideas:",
+        "",
+    ]
+    for i, prog in enumerate(inspirations):
+        code = str(prog.get("code") or "").strip()
+        if not code:
+            continue
+        metrics = prog.get("metrics") or {}
+        score = metrics.get("combined_score")
+        try:
+            score_s = f"{float(score):.4f}" if score is not None else "n/a"
+        except (TypeError, ValueError):
+            score_s = "n/a"
+        blocks.append(
+            f"### Inspiration {i + 1} (Score: {score_s}, Type: island inspiration)\n"
+            f"```python\n{code}\n```\n"
+            "Unique approach: alternative implementation from the same island.\n"
+        )
+    text = "\n".join(blocks).strip()
+    return text if "```python" in text else ""
+
+
+def _drop_optional_program_sections(user_text: str) -> str:
+    """Drop optional blocks in reverse official template order."""
+    text = user_text
+    for marker, _name in _OPTIONAL_DROP_MARKERS:
+        if marker in text:
+            text = text.split(marker, 1)[0].rstrip()
+    return text
+
+
+def _drop_inspiration_section(user_text: str) -> str:
+    return _drop_optional_program_sections(user_text)
 
 
 def truncate_vanilla_messages(
@@ -810,14 +1319,29 @@ def truncate_vanilla_messages(
     reserved_completion_tokens: int,
     model_context_len: int,
     categorical: bool = False,
+    n_actions: Optional[int] = None,
+    interface_text: Optional[str] = None,
+    top_programs: Optional[List[Dict[str, Any]]] = None,
+    diverse_programs: Optional[List[Dict[str, Any]]] = None,
+    inspirations: Optional[List[Dict[str, Any]]] = None,
+    previous_programs: Optional[List[Dict[str, Any]]] = None,
+    artifacts: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, str], TruncationState]:
     """
-    Deterministically shrink prompt until estimated tokens <= max_prompt_tokens.
-    Never includes test trials (caller must pass train+val only).
+    Fit the prompt under the Qwen input ceiling.
+
+    Required: system, task, choose() contract, current parent. Observed train+val
+    examples outrank optional official context. Optional blocks are appended in
+    411fb59 template order (artifacts, previous attempts, top, diverse,
+    inspirations) while they fit, then dropped in reverse before examples are
+    reduced. Never includes test.
     """
+    del reserved_completion_tokens  # counted by the chat template + separate max_tokens
     state = TruncationState()
-    trial_line_caps = [40, 30, 20, 10, 5]
     all_lines = [ln for ln in trials_compact.splitlines() if ln.strip()]
+    state.examples_available = len(all_lines)
+    ceiling = min(int(max_prompt_tokens), ICLR_FROZEN_INPUT_TOKEN_CEILING)
+    ceiling = min(ceiling, int(model_context_len) - ICLR_FROZEN_LLM_MAX_TOKENS)
 
     def _format_metric(k: str, v: Any) -> str:
         if isinstance(v, bool):
@@ -836,12 +1360,15 @@ def truncate_vanilla_messages(
     )
 
     def build_user(trials_text: str, include_metrics: bool) -> str:
+        api = (interface_text or "").strip() or choose_api_text(
+            categorical=categorical, n_actions=n_actions
+        )
         parts = [
             "# Task (vanilla — no TEH prompt engineering)",
             task_text.strip(),
             "",
             "# API",
-            CHOOSE_API_CATEGORICAL if categorical else CHOOSE_API_BERNOULLI,
+            api,
             "",
             "# Output format (required for parser)",
             _FULL_REWRITE_OUTPUT_FORMAT.strip(),
@@ -861,38 +1388,155 @@ def truncate_vanilla_messages(
         "You improve Python programs for human choice prediction. "
         "Return one fenced ```python code block containing the full revised program."
     )
-    trials_text = trials_compact
+    required_user = build_user("", include_metrics=False)
+    required_tokens = chat_input_token_count(system, required_user)
+    if required_tokens > ceiling:
+        state.estimated_tokens = required_tokens
+        state.trim_reason = "required_overflow"
+        state.steps.append("required_overflow")
+        raise RequiredPromptOverflowError(
+            f"required system/task/interface/parent prompt is {required_tokens} tokens, "
+            f"exceeds ceiling {ceiling}"
+        )
+
     include_metrics = True
+    example_lines = list(all_lines)
+    trials_text = "\n".join(example_lines)
+    user = build_user(trials_text, include_metrics)
+    state.estimated_tokens = chat_input_token_count(system, user)
+    state.prompt_trial_count = len(example_lines)
+    state.examples_included = len(example_lines)
+    fitted = state.estimated_tokens <= ceiling
 
-    for cap in trial_line_caps:
-        if len(all_lines) > cap:
-            trials_text = "\n".join(all_lines[:cap])
-            state.steps.append(f"cap_prompt_trials_{cap}")
-        user = build_user(trials_text, include_metrics)
-        est = estimate_tokens(system) + estimate_tokens(user) + reserved_completion_tokens
-        state.estimated_tokens = est
-        state.prompt_trial_count = len([ln for ln in trials_text.splitlines() if ln.strip()])
-        if est <= max_prompt_tokens:
-            return {"system": system, "user": user}, state
-        state.steps.append("drop_metrics")
+    if not fitted:
         include_metrics = False
+        state.steps.append("drop_metrics")
         user = build_user(trials_text, include_metrics)
-        est = estimate_tokens(system) + estimate_tokens(user) + reserved_completion_tokens
-        state.estimated_tokens = est
-        if est <= max_prompt_tokens:
-            return {"system": system, "user": user}, state
+        state.estimated_tokens = chat_input_token_count(system, user)
+        fitted = state.estimated_tokens <= ceiling
 
-    state.steps.append("minimal_trials_5")
-    trials_text = "\n".join(all_lines[:5])
-    user = build_user(trials_text, include_metrics=False)
-    state.estimated_tokens = estimate_tokens(system) + estimate_tokens(user) + reserved_completion_tokens
-    state.prompt_trial_count = min(5, len(all_lines))
-    return {"system": system, "user": user}, state
+    if not fitted:
+        for cap in ICLR_PROMPT_EXAMPLE_REDUCTION_CAPS:
+            if len(all_lines) <= cap:
+                continue
+            example_lines = all_lines[:cap]
+            trials_text = "\n".join(example_lines)
+            state.steps.append(f"cap_prompt_trials_{cap}")
+            user = build_user(trials_text, include_metrics)
+            state.estimated_tokens = chat_input_token_count(system, user)
+            state.prompt_trial_count = len(example_lines)
+            state.examples_included = len(example_lines)
+            if state.estimated_tokens <= ceiling:
+                fitted = True
+                state.trim_reason = f"reduced_examples_to_{cap}"
+                break
+
+    if not fitted:
+        state.steps.append("minimal_trials_5")
+        example_lines = all_lines[:5]
+        trials_text = "\n".join(example_lines)
+        user = build_user(trials_text, include_metrics=False)
+        state.estimated_tokens = chat_input_token_count(system, user)
+        state.prompt_trial_count = len(example_lines)
+        state.examples_included = len(example_lines)
+        state.trim_reason = "reduced_examples_to_5"
+        if state.estimated_tokens > ceiling:
+            state.trim_reason = "required_plus_examples_overflow"
+            raise RequiredPromptOverflowError(
+                f"required content plus minimal examples is {state.estimated_tokens} tokens, "
+                f"exceeds ceiling {ceiling}"
+            )
+
+    base_user = user
+    artifacts_section = format_official_artifacts_section(artifacts)
+    previous_section = format_official_previous_attempts(previous_programs)
+    state.artifacts_requested = 1 if artifacts_section else 0
+    state.previous_attempts_requested = 1 if previous_section else 0
+    state.top_programs_requested = len(list(top_programs or []))
+    state.diverse_programs_requested = len(list(diverse_programs or []))
+    state.inspirations_requested = len(list(inspirations or []))
+
+    def _try_section(kind: str, section: str) -> bool:
+        nonlocal base_user
+        if not section:
+            return False
+        candidate = base_user + "\n\n" + section
+        est = chat_input_token_count(system, candidate)
+        if est > ceiling:
+            state.steps.append(f"drop_{kind}")
+            return False
+        base_user = candidate
+        state.estimated_tokens = est
+        return True
+
+    if artifacts_section and _try_section("artifacts", artifacts_section):
+        state.artifacts_kept = 1
+        state.steps.append("keep_artifacts")
+    if previous_section and _try_section("previous_attempts", previous_section):
+        state.previous_attempts_kept = 1
+        state.steps.append("keep_previous_attempts")
+
+    program_base = base_user
+    kept_top: List[Dict[str, Any]] = []
+    kept_div: List[Dict[str, Any]] = []
+    kept_insp: List[Dict[str, Any]] = []
+
+    def _try_keep(kind: str, kept: List[Dict[str, Any]], prog: Dict[str, Any]) -> bool:
+        nonlocal base_user
+        trial_top = list(kept_top)
+        trial_div = list(kept_div)
+        trial_insp = list(kept_insp)
+        if kind == "top":
+            trial_top = kept + [prog]
+        elif kind == "diverse":
+            trial_div = kept + [prog]
+        else:
+            trial_insp = kept + [prog]
+        parts = [
+            format_official_top_section(trial_top),
+            format_official_diverse_section(trial_div),
+            format_official_inspiration_section(trial_insp),
+        ]
+        extra = "\n\n".join(p for p in parts if p)
+        candidate = program_base + (("\n\n" + extra) if extra else "")
+        est = chat_input_token_count(system, candidate)
+        if est > ceiling:
+            state.steps.append(f"drop_{kind}_{len(kept)}")
+            return False
+        kept.append(prog)
+        base_user = candidate
+        state.estimated_tokens = est
+        return True
+
+    for prog in list(top_programs or []):
+        if isinstance(prog, dict) and str(prog.get("code") or "").strip():
+            _try_keep("top", kept_top, prog)
+    for prog in list(diverse_programs or []):
+        if isinstance(prog, dict) and str(prog.get("code") or "").strip():
+            _try_keep("diverse", kept_div, prog)
+    for prog in list(inspirations or []):
+        if isinstance(prog, dict) and str(prog.get("code") or "").strip():
+            _try_keep("inspiration", kept_insp, prog)
+    state.top_programs_kept = len(kept_top)
+    state.diverse_programs_kept = len(kept_div)
+    state.inspirations_kept = len(kept_insp)
+    if kept_top:
+        state.steps.append(f"keep_top_{len(kept_top)}")
+    if kept_div:
+        state.steps.append(f"keep_diverse_{len(kept_div)}")
+    if kept_insp:
+        state.steps.append(f"keep_inspirations_{len(kept_insp)}")
+    dropped_optional = any(s.startswith("drop_") for s in state.steps)
+    if dropped_optional and not state.trim_reason:
+        state.trim_reason = "dropped_optional_blocks"
+    return {"system": system, "user": base_user}, state
 
 
 def _estimate_total_prompt_tokens(system_message: str, messages: List[Dict[str, str]], reserved: int) -> int:
     user_text = messages[-1].get("content", "") if messages else ""
-    return estimate_tokens(system_message or "") + estimate_tokens(user_text) + reserved
+    # Chat-template input tokens; reserved generation is a separate vLLM max_tokens.
+    del reserved
+    return chat_input_token_count(system_message or "", user_text)
 
 
 def _append_prompt_diagnostic(
@@ -912,9 +1556,25 @@ def _append_prompt_diagnostic(
         "source": source,
         "estimated_prompt_tokens": state.estimated_tokens,
         "hard_prompt_token_cap": ctx.get("hard_prompt_token_cap"),
+        "examples_available": state.examples_available,
+        "examples_included": state.examples_included,
         "prompt_trial_count": state.prompt_trial_count,
         "prompt_train_trials": ctx.get("prompt_train_trials"),
         "prompt_val_trials": ctx.get("prompt_val_trials"),
+        "artifacts_requested": state.artifacts_requested,
+        "artifacts_included": state.artifacts_kept,
+        "previous_attempts_requested": state.previous_attempts_requested,
+        "previous_attempts_included": state.previous_attempts_kept,
+        "top_programs_requested": state.top_programs_requested,
+        "top_programs_included": state.top_programs_kept,
+        "diverse_programs_requested": state.diverse_programs_requested,
+        "diverse_programs_included": state.diverse_programs_kept,
+        "inspirations_requested": state.inspirations_requested,
+        "inspirations_included": state.inspirations_kept,
+        "inspirations_kept": state.inspirations_kept,
+        "top_programs_kept": state.top_programs_kept,
+        "diverse_programs_kept": state.diverse_programs_kept,
+        "trim_reason": state.trim_reason,
         "truncation_steps": state.steps,
         "status": status,
         "safety_guard_passed": safety_guard_passed,
@@ -937,22 +1597,29 @@ def _append_prompt_diagnostic(
 
 
 def _minimal_shrink_user_message(user_text: str, cap: int, system_message: str, reserved: int) -> Tuple[str, List[str]]:
-    """Drop lines from the end of user content until estimated tokens fit cap."""
+    """Drop optional program blocks first; never strip the choose() contract or parent."""
+    del reserved
     steps: List[str] = []
-    est = estimate_tokens(system_message or "") + estimate_tokens(user_text) + reserved
+    est = chat_input_token_count(system_message or "", user_text)
     if est <= cap:
         return user_text, steps
-    lines = user_text.splitlines()
-    while lines and est > cap:
-        lines = lines[:-1]
-        steps.append("guard_drop_user_lines")
-        user_text = "\n".join(lines) if lines else "(prompt truncated to fit token cap)"
-        est = estimate_tokens(system_message or "") + estimate_tokens(user_text) + reserved
-    if est > cap and user_text:
-        max_chars = max(200, cap * 3)
-        user_text = user_text[:max_chars]
-        steps.append("guard_hard_char_cap")
-        est = estimate_tokens(system_message or "") + estimate_tokens(user_text) + reserved
+    for marker, name in _OPTIONAL_DROP_MARKERS:
+        if marker in user_text:
+            user_text = user_text.split(marker, 1)[0].rstrip()
+            steps.append(f"guard_drop_{name}")
+            est = chat_input_token_count(system_message or "", user_text)
+            if est <= cap:
+                return user_text, steps
+    # Drop example lines from the end of the examples block only.
+    marker = "# Example trials (train+val only; compact)"
+    if marker in user_text:
+        head, tail = user_text.split(marker, 1)
+        example_lines = [ln for ln in tail.splitlines() if ln.strip()]
+        while example_lines and est > cap:
+            example_lines = example_lines[:-1]
+            steps.append("guard_drop_example_line")
+            user_text = head + marker + ("\n" + "\n".join(example_lines) if example_lines else "")
+            est = chat_input_token_count(system_message or "", user_text)
     return user_text, steps
 
 
@@ -966,32 +1633,70 @@ def _patched_build_prompt(
     """
     Sole builder/truncator for LLM prompts.
 
-    OpenEvolve database/islands still select parents, but top/inspiration/history/artifacts
-    from the default OpenEvolve prompt are intentionally omitted here.
+    OpenEvolve database/islands still select a single parent. Official optional
+    whole-program context comes from the worker kwargs: ``previous_programs`` is
+    the island top-``num_top`` list, ``top_programs`` is the island-sorted slice
+    of size num_top+num_diverse (diverse taken via official ``random.sample``),
+    ``inspirations`` is ``sample_from_island(..., num_inspirations=num_diverse)``,
+    and ``program_artifacts`` is the parent artifact dict when include_artifacts
+    is on. Optional blocks are packed after required task/contract/parent/examples
+    and dropped before reducing examples.
     """
     ctx = _WORKER_VANILLA
     task_text = ctx.get("task_text", "")
     program_code = current_program or ""
     metrics = program_metrics or {}
     trials_compact = ctx.get("trials_compact", "")
-    max_prompt_tokens = int(ctx.get("hard_prompt_token_cap", 14000))
-    reserved = int(ctx.get("llm_max_tokens", 1024)) + 256
+    reserved = int(ctx.get("llm_max_tokens", ICLR_FROZEN_LLM_MAX_TOKENS))
     model_len = int(ctx.get("max_model_len", 16384))
-    max_prompt_tokens = min(max_prompt_tokens, model_len - reserved)
-    prompt, state = truncate_vanilla_messages(
-        task_text=task_text,
-        program_code=program_code,
-        metrics=metrics,
-        trials_compact=trials_compact,
-        max_prompt_tokens=max_prompt_tokens,
-        reserved_completion_tokens=reserved,
-        model_context_len=model_len,
-        categorical=bool(ctx.get("categorical", False)),
+    max_prompt_tokens = min(
+        int(ctx.get("hard_prompt_token_cap", ICLR_FROZEN_INPUT_TOKEN_CEILING)),
+        ICLR_FROZEN_INPUT_TOKEN_CEILING,
+        model_len - reserved,
     )
+    cfg = getattr(self, "config", None)
+    num_top = int(getattr(cfg, "num_top_programs", ICLR_FROZEN_NUM_TOP_PROGRAMS))
+    num_diverse = int(getattr(cfg, "num_diverse_programs", ICLR_FROZEN_NUM_DIVERSE_PROGRAMS))
+    include_artifacts = bool(getattr(cfg, "include_artifacts", ICLR_FROZEN_INCLUDE_ARTIFACTS))
+    top, diverse, insp = split_official_optional_programs(
+        kwargs.get("top_programs") or [],
+        kwargs.get("inspirations") or [],
+        num_top=num_top,
+        num_diverse=num_diverse,
+    )
+    artifacts = kwargs.get("program_artifacts") if include_artifacts else None
+    try:
+        prompt, state = truncate_vanilla_messages(
+            task_text=task_text,
+            program_code=program_code,
+            metrics=metrics,
+            trials_compact=trials_compact,
+            max_prompt_tokens=max_prompt_tokens,
+            reserved_completion_tokens=reserved,
+            model_context_len=model_len,
+            categorical=bool(ctx.get("categorical", False)),
+            n_actions=ctx.get("n_actions"),
+            interface_text=ctx.get("interface_text"),
+            top_programs=top,
+            diverse_programs=diverse,
+            inspirations=insp,
+            previous_programs=kwargs.get("previous_programs") or [],
+            artifacts=artifacts if isinstance(artifacts, dict) else None,
+        )
+    except RequiredPromptOverflowError:
+        state = TruncationState(trim_reason="required_overflow", steps=["required_overflow"])
+        ctx["last_truncation"] = state
+        _append_prompt_diagnostic(
+            ctx, source="build_prompt", state=state, status="required_overflow", safety_guard_passed=False
+        )
+        raise
     state.prompt_train_trials = int(ctx.get("prompt_train_trials", 0))
     state.prompt_val_trials = int(ctx.get("prompt_val_trials", 0))
     ctx["last_truncation"] = state
-    status = "truncated" if state.steps else "ok"
+    truncating = any(
+        s.startswith(("cap_", "drop_", "minimal_", "guard_")) for s in state.steps
+    )
+    status = "truncated" if truncating else "ok"
     _append_prompt_diagnostic(ctx, source="build_prompt", state=state, status=status, safety_guard_passed=None)
     return prompt
 
@@ -1000,9 +1705,13 @@ def _patched_generate_with_context(self, system_message, messages, **kwargs):
     """Final safety guard only — never rebuilds the task prompt from message content."""
     ctx = _WORKER_VANILLA
     if ctx and messages:
-        reserved = int(ctx.get("llm_max_tokens", 1024)) + 256
+        reserved = int(ctx.get("llm_max_tokens", ICLR_FROZEN_LLM_MAX_TOKENS))
         model_len = int(ctx.get("max_model_len", 16384))
-        cap = min(int(ctx.get("hard_prompt_token_cap", 14000)), model_len - reserved)
+        cap = min(
+            int(ctx.get("hard_prompt_token_cap", ICLR_FROZEN_INPUT_TOKEN_CEILING)),
+            ICLR_FROZEN_INPUT_TOKEN_CEILING,
+            model_len - reserved,
+        )
         total_est = _estimate_total_prompt_tokens(system_message or "", messages, reserved)
         guard_state = TruncationState(estimated_tokens=total_est)
         last_trunc = ctx.get("last_truncation")
@@ -1048,8 +1757,36 @@ def _patched_generate_with_context(self, system_message, messages, **kwargs):
     return _ORIG_GENERATE_WITH_CONTEXT(self, system_message, messages, **kwargs)
 
 
+def _adapt_official_failure_metrics_for_loglik(metrics: Any) -> Any:
+    """Map official failed-eval metrics so fitness cannot beat valid negative loglik.
+
+    OpenEvolve (audit 411fb59 and the ProcessParallel APIs this runner imports)
+    scores a failed ``evaluate()`` / timeout / unexpected return as
+    ``{"error": 0.0}`` or ``{"error": 0.0, "timeout": True}`` with no
+    ``combined_score``. ``get_fitness_score`` then uses that 0.0. That is the
+    worst value for accuracy-style maximize; it outranks valid log-likelihood.
+    Attach ``FAILED_COMBINED_SCORE`` only when official failure metrics are
+    missing ``combined_score``. Successful returns are unchanged.
+    """
+    if not isinstance(metrics, dict):
+        return metrics
+    if "combined_score" in metrics:
+        return metrics
+    if (not metrics) or ("error" in metrics) or (metrics.get("timeout") is True):
+        adapted = dict(metrics)
+        adapted["combined_score"] = float(FAILED_COMBINED_SCORE)
+        return adapted
+    return metrics
+
+
+async def _patched_evaluate_program(self, program_code: str, program_id: str = ""):
+    metrics = await _ORIG_EVALUATE_PROGRAM(self, program_code, program_id)
+    return _adapt_official_failure_metrics_for_loglik(metrics)
+
+
 def _install_runtime_patches() -> None:
-    global _ORIG_BUILD_PROMPT, _ORIG_GENERATE_WITH_CONTEXT
+    global _ORIG_BUILD_PROMPT, _ORIG_GENERATE_WITH_CONTEXT, _ORIG_EVALUATE_PROGRAM
+    import openevolve.evaluator as oe_evaluator
     import openevolve.llm.openai as oe_openai
     import openevolve.prompt.sampler as oe_sampler
 
@@ -1059,6 +1796,9 @@ def _install_runtime_patches() -> None:
     if _ORIG_GENERATE_WITH_CONTEXT is None:
         _ORIG_GENERATE_WITH_CONTEXT = oe_openai.OpenAILLM.generate_with_context
         oe_openai.OpenAILLM.generate_with_context = _patched_generate_with_context
+    if _ORIG_EVALUATE_PROGRAM is None:
+        _ORIG_EVALUATE_PROGRAM = oe_evaluator.Evaluator.evaluate_program
+        oe_evaluator.Evaluator.evaluate_program = _patched_evaluate_program
 
 
 _OE_VANILLA_WORKER_CODE = """
@@ -1159,6 +1899,7 @@ class VanillaProcessParallelController(ProcessParallelController):
             max_trials_per_problem=int(ctx["max_prompt_trials_per_problem"]),
             subsample_seed=int(ctx["split_seed"]) + iteration * 9973 + int(ctx["participant_id"]) * 100007,
         )
+        # selected is prompt-display only; evaluator JSON still has full train+val.
         ctx["prompt_trial_count"] = len(selected)
         ctx["prompt_train_trials"] = n_train
         ctx["prompt_val_trials"] = n_val
@@ -1173,6 +1914,8 @@ class VanillaProcessParallelController(ProcessParallelController):
             "prompt_train_trials": n_train,
             "prompt_val_trials": n_val,
             "categorical": bool(ctx.get("categorical", False)),
+            "n_actions": ctx.get("n_actions"),
+            "interface_text": ctx.get("interface_text"),
             "diagnostics_path": ctx.get("diagnostics_path"),
         }
         return snap
@@ -1241,7 +1984,10 @@ def _render_evaluator_py(
     if not (0.0 < split_ratio < 1.0):
         raise ValueError(f"split_ratio must be in (0,1), got {split_ratio}")
     categorical_lit = "True" if categorical else "False"
-    return f'''"""Auto-generated OpenEvolve evaluator (observed-union objective; no test access)."""
+    return f'''"""Auto-generated OpenEvolve evaluator (observed-union objective; no test access).
+
+Loads the complete retained train+val JSON. Prompt example caps do not apply here.
+"""
 import json
 import math
 from pathlib import Path
@@ -1318,16 +2064,20 @@ def _valid_action_ids(problem: Dict[str, Any]) -> List[int]:
 
 def _coerce_categorical(probs_raw: Any, valid_ids: List[int]) -> Dict[int, float]:
     K = len(valid_ids)
+    if K < 1:
+        raise ValueError("no valid action ids")
     expected = set(valid_ids)
     if isinstance(probs_raw, dict):
         raw = probs_raw
     elif K == 2 and isinstance(probs_raw, (float, int, bool)):
         p1 = float(probs_raw)
-        p1 = min(max(p1, 0.0), 1.0) if math.isfinite(p1) else 0.5
+        if not (math.isfinite(p1) and 0.0 <= p1 <= 1.0):
+            raise ValueError(f"invalid Bernoulli-style categorical output: {{p1!r}}")
         raw = {{0: 1.0 - p1, 1: p1}}
     else:
-        u = 1.0 / K
-        return {{aid: u for aid in valid_ids}}
+        raise ValueError(
+            f"malformed categorical choose() output: {{type(probs_raw).__name__}}"
+        )
     probs = {{aid: 0.0 for aid in valid_ids}}
     for key, val in raw.items():
         try:
@@ -1344,43 +2094,30 @@ def _coerce_categorical(probs_raw: Any, valid_ids: List[int]) -> Dict[int, float
             probs[aid] = p
     total = sum(probs.values())
     if total <= 0.0:
-        u = 1.0 / K
-        return {{aid: u for aid in valid_ids}}
+        raise ValueError("categorical probabilities have no positive mass")
     return {{aid: probs[aid] / total for aid in valid_ids}}
 
 
 def evaluate_trials(choose_fn: Callable, trials: List[Dict[str, Any]]) -> Dict[str, float]:
     if not trials:
-        return {{"avg_loglik": float("-inf"), "errors": 1, "n": 0}}
+        return {{"avg_loglik": float("-inf"), "n": 0}}
     ll = 0.0
-    errors = 0
     if CATEGORICAL:
         for t in trials:
             problem = t.get("problem") or {{}}
             y = int(t["action"])
             valid_ids = _valid_action_ids(problem)
             if not valid_ids:
-                errors += 1
-                ll += math.log(CHOICE13K_LOGLIK_EPS)
-                continue
-            try:
-                probs = _coerce_categorical(choose_fn(problem, t.get("history") or []), valid_ids)
-                p = _clamp(float(probs.get(y, 0.0)))
-            except Exception:
-                errors += 1
-                p = _clamp(1.0 / max(1, len(valid_ids)))
+                raise ValueError("no valid action ids")
+            probs = _coerce_categorical(choose_fn(problem, t.get("history") or []), valid_ids)
+            p = _clamp(float(probs.get(y, 0.0)))
             ll += math.log(p)
-        return {{"avg_loglik": float(ll / len(trials)), "errors": errors, "n": len(trials)}}
+        return {{"avg_loglik": float(ll / len(trials)), "n": len(trials)}}
     for t in trials:
         y = int(t["action"])
-        try:
-            p = _clamp(_parse_choose_output(choose_fn(t["problem"], t["history"])))
-        except Exception:
-            errors += 1
-            p = 0.5
-            p = _clamp(p)
+        p = _clamp(_parse_choose_output(choose_fn(t["problem"], t["history"])))
         ll += y * math.log(p) + (1 - y) * math.log(1.0 - p)
-    return {{"avg_loglik": float(ll / len(trials)), "errors": errors, "n": len(trials)}}
+    return {{"avg_loglik": float(ll / len(trials)), "n": len(trials)}}
 
 
 def evaluate(program_path: str) -> Dict[str, float]:
@@ -1388,33 +2125,17 @@ def evaluate(program_path: str) -> Dict[str, float]:
     code = path.read_text(encoding="utf-8")
     choose_fn = compile_program(code)
     if choose_fn is None:
-        return {{
-            "combined_score": float("-inf"),
-            "observed_loglik": float("-inf"),
-            "train_loglik": float("-inf"),
-            "val_loglik": float("-inf"),
-            "n_train": 0,
-            "n_val": 0,
-            "error": "no choose()",
-        }}
+        raise RuntimeError("no choose()")
     train_trials, val_trials = _load_splits()
     n_train = len(train_trials)
     n_val = len(val_trials)
     train_eval = evaluate_trials(choose_fn, train_trials)
     val_eval = evaluate_trials(choose_fn, val_trials)
-    if train_eval.get("errors", 0) > 0 and n_train > 0:
-        return {{
-            "combined_score": float("-inf"),
-            "observed_loglik": float("-inf"),
-            "train_loglik": float("-inf"),
-            "val_loglik": float("-inf"),
-            "n_train": n_train,
-            "n_val": n_val,
-            "error": "invalid_on_train",
-        }}
     train_ll = float(train_eval["avg_loglik"])
     val_ll = float(val_eval["avg_loglik"]) if n_val > 0 else train_ll
     combined = _pooled_observed_loglik(train_ll, val_ll, n_train, n_val)
+    if not math.isfinite(combined):
+        raise RuntimeError("non-finite observed combined_score")
     return {{
         "combined_score": combined,
         "observed_loglik": combined,
@@ -1599,13 +2320,17 @@ def run_participant(
     posthoc_test_path = participant_dir / "trials_test_posthoc.json"
     _write_posthoc_test_json(posthoc_test_path, test_trials)
 
-    seed_path, base_prompt_path = resolve_openevolve_seed_and_prompt(
+    seed_path, _base_prompt_path = resolve_openevolve_seed_and_prompt(
         args.dataset,
         seed_path=args.seed_path,
         base_prompt=args.base_prompt,
     )
-    task_text = base_prompt_path.read_text(encoding="utf-8")
+    categorical = is_categorical_output_dataset(args.dataset)
+    n_actions = dataset_n_actions(args.dataset)
+    task_text = vanilla_dataset_description(args.dataset, base_prompt=args.base_prompt)
+    interface_text = choose_api_text(categorical=categorical, n_actions=n_actions)
     (exp_dir / "vanilla_task_prompt.txt").write_text(task_text, encoding="utf-8")
+    (exp_dir / "vanilla_interface_contract.txt").write_text(interface_text, encoding="utf-8")
 
     initial_src = seed_path.resolve()
     initial_dst = exp_dir / "initial_program.py"
@@ -1616,7 +2341,7 @@ def run_participant(
         _render_evaluator_py(
             evolution_split_path,
             split_ratio=args.split_ratio,
-            categorical=is_categorical_output_dataset(args.dataset),
+            categorical=categorical,
         ),
         encoding="utf-8",
     )
@@ -1630,6 +2355,8 @@ def run_participant(
         "train_trials": train_trials,
         "val_trials": val_trials,
         "task_text": task_text,
+        "interface_text": interface_text,
+        "n_actions": n_actions,
         "max_prompt_train_trials": args.max_prompt_train_trials,
         "max_prompt_trials_per_problem": args.max_prompt_trials_per_problem,
         "split_seed": args.split_seed,
@@ -1637,7 +2364,7 @@ def run_participant(
         "llm_max_tokens": args.llm_max_tokens,
         "max_model_len": args.max_model_len,
         "diagnostics_path": str(diagnostics_path),
-        "categorical": is_categorical_output_dataset(args.dataset),
+        "categorical": categorical,
     }
 
     oe_output = participant_dir / "openevolve_output"
@@ -1820,10 +2547,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--all_max_participants", type=int, default=None)
     p.add_argument("--filter_mixed_gambles", action="store_true")
     p.add_argument("--split_mode", type=str, default="within_participant", choices=["within_participant", "across_participants"])
-    p.add_argument("--split_ratio", type=float, default=0.6)
-    p.add_argument("--split_seed", type=int, default=0)
+    p.add_argument("--split_ratio", type=float, default=ICLR_FROZEN_SPLIT_RATIO)
+    p.add_argument("--split_seed", type=int, default=ICLR_FROZEN_SPLIT_SEED)
     p.add_argument("--seed_path", type=str, default=str(DEFAULT_SEED_PATH))
-    p.add_argument("--base_prompt", type=str, default=str(DEFAULT_BASE_PROMPT))
+    p.add_argument(
+        "--base_prompt",
+        type=str,
+        default=None,
+        help=(
+            "Optional override file for # Task text. Frozen ICLR uses registered "
+            "task_description for all 15 datasets; the legacy vanilla infer files "
+            "are never loaded."
+        ),
+    )
     p.add_argument(
         "--max_observed_trials_per_participant",
         type=int,
@@ -1835,27 +2571,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     add_limited_data_cli_arguments(p)
-    p.add_argument("--n_iterations", type=int, default=600)
+    p.set_defaults(
+        limited_data_protocol=ICLR_FROZEN_LIMITED_DATA_PROTOCOL,
+        limited_train_val=ICLR_FROZEN_LIMITED_TRAIN_VAL,
+    )
+    p.add_argument("--n_iterations", type=int, default=ICLR_FROZEN_N_ITERATIONS)
     p.add_argument("--checkpoint_interval", type=int, default=50)
-    p.add_argument("--max_prompt_train_trials", type=int, default=40)
+    p.add_argument(
+        "--max_prompt_train_trials",
+        type=int,
+        default=ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS,
+        help=(
+            "Legacy name. Prompt-display cap on the combined observed train+validation "
+            "union (T-PICS 60). Fitness still uses the complete retained train+val set. "
+            "0 = no prompt cap. SA40 participants usually have <=40 observations, so 40 "
+            "and 60 select the same examples except Kool's optional +1 stage-1 pairing."
+        ),
+    )
     p.add_argument("--max_prompt_trials_per_problem", type=int, default=5)
-    p.add_argument("--model", type=str, default="Qwen/Qwen2.5-Coder-32B-Instruct")
+    p.add_argument("--model", type=str, default=ICLR_FROZEN_MODEL)
     p.add_argument("--api_base", type=str, default=None)
     p.add_argument("--vllm_url", type=str, default=os.environ.get("VLLM_LOCAL_URL", "http://localhost:8000/v1"))
     p.add_argument("--llm_api_key", type=str, default=os.environ.get("VLLM_LOCAL_API_KEY", "EMPTY"))
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top_p", type=float, default=None)
-    p.add_argument("--llm_max_tokens", type=int, default=1024)
+    p.add_argument("--llm_max_tokens", type=int, default=ICLR_FROZEN_LLM_MAX_TOKENS)
     p.add_argument("--max_model_len", type=int, default=16384)
-    p.add_argument("--hard_prompt_token_cap", type=int, default=14000)
+    p.add_argument("--hard_prompt_token_cap", type=int, default=ICLR_FROZEN_INPUT_TOKEN_CEILING)
     p.add_argument("--llm_timeout", type=int, default=300)
     p.add_argument("--llm_retries", type=int, default=3)
-    p.add_argument("--parallel_evaluations", type=int, default=4)
+    p.add_argument("--parallel_evaluations", type=int, default=ICLR_FROZEN_PARALLEL_EVALUATIONS)
     p.add_argument(
         "--parallel_participants",
         type=int,
-        default=1,
-        help="Number of participants to evolve concurrently (thread pool). Default 1 (sequential).",
+        default=ICLR_FROZEN_PARALLEL_PARTICIPANTS,
+        help="Number of participants to evolve concurrently (thread pool). ICLR freeze: 1.",
     )
     p.add_argument("--evaluator_timeout", type=int, default=120)
     p.add_argument("--evaluator_max_retries", type=int, default=2)
@@ -1878,9 +2628,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--elite_selection_ratio", type=float, default=0.1)
     p.add_argument("--migration_interval", type=int, default=50)
     p.add_argument("--migration_rate", type=float, default=0.1)
-    p.add_argument("--num_top_programs", type=int, default=1)
-    p.add_argument("--num_diverse_programs", type=int, default=0)
-    p.add_argument("--include_artifacts", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--num_top_programs", type=int, default=ICLR_FROZEN_NUM_TOP_PROGRAMS)
+    p.add_argument(
+        "--num_diverse_programs",
+        type=int,
+        default=ICLR_FROZEN_NUM_DIVERSE_PROGRAMS,
+        help=(
+            "Official OpenEvolve inspiration count (contextual examples, not co-parents). "
+            "Default 2 matches PromptConfig.num_diverse_programs at 411fb59."
+        ),
+    )
+    p.add_argument("--include_artifacts", action=argparse.BooleanOptionalAction, default=ICLR_FROZEN_INCLUDE_ARTIFACTS)
     p.add_argument("--use_llm_feedback", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--cascade_evaluation", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--enable_artifacts", action=argparse.BooleanOptionalAction, default=True)
@@ -1904,6 +2662,11 @@ def main() -> None:
         raise ValueError(f"--parallel_participants must be >= 1, got {args.parallel_participants}")
     if args.parallel_evaluations < 1:
         raise ValueError(f"--parallel_evaluations must be >= 1, got {args.parallel_evaluations}")
+    apply_iclr_frozen_range_ordinals(args)
+    oe_sha = require_openevolve_checkout()
+    if normalize_limited_data_protocol(args.limited_data_protocol) == LIMITED_DATA_PROTOCOL_OFF:
+        # ICLR default is SA40 (limited_train_val=40). Full-data reruns pass --limited_data_protocol off.
+        args.limited_train_val = None
     try:
         resolve_limited_data_budget(
             protocol=args.limited_data_protocol,
@@ -1913,14 +2676,12 @@ def main() -> None:
     except ValueError as e:
         raise SystemExit(f"Error: {e}") from e
 
-    # Resolve dataset-specific seed/prompt when CLI still points at Bernoulli defaults.
-    seed_resolved, prompt_resolved = resolve_openevolve_seed_and_prompt(
+    seed_resolved, _prompt_path = resolve_openevolve_seed_and_prompt(
         args.dataset,
         seed_path=args.seed_path,
         base_prompt=args.base_prompt,
     )
     args.seed_path = str(seed_resolved)
-    args.base_prompt = str(prompt_resolved)
 
     parallel_participants = int(args.parallel_participants)
     parallel_evaluations = int(args.parallel_evaluations)
@@ -1928,6 +2689,7 @@ def main() -> None:
     print(f"parallel_participants={parallel_participants}")
     print(f"parallel_evaluations={parallel_evaluations}")
     print(f"approx_total_concurrency={approx_concurrency}")
+    print(f"openevolve_git_sha={oe_sha}")
     print(f"dataset={args.dataset} categorical={is_categorical_output_dataset(args.dataset)}")
     print(f"seed_path={args.seed_path}")
     print(f"base_prompt={args.base_prompt}")
@@ -1943,7 +2705,13 @@ def main() -> None:
         openevolve_output_base_dir(args.dataset, timestamp, psych_dataset_split=psych_dataset_split)
     )
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "run_config.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
+    run_meta = dict(vars(args))
+    run_meta["openevolve_git_sha"] = oe_sha
+    run_meta["openevolve_expected_git_sha"] = EXPECTED_OPENEVOLVE_GIT_SHA
+    run_meta["openevolve_root"] = str(_OPENVOLVE_ROOT)
+    (run_dir / "run_config.json").write_text(
+        json.dumps(run_meta, indent=2, default=str), encoding="utf-8"
+    )
     (run_dir / "log").mkdir(exist_ok=True)
 
     valid = load_valid_participant_ids_from_json(
@@ -2012,14 +2780,19 @@ def main() -> None:
     print(
         "Split: split_ratio=0.6 -> 60% train, remainder 50/50 val/test blocks; "
         "SA40 observed = retained train+val; evolution combined_score = trial-pooled "
-        "mean loglik on the complete observed union; prompt trials from train+val only; "
+        "mean loglik on the complete observed union; "
+        f"prompt examples from train+val only (display cap "
+        f"{int(args.max_prompt_train_trials)}, fitness uncapped); "
         "test scored once after selecting the best-by-observed-union program; "
         "dataset mean = equal-person mean of person-level test loglik."
     )
     print(
-        "Prompt: vanilla/minimal (task + program + train/val trials + metrics). "
-        "OpenEvolve islands/MAP-Elites/archive still active for parent selection; "
-        "top/diverse/history/artifacts are NOT included in LLM prompts."
+        "Prompt: vanilla/minimal (task + choose() contract + parent + train/val examples). "
+        "OpenEvolve islands/MAP-Elites/archive still select one formal parent; official "
+        "optional contextual blocks (artifacts, previous attempts, 3 island-best top, "
+        "random.sample diverse leftover, 2 inspirations) are packed in 411fb59 template "
+        "order and dropped before reducing observed examples if the 14k Qwen input "
+        "ceiling is exceeded. The MAP-Elites database is not serialized into the prompt."
     )
 
     _patch_process_parallel_worker()

@@ -630,3 +630,10 @@ Authoritative method file: `analysis/config/T-PICS/Documentation.md`. G.2 transf
 
 People: valid list = non-empty train∧test after split (all 15, including five-new); then EMNLP slice. Five-new are 0–49. Wulff **1290–1339** is the only high-trial exception. Production mixed gambles uses **all** trial types (`gain_loss` + `gain_only`); no `--filter_mixed_gambles` on gated/G.1 argv.
 
+---
+
+## Short update (Sep 19 2026 — frozen ICLR OpenEvolve)
+
+Authoritative: `baseline_methods/Psych101/docs/Documentation_Openevolve.md`. Official OpenEvolve `411fb59` with a task adapter (not unmodified search). Frozen: 350 iters/person, SA40, split 0.6/seed 0, Qwen2.5-Coder-32B-Instruct, 1×4 concurrency. 350 is a **nominal full-pipeline generation budget** vs gated T-PICS (200 shared G.1+G.2 + 150 person-specific G.3+person); all 350 OE candidates are person-specific (generous to OE). All 15 `# Task` strings come from registered `task_description` / `TASK_DESCRIPTION`; `# API` is the in-runner Bernoulli/categorical contract. Kool-41 is current loader behavior, pending the SA40 audit. Production clone: `reference_repos/openevolve` at that SHA (runner never clones).
+
+

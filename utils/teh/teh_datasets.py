@@ -23,6 +23,7 @@ from data_modules.external import (
     EXTERNAL_DATASETS,
     EXTERNAL_DATASET_META,
     external_dataset_display_name,
+    external_dataset_task_description,
     external_default_data_dir,
     is_bergert_nosofsky_2007_dataset,
     is_guan_2020_stopping_dataset,
@@ -166,6 +167,20 @@ def dataset_display_name(dataset: str) -> str:
         return external_dataset_display_name(dataset)
     alias = normalize_psych101_dataset_alias(dataset)
     return PSYCH101_BINARY_DATASETS[alias]["display_name"]
+
+
+def dataset_task_description(dataset: str) -> str:
+    """Registered high-level task text (Psych-101, mixed_gambles, external)."""
+    if is_mixed_gambles_dataset(dataset):
+        return str(mixed_gambles_module.TASK_DESCRIPTION).strip()
+    if is_external_dataset(dataset):
+        return external_dataset_task_description(dataset).strip()
+    alias = normalize_psych101_dataset_alias(dataset)
+    spec = PSYCH101_BINARY_DATASETS.get(alias) or {}
+    desc = spec.get("task_description")
+    if not desc:
+        raise KeyError(f"No registered task_description for {dataset!r}")
+    return str(desc).strip()
 
 
 TEH_DATASETS_YAML = (

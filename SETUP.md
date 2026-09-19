@@ -151,8 +151,14 @@ Runners expect a local checkout (see `baseline_methods/deprecated_run_openevolve
 
 ```bash
 mkdir -p reference_repos
-git clone <openevolve-repo-url> reference_repos/openevolve
+git clone https://github.com/codelion/openevolve.git reference_repos/openevolve
+git -C reference_repos/openevolve checkout 411fb59c886c18704caaffb611e17cf9e7d824d2
 ```
+
+`baseline_methods/Psych101/run_openevolve.py` records that SHA as
+`EXPECTED_OPENEVOLVE_GIT_SHA` and fail-fasts before a production run if the
+checkout is missing or on a different commit. The runner never clones, fetches,
+or installs OpenEvolve.
 
 ### Centaur
 

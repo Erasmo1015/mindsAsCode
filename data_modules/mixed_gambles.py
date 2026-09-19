@@ -14,6 +14,10 @@ import numpy as np
 
 DEFAULT_CSV_PATH = "datasets/mixed_gambles/data_all_2021-01-08.csv"
 DATASET_NAME = "mixed_gambles"
+TASK_DESCRIPTION = (
+    "Choose between a risky gamble with explicit outcomes and probabilities and a "
+    "certain outcome. Trials are independent, so history is empty."
+)
 
 
 def three_way_unit_counts(n_units: int, split_ratio: float) -> Tuple[int, int, int]:
