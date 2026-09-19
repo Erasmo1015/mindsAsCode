@@ -15,7 +15,7 @@ python baseline_methods/Psych101/run_openevolve.py \
   --n_iterations 350 \
   --parallel_participants 1 \
   --parallel_evaluations 4 \
-  --limited_data_protocol structure_aware \
+  --limited_data_protocol structure_aware_v2 \
   --limited_train_val 40 \
   --max_prompt_train_trials 60
 
@@ -42,7 +42,8 @@ Observed train+val examples outrank optional context. Optional blocks are droppe
 before examples are reduced. The complete MAP-Elites database is never serialized.
 
 ICLR freeze: --n_iterations 350, --parallel_participants 1, --parallel_evaluations 4,
-SA40 (--limited_data_protocol structure_aware --limited_train_val 40),
+SA40 (--limited_data_protocol structure_aware_v2 --limited_train_val 40;
+v1 `structure_aware` remains available for replay),
 --max_prompt_train_trials 60 (prompt display only; fitness uses the complete
 retained train+val union). Do not copy the obsolete 10×10 example or PICS
 --max_workers 100.
@@ -171,6 +172,7 @@ ICLR_FROZEN_PARALLEL_PARTICIPANTS = 1
 ICLR_FROZEN_PARALLEL_EVALUATIONS = 4
 ICLR_FROZEN_LIMITED_DATA_PROTOCOL = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
 ICLR_V2_LIMITED_DATA_PROTOCOL = "structure_aware_v2"
+ICLR_DEFAULT_LIMITED_DATA_PROTOCOL = ICLR_V2_LIMITED_DATA_PROTOCOL
 ICLR_FROZEN_LIMITED_TRAIN_VAL = 40
 ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS = 60  # T-PICS prompt-display cap on train+val union
 ICLR_FROZEN_SPLIT_RATIO = 0.6
@@ -503,7 +505,7 @@ def iclr_frozen_argv(dataset: str, *, api_base: str = "http://localhost:8000/v1"
         "--num_top_programs",
         str(ICLR_FROZEN_NUM_TOP_PROGRAMS),
         "--limited_data_protocol",
-        ICLR_FROZEN_LIMITED_DATA_PROTOCOL,
+        ICLR_DEFAULT_LIMITED_DATA_PROTOCOL,
         "--limited_train_val",
         str(ICLR_FROZEN_LIMITED_TRAIN_VAL),
         "--max_prompt_train_trials",
@@ -2573,7 +2575,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     add_limited_data_cli_arguments(p)
     p.set_defaults(
-        limited_data_protocol=ICLR_FROZEN_LIMITED_DATA_PROTOCOL,
+        limited_data_protocol=ICLR_DEFAULT_LIMITED_DATA_PROTOCOL,
         limited_train_val=ICLR_FROZEN_LIMITED_TRAIN_VAL,
     )
     p.add_argument("--n_iterations", type=int, default=ICLR_FROZEN_N_ITERATIONS)

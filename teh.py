@@ -4818,10 +4818,24 @@ class PromptBudgetExceededError(RuntimeError):
         self.truncation_steps = truncation_steps
 
 
+def _v2_prompt_budget_estimator_name() -> str:
+    return "qwen_chat" if using_v2_prompt_contract() else "char4"
+
+
 def estimate_tokens(text: str, *, estimator: str = "char4") -> int:
-    """Fast token estimate; char4 avoids heavy tokenizer dependencies."""
+    """Prompt-budget token count.
+
+    v1 uses char4 (ceil(len/4)). Under the v2 prompt contract, use the real
+    Qwen chat tokenizer on chat-templated system+user so the existing
+    40→30→20→10→5 trial-count truncation loop matches vLLM's input size.
+    Compact one-liners are a separate v1 last resort and are not a v2 format change.
+    """
     if not text:
         return 0
+    if using_v2_prompt_contract():
+        from utils.teh.prompt_units import qwen_user_prompt_token_count
+
+        return qwen_user_prompt_token_count(text)
     if estimator == "char4":
         return math.ceil(len(text) / 4)
     return math.ceil(len(text) / 4)
@@ -4943,6 +4957,8 @@ def _serialize_trials_for_prompt(
     compact: bool,
 ) -> str:
     if using_v2_prompt_contract():
+        # Keep snapshot JSON. v2 over-budget handling is trial-count caps in
+        # _truncate_psych_prompt_to_budget, not rewriting examples as one-liners.
         return format_snapshot_examples(trials)
     if compact:
         return format_trials_to_text_compact(trials, dataset=dataset)
@@ -5180,6 +5196,9 @@ def _truncate_psych_prompt_to_budget(
             "truncated": False,
             "prompt_tokens_before_truncation": tokens_before,
             "prompt_tokens_after_truncation": tokens_before,
+            "prompt_token_estimator": _v2_prompt_budget_estimator_name()
+            if using_v2_prompt_contract()
+            else prompt_token_estimator,
             "train_trials_before": len(train_trials_source),
             "train_trials_after": n_train,
             "val_trials_before": len(val_trials_source) if val_trials_source is not None else 0,
@@ -5229,8 +5248,9 @@ def _truncate_psych_prompt_to_budget(
             if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
                 break
 
-    # 6) compact serialization
-    if not compact:
+    # 6) compact serialization (v1 only: rewrite trials as one-liners).
+    # v2 keeps snapshot JSON and continues dropping trial counts instead.
+    if not compact and not using_v2_prompt_contract():
         compact = True
         steps.append("compact_trial_serialization")
         prompt, _, _, n_train, n_val, n_parents = _assemble()
@@ -5277,7 +5297,8 @@ def _truncate_psych_prompt_to_budget(
                     else _MIN_TRAIN_TRIALS_FINAL
                 )
         effective_per_problem = 1
-        compact = True
+        if not using_v2_prompt_contract():
+            compact = True
         if len(parents) > 1:
             parents = [parents[0]]
         steps.append("final_fallback_minimal")
@@ -5292,6 +5313,9 @@ def _truncate_psych_prompt_to_budget(
         "truncated": True,
         "prompt_tokens_before_truncation": tokens_before,
         "prompt_tokens_after_truncation": tokens_after,
+        "prompt_token_estimator": _v2_prompt_budget_estimator_name()
+        if using_v2_prompt_contract()
+        else prompt_token_estimator,
         "train_trials_before": len(train_trials_source),
         "train_trials_after": n_train,
         "val_trials_before": len(val_trials_source) if val_trials_source is not None else 0,
@@ -13661,7 +13685,8 @@ def main():
         default=False,
         help=(
             "Final default T-PICS transfer pipeline: reuse frozen G.1 source pops from "
-            "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml "
+            "analysis/config/T-PICS/Transfer_source/v2/"
+            "occurrence_eb_schema4_iter10_sa40_v2.yaml "
             "(unless --t_pics_gated_independent); "
             "run two matched 5-iter target-population arms (control vs transfer); "
             "select transfer only if mean target train_val (train+val) loglik is "
@@ -13715,7 +13740,11 @@ def main():
             "A run config also fills --global_prompt_source_program from the "
             "recorded Step 1 rank-1 when that flag is omitted. "
             "--t_pics_gated_transfer defaults this path to "
-            "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml."
+            "analysis/config/T-PICS/Transfer_source/v2/"
+            "occurrence_eb_schema4_iter10_sa40_v2.yaml "
+            "(written after v2 G.1 + schema-v4 + Occurrence-EB). "
+            "Frozen v1 map: analysis/config/T-PICS/Transfer_source/"
+            "occurrence_eb_schema4_iter10.yaml."
         ),
     )
     parser.add_argument(
@@ -13913,8 +13942,8 @@ def main():
             "After the train/val/test split, keep at most N train+val observations per "
             "participant (sampled proportionally from train and val; test is never changed). "
             "Omitted or <=0 disables the cap (full data). Uses --split_seed. "
-            "Under --limited_data_protocol structure_aware this is the same N as "
-            "--limited_train_val when that flag is omitted."
+            "Under --limited_data_protocol structure_aware or structure_aware_v2 "
+            "this is the same N as --limited_train_val when that flag is omitted."
         ),
     )
     add_limited_data_cli_arguments(parser)
@@ -13969,7 +13998,11 @@ def main():
         type=str,
         default="char4",
         choices=("char4",),
-        help="Token estimator for prompt budgeting: char4 = ceil(len/4) (default: char4).",
+        help=(
+            "Token estimator for prompt budgeting: char4 = ceil(len/4) (default: char4). "
+            "Under structure_aware_v2 the Qwen chat tokenizer is used on chat-templated "
+            "system+user input so trial-count truncation matches vLLM."
+        ),
     )
     parser.add_argument(
         "--prompt_debug",
@@ -14546,17 +14579,19 @@ def main():
         if args.fitness_metric != "loglik":
             print("Error: --phase refine requires --fitness_metric loglik.")
             return
-
-    prompt_contract_scope(
-        limited_data_protocol_revision(getattr(args, "limited_data_protocol", "off"))
-        == "v2"
-    ).__enter__()
         if not args.prev_exp_path:
             print("Error: --phase refine requires --prev_exp_path.")
             return
         if not Path(args.prev_exp_path).exists():
             print(f"Error: --prev_exp_path does not exist: {args.prev_exp_path}")
             return
+
+    prompt_contract_scope(
+        limited_data_protocol_revision(
+            getattr(args, "limited_data_protocol", "structure_aware_v2")
+        )
+        == "v2"
+    ).__enter__()
     if args.phase == "evolution" and args.refinement_phase:
         print("Note: --refinement_phase is ignored when --phase evolution.")
     if args.elite_pool_size is not None and args.elite_pool_size < 1:
@@ -14879,7 +14914,7 @@ def main():
         wandb = init_gated_wandb_reporter(
             args=args,
             output_root=Path(base_run_dir),
-            project=str(getattr(args, "wandb_project", None) or "teh_t_pics_gated"),
+            project=str(getattr(args, "wandb_project", None) or "teh_t_pics_v2"),
             selected_source=str(_gated_entry.selected_source),
             source_job_id=(
                 "live" if t_pics_gated_independent else str(_gated_entry.job_id)

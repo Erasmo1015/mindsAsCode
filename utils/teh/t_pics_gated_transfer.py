@@ -35,15 +35,27 @@ from utils.teh.t_pics_sources import (
     official_t_pics_source,
 )
 from utils.teh.teh_datasets import PARTICIPANT_DATASETS
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG = (
-    _REPO_ROOT / "analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml"
+from utils.teh.t_pics_v2 import (
+    G1_KIND_V2,
+    INDEPENDENT_KIND_V2,
+    KIND_V2,
+    RUN_TAG_V2,
+    V1_FROZEN_SOURCE_YAML,
+    V2_SOURCE_YAML,
 )
 
-KIND = "t_pics_gated"
-INDEPENDENT_KIND = "t_pics_gated_independent"
-RUN_TAG = "g5e50p10_occurrence_eb"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Frozen v1 map (jobs 257174-257188 / 257756). Do not overwrite.
+FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V1 = V1_FROZEN_SOURCE_YAML
+# Default for new gated jobs. Written after v2 G.1 + schema-v4 + Occurrence-EB.
+FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG = V2_SOURCE_YAML
+
+KIND_V1 = "t_pics_gated"
+INDEPENDENT_KIND_V1 = "t_pics_gated_independent"
+KIND = KIND_V2
+INDEPENDENT_KIND = INDEPENDENT_KIND_V2
+G1_KIND = G1_KIND_V2
+RUN_TAG = RUN_TAG_V2
 SOURCE_POPULATION_ITERS = 10
 DEFAULT_GLOBAL_ITERS = 5
 DEFAULT_EXPLORE_CANDIDATES = 50
@@ -665,6 +677,11 @@ def apply_gated_cli_defaults(args: Any, argv: Optional[Sequence[str]] = None) ->
         args.explore_candidates = DEFAULT_EXPLORE_CANDIDATES
     if getattr(args, "t_pics_source_config", None) in (None, ""):
         args.t_pics_source_config = str(FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG)
+    if not cli_flag_was_passed("--limited_data_protocol", argv):
+        args.limited_data_protocol = "structure_aware_v2"
+    if not cli_flag_was_passed("--limited_train_val", argv):
+        if getattr(args, "limited_train_val", None) in (None,):
+            args.limited_train_val = 40
     return args
 
 
@@ -812,7 +829,7 @@ def audit_gated_transfer_prompt_budgets(
     sample_size: int = 8,
     max_prompt_train_trials: int = 60,
     split_seed: int = 0,
-    limited_data_protocol: str = "structure_aware",
+    limited_data_protocol: str = "structure_aware_v2",
     limited_train_val: int = 40,
 ) -> List[Dict[str, Any]]:
     """CPU audit of G.2 transfer instruction+source-suffix token budgets.

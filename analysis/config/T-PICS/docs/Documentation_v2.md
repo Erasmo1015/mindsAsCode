@@ -242,8 +242,9 @@ See `analysis/config/T-PICS/v2/dry_run_commands.sh`. Submitters must pass `--con
 
 ## 17. Known limitations
 
-- v2 source YAML does not exist until G.1+EB complete. Default gated T-PICS still points at the v1 freeze.
-- Cluster submitters under `cluster/` are gitignored; v2 dry-run lives in `analysis/config/T-PICS/v2/`.
+- v2 source YAML does not exist until G.1+EB complete. Default gated T-PICS now **points at** `Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml`; gated jobs fail until that file is written. Replay v1 with `--t_pics_source_config analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml`.
+- CLI default is `--limited_data_protocol structure_aware_v2 --limited_train_val 40` (teh.py, Centaur, LM, PT, OpenEvolve). Full-data reruns pass `--limited_data_protocol off`.
+- Cluster submitters under `cluster/` are gitignored; v2 dry-run lives in `analysis/config/T-PICS/v2/`. G.1 workers: `cluster/v2/ours/Qwen/`.
 - Full production-table fingerprints (all ordinals × 15) are CPU-heavy; the checked-in test uses one person per dataset plus Kool 41/45.
 - Qwen tokenizer must be locally available for production packing counts; tests that need exact 14k numbers fail clearly rather than substituting char/4.
 - Independent G.1/G.2 snapshot sampling shuffles **units within person** with the frozen seed, then round-robins people; it does not shuffle chronology inside a resetting unit.

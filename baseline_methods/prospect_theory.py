@@ -950,8 +950,8 @@ def main() -> None:
             "After the train/val/test split, keep at most N train+val observations per "
             "participant (sampled proportionally from train and val; test is never changed). "
             "Omitted or <=0 disables the cap (full data). Uses --split_seed. "
-            "Under --limited_data_protocol structure_aware this is the same N as "
-            "--limited_train_val when that flag is omitted."
+            "Under --limited_data_protocol structure_aware or structure_aware_v2 "
+            "this is the same N as --limited_train_val when that flag is omitted."
         ),
     )
     add_limited_data_cli_arguments(parser)

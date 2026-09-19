@@ -39,6 +39,7 @@ from run_openevolve import (  # noqa: E402
     EXPECTED_OPENEVOLVE_GIT_SHA,
     FAILED_COMBINED_SCORE,
     ICLR_FROZEN_LIMITED_DATA_PROTOCOL,
+    ICLR_DEFAULT_LIMITED_DATA_PROTOCOL,
     ICLR_FROZEN_LIMITED_TRAIN_VAL,
     ICLR_FROZEN_LLM_MAX_TOKENS,
     ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS,
@@ -771,7 +772,8 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.n_iterations == ICLR_FROZEN_N_ITERATIONS == 350
     assert args.parallel_participants == ICLR_FROZEN_PARALLEL_PARTICIPANTS == 1
     assert args.parallel_evaluations == ICLR_FROZEN_PARALLEL_EVALUATIONS == 4
-    assert args.limited_data_protocol == ICLR_FROZEN_LIMITED_DATA_PROTOCOL == "structure_aware"
+    assert args.limited_data_protocol == ICLR_DEFAULT_LIMITED_DATA_PROTOCOL == "structure_aware_v2"
+    assert ICLR_FROZEN_LIMITED_DATA_PROTOCOL == "structure_aware"
     assert args.limited_train_val == ICLR_FROZEN_LIMITED_TRAIN_VAL == 40
     assert args.split_ratio == ICLR_FROZEN_SPLIT_RATIO == 0.6
     assert args.split_seed == ICLR_FROZEN_SPLIT_SEED == 0
@@ -799,7 +801,7 @@ def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():
         assert parsed.n_iterations == 350
         assert parsed.parallel_participants == 1
         assert parsed.parallel_evaluations == 4
-        assert parsed.limited_data_protocol == "structure_aware"
+        assert parsed.limited_data_protocol == "structure_aware_v2"
         assert parsed.limited_train_val == 40
         assert parsed.max_prompt_train_trials == 60
         assert parsed.num_diverse_programs == 2

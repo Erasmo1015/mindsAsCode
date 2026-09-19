@@ -5,6 +5,7 @@ retained train+val union; this module only chooses display examples.
 """
 from __future__ import annotations
 
+import threading
 from collections import defaultdict, deque
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -28,9 +29,15 @@ QWEN_INPUT_CEILING = 14_000
 OUTPUT_RESERVE = 1_024
 VLLM_CONTEXT = 16_384
 QWEN_TOKENIZER_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
+# Qwen2.5 chat template inserts this when the first message is not system.
+# vLLM OpenAI serving does the same for teh.py's user-only candidate calls.
+QWEN_DEFAULT_SYSTEM = (
+    "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+)
 
 _QWEN_TOKENIZER = None
 _QWEN_TOKENIZER_FAILED: Optional[str] = None
+_QWEN_TOKENIZER_LOCK = threading.Lock()
 
 
 def infer_prompt_dataset_alias(trials: Sequence[Dict[str, Any]]) -> str:
@@ -240,35 +247,53 @@ def largest_balanced_prefix_that_fits(
     return kept, diag
 
 
-def qwen_chat_token_count(system: str, user: str) -> int:
-    """Qwen chat-templated input tokens. Fail clearly if the tokenizer is missing."""
+def _ensure_qwen_tokenizer():
+    """Load the Qwen tokenizer once. Fail clearly; never silently fall back to char/4."""
     global _QWEN_TOKENIZER, _QWEN_TOKENIZER_FAILED
-    if _QWEN_TOKENIZER_FAILED:
-        raise RuntimeError(_QWEN_TOKENIZER_FAILED)
-    if _QWEN_TOKENIZER is None:
-        try:
-            from transformers import AutoTokenizer  # type: ignore
-        except Exception as exc:
-            _QWEN_TOKENIZER_FAILED = (
-                f"Qwen tokenizer unavailable ({type(exc).__name__}: {exc}). "
-                "Refusing to silently change T-PICS v2 packing. Install/cache "
-                f"{QWEN_TOKENIZER_NAME} or pass a tokenizer in tests."
-            )
-            raise RuntimeError(_QWEN_TOKENIZER_FAILED) from exc
-        try:
-            _QWEN_TOKENIZER = AutoTokenizer.from_pretrained(
-                QWEN_TOKENIZER_NAME, trust_remote_code=True
-            )
-        except Exception as exc:
-            _QWEN_TOKENIZER_FAILED = (
-                f"Failed to load {QWEN_TOKENIZER_NAME}: {type(exc).__name__}: {exc}"
-            )
-            raise RuntimeError(_QWEN_TOKENIZER_FAILED) from exc
+    with _QWEN_TOKENIZER_LOCK:
+        if _QWEN_TOKENIZER_FAILED:
+            raise RuntimeError(_QWEN_TOKENIZER_FAILED)
+        if _QWEN_TOKENIZER is None:
+            try:
+                from transformers import AutoTokenizer  # type: ignore
+            except Exception as exc:
+                _QWEN_TOKENIZER_FAILED = (
+                    f"Qwen tokenizer unavailable ({type(exc).__name__}: {exc}). "
+                    "Refusing to silently change T-PICS v2 packing. Install/cache "
+                    f"{QWEN_TOKENIZER_NAME} or pass a tokenizer in tests."
+                )
+                raise RuntimeError(_QWEN_TOKENIZER_FAILED) from exc
+            try:
+                _QWEN_TOKENIZER = AutoTokenizer.from_pretrained(
+                    QWEN_TOKENIZER_NAME, trust_remote_code=True
+                )
+            except Exception as exc:
+                _QWEN_TOKENIZER_FAILED = (
+                    f"Failed to load {QWEN_TOKENIZER_NAME}: {type(exc).__name__}: {exc}"
+                )
+                raise RuntimeError(_QWEN_TOKENIZER_FAILED) from exc
+        return _QWEN_TOKENIZER
+
+
+def qwen_chat_token_count(system: str, user: str) -> int:
+    """vLLM-matching Qwen chat-templated input tokens (system + user).
+
+    Must apply the chat template with a system turn. Encoding the user string
+    alone, or templating user-only, undershoots vLLM's ``tokens in the messages``
+    (Qwen injects the default system even when the OpenAI client sent user-only).
+    Fail clearly if the tokenizer is missing; never fall back to char/4.
+    """
+    tokenizer = _ensure_qwen_tokenizer()
     messages = [
-        {"role": "system", "content": system or ""},
+        {"role": "system", "content": system or QWEN_DEFAULT_SYSTEM},
         {"role": "user", "content": user or ""},
     ]
-    text = _QWEN_TOKENIZER.apply_chat_template(
+    text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    return int(len(_QWEN_TOKENIZER.encode(text, add_special_tokens=False)))
+    return int(len(tokenizer.encode(text, add_special_tokens=False)))
+
+
+def qwen_user_prompt_token_count(user: str) -> int:
+    """Candidate-generation prompt count: chat-templated default system + user."""
+    return qwen_chat_token_count(QWEN_DEFAULT_SYSTEM, user)

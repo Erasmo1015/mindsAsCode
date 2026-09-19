@@ -31,6 +31,7 @@ from utils.teh.prompt_context import _trial_to_example_dict, DEFAULT_HISTORY_MAX
 from utils.teh.prompt_snapshots import (
     current_or_future_leak_paths,
     format_snapshot_example,
+    prompt_contract_scope,
     sanitize_problem_for_choose,
     stamp_prompt_participant_id,
 )
@@ -38,8 +39,8 @@ from utils.teh.prompt_units import (
     largest_balanced_prefix_that_fits,
     select_structure_aware_prompt_examples,
 )
-from utils.teh.t_pics_gated_transfer import EVOLUTION_SELECTION_SCORE, GATE_SCORE_FIELD
-from utils.teh.t_pics_v2 import KIND_V2, V1_FROZEN_SOURCE_YAML, V1_G1_JOBS
+from utils.teh.t_pics_gated_transfer import EVOLUTION_SELECTION_SCORE, GATE_SCORE_FIELD, KIND
+from utils.teh.t_pics_v2 import KIND_V2, V1_FROZEN_SOURCE_YAML, V1_G1_JOBS, V2_SOURCE_YAML
 
 SPLIT = dict(split_ratio=0.6, split_seed=0, psych_dataset_split="train")
 
@@ -109,6 +110,33 @@ def test_v1_artifacts_untouched():
     assert V1_FROZEN_SOURCE_YAML.is_file()
     assert KIND_V2 != "t_pics_gated"
     assert 257174 in V1_G1_JOBS and 257188 in V1_G1_JOBS
+
+
+def test_cli_and_gated_defaults_are_v2():
+    import argparse
+
+    from utils.teh.limited_data_protocol import add_limited_data_cli_arguments
+    from utils.teh.t_pics_gated_transfer import (
+        FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG,
+        FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V1,
+        apply_gated_cli_defaults,
+    )
+
+    parser = argparse.ArgumentParser()
+    add_limited_data_cli_arguments(parser)
+    args = parser.parse_args([])
+    assert args.limited_data_protocol == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+    assert args.limited_train_val == 40
+    assert KIND == KIND_V2
+    assert FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG == V2_SOURCE_YAML
+    assert FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V1 == V1_FROZEN_SOURCE_YAML
+    ns = argparse.Namespace(t_pics_source_config=None, limited_data_protocol="off", limited_train_val=None)
+    apply_gated_cli_defaults(ns, argv=["--t_pics_gated_transfer"])
+    assert ns.limited_data_protocol == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+    assert ns.limited_train_val == 40
+    assert ns.t_pics_source_config == str(V2_SOURCE_YAML)
+    # v2 map is written after G.1 + annotation + Occurrence-EB.
+    assert not V2_SOURCE_YAML.is_file()
 
 
 def test_gate_independent_of_test():
@@ -336,3 +364,98 @@ def test_lm_fit_excludes_test():
     assert "fit_trials = train_trials + val_trials" in src
     assert "test_trials" in src
     assert "loglik_fn(test_trials)" in src
+
+
+def test_v2_estimate_tokens_uses_qwen_not_char4(monkeypatch):
+    import teh
+
+    monkeypatch.setattr(
+        "utils.teh.prompt_units.qwen_user_prompt_token_count",
+        lambda user: 12345,
+    )
+    with prompt_contract_scope(True):
+        assert teh.estimate_tokens("abcd" * 100) == 12345
+    with prompt_contract_scope(False):
+        assert teh.estimate_tokens("abcd" * 100) == 100
+
+
+def test_v2_truncation_drops_trial_count_keeps_snapshots(monkeypatch):
+    import teh
+
+    def fake_estimate(text, *, estimator="char4"):
+        n = text.count("### example")
+        return 20000 if n > 30 else 1000
+
+    monkeypatch.setattr(teh, "estimate_tokens", fake_estimate)
+    trials = []
+    for i in range(80):
+        trials.append(
+            stamp_prompt_participant_id(
+                {
+                    "problem": {
+                        "dataset_alias": "7hilbig2014generalized",
+                        "option_keys": [0, 1],
+                    },
+                    "action": 0,
+                    "history": [{"action": 0, "reward": 1}],
+                    "split": "train",
+                },
+                i % 10,
+            )
+        )
+    with prompt_contract_scope(True):
+        prompt, diag, steps = teh._truncate_psych_prompt_to_budget(
+            base_prompt="TASK",
+            train_trials=trials[:60],
+            train_trials_source=trials,
+            val_trials=None,
+            val_trials_source=None,
+            extra_prompt_trials_label="validation",
+            parent_programs=["def choose(problem, history):\n    return 0.5\n"],
+            parent_context_builder=lambda prompt_parent_programs, **_: "PARENT",
+            parent_context_kwargs={},
+            code_template_suffix="TEMPLATE",
+            candidate_output_rules="RULES",
+            dataset="7hilbig2014generalized",
+            dataset_type="7hilbig2014generalized",
+            hard_prompt_token_cap=14000,
+            prompt_token_estimator="char4",
+            max_prompt_train_trials=60,
+            max_prompt_trials_per_problem=5,
+            prompt_train_trials_seed=0,
+            max_parent_chars=3500,
+            refinement_val_observations=False,
+            pre_capped_train=False,
+            pre_capped_val=False,
+        )
+    assert diag["train_trials_after"] == 30
+    assert "compact_trial_serialization" not in steps
+    assert diag.get("compact_serialization") is False
+    assert "### example" in prompt
+    assert "observed_action_label" in prompt
+    assert "train_trials_cap_30" in steps
+
+
+def test_qwen_budget_count_is_chat_templated_system_plus_user(monkeypatch):
+    captured: dict = {}
+
+    class _FakeTok:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            captured["messages"] = messages
+            captured["add_generation_prompt"] = add_generation_prompt
+            return "TEMPLATED"
+
+        def encode(self, text, add_special_tokens=False):
+            return [1, 2, 3, 4]
+
+    from utils.teh import prompt_units as pu
+
+    monkeypatch.setattr(pu, "_ensure_qwen_tokenizer", lambda: _FakeTok())
+    n = pu.qwen_user_prompt_token_count("hello")
+    assert n == 4
+    assert captured["add_generation_prompt"] is True
+    assert captured["messages"][0] == {
+        "role": "system",
+        "content": pu.QWEN_DEFAULT_SYSTEM,
+    }
+    assert captured["messages"][1] == {"role": "user", "content": "hello"}

@@ -1,6 +1,7 @@
 """Optional structure-aware limited-data protocol shared by PICS, LM, and PT.
 
-Default protocol is ``off``: loaders keep the legacy TEH split and
+CLI default is ``structure_aware_v2`` with train+val budget 40 (ICLR T-PICS v2).
+Pass ``--limited_data_protocol off`` for the legacy TEH split and
 ``apply_max_observed_trials`` (random train+val cap, test untouched).
 
 ``--limited_data_protocol structure_aware`` (v1) with budget 40 means at most 40
@@ -174,16 +175,16 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
     parser.add_argument(
         "--limited_data_protocol",
         type=str,
-        default=LIMITED_DATA_PROTOCOL_OFF,
+        default=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
         metavar="NAME",
         help=(
             "Observation-selection protocol after the train/val/test split. "
-            "'off' (default) keeps the legacy random train+val cap via "
-            "--max_observed_trials_per_participant. "
-            "'structure_aware' is v1 (may rebuild continuous test histories; Kool "
-            "may retain 41). 'structure_aware_v2' is ICLR T-PICS v2: hard cap 40, "
+            "Default 'structure_aware_v2' is ICLR T-PICS v2: hard cap 40, "
             "original test histories, train+val histories rebuilt only from retained "
-            "observations. Speekenbrink's session split is chronological by default "
+            "observations. 'structure_aware' is frozen v1 (may rebuild continuous "
+            "test histories; Kool may retain 41). 'off' keeps the legacy random "
+            "train+val cap via --max_observed_trials_per_participant. "
+            "Speekenbrink's session split is chronological by default "
             "(see --speekenbrink_split), independent of this protocol."
         ),
     )
@@ -201,12 +202,13 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
     parser.add_argument(
         "--limited_train_val",
         type=int,
-        default=None,
+        default=40,
         metavar="N",
         help=(
             "Under --limited_data_protocol structure_aware or structure_aware_v2, "
             "keep at most N combined train+validation observations per participant "
-            "(test is reserved first and never counted). If omitted, "
+            "(test is reserved first and never counted). Default 40. Ignored when "
+            "protocol is 'off'. If omitted under a structure-aware protocol, "
             "--max_observed_trials_per_participant is used as the same budget."
         ),
     )
@@ -222,11 +224,7 @@ def resolve_limited_data_budget(
     n_max = normalize_max_observed_trials(max_observed_trials_per_participant)
     n_tv = normalize_max_observed_trials(limited_train_val)
     if proto == LIMITED_DATA_PROTOCOL_OFF:
-        if n_tv is not None:
-            raise ValueError(
-                "--limited_train_val requires --limited_data_protocol "
-                "structure_aware or structure_aware_v2"
-            )
+        # CLI default --limited_train_val 40 is ignored for full-data reruns.
         return proto, n_max
     if not is_structure_aware_protocol(proto):
         raise ValueError(f"unsupported limited_data_protocol {proto!r}")
@@ -237,10 +235,7 @@ def resolve_limited_data_budget(
         )
     budget = n_tv if n_tv is not None else n_max
     if budget is None:
-        raise ValueError(
-            "--limited_data_protocol structure_aware / structure_aware_v2 requires "
-            "--limited_train_val N or --max_observed_trials_per_participant N"
-        )
+        budget = 40
     return proto, budget
 
 

@@ -640,6 +640,6 @@ Authoritative: `baseline_methods/Psych101/docs/Documentation_Openevolve.md`. Off
 
 ## Short update (Sep 20 2026 — T-PICS v2 / training-only SA40)
 
-New method version, not a v1 overwrite. Flag: `--limited_data_protocol structure_aware_v2`. Cap 40 is **train+val only**; test keeps original histories (Speekenbrink/Kool restored; Hilbig/Enkavi no longer emptied). Kool 41/45 are exact-40 (no +1 stage-1). Snapshots + unit sampling in `utils/teh/prompt_snapshots.py` / `prompt_units.py`. Docs/paths: `analysis/config/T-PICS/docs/Documentation_v2.md`, `analysis/config/T-PICS/v2/`. Frozen v1 YAML/jobs 257174–257188/257756 untouched. Do not submit v2 jobs until the new source map exists.
+New method version, not a v1 overwrite. Flag: `--limited_data_protocol structure_aware_v2` (**CLI default** for teh.py / Centaur / LM / PT / OpenEvolve; `--limited_train_val` default 40). Cap 40 is **train+val only**; test keeps original histories (Speekenbrink/Kool restored; Hilbig/Enkavi no longer emptied). Kool 41/45 are exact-40 (no +1 stage-1). Snapshots + unit sampling in `utils/teh/prompt_snapshots.py` / `prompt_units.py`. Docs/paths: `analysis/config/T-PICS/docs/Documentation_v2.md`, `analysis/config/T-PICS/v2/`. Frozen v1 YAML/jobs 257174–257188/257756 untouched. Gated jobs default to `Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml` (not written until G.1+EB). Cluster G.1: `cluster/v2/ours/Qwen/`. Generated outputs use KIND `t_pics_g1_sa40_v2` / `t_pics_gated_sa40_v2` (v1 folders untouched).
 
 
