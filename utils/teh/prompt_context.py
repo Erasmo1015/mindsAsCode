@@ -323,7 +323,9 @@ def _trial_to_example_dict(
     *,
     history_max_entries: int,
 ) -> Dict[str, Any]:
-    problem = trial.get("problem") or {}
+    from utils.teh.prompt_snapshots import sanitize_problem_for_choose
+
+    problem = sanitize_problem_for_choose(trial.get("problem") or {})
     # Drop heavy meta aliases that are not needed for structure (keep schema_type).
     hist, was_trunc, orig_len = _truncate_history_entries(
         trial.get("history") or [],

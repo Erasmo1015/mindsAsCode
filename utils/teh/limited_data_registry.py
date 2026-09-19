@@ -17,9 +17,11 @@ CONTINUOUS_SESSION = "continuous_session"
 
 LIMITED_DATA_PROTOCOL_OFF = "off"
 LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE = "structure_aware"
+LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2 = "structure_aware_v2"
 LIMITED_DATA_PROTOCOLS = (
     LIMITED_DATA_PROTOCOL_OFF,
     LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
 )
 
 
@@ -256,11 +258,35 @@ def limited_data_spec(dataset: str) -> LimitedDataSpec:
 def normalize_limited_data_protocol(value: object) -> str:
     if value is None:
         return LIMITED_DATA_PROTOCOL_OFF
-    text = str(value).strip().lower()
+    text = str(value).strip().lower().replace("-", "_")
     if text in {"", "0", "false", "no", "none", "off", "legacy"}:
         return LIMITED_DATA_PROTOCOL_OFF
-    if text in {"structure_aware", "structure-aware", "1", "true", "yes", "on"}:
+    if text in {"structure_aware", "structureaware", "1", "true", "yes", "on", "v1"}:
         return LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
+    if text in {
+        "structure_aware_v2",
+        "structureaware_v2",
+        "v2",
+        "sa40_v2",
+        "training_only",
+    }:
+        return LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
     raise ValueError(
-        f"limited_data_protocol must be 'off' or 'structure_aware', got {value!r}"
+        f"limited_data_protocol must be 'off', 'structure_aware', or "
+        f"'structure_aware_v2', got {value!r}"
     )
+
+
+def is_structure_aware_protocol(value: object) -> bool:
+    proto = normalize_limited_data_protocol(value)
+    return proto in (
+        LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+        LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+    )
+
+
+def limited_data_protocol_revision(value: object) -> str:
+    proto = normalize_limited_data_protocol(value)
+    if proto == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2:
+        return "v2"
+    return "v1"

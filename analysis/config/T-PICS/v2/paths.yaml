@@ -1,0 +1,21 @@
+# Proposed ICLR T-PICS v2 artifact paths. None of these overwrite v1.
+#
+# Frozen v1 (do not edit):
+#   analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml
+#   jobs 257174-257188, Occurrence-EB 257756
+#
+kind_gated: t_pics_gated_sa40_v2
+kind_independent: t_pics_gated_independent_sa40_v2
+kind_g1: t_pics_g1_sa40_v2
+run_tag: g5e50p10_occurrence_eb_sa40_v2
+limited_data_protocol: structure_aware_v2
+limited_train_val: 40
+source_yaml_v2: analysis/config/T-PICS/Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml
+freeze_dir_v2: analysis/config/T-PICS/Transfer_source/v2/schema4_occurrence_eb_freeze
+reuse:
+  schema_v4_motifs: unchanged
+  occurrence_eb_formulas: unchanged
+  six_source_allowlist: unchanged
+  train_val_gate: unchanged
+v1_g1_jobs: [257174, 257188]
+v1_occurrence_eb_job: 257756

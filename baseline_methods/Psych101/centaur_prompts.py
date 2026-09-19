@@ -191,7 +191,14 @@ def build_kool_prefix(
         if len(keys) >= 2:
             parts.append(f"You are presented with spaceships {keys[0]} and {keys[1]}.")
     else:
-        # Planet already revealed by today's stage-1 history entry; only show aliens.
+        planet_in_hist = any(
+            int(h.get("stage", 0) or 0) == 1 and h.get("planet") is not None
+            for h in hist
+            if isinstance(h, dict)
+        )
+        planet = cur.get("planet")
+        if planet is not None and not planet_in_hist:
+            parts.append(f"You arrive at planet {planet}.")
         if len(keys) >= 2:
             parts.append(f"You see aliens {keys[0]} and {keys[1]}.")
     parts.append("You press ")

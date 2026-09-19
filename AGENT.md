@@ -636,4 +636,10 @@ People: valid list = non-empty train∧test after split (all 15, including five-
 
 Authoritative: `baseline_methods/Psych101/docs/Documentation_Openevolve.md`. Official OpenEvolve `411fb59` with a task adapter (not unmodified search). Frozen: 350 iters/person, SA40, split 0.6/seed 0, Qwen2.5-Coder-32B-Instruct, 1×4 concurrency. 350 is a **nominal full-pipeline generation budget** vs gated T-PICS (200 shared G.1+G.2 + 150 person-specific G.3+person); all 350 OE candidates are person-specific (generous to OE). All 15 `# Task` strings come from registered `task_description` / `TASK_DESCRIPTION`; `# API` is the in-runner Bernoulli/categorical contract. Kool-41 is current loader behavior, pending the SA40 audit. Production clone: `reference_repos/openevolve` at that SHA (runner never clones).
 
+---
+
+## Short update (Sep 20 2026 — T-PICS v2 / training-only SA40)
+
+New method version, not a v1 overwrite. Flag: `--limited_data_protocol structure_aware_v2`. Cap 40 is **train+val only**; test keeps original histories (Speekenbrink/Kool restored; Hilbig/Enkavi no longer emptied). Kool 41/45 are exact-40 (no +1 stage-1). Snapshots + unit sampling in `utils/teh/prompt_snapshots.py` / `prompt_units.py`. Docs/paths: `analysis/config/T-PICS/docs/Documentation_v2.md`, `analysis/config/T-PICS/v2/`. Frozen v1 YAML/jobs 257174–257188/257756 untouched. Do not submit v2 jobs until the new source map exists.
+
 

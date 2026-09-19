@@ -113,6 +113,14 @@ from utils.teh.limited_data_protocol import (
     should_persist_limited_data_manifest,
     write_limited_data_manifest,
 )
+from utils.teh.limited_data_registry import limited_data_protocol_revision
+from utils.teh.prompt_snapshots import (
+    format_snapshot_examples,
+    prompt_contract_scope,
+    stamp_prompt_participant_id,
+    using_v2_prompt_contract,
+)
+from utils.teh.prompt_units import select_structure_aware_prompt_examples
 from utils.teh.sparse_observations import (
     SPARSE_AUDIT_CSV_FILENAME,
     SPARSE_AUDIT_FILENAME,
@@ -2740,7 +2748,10 @@ def _collect_pooled_split_trials_for_participants(
             speekenbrink_split=speekenbrink_split,
             return_audit=True,
         )
-        pooled.extend((train_trials, val_trials)[split_idx])
+        pooled.extend(
+            stamp_prompt_participant_id(t, int(pid))
+            for t in (train_trials, val_trials)[split_idx]
+        )
         if audits_out is not None:
             audits_out.append(audit)
     return pooled
@@ -3039,6 +3050,9 @@ def run_global_evolution_phase(
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     mdl_lambda = normalize_mdl_lambda(mdl_lambda)
+    prompt_contract_scope(
+        limited_data_protocol_revision(limited_data_protocol) == "v2"
+    ).__enter__()
     participant_ids = [int(p) for p in participants]
     sparse_audits: List[SparseObservationAudit] = []
     pooled_train = _collect_pooled_train_trials_for_participants(
@@ -4619,6 +4633,34 @@ def _cap_and_subsample_prompt_trials(
     if not trials:
         return []
 
+    if using_v2_prompt_contract():
+        alias = None
+        for t in trials:
+            p = t.get("problem") or {}
+            if p.get("dataset_alias"):
+                alias = str(p["dataset_alias"])
+                break
+        if alias is None:
+            raise ValueError("v2 prompt selection requires dataset_alias on trials")
+        pids = {
+            t.get("_prompt_participant_id")
+            for t in trials
+            if t.get("_prompt_participant_id") is not None
+        }
+        selected, diag = select_structure_aware_prompt_examples(
+            trials,
+            dataset=alias,
+            max_trials=max_trials,
+            subsample_seed=subsample_seed,
+            pooled=len(pids) > 1,
+        )
+        print(
+            f"[LLM prompt v2] Using {len(selected)} of {len(trials)} {label} trials "
+            f"(structure-aware, max={max_trials}, seed={subsample_seed}, "
+            f"mode={diag.get('mode')}, people={diag.get('n_participants')})."
+        )
+        return selected
+
     rng = np.random.default_rng(subsample_seed)
     orig_index = {id(t): i for i, t in enumerate(trials)}
 
@@ -4900,6 +4942,8 @@ def _serialize_trials_for_prompt(
     dataset: str,
     compact: bool,
 ) -> str:
+    if using_v2_prompt_contract():
+        return format_snapshot_examples(trials)
     if compact:
         return format_trials_to_text_compact(trials, dataset=dataset)
     return format_trials_to_text(trials, dataset=dataset)
@@ -6318,9 +6362,18 @@ def _trials_for_loglik_participant(
         speekenbrink_split=speekenbrink_split,
     )
     if return_manifest:
+        train_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in train_trials]
+        val_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in val_trials]
+        test_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in test_trials]
         return train_trials, val_trials, test_trials, audit, manifest
     if return_audit:
+        train_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in train_trials]
+        val_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in val_trials]
+        test_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in test_trials]
         return train_trials, val_trials, test_trials, audit
+    train_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in train_trials]
+    val_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in val_trials]
+    test_trials = [stamp_prompt_participant_id(t, int(participant_id)) for t in test_trials]
     return train_trials, val_trials, test_trials
 
 
@@ -14493,6 +14546,11 @@ def main():
         if args.fitness_metric != "loglik":
             print("Error: --phase refine requires --fitness_metric loglik.")
             return
+
+    prompt_contract_scope(
+        limited_data_protocol_revision(getattr(args, "limited_data_protocol", "off"))
+        == "v2"
+    ).__enter__()
         if not args.prev_exp_path:
             print("Error: --phase refine requires --prev_exp_path.")
             return

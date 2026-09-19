@@ -70,9 +70,13 @@ from utils.teh.limited_data_protocol import (  # noqa: E402
     add_limited_data_cli_arguments,
     append_limited_data_manifest_jsonl,
     load_participant_limited_splits,
+    load_raw_participant_splits,
     resolve_limited_data_budget,
     rewrite_limited_data_csv_from_jsonl,
     should_persist_limited_data_manifest,
+)
+from utils.teh.limited_data_registry import (  # noqa: E402
+    limited_data_protocol_revision,
 )
 from utils.teh.participant_ids import load_valid_participant_ids  # noqa: E402
 from utils.teh.teh_datasets import (  # noqa: E402
@@ -282,6 +286,22 @@ def _centaur_prompt_timeline(
     """Full split timeline for prefixes; indices to score (test only)."""
     prompt = list(train_trials) + list(val_trials) + list(test_trials)
     test_start = len(train_trials) + len(val_trials)
+    score_indices = list(range(test_start, test_start + len(test_trials)))
+    return prompt, score_indices
+
+
+def _centaur_prompt_timeline_v2(
+    raw_train: Sequence[Dict[str, Any]],
+    raw_val: Sequence[Dict[str, Any]],
+    test_trials: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[int]]:
+    """Original pre-test rows as unscored context, then original test.
+
+    Omitted SA40 train+val trials are included here so original test histories
+    map onto earlier rows. They are never scored and do not count toward SA40.
+    """
+    prompt = list(raw_train) + list(raw_val) + list(test_trials)
+    test_start = len(raw_train) + len(raw_val)
     score_indices = list(range(test_start, test_start + len(test_trials)))
     return prompt, score_indices
 
@@ -1271,14 +1291,33 @@ def _evaluate_participant(
     if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
         append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
     chooser.task_instruction = instruction
-    prompt_trials, score_indices = _centaur_prompt_timeline(
-        train_trials, val_trials, test_trials
-    )
+    if limited_data_protocol_revision(limited_data_protocol) == "v2":
+        raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
+            dataset,
+            int(participant_row_index),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            speekenbrink_split=speekenbrink_split,
+        )
+        prompt_trials, score_indices = _centaur_prompt_timeline_v2(
+            raw_train, raw_val, test_trials
+        )
+        timeline_note = (
+            f"v2 unscored pre-test context n={len(raw_train)+len(raw_val)} "
+            f"(omitted SA40 rows included, never scored)"
+        )
+    else:
+        prompt_trials, score_indices = _centaur_prompt_timeline(
+            train_trials, val_trials, test_trials
+        )
+        timeline_note = f"v1 prefix on train+val+test n={len(prompt_trials)}"
     print(
         f"[Split] {dataset} participant row {participant_row_index}: "
         f"train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)} "
         f"(ratio={split_ratio:.3f}, seed={split_seed}; "
-        f"Centaur prefix on train+val+test n={len(prompt_trials)}, "
+        f"{timeline_note}, "
         f"scores test only n={len(score_indices)}; protocol={manifest.protocol})"
     )
     test_eval = evaluate_centaur_on_trials(

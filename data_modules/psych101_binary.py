@@ -758,8 +758,16 @@ def summarize_runtime_schema_for_prompt(trials: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
-    """One-line summary of a parsed trial for infer_single_choice prompt generation."""
+def format_trial_for_prompt(
+    trial: Dict[str, Any], index: int, *, contract: str = "v1"
+) -> str:
+    """One-line summary of a parsed trial for infer_single_choice prompt generation.
+
+    ``contract='v1'`` is the frozen ICLR T-PICS v1 one-line formatter.
+    ``contract='v2'`` corrects Badham (category-learning) and Frey Risk (balloon)
+    instead of the erroneous product/CCT fallbacks. T-PICS v2 candidate prompts
+    use ``format_snapshot_example`` as the authoritative representation.
+    """
     p = trial["problem"]
     schema = p.get("schema_type", "?")
     action = trial["action"]
@@ -771,6 +779,25 @@ def format_trial_for_prompt(trial: Dict[str, Any], index: int) -> str:
     if hist:
         last = hist[-1]
         hist_fb = last.get("feedback", last.get("reward"))
+
+    if str(contract).strip().lower() == "v2":
+        if p.get("balloon_id") is not None or p.get("pump_key") is not None:
+            return (
+                f"{index}. [balloon] balloon_id={p.get('balloon_id')}; "
+                f"step_index={p.get('step_index')}; "
+                f"pump_count_before={p.get('pump_count_before')}; "
+                f"accumulated_points_before={p.get('accumulated_points_before')}; "
+                f"pump_key={p.get('pump_key')}; stop_key={p.get('stop_key')}; "
+                f"option_keys={keys}; action={action} (0=pump, 1=stop); "
+                f"history_len={hist_len}"
+            )
+        if p.get("stimulus_features") is not None or p.get("rule_block_id") is not None:
+            return (
+                f"{index}. [category] rule_block_id={p.get('rule_block_id')}; "
+                f"stimulus_features={p.get('stimulus_features')}; "
+                f"schema_type={schema}; option_keys={keys}; "
+                f"action={action} (key={key_lbl}); history_len={hist_len}"
+            )
 
     if schema == "categorical_bandit":
         last_reward = hist[-1].get("reward", hist[-1].get("feedback")) if hist else None

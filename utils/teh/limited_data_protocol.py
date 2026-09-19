@@ -3,9 +3,13 @@
 Default protocol is ``off``: loaders keep the legacy TEH split and
 ``apply_max_observed_trials`` (random train+val cap, test untouched).
 
-``--limited_data_protocol structure_aware`` with budget 40 means at most 40
+``--limited_data_protocol structure_aware`` (v1) with budget 40 means at most 40
 combined train+validation observations per participant. Test is reserved first
-and is never counted toward the 40.
+and is never counted toward the 40. v1 also rebuilds continuous-session test
+histories from the retained suffix and may retain 41 Kool trials.
+
+``--limited_data_protocol structure_aware_v2`` is the ICLR T-PICS v2 protocol:
+the same train+val cap, original test histories, and a hard Kool cap of 40.
 
 Speekenbrink uses a chronological session split by default (full data and SA40).
 Pass ``--speekenbrink_split legacy`` for the old shuffled pseudo-blocks.
@@ -35,8 +39,11 @@ from utils.teh.limited_data_registry import (
     INDEPENDENT_TRIAL,
     LIMITED_DATA_PROTOCOL_OFF,
     LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
     LIMITED_DATA_PROTOCOLS,
     RESETTING_UNIT,
+    is_structure_aware_protocol,
+    limited_data_protocol_revision,
     limited_data_spec,
     normalize_limited_data_protocol,
     normalize_limited_dataset_alias,
@@ -173,11 +180,11 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
             "Observation-selection protocol after the train/val/test split. "
             "'off' (default) keeps the legacy random train+val cap via "
             "--max_observed_trials_per_participant. "
-            "'structure_aware' keeps complete resetting units (plus a validated "
-            "chronological prefix), samples IID trials, and uses a contiguous "
-            "pre-test segment for continuous sessions. Speekenbrink's session split "
-            "is chronological by default (see --speekenbrink_split), independent of "
-            "this protocol."
+            "'structure_aware' is v1 (may rebuild continuous test histories; Kool "
+            "may retain 41). 'structure_aware_v2' is ICLR T-PICS v2: hard cap 40, "
+            "original test histories, train+val histories rebuilt only from retained "
+            "observations. Speekenbrink's session split is chronological by default "
+            "(see --speekenbrink_split), independent of this protocol."
         ),
     )
     parser.add_argument(
@@ -197,10 +204,10 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
         default=None,
         metavar="N",
         help=(
-            "Under --limited_data_protocol structure_aware, keep at most N combined "
-            "train+validation observations per participant (test is reserved first "
-            "and never counted). If omitted, --max_observed_trials_per_participant "
-            "is used as the same budget."
+            "Under --limited_data_protocol structure_aware or structure_aware_v2, "
+            "keep at most N combined train+validation observations per participant "
+            "(test is reserved first and never counted). If omitted, "
+            "--max_observed_trials_per_participant is used as the same budget."
         ),
     )
 
@@ -217,9 +224,12 @@ def resolve_limited_data_budget(
     if proto == LIMITED_DATA_PROTOCOL_OFF:
         if n_tv is not None:
             raise ValueError(
-                "--limited_train_val requires --limited_data_protocol structure_aware"
+                "--limited_train_val requires --limited_data_protocol "
+                "structure_aware or structure_aware_v2"
             )
         return proto, n_max
+    if not is_structure_aware_protocol(proto):
+        raise ValueError(f"unsupported limited_data_protocol {proto!r}")
     if n_tv is not None and n_max is not None and n_tv != n_max:
         raise ValueError(
             "--limited_train_val and --max_observed_trials_per_participant both set "
@@ -228,7 +238,7 @@ def resolve_limited_data_budget(
     budget = n_tv if n_tv is not None else n_max
     if budget is None:
         raise ValueError(
-            "--limited_data_protocol structure_aware requires "
+            "--limited_data_protocol structure_aware / structure_aware_v2 requires "
             "--limited_train_val N or --max_observed_trials_per_participant N"
         )
     return proto, budget
@@ -567,6 +577,7 @@ def _contiguous_tv_suffix(
     budget: int,
     *,
     kool: bool,
+    exact_40: bool = False,
 ) -> Tuple[List[Dict[str, Any]], str]:
     tv = list(tv_trials)
     if budget <= 0 or len(tv) <= budget:
@@ -574,7 +585,7 @@ def _contiguous_tv_suffix(
         return tv, reason
     start = len(tv) - int(budget)
     reason = ""
-    if kool and start < len(tv) and _kool_is_stage2(tv[start]):
+    if kool and (not exact_40) and start < len(tv) and _kool_is_stage2(tv[start]):
         if start > 0:
             start -= 1
             reason = "kool_include_matching_stage1"
@@ -788,9 +799,16 @@ def apply_structure_aware_protocol(
     split_ratio: float,
     budget: int,
     split_kind: str,
+    revision: str = "v1",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], SparseObservationAudit, LimitedDataManifest]:
     spec = limited_data_spec(dataset)
     alias = spec.dataset
+    is_v2 = str(revision).strip().lower() == "v2"
+    protocol_name = (
+        LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+        if is_v2
+        else LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
+    )
     tagged_train, tagged_val, tagged_test = tag_split_trials(
         alias, train_trials, val_trials, test_trials
     )
@@ -820,9 +838,12 @@ def apply_structure_aware_protocol(
         if original_n_train + original_n_val < budget:
             fallback = "insufficient_train_val"
         new_train, new_val, new_test = sparse_train, sparse_val, sparse_test
-        for row in new_train + new_val + new_test:
+        for row in new_train + new_val:
             row["history"] = []
-        hist_status = "pass"
+        if not is_v2:
+            for row in new_test:
+                row["history"] = []
+        hist_status = "original_test_histories_preserved" if is_v2 else "pass"
         train_idx = sparse_audit.selected_train_indices
         val_idx = sparse_audit.selected_val_indices
     elif spec.category == RESETTING_UNIT:
@@ -848,7 +869,12 @@ def apply_structure_aware_protocol(
         new_test = list(tagged_test)
         new_train, hist_t = rebuild_resetting_split(new_train, tagged_train)
         new_val, hist_v = rebuild_resetting_split(new_val, tagged_val)
-        new_test, hist_te = rebuild_resetting_split(new_test, tagged_test)
+        if is_v2:
+            for tagged, orig in zip(new_test, test_trials):
+                tagged["history"] = copy.deepcopy(orig.get("history") or [])
+            hist_te = "original_test_histories_preserved"
+        else:
+            new_test, hist_te = rebuild_resetting_split(new_test, tagged_test)
         hist_status = "pass"
         for part in (hist_t, hist_v, hist_te):
             if part != "pass":
@@ -866,7 +892,7 @@ def apply_structure_aware_protocol(
         tv = tagged_train + tagged_val
         new_test = list(tagged_test)
         segment, suffix_reason = _contiguous_tv_suffix(
-            tv, int(budget), kool=(alias == KOOL_ALIAS)
+            tv, int(budget), kool=(alias == KOOL_ALIAS), exact_40=is_v2
         )
         if original_n_train + original_n_val < budget:
             fallback = "insufficient_train_val"
@@ -880,15 +906,33 @@ def apply_structure_aware_protocol(
         )
         if split_extra:
             fallback = (fallback + ";" if fallback else "") + split_extra
-        rebuilt, hist_status = rebuild_histories_in_scopes(
-            [new_train + new_val + new_test],
-            [tagged_train + tagged_val + tagged_test],
-        )
-        combined = rebuilt[0]
-        n_tr, n_va = len(new_train), len(new_val)
-        new_train = combined[:n_tr]
-        new_val = combined[n_tr : n_tr + n_va]
-        new_test = combined[n_tr + n_va :]
+        if is_v2:
+            rebuilt, hist_status = rebuild_histories_in_scopes(
+                [new_train + new_val],
+                [tagged_train + tagged_val],
+            )
+            combined = rebuilt[0]
+            n_tr, n_va = len(new_train), len(new_val)
+            new_train = combined[:n_tr]
+            new_val = combined[n_tr : n_tr + n_va]
+            new_test = list(tagged_test)
+            for tagged, orig in zip(new_test, test_trials):
+                tagged["history"] = copy.deepcopy(orig.get("history") or [])
+            hist_status = (
+                "original_test_histories_preserved"
+                if hist_status == "pass"
+                else hist_status
+            )
+        else:
+            rebuilt, hist_status = rebuild_histories_in_scopes(
+                [new_train + new_val + new_test],
+                [tagged_train + tagged_val + tagged_test],
+            )
+            combined = rebuilt[0]
+            n_tr, n_va = len(new_train), len(new_val)
+            new_train = combined[:n_tr]
+            new_val = combined[n_tr : n_tr + n_va]
+            new_test = combined[n_tr + n_va :]
         train_idx = tuple(
             int((t.get("_ldp") or {}).get("session_index", i)) for i, t in enumerate(new_train)
         )
@@ -897,26 +941,32 @@ def apply_structure_aware_protocol(
         )
 
     assert_no_split_overlap(new_train, new_val, new_test)
-    if len(new_train) + len(new_val) > int(budget) and fallback != "kool_include_matching_stage1" and "overshoot" not in fallback:
-        if alias == KOOL_ALIAS and (
-            "kool_include_matching_stage1" in fallback
-            or "overshoot" in fallback
-        ):
-            pass
-        elif alias == KOOL_ALIAS:
-            pass
-        else:
+    n_obs = len(new_train) + len(new_val)
+    if n_obs > int(budget):
+        if is_v2:
             raise AssertionError(
-                f"{alias} retained train+val={len(new_train)+len(new_val)} exceeds budget {budget}"
+                f"{alias} v2 retained train+val={n_obs} exceeds budget {budget}"
             )
+        if fallback != "kool_include_matching_stage1" and "overshoot" not in fallback:
+            if alias == KOOL_ALIAS and (
+                "kool_include_matching_stage1" in fallback
+                or "overshoot" in fallback
+            ):
+                pass
+            elif alias == KOOL_ALIAS:
+                pass
+            else:
+                raise AssertionError(
+                    f"{alias} retained train+val={n_obs} exceeds budget {budget}"
+                )
     if len(new_test) != original_n_test and not test_differs:
         raise AssertionError("structure-aware protocol changed the test count")
-    if len(new_train) + len(new_val) > int(budget):
+    if n_obs > int(budget):
         if "kool" not in fallback:
             fallback = (fallback + ";" if fallback else "") + "budget_overshoot"
 
     assert_no_split_overlap(new_train, new_val, new_test)
-    if hist_status != "pass":
+    if hist_status not in ("pass", "original_test_histories_preserved"):
         raise AssertionError(hist_status)
 
     fp = structure_aware_subset_fingerprint(
@@ -924,7 +974,7 @@ def apply_structure_aware_protocol(
         participant_id=int(participant_id),
         split_seed=int(split_seed),
         budget=int(budget),
-        protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+        protocol=protocol_name,
         train_trials=new_train,
         val_trials=new_val,
         test_trials=new_test,
@@ -963,7 +1013,7 @@ def apply_structure_aware_protocol(
     manifest = LimitedDataManifest(
         dataset=str(alias),
         participant_id=int(participant_id),
-        protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+        protocol=protocol_name,
         split_seed=int(split_seed),
         split_ratio=float(split_ratio),
         budget=int(budget),
@@ -1000,6 +1050,12 @@ def apply_structure_aware_protocol(
         extra={
             "prefix_valid": spec.prefix_valid,
             "chronological_split": spec.chronological_split,
+            "sa40_revision": "v2" if is_v2 else "v1",
+            "test_history_policy": (
+                "original_pre_choice"
+                if is_v2
+                else "v1_rebuilt_or_emptied"
+            ),
         },
     )
     return (
@@ -1059,6 +1115,7 @@ def apply_limited_data_protocol(
         split_ratio=float(split_ratio),
         budget=int(budget),
         split_kind=split_kind,
+        revision=limited_data_protocol_revision(proto),
     )
 
 
@@ -1198,4 +1255,4 @@ def _manifest_kwargs_from_dict(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def should_persist_limited_data_manifest(manifest: LimitedDataManifest) -> bool:
-    return manifest.protocol == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
+    return is_structure_aware_protocol(manifest.protocol)

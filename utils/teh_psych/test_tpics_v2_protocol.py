@@ -1,0 +1,338 @@
+"""ICLR T-PICS v2: training-only SA40, original test histories, snapshots, packing."""
+from __future__ import annotations
+
+import inspect
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "baseline_methods" / "Psych101"))
+
+from data_modules.psych101_binary import format_trial_for_prompt
+from utils.teh.limited_data_protocol import (
+    apply_structure_aware_protocol,
+    load_participant_limited_splits,
+    load_raw_participant_splits,
+    _contiguous_tv_suffix,
+)
+from utils.teh.limited_data_registry import (
+    CONTINUOUS_SESSION,
+    INDEPENDENT_TRIAL,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+    LIMITED_DATA_REGISTRY,
+    RESETTING_UNIT,
+)
+from utils.teh.prompt_context import _trial_to_example_dict, DEFAULT_HISTORY_MAX_ENTRIES
+from utils.teh.prompt_snapshots import (
+    current_or_future_leak_paths,
+    format_snapshot_example,
+    sanitize_problem_for_choose,
+    stamp_prompt_participant_id,
+)
+from utils.teh.prompt_units import (
+    largest_balanced_prefix_that_fits,
+    select_structure_aware_prompt_examples,
+)
+from utils.teh.t_pics_gated_transfer import EVOLUTION_SELECTION_SCORE, GATE_SCORE_FIELD
+from utils.teh.t_pics_v2 import KIND_V2, V1_FROZEN_SOURCE_YAML, V1_G1_JOBS
+
+SPLIT = dict(split_ratio=0.6, split_seed=0, psych_dataset_split="train")
+
+
+def _hist(t):
+    return json.dumps(t.get("history") or [], sort_keys=True, default=str)
+
+
+def test_v1_kool_suffix_still_retains_41():
+    tv = []
+    for i in range(80):
+        stage = 2 if i % 2 == 0 else 1
+        tv.append({"problem": {"stage": stage, "presented_day": i // 20}, "history": [], "action": 0})
+    kept, reason = _contiguous_tv_suffix(tv, 40, kool=True)
+    assert len(kept) == 41
+    assert reason == "kool_include_matching_stage1"
+
+
+def test_v2_kool_suffix_is_exact_40():
+    tv = []
+    for i in range(80):
+        stage = 2 if i % 2 == 0 else 1
+        tv.append({"problem": {"stage": stage, "presented_day": i // 20}, "history": [], "action": 0})
+    kept, reason = _contiguous_tv_suffix(tv, 40, kool=True, exact_40=True)
+    assert len(kept) == 40
+    assert reason == ""
+    assert int(kept[0]["problem"]["stage"]) == 2
+
+
+def test_v2_kool_protocol_never_exceeds_40():
+    tv = []
+    for i in range(80):
+        stage = 2 if i % 2 == 0 else 1
+        tv.append(
+            {
+                "problem": {
+                    "dataset_alias": "14kool2016when",
+                    "schema_type": "kool_twostep",
+                    "stage": stage,
+                    "presented_day": i // 20,
+                    "option_keys": [0, 1],
+                },
+                "history": [],
+                "action": 0,
+            }
+        )
+    train, val, test = tv[:48], tv[48:70], tv[70:]
+    new_train, new_val, new_test, _a, man = apply_structure_aware_protocol(
+        train,
+        val,
+        test,
+        dataset="14kool2016when",
+        participant_id=0,
+        split_seed=0,
+        split_ratio=0.6,
+        budget=40,
+        split_kind="legacy_chronological_days",
+        revision="v2",
+    )
+    assert len(new_train) + len(new_val) == 40
+    assert "kool_include_matching_stage1" not in (man.fallback_reason or "")
+    assert man.protocol == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+    assert len(new_test) == len(test)
+
+
+def test_v1_artifacts_untouched():
+    assert V1_FROZEN_SOURCE_YAML.is_file()
+    assert KIND_V2 != "t_pics_gated"
+    assert 257174 in V1_G1_JOBS and 257188 in V1_G1_JOBS
+
+
+def test_gate_independent_of_test():
+    assert EVOLUTION_SELECTION_SCORE == "train_val"
+    assert GATE_SCORE_FIELD == "mean_train_val_loglik"
+
+
+def test_badham_frey_v2_formatter():
+    badham = {
+        "problem": {
+            "schema_type": "B",
+            "rule_block_id": 3,
+            "stimulus_features": {"f1": 1},
+            "option_keys": ["A", "B"],
+            "correct_category": "A",
+        },
+        "action": 0,
+        "history": [],
+    }
+    v1 = format_trial_for_prompt(badham, 1, contract="v1")
+    v2 = format_trial_for_prompt(badham, 1, contract="v2")
+    assert "ratings_A" in v1
+    assert "stimulus_features" in v2
+    assert "correct_category" not in v2
+    balloon = {
+        "problem": {
+            "schema_type": "D",
+            "balloon_id": 7,
+            "step_index": 2,
+            "pump_count_before": 2,
+            "accumulated_points_before": 10,
+            "pump_key": "P",
+            "stop_key": "S",
+            "option_keys": ["P", "S"],
+        },
+        "action": 0,
+        "history": [],
+    }
+    v1b = format_trial_for_prompt(balloon, 1, contract="v1")
+    v2b = format_trial_for_prompt(balloon, 1, contract="v2")
+    assert "round_id" in v1b
+    assert "balloon_id=7" in v2b
+    assert "0=pump" in v2b
+
+
+def test_snapshot_and_auto_prompt_sanitizer_parity():
+    trial = {
+        "problem": {
+            "dataset_alias": "12badham2017deficits",
+            "schema_type": "B",
+            "stimulus_features": {"shape": 1},
+            "correct_category": "X",
+            "response_key": "r",
+            "option_keys": ["A", "B"],
+        },
+        "action": 1,
+        "history": [{"action": 0, "feedback": 1}] * 12,
+    }
+    snap_prob = sanitize_problem_for_choose(trial["problem"])
+    auto = _trial_to_example_dict(trial, 1, history_max_entries=DEFAULT_HISTORY_MAX_ENTRIES)
+    assert "correct_category" not in snap_prob
+    assert "correct_category" not in auto["problem"]
+    assert auto["history_truncated"] is True
+    assert auto["history_original_len"] == 12
+    assert len(auto["history"]) == 8
+    text = format_snapshot_example(trial, 1)
+    assert "observed_action_label=1" in text
+    assert current_or_future_leak_paths({"problem": snap_prob, "action": 1}) == []
+
+
+def test_balanced_prefix_does_not_drop_later_participants_only():
+    trials = []
+    for pid in (0, 1, 2):
+        for i in range(4):
+            trials.append(
+                stamp_prompt_participant_id(
+                    {
+                        "problem": {"dataset_alias": "7hilbig2014generalized", "option_keys": [0, 1]},
+                        "action": 0,
+                        "history": [],
+                    },
+                    pid,
+                )
+            )
+    selected, _ = select_structure_aware_prompt_examples(
+        trials,
+        dataset="7hilbig2014generalized",
+        max_trials=6,
+        subsample_seed=0,
+        pooled=True,
+    )
+    pids = [t["_prompt_participant_id"] for t in selected]
+    assert set(pids) == {0, 1, 2}
+
+    def tok(text: str) -> int:
+        return text.count("### example")
+
+    kept, diag = largest_balanced_prefix_that_fits(
+        selected,
+        required_prompt="REQ",
+        token_count=tok,
+        token_ceiling=3,
+    )
+    assert diag["n_retained"] == 3
+    assert diag["n_participants_retained"] == 3
+    assert set(t["_prompt_participant_id"] for t in kept) == {0, 1, 2}
+
+
+def test_centaur_v2_timeline_unscored_context():
+    from Centaur import _centaur_prompt_timeline_v2
+
+    raw_tv = [{"problem": {"x": i}, "history": [], "action": 0} for i in range(10)]
+    test = [{"problem": {"x": 99}, "history": [{}] * 10, "action": 1}]
+    prompt, scores = _centaur_prompt_timeline_v2(raw_tv[:8], raw_tv[8:], test)
+    assert scores == [10]
+    assert len(prompt) == 11
+    assert prompt[scores[0]]["problem"]["x"] == 99
+
+
+def _one_pid(alias: str) -> int:
+    if alias == "mixed_gambles":
+        path = REPO / "datasets/mixed_gambles/valid_participant_ids.json"
+        return int(json.loads(path.read_text())["valid_participant_ids"][0])
+    if alias in LIMITED_DATA_REGISTRY and alias.startswith(
+        ("bergert", "guan", "steyvers")
+    ) or alias in {"bergert_nosofsky_2007", "guan_2020_stopping", "steyvers_2009_bandit"}:
+        path = REPO / "datasets/external" / alias / "valid_participant_ids.json"
+        return int(json.loads(path.read_text())["valid_participant_ids"][0])
+    return 0
+
+
+@pytest.mark.parametrize("alias", sorted(LIMITED_DATA_REGISTRY))
+def test_v2_all_15_structure_categories_one_person(alias):
+    spec = LIMITED_DATA_REGISTRY[alias]
+    pid = _one_pid(alias)
+    raw_tr, raw_va, raw_te, _ = load_raw_participant_splits(alias, pid, **SPLIT)
+    v2_tr, v2_va, v2_te, _a, man = load_participant_limited_splits(
+        alias,
+        pid,
+        **SPLIT,
+        limited_data_protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+        limited_train_val=40,
+        max_observed_trials_per_participant=40,
+    )
+    assert man.protocol == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+    assert len(v2_tr) + len(v2_va) <= 40
+    assert len(v2_te) == len(raw_te)
+    assert [t.get("action") for t in v2_te] == [t.get("action") for t in raw_te]
+    assert [_hist(a) for a in v2_te] == [_hist(b) for b in raw_te]
+    for t in v2_te:
+        assert current_or_future_leak_paths(t) == []
+    assert spec.category in {INDEPENDENT_TRIAL, RESETTING_UNIT, CONTINUOUS_SESSION}
+
+
+def test_v2_kool_41_and_45_exact_40_and_original_test():
+    for pid in (41, 45):
+        raw_tr, raw_va, raw_te, _ = load_raw_participant_splits("14kool2016when", pid, **SPLIT)
+        v1_tr, v1_va, v1_te, _a1, m1 = load_participant_limited_splits(
+            "14kool2016when",
+            pid,
+            **SPLIT,
+            limited_data_protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+            limited_train_val=40,
+            max_observed_trials_per_participant=40,
+        )
+        v2_tr, v2_va, v2_te, _a2, m2 = load_participant_limited_splits(
+            "14kool2016when",
+            pid,
+            **SPLIT,
+            limited_data_protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+            limited_train_val=40,
+            max_observed_trials_per_participant=40,
+        )
+        assert len(v1_tr) + len(v1_va) == 41
+        assert len(v2_tr) + len(v2_va) == 40
+        assert int((v2_tr + v2_va)[0]["problem"]["stage"]) == 2
+        assert [_hist(a) for a in v2_te] == [_hist(b) for b in raw_te]
+        assert [_hist(a) for a in v1_te] != [_hist(b) for b in raw_te]
+        last_v1 = (v1_tr + v1_va)[-1]
+        last_v2 = (v2_tr + v2_va)[-1]
+        assert last_v1["problem"]["presented_day"] == last_v2["problem"]["presented_day"]
+        assert last_v1["problem"]["stage"] == last_v2["problem"]["stage"]
+
+
+def test_v2_continuous_and_hilbig_restore_raw_test_history():
+    for alias in ("5speekenbrink2008learning", "7hilbig2014generalized"):
+        raw_tr, raw_va, raw_te, _ = load_raw_participant_splits(alias, 0, **SPLIT)
+        v1_tr, v1_va, v1_te, *_ = load_participant_limited_splits(
+            alias,
+            0,
+            **SPLIT,
+            limited_data_protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
+            limited_train_val=40,
+            max_observed_trials_per_participant=40,
+        )
+        v2_tr, v2_va, v2_te, *_ = load_participant_limited_splits(
+            alias,
+            0,
+            **SPLIT,
+            limited_data_protocol=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+            limited_train_val=40,
+            max_observed_trials_per_participant=40,
+        )
+        assert [_hist(a) for a in v2_te] == [_hist(b) for b in raw_te]
+        if alias == "5speekenbrink2008learning":
+            assert len(raw_te[0].get("history") or []) > len(v1_te[0].get("history") or [])
+        if alias == "7hilbig2014generalized":
+            assert any(raw_te[i].get("history") for i in range(len(raw_te)))
+            assert [_hist(a) for a in v1_te] != [_hist(b) for b in raw_te]
+
+
+def test_oe_combined_score_excludes_test():
+    from run_openevolve import _find_best_program_by_observed_loglik, _render_evaluator_py
+
+    src = inspect.getsource(_render_evaluator_py)
+    assert "combined_score" in src
+    assert "observed-union objective; no test access" in src
+    assert "never test" in inspect.getdoc(_find_best_program_by_observed_loglik)
+
+
+def test_lm_fit_excludes_test():
+    from baseline_methods.MLE import _fit_and_evaluate_participant
+
+    src = inspect.getsource(_fit_and_evaluate_participant)
+    assert "fit_trials = train_trials + val_trials" in src
+    assert "test_trials" in src
+    assert "loglik_fn(test_trials)" in src
