@@ -640,6 +640,15 @@ def _build_balloon_prefix(
     return "\n\n".join(parts)
 
 
+def _is_supported_centaur_dataset(alias: str) -> bool:
+    name = str(alias or "")
+    if not name:
+        return False
+    if name in PSYCH101_CENTAUR_DATASETS:
+        return True
+    return normalize_psych101_dataset_alias(name) in PSYCH101_CENTAUR_DATASETS
+
+
 def _build_generic_prefix(
     trials: List[Dict[str, Any]], trial_index: int, *, instruction: str = ""
 ) -> str:
@@ -663,26 +672,48 @@ def build_centaur_prompt_prefix_indexed(
     instruction: str = "",
 ) -> str:
     """Build Psych-101-style prefix for trials[trial_index] (ends with 'You press ')."""
+    problem = trials[trial_index]["problem"]
+    alias = str(problem.get("dataset_alias") or "")
     extended = try_build_extended_centaur_prefix(
         trials, trial_index, instruction=instruction
     )
     if extended is not None:
-        return extended
-    schema = str(trials[trial_index]["problem"].get("schema_type", "?"))
-    problem = trials[trial_index]["problem"]
-    if "gamble_A" in problem and "gamble_B" in problem:
-        return _build_gamble_prefix(trials, trial_index, instruction=instruction)
-    if schema == "A" and ("gamble_A" in problem or "gamble_B" in problem):
-        return _build_gamble_prefix(trials, trial_index, instruction=instruction)
-    if schema == "D":
-        if "balloon_id" in trials[trial_index]["problem"]:
-            return _build_balloon_prefix(trials, trial_index, instruction=instruction)
-        return _build_cct_prefix(trials, trial_index, instruction=instruction)
-    if schema == "B":
-        return _build_schema_b_prefix(trials, trial_index, instruction=instruction)
-    if schema == "C":
-        return _build_bandit_prefix(trials, trial_index, instruction=instruction)
-    return _build_generic_prefix(trials, trial_index, instruction=instruction)
+        prefix = extended
+    else:
+        schema = str(problem.get("schema_type", "?"))
+        if "gamble_A" in problem and "gamble_B" in problem:
+            prefix = _build_gamble_prefix(trials, trial_index, instruction=instruction)
+        elif schema == "A" and ("gamble_A" in problem or "gamble_B" in problem):
+            prefix = _build_gamble_prefix(trials, trial_index, instruction=instruction)
+        elif schema == "D":
+            if "balloon_id" in problem:
+                prefix = _build_balloon_prefix(trials, trial_index, instruction=instruction)
+            else:
+                prefix = _build_cct_prefix(trials, trial_index, instruction=instruction)
+        elif schema == "B":
+            prefix = _build_schema_b_prefix(trials, trial_index, instruction=instruction)
+        elif schema == "C":
+            prefix = _build_bandit_prefix(trials, trial_index, instruction=instruction)
+        elif _is_supported_centaur_dataset(alias):
+            raise ValueError(
+                f"Centaur refused empty generic prefix for supported dataset {alias!r} "
+                f"(schema_type={schema!r}). Dataset-specific prompt routing failed."
+            )
+        else:
+            prefix = _build_generic_prefix(trials, trial_index, instruction=instruction)
+    if is_mixed_gambles_dataset(alias) or is_mixed_gambles_dataset(
+        normalize_psych101_dataset_alias(alias)
+    ):
+        keys = centaur_display_keys(problem)
+        if keys != ["A", "B"]:
+            raise ValueError(
+                f"mixed_gambles Centaur requires display keys ['A', 'B'], got {keys!r}"
+            )
+        if "Option A delivers" not in prefix:
+            raise ValueError(
+                "mixed_gambles Centaur prefix is missing Option A/B gamble text"
+            )
+    return prefix
 
 
 # ----- Centaur model (reference: test_adapter.py loading; suffix logprob scoring) -----

@@ -375,6 +375,38 @@ def resolve_participants_for_scope(
     raise ValueError(f"Unknown participant_scope: {participant_scope!r}")
 
 
+_ENKAVI_ORACLE_KEYS = ("probe_in_set",)
+_KOOL_STAGE1_UNOBSERVED_KEYS = (
+    "planet",
+    "alien_options",
+    "stage1_action",
+    "spaceship",
+    "reward",
+    "treasure",
+)
+_KOOL_CURRENT_OUTCOME_KEYS = ("reward", "treasure")
+
+
+def sanitize_trial_for_program(trial: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop oracle/future fields from the problem dict passed to choose() / compact text.
+
+    History entries are unchanged (those are already-observed outcomes).
+    """
+    nt = dict(trial)
+    problem = dict(trial.get("problem") or {})
+    for key in _ENKAVI_ORACLE_KEYS:
+        problem.pop(key, None)
+    alias = str(problem.get("dataset_alias") or "")
+    schema = str(problem.get("schema_type") or "")
+    if schema == "kool_twostep" or alias == "14kool2016when":
+        stage = int(problem.get("stage") or 1)
+        drop = _KOOL_STAGE1_UNOBSERVED_KEYS if stage == 1 else _KOOL_CURRENT_OUTCOME_KEYS
+        for key in drop:
+            problem.pop(key, None)
+    nt["problem"] = problem
+    return nt
+
+
 def trials_for_participant(
     dataset: str,
     participant_id: int,
@@ -407,7 +439,13 @@ def trials_for_participant(
         speekenbrink_split=speekenbrink_split,
     )
     if return_manifest:
+        train_trials = [sanitize_trial_for_program(t) for t in train_trials]
+        val_trials = [sanitize_trial_for_program(t) for t in val_trials]
+        test_trials = [sanitize_trial_for_program(t) for t in test_trials]
         return train_trials, val_trials, test_trials, audit, manifest
+    train_trials = [sanitize_trial_for_program(t) for t in train_trials]
+    val_trials = [sanitize_trial_for_program(t) for t in val_trials]
+    test_trials = [sanitize_trial_for_program(t) for t in test_trials]
     return train_trials, val_trials, test_trials
 
 
@@ -644,6 +682,7 @@ def _compact_history(history: List[Dict[str, Any]], max_items: int = 6) -> str:
 
 
 def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
+    trial = sanitize_trial_for_program(trial)
     problem = trial.get("problem") or {}
     alias = str(problem.get("dataset_alias") or "")
     schema = str(problem.get("schema_type") or "")
@@ -673,14 +712,23 @@ def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
             f"n_arms={problem.get('n_arms')} keys={list(problem.get('option_keys') or [])}"
         )
     elif schema == "kool_twostep" or alias == "14kool2016when":
-        core = (
-            f"kool stage={problem.get('stage')} day={problem.get('presented_day')} "
-            f"keys={list(problem.get('option_keys') or [])} "
-            f"spaceship={problem.get('spaceship_options') or problem.get('spaceship')} "
-            f"aliens={problem.get('alien_options')} "
-            f"s1={problem.get('stage1_action')} "
-            f"planet={problem.get('planet')}"
-        )
+        stage = int(problem.get("stage") or 1)
+        keys = list(problem.get("option_keys") or [])
+        if stage == 1:
+            core = (
+                f"kool stage=1 day={problem.get('presented_day')} "
+                f"keys={keys} "
+                f"spaceship={problem.get('spaceship_options') or keys}"
+            )
+        else:
+            core = (
+                f"kool stage=2 day={problem.get('presented_day')} "
+                f"keys={keys} "
+                f"spaceship={problem.get('spaceship')} "
+                f"aliens={problem.get('alien_options')} "
+                f"s1={problem.get('stage1_action')} "
+                f"planet={problem.get('planet')}"
+            )
     elif "balloon_id" in problem and "pump_count_before" in problem:
         core = (
             f"balloon={problem.get('balloon_id')} "
@@ -706,8 +754,7 @@ def format_trial_compact(trial: Dict[str, Any], split_label: str) -> str:
         core = (
             "memory_set="
             f"{problem.get('memory_set_letters', [])} "
-            f"probe={problem.get('probe_letter')} "
-            f"in_set={problem.get('probe_in_set')}"
+            f"probe={problem.get('probe_letter')}"
         )
     elif "stimulus_features" in problem and (
         problem.get("task") == "category_learning" or "correct_category" in problem
