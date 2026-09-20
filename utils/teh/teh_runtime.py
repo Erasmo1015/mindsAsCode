@@ -42,6 +42,7 @@ from utils.teh.prompt_context import (
     DEFAULT_HISTORY_MAX_ENTRIES,
     DEFAULT_MAX_EXAMPLES,
     RUNTIME_CONTRACT_FILENAME,
+    assert_no_generation_oracle_leak,
     attach_runtime_contract_to_prompt,
     build_deterministic_runtime_contract,
     history_keys_note_from_schema,
@@ -663,8 +664,13 @@ def _generate_prompt_via_llm(
 
 def _prompt_trial_fingerprint(trial: Dict[str, Any]) -> str:
     """Instance fingerprint for prompt-example leakage checks (problem + history)."""
+    from utils.teh.prompt_snapshots import sanitize_problem_for_choose
+
     return json.dumps(
-        {"problem": trial.get("problem"), "history": trial.get("history")},
+        {
+            "problem": sanitize_problem_for_choose(trial.get("problem") or {}),
+            "history": trial.get("history"),
+        },
         sort_keys=True,
         default=str,
     )
@@ -948,6 +954,7 @@ def setup_teh_run_prompts(
         print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
 
     contract = build_deterministic_runtime_contract(sample_trial_list)
+    assert_no_generation_oracle_leak(contract, context="runtime_contract")
     (prompts_dir / RUNTIME_CONTRACT_FILENAME).write_text(
         contract + "\n", encoding="utf-8"
     )
@@ -966,6 +973,15 @@ def setup_teh_run_prompts(
     shutil.copy2(seed_src, prompts_dir / "seed_program.py")
 
     infer_text_final = infer_path.read_text(encoding="utf-8")
+    assert_no_generation_oracle_leak(
+        infer_text_final, context=f"infer_single_choice:{infer_path}"
+    )
+    llm_input_path = prompts_dir / "llm_input_prompt.txt"
+    if llm_input_path.is_file():
+        assert_no_generation_oracle_leak(
+            llm_input_path.read_text(encoding="utf-8"),
+            context=f"llm_input_prompt:{llm_input_path}",
+        )
     if require_auto_llm_prompt:
         if not generated or used_reference or used_dataset_prompt_file:
             raise RuntimeError(

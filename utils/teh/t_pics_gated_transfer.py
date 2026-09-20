@@ -35,6 +35,14 @@ from utils.teh.t_pics_sources import (
     official_t_pics_source,
 )
 from utils.teh.teh_datasets import PARTICIPANT_DATASETS
+from utils.teh.pics_v3 import (
+    G1_KIND as G1_KIND_PICS_V3,
+    INDEPENDENT_KIND as INDEPENDENT_KIND_PICS_V3,
+    KIND as KIND_PICS_V3,
+    LIMITED_DATA_PROTOCOL as LIMITED_DATA_PROTOCOL_PICS_V3,
+    RUN_TAG as RUN_TAG_PICS_V3,
+    SOURCE_YAML as PICS_V3_SOURCE_YAML,
+)
 from utils.teh.t_pics_v2 import (
     G1_KIND_V2,
     INDEPENDENT_KIND_V2,
@@ -47,15 +55,22 @@ from utils.teh.t_pics_v2 import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # Frozen v1 map (jobs 257174-257188 / 257756). Do not overwrite.
 FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V1 = V1_FROZEN_SOURCE_YAML
-# Default for new gated jobs. Written after v2 G.1 + schema-v4 + Occurrence-EB.
-FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG = V2_SOURCE_YAML
+# Preliminary T-PICS v2 map (non-final). Do not overwrite.
+FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V2 = V2_SOURCE_YAML
+# Default for new gated jobs. Written after PICS v3 G.1 + schema-v4 + Occurrence-EB.
+FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG = PICS_V3_SOURCE_YAML
 
 KIND_V1 = "t_pics_gated"
 INDEPENDENT_KIND_V1 = "t_pics_gated_independent"
-KIND = KIND_V2
-INDEPENDENT_KIND = INDEPENDENT_KIND_V2
-G1_KIND = G1_KIND_V2
-RUN_TAG = RUN_TAG_V2
+KIND = KIND_PICS_V3
+INDEPENDENT_KIND = INDEPENDENT_KIND_PICS_V3
+G1_KIND = G1_KIND_PICS_V3
+RUN_TAG = RUN_TAG_PICS_V3
+# Keep preliminary-v2 kind aliases importable for frozen audits.
+KIND_PRELIMINARY_V2 = KIND_V2
+INDEPENDENT_KIND_PRELIMINARY_V2 = INDEPENDENT_KIND_V2
+G1_KIND_PRELIMINARY_V2 = G1_KIND_V2
+RUN_TAG_PRELIMINARY_V2 = RUN_TAG_V2
 SOURCE_POPULATION_ITERS = 10
 DEFAULT_GLOBAL_ITERS = 5
 DEFAULT_EXPLORE_CANDIDATES = 50
@@ -664,6 +679,13 @@ def cli_flag_was_passed(flag: str, argv: Optional[Sequence[str]] = None) -> bool
 
 def apply_gated_cli_defaults(args: Any, argv: Optional[Sequence[str]] = None) -> Any:
     """Apply T-PICS gated defaults without changing generic TEH argparse defaults."""
+    from utils.teh.pics_v3 import (
+        HARD_PROMPT_TOKEN_CAP,
+        LLM_MAX_TOKENS,
+        MAX_PARENT_CHARS,
+        MAX_PROMPT_TRAIN_TRIALS,
+    )
+
     argv = list(sys.argv[1:] if argv is None else argv)
     args.global_phase = True
     args.refinement_phase = False
@@ -676,12 +698,27 @@ def apply_gated_cli_defaults(args: Any, argv: Optional[Sequence[str]] = None) ->
     if not cli_flag_was_passed("--explore_candidates", argv):
         args.explore_candidates = DEFAULT_EXPLORE_CANDIDATES
     if getattr(args, "t_pics_source_config", None) in (None, ""):
-        args.t_pics_source_config = str(FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG)
+        # Final pics_v3 YAML appears after G.1 → annotate → Occurrence-EB.
+        # Until then, bootstrap from the frozen preliminary-v2 map for topology /
+        # allowlist validation only (G.1 independent does not consume rank-1 files
+        # when require_files=False). Do not treat the v2 map as the final PICS v3 source.
+        cfg_path = FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG
+        if not Path(cfg_path).is_file():
+            cfg_path = FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V2
+        args.t_pics_source_config = str(cfg_path)
     if not cli_flag_was_passed("--limited_data_protocol", argv):
-        args.limited_data_protocol = "structure_aware_v2"
+        args.limited_data_protocol = LIMITED_DATA_PROTOCOL_PICS_V3
     if not cli_flag_was_passed("--limited_train_val", argv):
         if getattr(args, "limited_train_val", None) in (None,):
             args.limited_train_val = 40
+    if not cli_flag_was_passed("--hard_prompt_token_cap", argv):
+        args.hard_prompt_token_cap = HARD_PROMPT_TOKEN_CAP
+    if not cli_flag_was_passed("--max_parent_chars", argv):
+        args.max_parent_chars = MAX_PARENT_CHARS
+    if not cli_flag_was_passed("--llm_max_tokens", argv):
+        args.llm_max_tokens = LLM_MAX_TOKENS
+    if not cli_flag_was_passed("--max_prompt_train_trials", argv):
+        args.max_prompt_train_trials = MAX_PROMPT_TRAIN_TRIALS
     return args
 
 
@@ -824,12 +861,12 @@ def _char4_tokens(text: str) -> int:
 def audit_gated_transfer_prompt_budgets(
     *,
     config: Optional[FrozenTransferConfig] = None,
-    hard_prompt_token_cap: int = 14000,
-    max_parent_chars: int = 3500,
+    hard_prompt_token_cap: int = 30000,
+    max_parent_chars: int = 5000,
     sample_size: int = 8,
     max_prompt_train_trials: int = 60,
     split_seed: int = 0,
-    limited_data_protocol: str = "structure_aware_v2",
+    limited_data_protocol: str = LIMITED_DATA_PROTOCOL_PICS_V3,
     limited_train_val: int = 40,
 ) -> List[Dict[str, Any]]:
     """CPU audit of G.2 transfer instruction+source-suffix token budgets.

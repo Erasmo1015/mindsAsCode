@@ -77,6 +77,7 @@ from utils.teh.limited_data_protocol import (  # noqa: E402
 )
 from utils.teh.limited_data_registry import (  # noqa: E402
     limited_data_protocol_revision,
+    uses_training_only_sa40,
 )
 from utils.teh.participant_ids import load_valid_participant_ids  # noqa: E402
 from utils.teh.teh_datasets import (  # noqa: E402
@@ -1230,9 +1231,28 @@ def run_smoke_prompt_check(
         limited_train_val=limited_train_val,
         speekenbrink_split=speekenbrink_split,
     )
-    prompt_trials, score_indices = _centaur_prompt_timeline(
-        train, val, test
-    )
+    # Match production `_evaluate_participant`: under training-only SA40 (v2/v3),
+    # continuous test histories must map onto the original pre-test timeline.
+    if uses_training_only_sa40(limited_data_protocol):
+        raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
+            dataset,
+            int(participant_row_index),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            speekenbrink_split=speekenbrink_split,
+        )
+        raw_train = _ensure_mixed_gambles_centaur_contract(dataset, raw_train)
+        raw_val = _ensure_mixed_gambles_centaur_contract(dataset, raw_val)
+        prompt_trials, score_indices = _centaur_prompt_timeline_v2(
+            raw_train, raw_val, test
+        )
+        timeline_mode = "v2_raw_pretest"
+    else:
+        prompt_trials, score_indices = _centaur_prompt_timeline(train, val, test)
+        timeline_mode = "v1_retained"
+    prompt_trials = _ensure_mixed_gambles_centaur_contract(dataset, prompt_trials)
     if not prompt_trials:
         raise ValueError("No trials available for smoke check.")
     if score_indices:
@@ -1273,6 +1293,8 @@ def run_smoke_prompt_check(
         "retained_n_train": getattr(manifest, "retained_n_train", None),
         "retained_n_val": getattr(manifest, "retained_n_val", None),
         "retained_n_test": getattr(manifest, "retained_n_test", None),
+        "timeline_mode": timeline_mode,
+        "prompt_timeline_n": len(prompt_trials),
         "instruction_chars": len(instruction),
         "samples": samples,
     }
@@ -1311,7 +1333,7 @@ def _evaluate_participant(
     if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
         append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
     chooser.task_instruction = instruction
-    if limited_data_protocol_revision(limited_data_protocol) == "v2":
+    if uses_training_only_sa40(limited_data_protocol):
         raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
             dataset,
             int(participant_row_index),
@@ -1326,8 +1348,9 @@ def _evaluate_participant(
         prompt_trials, score_indices = _centaur_prompt_timeline_v2(
             raw_train, raw_val, test_trials
         )
+        rev = limited_data_protocol_revision(limited_data_protocol)
         timeline_note = (
-            f"v2 unscored pre-test context n={len(raw_train)+len(raw_val)} "
+            f"{rev} unscored pre-test context n={len(raw_train)+len(raw_val)} "
             f"(omitted SA40 rows included, never scored)"
         )
     else:

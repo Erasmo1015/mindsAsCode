@@ -27,3 +27,5 @@ V1_OCCURRENCE_EB_JOB = 257756
 
 LIMITED_DATA_PROTOCOL_V2 = "structure_aware_v2"
 LIMITED_TRAIN_VAL_V2 = 40
+G2_PAIRED_PACK_VERSION = "g2_paired_pack_v1"
+G2_PAIRED_PACK_FILENAME = "g2_paired_packing.json"

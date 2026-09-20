@@ -94,7 +94,27 @@ from utils.teh.prompt_context import (
     DEFAULT_EXAMPLE_CHAR_BUDGET,
     DEFAULT_HISTORY_MAX_ENTRIES,
     DEFAULT_MAX_EXAMPLES,
+    RUNTIME_CONTRACT_FILENAME,
     append_runtime_contract_if_present,
+    attach_runtime_contract_to_prompt,
+)
+from utils.teh.g2_paired_packing import (
+    PairedPackingFitError,
+    freeze_g2_target_examples,
+    load_paired_pack_freeze,
+    materialize_frozen_trials,
+    prompt_contains_source_suffix,
+    stable_target_example_id,
+    trim_reason as g2_trim_reason,
+    write_paired_pack_freeze,
+    fits_input_and_context,
+)
+from utils.teh.prompt_units import OUTPUT_RESERVE, VLLM_CONTEXT
+from utils.teh.pics_v3 import (
+    G2_PAIRED_PACK_FILENAME,
+    G2_PAIRED_PACK_VERSION,
+    HARD_PROMPT_TOKEN_CAP as PICS_V3_HARD_PROMPT_TOKEN_CAP,
+    MAX_PARENT_CHARS as PICS_V3_MAX_PARENT_CHARS,
 )
 from utils.teh.dataset_prompt_evolution import (
     aggregate_pics_style_prompt_scores,
@@ -113,7 +133,7 @@ from utils.teh.limited_data_protocol import (
     should_persist_limited_data_manifest,
     write_limited_data_manifest,
 )
-from utils.teh.limited_data_registry import limited_data_protocol_revision
+from utils.teh.limited_data_registry import limited_data_protocol_revision, uses_training_only_sa40
 from utils.teh.prompt_snapshots import (
     format_snapshot_examples,
     prompt_contract_scope,
@@ -2174,6 +2194,13 @@ def compile_program(code_str: str) -> Optional[Callable]:
     return choose_fn
 
 
+def _problem_for_choose(trial: Dict[str, Any]) -> Dict[str, Any]:
+    """Observable choice-time problem: shared sanitizer used by prompts and evaluators."""
+    from utils.teh.prompt_snapshots import sanitize_problem_for_choose
+
+    return sanitize_problem_for_choose(trial.get("problem") or {})
+
+
 _CHOICE13K_GATE_THRESHOLD = -0.45
 _CHOICE13K_LOGLIK_CLAMP_EPS = 1e-9
 
@@ -3038,6 +3065,8 @@ def run_global_evolution_phase(
     mdl_lambda: float = 0.0,
     mem_trace: bool = True,
     prompt_suffix: Optional[str] = None,
+    g2_arm: Optional[str] = None,
+    g2_paired_pack_path: Optional[str] = None,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -3051,7 +3080,7 @@ def run_global_evolution_phase(
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     mdl_lambda = normalize_mdl_lambda(mdl_lambda)
     prompt_contract_scope(
-        limited_data_protocol_revision(limited_data_protocol) == "v2"
+        uses_training_only_sa40(limited_data_protocol)
     ).__enter__()
     participant_ids = [int(p) for p in participants]
     sparse_audits: List[SparseObservationAudit] = []
@@ -3368,6 +3397,8 @@ def run_global_evolution_phase(
             "max_error_prompt_chars": max_error_prompt_chars,
             "error_feedback_mode": error_feedback_mode,
             "prompt_suffix": prompt_suffix,
+            "g2_arm": g2_arm,
+            "g2_paired_pack_path": g2_paired_pack_path,
             "llm_decoding_seed_base": _phase_llm_decoding_seed_base(
                 split_seed=int(split_seed),
                 iteration_step=int(iteration_step),
@@ -3383,6 +3414,8 @@ def run_global_evolution_phase(
             variant_kwargs=variant_kwargs,
             fresh_parent_train_accuracies=[baseline_ll],
             normal_parent_train_accuracies=parent_train_lls,
+            fresh_parent_program_ids=["global_baseline"],
+            normal_parent_program_ids=[str(p[3]) for p in selected_parents],
         )
 
         selected_results: List[Dict[str, Any]] = []
@@ -4015,6 +4048,8 @@ def _gated_global_phase_kwargs(
     run_prompts_dir: str,
     output_dir: Path,
     prompt_suffix: Optional[str],
+    g2_arm: Optional[str] = None,
+    g2_paired_pack_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "dataset": args.dataset,
@@ -4064,6 +4099,8 @@ def _gated_global_phase_kwargs(
         "mdl_lambda": args.mdl_lambda,
         "mem_trace": args.mem_trace,
         "prompt_suffix": prompt_suffix,
+        "g2_arm": g2_arm,
+        "g2_paired_pack_path": g2_paired_pack_path,
     }
 
 
@@ -4137,6 +4174,131 @@ def _ensure_gated_independent_source_population(
     )
 
 
+def _runtime_contract_text(run_prompts_dir: Optional[str]) -> str:
+    if not run_prompts_dir:
+        return ""
+    path = Path(run_prompts_dir) / RUNTIME_CONTRACT_FILENAME
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _g2_paired_pack_example_seed(split_seed: int) -> int:
+    """Freeze target examples with the G.2 iteration-0 subsample seed; reuse all five iters."""
+    return int(split_seed) + 60_000 + 1
+
+
+def _ensure_g2_paired_pack_freeze(
+    *,
+    args: Any,
+    participants: List[int],
+    seed_program_path: str,
+    run_prompts_dir: str,
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+    source_suffix: str,
+    freeze_path: Path,
+    source_dataset: str,
+    source_rank1: Path,
+) -> Dict[str, Any]:
+    """Freeze shared G.2 target-example IDs under the transfer token condition."""
+    freeze_path = Path(freeze_path)
+    if freeze_path.is_file():
+        payload = load_paired_pack_freeze(freeze_path)
+        print(
+            f"[T-PICS gated] reuse G.2 paired-pack freeze -> {freeze_path} "
+            f"n_examples={payload.get('n_examples_included')} "
+            f"version={payload.get('version')}"
+        )
+        return payload
+
+    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
+
+    infer_path = Path(run_prompts_dir) / "infer_single_choice.txt"
+    template_path = Path(run_prompts_dir) / "single_code_template.txt"
+    if not infer_path.is_file():
+        raise FileNotFoundError(f"G.2 paired packing needs infer prompt: {infer_path}")
+    infer_text = infer_path.read_text(encoding="utf-8")
+    code_template = (
+        load_single_code_template(str(template_path)) if template_path.is_file() else ""
+    )
+    code_template_suffix = single_code_template_prompt_suffix(code_template)
+    runtime_contract = _runtime_contract_text(run_prompts_dir)
+    seed_code = Path(seed_program_path).read_text(encoding="utf-8")
+    example_seed = _g2_paired_pack_example_seed(int(args.split_seed))
+    participant_ids = [int(p) for p in participants]
+    source_filter = bool(filter_mixed_gambles) or str(source_dataset) == "mixed_gambles"
+
+    with prompt_contract_scope(
+        uses_training_only_sa40(str(args.limited_data_protocol))
+    ):
+        pooled_train = _collect_pooled_train_trials_for_participants(
+            str(args.dataset),
+            participant_ids,
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+            data_path=str(args.data_path),
+            filter_mixed_gambles=bool(filter_mixed_gambles),
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=str(args.limited_data_protocol),
+            limited_train_val=args.limited_train_val,
+            speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        )
+        pooled_val = _collect_pooled_split_trials_for_participants(
+            str(args.dataset),
+            participant_ids,
+            split="val",
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+            data_path=str(args.data_path),
+            filter_mixed_gambles=bool(filter_mixed_gambles),
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            limited_data_protocol=str(args.limited_data_protocol),
+            limited_train_val=args.limited_train_val,
+            speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        )
+        payload = freeze_g2_target_examples(
+            dataset=str(args.dataset),
+            pooled_train=pooled_train,
+            pooled_val=pooled_val,
+            infer_text=infer_text,
+            source_suffix=source_suffix,
+            runtime_contract=runtime_contract,
+            seed_code=seed_code,
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=f"\n{CANDIDATE_OUTPUT_RULES}\n",
+            max_parent_chars=int(args.max_parent_chars),
+            max_prompt_train_trials=int(args.max_prompt_train_trials),
+            prompt_train_trials_seed=example_seed,
+            hard_prompt_token_cap=int(args.hard_prompt_token_cap),
+            sample_size=int(getattr(args, "sample_size", 8) or 8),
+        )
+    payload["source_dataset"] = str(source_dataset)
+    payload["source_rank1"] = str(source_rank1)
+    payload["source_suffix_sha256"] = hashlib.sha256(
+        (source_suffix or "").encode("utf-8")
+    ).hexdigest()
+    payload["source_filter_mixed_gambles"] = bool(source_filter)
+    payload["freeze_seed"] = example_seed
+    write_paired_pack_freeze(freeze_path, payload)
+    print(
+        f"[T-PICS gated] wrote G.2 paired-pack freeze -> {freeze_path} "
+        f"n_available={payload.get('n_selected_available')} "
+        f"n_included={payload.get('n_examples_included')} "
+        f"paired_parent_count={payload.get('paired_parent_count')} "
+        f"required_tokens={payload.get('transfer_required_tokens')} "
+        f"packed_tokens={payload.get('transfer_packed_tokens_at_freeze')} "
+        f"suffix_tokens={payload.get('source_suffix_tokens')}"
+    )
+    return payload
+
+
 def _run_t_pics_gated_population_arms(
     *,
     args: Any,
@@ -4205,6 +4367,33 @@ def _run_t_pics_gated_population_arms(
         f"gate={GATE_NAME} field={GATE_SCORE_FIELD} tolerance={GATE_TIE_TOLERANCE}"
     )
 
+    transfer_suffix = _cross_task_source_suffix(
+        source_dataset=str(entry.selected_source),
+        program_path=str(source_rank1),
+        args=args,
+        psych_dataset_split=psych_dataset_split,
+        filter_mixed_gambles=filter_mixed_gambles,
+        best_loglik=source_best_loglik,
+        require_source_examples=True,
+    )
+    freeze_path = Path(run_root) / G2_PAIRED_PACK_FILENAME
+    freeze_payload = _ensure_g2_paired_pack_freeze(
+        args=args,
+        participants=participants,
+        seed_program_path=seed_program_path,
+        run_prompts_dir=run_prompts_dir,
+        psych_dataset_split=psych_dataset_split,
+        filter_mixed_gambles=filter_mixed_gambles,
+        source_suffix=transfer_suffix,
+        freeze_path=freeze_path,
+        source_dataset=str(entry.selected_source),
+        source_rank1=source_rank1,
+    )
+    gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
+    if not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve():
+        write_paired_pack_freeze(gate_freeze, freeze_payload)
+    freeze_path_str = str(freeze_path)
+
     expected_iters = int(args.global_iters)
     if hasattr(wandb_module, "set_g2_arm"):
         wandb_module.set_g2_arm("control")
@@ -4229,6 +4418,8 @@ def _run_t_pics_gated_population_arms(
                 run_prompts_dir=run_prompts_dir,
                 output_dir=layout["control"],
                 prompt_suffix=None,
+                g2_arm="control",
+                g2_paired_pack_path=freeze_path_str,
             )
         )
         control_ok = population_arm_is_complete(
@@ -4258,15 +4449,6 @@ def _run_t_pics_gated_population_arms(
             transfer_failed = True
     else:
         try:
-            transfer_suffix = _cross_task_source_suffix(
-                source_dataset=str(entry.selected_source),
-                program_path=str(source_rank1),
-                args=args,
-                psych_dataset_split=psych_dataset_split,
-                filter_mixed_gambles=filter_mixed_gambles,
-                best_loglik=source_best_loglik,
-                require_source_examples=True,
-            )
             print(
                 "[T-PICS gated] transfer G.2 prompt includes "
                 f"{'live independent' if independent else 'frozen YAML'} rank-1 "
@@ -4284,6 +4466,8 @@ def _run_t_pics_gated_population_arms(
                     run_prompts_dir=run_prompts_dir,
                     output_dir=layout["transfer"],
                     prompt_suffix=transfer_suffix,
+                    g2_arm="transfer",
+                    g2_paired_pack_path=freeze_path_str,
                 )
             )
             transfer_ok = population_arm_is_complete(
@@ -4381,6 +4565,10 @@ def _run_t_pics_gated_population_arms(
             "selected_arm": decision.selected_arm,
             "retained_pool_path": str(retained_pool),
             "g2_arms_shared_target_prompt": True,
+            "g2_paired_pack_path": str(freeze_path),
+            "g2_paired_pack_version": G2_PAIRED_PACK_VERSION,
+            "g2_paired_n_examples_included": freeze_payload.get("n_examples_included"),
+            "g2_paired_example_ids": freeze_payload.get("example_ids"),
         },
     )
     print(
@@ -5059,11 +5247,15 @@ def _build_psych_prompt_text(
     parent_context: str,
     code_template_suffix: str,
     candidate_output_rules: str,
+    runtime_contract: str = "",
 ) -> str:
-    return (
+    text = (
         f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{code_template_suffix}\n{candidate_output_rules}\n"
     )
+    if runtime_contract and str(runtime_contract).strip():
+        text = attach_runtime_contract_to_prompt(text, str(runtime_contract).strip())
+    return text
 
 
 def _truncate_psych_prompt_to_budget(
@@ -5090,6 +5282,8 @@ def _truncate_psych_prompt_to_budget(
     refinement_val_observations: bool,
     pre_capped_train: bool,
     pre_capped_val: bool,
+    runtime_contract: str = "",
+    freeze_examples: bool = False,
 ) -> Tuple[str, Dict[str, Any], List[str]]:
     """
     Structured truncation for Psych/TEH prompts. Returns (prompt, diagnostics, steps).
@@ -5174,6 +5368,7 @@ def _truncate_psych_prompt_to_budget(
             parent_context=pctx,
             code_template_suffix=code_template_suffix,
             candidate_output_rules=candidate_output_rules,
+            runtime_contract=runtime_contract,
         )
         return prompt, state_text, extra_state_text, len(tr), n_val, len(parents)
 
@@ -5206,6 +5401,7 @@ def _truncate_psych_prompt_to_budget(
             "parents_before": n_parents_before,
             "parents_after": n_parents,
             "compact_serialization": compact,
+            "freeze_examples": bool(freeze_examples),
         }, steps
 
     # 1) compress whitespace in instruction
@@ -5225,50 +5421,52 @@ def _truncate_psych_prompt_to_budget(
         prompt, _, _, n_train, n_val, n_parents = _assemble()
 
     # 4) trial caps (monotone 40 -> 30 -> 20 -> 10 -> 5)
-    for cap in _TRAIN_TRIAL_CAP_STEPS:
-        if use_shared_trial_budget:
-            effective_max_total = (
-                min(effective_max_total, cap) if effective_max_total > 0 else cap
-            )
-        else:
-            effective_max_train = (
-                min(effective_max_train, cap) if effective_max_train > 0 else cap
-            )
-        steps.append(f"train_trials_cap_{cap}")
-        prompt, _, _, n_train, n_val, n_parents = _assemble()
-        if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
-            break
-
-    # 5) per-problem caps (when flat sampling was used, enable block caps under budget pressure)
-    if max_prompt_trials_per_problem <= 0:
-        for cap in _PER_PROBLEM_CAP_STEPS:
-            effective_per_problem = cap
-            steps.append(f"per_problem_cap_{cap}")
+    # Frozen G.2 examples skip this ladder so both arms keep the same IDs.
+    if not freeze_examples:
+        for cap in _TRAIN_TRIAL_CAP_STEPS:
+            if use_shared_trial_budget:
+                effective_max_total = (
+                    min(effective_max_total, cap) if effective_max_total > 0 else cap
+                )
+            else:
+                effective_max_train = (
+                    min(effective_max_train, cap) if effective_max_train > 0 else cap
+                )
+            steps.append(f"train_trials_cap_{cap}")
             prompt, _, _, n_train, n_val, n_parents = _assemble()
             if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
                 break
 
-    # 6) compact serialization (v1 only: rewrite trials as one-liners).
-    # v2 keeps snapshot JSON and continues dropping trial counts instead.
-    if not compact and not using_v2_prompt_contract():
-        compact = True
-        steps.append("compact_trial_serialization")
-        prompt, _, _, n_train, n_val, n_parents = _assemble()
+        # 5) per-problem caps (when flat sampling was used, enable block caps under budget pressure)
+        if max_prompt_trials_per_problem <= 0:
+            for cap in _PER_PROBLEM_CAP_STEPS:
+                effective_per_problem = cap
+                steps.append(f"per_problem_cap_{cap}")
+                prompt, _, _, n_train, n_val, n_parents = _assemble()
+                if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+                    break
 
-    # 7) val-only trial caps when train and val are capped separately
-    if not use_shared_trial_budget:
-        min_val = _MIN_VAL_TRIALS_REFINEMENT if refinement_val_observations else 1
-        for cap in _VAL_TRIAL_CAP_STEPS:
-            if val_trials_source is None:
-                break
-            next_cap = max(cap, min_val) if refinement_val_observations else cap
-            effective_max_val = (
-                min(effective_max_val, next_cap) if effective_max_val > 0 else next_cap
-            )
-            steps.append(f"val_trials_cap_{effective_max_val}")
+        # 6) compact serialization (v1 only: rewrite trials as one-liners).
+        # v2 keeps snapshot JSON and continues dropping trial counts instead.
+        if not compact and not using_v2_prompt_contract():
+            compact = True
+            steps.append("compact_trial_serialization")
             prompt, _, _, n_train, n_val, n_parents = _assemble()
-            if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
-                break
+
+        # 7) val-only trial caps when train and val are capped separately
+        if not use_shared_trial_budget:
+            min_val = _MIN_VAL_TRIALS_REFINEMENT if refinement_val_observations else 1
+            for cap in _VAL_TRIAL_CAP_STEPS:
+                if val_trials_source is None:
+                    break
+                next_cap = max(cap, min_val) if refinement_val_observations else cap
+                effective_max_val = (
+                    min(effective_max_val, next_cap) if effective_max_val > 0 else next_cap
+                )
+                steps.append(f"val_trials_cap_{effective_max_val}")
+                prompt, _, _, n_train, n_val, n_parents = _assemble()
+                if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+                    break
 
     # 8) parent char truncation (comments already stripped)
     if max_parent_chars > 0:
@@ -5285,25 +5483,37 @@ def _truncate_psych_prompt_to_budget(
 
     tokens_after = estimate_tokens(prompt, estimator=prompt_token_estimator)
     if tokens_after > hard_prompt_token_cap:
-        # 9) final fallback
-        if use_shared_trial_budget:
-            effective_max_total = _MIN_TRAIN_TRIALS_FINAL
-        else:
-            effective_max_train = _MIN_TRAIN_TRIALS_FINAL
-            if val_trials_source is not None:
-                effective_max_val = (
-                    _MIN_VAL_TRIALS_FINAL
-                    if refinement_val_observations
-                    else _MIN_TRAIN_TRIALS_FINAL
-                )
-        effective_per_problem = 1
-        if not using_v2_prompt_contract():
-            compact = True
+        # 9) final fallback. Frozen G.2 examples are never shrunk here.
+        if not freeze_examples:
+            if use_shared_trial_budget:
+                effective_max_total = _MIN_TRAIN_TRIALS_FINAL
+            else:
+                effective_max_train = _MIN_TRAIN_TRIALS_FINAL
+                if val_trials_source is not None:
+                    effective_max_val = (
+                        _MIN_VAL_TRIALS_FINAL
+                        if refinement_val_observations
+                        else _MIN_TRAIN_TRIALS_FINAL
+                    )
+            effective_per_problem = 1
+            if not using_v2_prompt_contract():
+                compact = True
         if len(parents) > 1:
             parents = [parents[0]]
         steps.append("final_fallback_minimal")
         prompt, _, _, n_train, n_val, n_parents = _assemble()
         tokens_after = estimate_tokens(prompt, estimator=prompt_token_estimator)
+
+    if tokens_after > hard_prompt_token_cap or tokens_after + OUTPUT_RESERVE > VLLM_CONTEXT:
+        if freeze_examples:
+            raise PairedPackingFitError(
+                "G.2 paired packing: frozen target examples plus retained parents "
+                f"still overflow after parent-only trim "
+                f"(tokens={tokens_after}, cap={hard_prompt_token_cap}, "
+                f"vllm={tokens_after}+{OUTPUT_RESERVE}>{VLLM_CONTEXT}). "
+                "Required instruction + one parent + source suffix + runtime "
+                "contract cannot be reduced without changing the frozen example set."
+            )
 
     overflow = _component_token_breakdown(
         _parts_dict(prompt, "", "", ""),
@@ -5323,6 +5533,7 @@ def _truncate_psych_prompt_to_budget(
         "parents_before": n_parents_before,
         "parents_after": n_parents,
         "compact_serialization": compact,
+        "freeze_examples": bool(freeze_examples),
         "overflow_components": overflow,
     }, steps
 
@@ -7016,7 +7227,7 @@ def evaluate_program(choose_fn: Callable, trials: List[Dict[str, Any]], verbose:
         errors = 0
         for t in trials:
             try:
-                pred = choose_fn(t["problem"], t["history"])
+                pred = choose_fn(_problem_for_choose(t), t["history"])
                 if pred is not None and pred == t["action"]:
                     correct += 1
             except Exception as e:
@@ -7072,7 +7283,7 @@ def evaluate_choice13k_program(
         for t in trials:
             y = int(t["action"])
             try:
-                p_raw = choose_fn(t["problem"], t["history"])
+                p_raw = choose_fn(_problem_for_choose(t), t["history"])
                 p_use = _parse_choice13k_choose_output(p_raw)
             except Exception as e:
                 errors += 1
@@ -7107,7 +7318,13 @@ def evaluate_choice13k_program(
         max_errors_per_seed = max(max_errors_per_seed, errs)
 
     avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
-    avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
+    # Any per-trial exception (e.g. KeyError on sanitized-away oracle fields)
+    # invalidates the program: do not report a chance-filled log-likelihood as
+    # usable fitness. Callers already gate on errors==0 / runtime_valid.
+    if max_errors_per_seed > 0:
+        avg_loglik = float("-inf")
+    else:
+        avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
     correct = int(round(avg_acc * total))
     if verbose and max_errors_per_seed > 0:
         print(
@@ -7167,7 +7384,7 @@ def evaluate_cpc18_split_program(
         for t in trials:
             y = int(t["action"])
             try:
-                p_raw = choose_fn(t["problem"], t["history"])
+                p_raw = choose_fn(_problem_for_choose(t), t["history"])
             except Exception as e:
                 errors += 1
                 if first_error is None and isinstance(source_code, str) and source_code:
@@ -7208,7 +7425,10 @@ def evaluate_cpc18_split_program(
         max_errors_per_seed = max(max_errors_per_seed, errs)
 
     avg_acc = float(np.mean(seed_avg_accs)) if seed_avg_accs else 0.0
-    avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
+    if max_errors_per_seed > 0:
+        avg_loglik = float("-inf")
+    else:
+        avg_loglik = float(np.mean(seed_avg_logliks)) if seed_avg_logliks else float("-inf")
     correct = int(round(avg_acc * total))
     if verbose and max_errors_per_seed > 0:
         print(
@@ -7284,7 +7504,7 @@ def evaluate_cpc18_mse(choose_fn: Callable, trials: List[Dict[str, Any]],
                     b_predictions = []
                     for trial in block_trials:
                         try:
-                            pred = choose_fn(trial["problem"], trial["history"])
+                            pred = choose_fn(_problem_for_choose(trial), trial["history"])
                             if pred is not None:
                                 b_predictions.append(int(pred == 1))  # 1 if B chosen, 0 if A
                             else:
@@ -9019,6 +9239,8 @@ def _generate_iteration_candidate_codes(
     normal_parent_train_accuracies: Optional[List[float]] = None,
     normal_parent_val_logliks: Optional[List[Optional[float]]] = None,
     normal_parent_overall_logliks: Optional[List[Optional[float]]] = None,
+    fresh_parent_program_ids: Optional[List[str]] = None,
+    normal_parent_program_ids: Optional[List[str]] = None,
 ) -> Tuple[List[str], List[str]]:
     """Generate candidates: first fresh_n from seed/baseline only, rest from normal parents."""
     fresh_n = int(fresh_n_candidates)
@@ -9040,6 +9262,8 @@ def _generate_iteration_candidate_codes(
             fresh_kw["parent_val_logliks"] = fresh_parent_val_logliks
         if fresh_parent_overall_logliks is not None:
             fresh_kw["parent_overall_logliks"] = fresh_parent_overall_logliks
+        if fresh_parent_program_ids is not None:
+            fresh_kw["parent_program_ids"] = list(fresh_parent_program_ids)
         fresh_codes = generate_program_variants(**fresh_kw)
         codes.extend(fresh_codes)
         sources.extend(["fresh"] * len(fresh_codes))
@@ -9060,6 +9284,8 @@ def _generate_iteration_candidate_codes(
             normal_kw["parent_val_logliks"] = normal_parent_val_logliks
         if normal_parent_overall_logliks is not None:
             normal_kw["parent_overall_logliks"] = normal_parent_overall_logliks
+        if normal_parent_program_ids is not None:
+            normal_kw["parent_program_ids"] = list(normal_parent_program_ids)
         normal_codes = generate_program_variants(**normal_kw)
         codes.extend(normal_codes)
         sources.extend(["normal"] * len(normal_codes))
@@ -9111,6 +9337,9 @@ def generate_program_variants(
     explain_suffix: Optional[str] = None,
     explain_artifacts_out: Optional[List[Dict[str, Any]]] = None,
     llm_decoding_seed_base: Optional[int] = None,
+    g2_arm: Optional[str] = None,
+    g2_paired_pack_path: Optional[str] = None,
+    parent_program_ids: Optional[List[str]] = None,
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -9217,10 +9446,32 @@ Provide only the code for choose(...) as a complete function body.
             code_template = ""
     
     # Trials serialized into the prompt (evaluation still uses full train_trials elsewhere).
+    freeze_payload: Optional[Dict[str, Any]] = None
+    freeze_examples = False
+    runtime_contract = ""
+    pre_capped_train = False
+    pre_capped_val = False
     refinement_val_observations = prompt_observation_trials is not None
     val_trials_for_budget: Optional[List[Dict[str, Any]]] = None
     val_source: Optional[List[Dict[str, Any]]] = None
-    if refinement_val_observations:
+    if g2_paired_pack_path:
+        freeze_payload = load_paired_pack_freeze(Path(g2_paired_pack_path))
+        freeze_examples = True
+        runtime_contract = _runtime_contract_text(run_prompts_dir)
+        pooled_val_for_freeze = extra_prompt_trials if extra_prompt_trials is not None else []
+        frozen_train, frozen_val = materialize_frozen_trials(
+            freeze_payload,
+            pooled_train=train_trials,
+            pooled_val=pooled_val_for_freeze,
+        )
+        observation_trials_source = frozen_train
+        trials_for_prompt = frozen_train
+        val_source = frozen_val
+        val_trials_for_budget = frozen_val
+        refinement_val_observations = False
+        pre_capped_train = True
+        pre_capped_val = True
+    elif refinement_val_observations:
         observation_trials_source = list(prompt_observation_trials)
         trials_for_prompt = list(prompt_observation_trials)
     elif extra_prompt_trials is not None:
@@ -9276,6 +9527,15 @@ Provide only the code for choose(...) as a complete function body.
     num_parents = len(parent_programs)
     parent_lengths_before = [len(p) for p in parent_programs]
     prompt_parent_programs = list(parent_programs)
+    paired_parent_count = None
+    if freeze_payload is not None and freeze_payload.get("paired_parent_count") is not None:
+        paired_parent_count = max(1, int(freeze_payload["paired_parent_count"]))
+        if len(prompt_parent_programs) > paired_parent_count:
+            prompt_parent_programs = prompt_parent_programs[:paired_parent_count]
+            if parent_program_ids is not None:
+                parent_program_ids = list(parent_program_ids)[:paired_parent_count]
+            num_parents = len(prompt_parent_programs)
+            parent_lengths_before = [len(p) for p in prompt_parent_programs]
 
     parent_ctx_kwargs = {
         "dataset": dataset,
@@ -9315,8 +9575,10 @@ Provide only the code for choose(...) as a complete function body.
         prompt_train_trials_seed=prompt_train_trials_seed,
         max_parent_chars=max_parent_chars,
         refinement_val_observations=refinement_val_observations,
-        pre_capped_train=False,
-        pre_capped_val=False,
+        pre_capped_train=pre_capped_train,
+        pre_capped_val=pre_capped_val,
+        runtime_contract=runtime_contract,
+        freeze_examples=freeze_examples,
     )
 
     parent_lengths_after = [len(p) for p in prompt_parent_programs]
@@ -9334,6 +9596,23 @@ Provide only the code for choose(...) as a complete function body.
             f"max_parent_chars={max_parent_chars}."
         )
 
+    parent_ids_before = (
+        list(parent_program_ids)
+        if parent_program_ids is not None
+        else [f"parent_{i}" for i in range(len(prompt_parent_programs))]
+    )
+    n_parents_after = int(trunc_diag.get("parents_after") or len(prompt_parent_programs))
+    parent_ids_after = parent_ids_before[:n_parents_after]
+    parent_retention_differed = n_parents_after != int(
+        trunc_diag.get("parents_before") or len(prompt_parent_programs)
+    )
+    freeze_example_ids = list((freeze_payload or {}).get("example_ids") or [])
+    freeze_n_available = int((freeze_payload or {}).get("n_selected_available") or 0)
+    freeze_n_included = int((freeze_payload or {}).get("n_examples_included") or 0)
+    suffix_tokens = int((freeze_payload or {}).get("source_suffix_tokens") or 0)
+    if freeze_examples and g2_arm == "control":
+        suffix_tokens = 0
+
     diag_base: Dict[str, Any] = {
         "participant_id": participant_id,
         "phase": phase,
@@ -9348,6 +9627,31 @@ Provide only the code for choose(...) as a complete function body.
             val_before=int(trunc_diag.get("val_trials_before") or 0),
             val_after=int(trunc_diag.get("val_trials_after") or 0),
         ),
+        "g2_arm": g2_arm,
+        "g2_paired_pack_version": (freeze_payload or {}).get("version")
+        if freeze_payload
+        else None,
+        "g2_paired_pack_path": str(g2_paired_pack_path) if g2_paired_pack_path else None,
+        "g2_shared_paired_packing_cap": freeze_n_included if freeze_examples else None,
+        "paired_parent_count": paired_parent_count if freeze_examples else None,
+        "target_examples_available": freeze_n_available if freeze_examples else None,
+        "target_examples_included": freeze_n_included if freeze_examples else None,
+        "target_example_ids": freeze_example_ids if freeze_examples else None,
+        "identical_target_examples_to_freeze": True if freeze_examples else None,
+        "parents_before": int(trunc_diag.get("parents_before") or len(prompt_parent_programs)),
+        "parents_after": n_parents_after,
+        "parent_ids_before": parent_ids_before,
+        "parent_ids_after": parent_ids_after,
+        "parent_retention_differed": bool(parent_retention_differed) if freeze_examples else None,
+        "source_suffix_tokens": suffix_tokens if (g2_arm or prompt_suffix or freeze_examples) else 0,
+        "g2_reserved_source_suffix_tokens": int(
+            (freeze_payload or {}).get("source_suffix_tokens") or 0
+        )
+        if freeze_examples
+        else None,
+        "source_suffix_present": prompt_contains_source_suffix(prompt_text),
+        "trim_actions": list(trunc_steps),
+        "trim_reason": g2_trim_reason(trunc_steps),
     }
     _warn_prompt_truncation(diag_base)
 
@@ -9362,6 +9666,14 @@ Provide only the code for choose(...) as a complete function body.
             "prompt_tokens_before_truncation": trunc_diag.get("prompt_tokens_before_truncation"),
             "prompt_tokens_after_truncation": trunc_diag.get("prompt_tokens_after_truncation"),
             "truncation_steps": trunc_steps,
+            "g2_arm": g2_arm,
+            "g2_paired_pack_version": diag_base.get("g2_paired_pack_version"),
+            "target_example_ids": diag_base.get("target_example_ids"),
+            "parents_before": diag_base.get("parents_before"),
+            "parents_after": diag_base.get("parents_after"),
+            "parent_ids_after": parent_ids_after,
+            "parent_retention_differed": diag_base.get("parent_retention_differed"),
+            "trim_reason": diag_base.get("trim_reason"),
         }
         prompt_stats_path = Path(prompt_stats_path)
         prompt_stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9372,26 +9684,38 @@ Provide only the code for choose(...) as a complete function body.
         diagnostics_dir = prompt_stats_path.parent.parent
 
     tokens_final = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
-    if tokens_final > hard_prompt_token_cap:
-        try:
-            prompt_text, _ = _enforce_prompt_budget(
-                prompt_text,
-                hard_prompt_token_cap=hard_prompt_token_cap,
-                strict_prompt_budget=strict_prompt_budget,
-                prompt_token_estimator=prompt_token_estimator,
-                overflow_components=trunc_diag.get("overflow_components") or {},
-                truncation_steps=trunc_steps,
-                phase=phase,
-                participant_id=participant_id,
-                iteration=iteration,
-                candidate_index=None,
-                diagnostics_dir=diagnostics_dir,
-                diagnostics_base=diag_base,
+    if freeze_examples:
+        if not fits_input_and_context(tokens_final, input_ceiling=hard_prompt_token_cap):
+            raise PairedPackingFitError(
+                "G.2 packed prompt overflowed after truncation with frozen examples "
+                f"(tokens={tokens_final}, cap={hard_prompt_token_cap}). "
+                "No post-packing re-append or example shrink is allowed."
             )
-        except PromptBudgetExceededError:
-            raise
+        # Contract is already inside the packed prompt. Do not re-append.
+    else:
+        if tokens_final > hard_prompt_token_cap:
+            try:
+                prompt_text, _ = _enforce_prompt_budget(
+                    prompt_text,
+                    hard_prompt_token_cap=hard_prompt_token_cap,
+                    strict_prompt_budget=strict_prompt_budget,
+                    prompt_token_estimator=prompt_token_estimator,
+                    overflow_components=trunc_diag.get("overflow_components") or {},
+                    truncation_steps=trunc_steps,
+                    phase=phase,
+                    participant_id=participant_id,
+                    iteration=iteration,
+                    candidate_index=None,
+                    diagnostics_dir=diagnostics_dir,
+                    diagnostics_base=diag_base,
+                )
+            except PromptBudgetExceededError:
+                raise
+        prompt_text = append_runtime_contract_if_present(prompt_text, run_prompts_dir)
+        tokens_final = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
 
-    prompt_text = append_runtime_contract_if_present(prompt_text, run_prompts_dir)
+    diag_base["final_chat_template_tokens"] = tokens_final
+    diag_base["prompt_tokens_after_truncation"] = tokens_final
 
     debug_captures: List[Dict[str, Any]] = []
     explain_artifact_by_idx: Dict[int, Dict[str, Any]] = {}
@@ -9438,6 +9762,20 @@ Provide only the code for choose(...) as a complete function body.
                     "prompt_tokens_before_truncation"
                 ),
                 "prompt_tokens_after_truncation": tokens,
+                "final_chat_template_tokens": tokens,
+                "g2_arm": g2_arm,
+                "target_examples_available": diag_base.get("target_examples_available"),
+                "target_examples_included": diag_base.get("target_examples_included"),
+                "target_example_ids": diag_base.get("target_example_ids"),
+                "g2_shared_paired_packing_cap": diag_base.get("g2_shared_paired_packing_cap"),
+                "g2_paired_pack_version": diag_base.get("g2_paired_pack_version"),
+                "parents_before": diag_base.get("parents_before"),
+                "parents_after": diag_base.get("parents_after"),
+                "parent_ids_before": diag_base.get("parent_ids_before"),
+                "parent_ids_after": diag_base.get("parent_ids_after"),
+                "source_suffix_tokens": diag_base.get("source_suffix_tokens"),
+                "trim_actions": diag_base.get("trim_actions"),
+                "trim_reason": diag_base.get("trim_reason"),
             },
             diagnostics_dir,
         )
@@ -13942,21 +14280,21 @@ def main():
             "After the train/val/test split, keep at most N train+val observations per "
             "participant (sampled proportionally from train and val; test is never changed). "
             "Omitted or <=0 disables the cap (full data). Uses --split_seed. "
-            "Under --limited_data_protocol structure_aware or structure_aware_v2 "
-            "this is the same N as --limited_train_val when that flag is omitted."
+            "Under --limited_data_protocol structure_aware, structure_aware_v2, or "
+            "structure_aware_v3 this is the same N as --limited_train_val when that flag is omitted."
         ),
     )
     add_limited_data_cli_arguments(parser)
     parser.add_argument(
         "--max_prompt_train_trials",
         type=int,
-        default=40,
+        default=60,
         help=(
             "Max trials serialized into each LLM prompt (total across train and validation when both "
             "are injected). With --max_prompt_trials_per_problem > 0, sample (max // per_problem) "
             "blocks at up to per_problem trials each, plus (max %% per_problem) extra trials, from the "
             "union of available splits. With per_problem=0, flat-random sample of max trials. "
-            "0 = no cap (full split in prompt). Default 40."
+            "0 = no cap (full split in prompt). Default 60 (PICS v3 prompt-display ceiling)."
         ),
     )
     parser.add_argument(
@@ -13971,17 +14309,21 @@ def main():
     parser.add_argument(
         "--llm_max_tokens",
         type=int,
-        default=800,
-        help="Max output tokens per candidate generation request (reduces context-overflow failures).",
+        default=1024,
+        help=(
+            "Max output tokens per candidate generation request "
+            "(default: 1024 for PICS v3 / Qwen 32768 context)."
+        ),
     )
     parser.add_argument(
         "--hard_prompt_token_cap",
         type=int,
-        default=14000,
+        default=PICS_V3_HARD_PROMPT_TOKEN_CAP,
         help=(
             "Hard input-token budget for each LLM prompt (estimated via --prompt_token_estimator). "
             "Prompts are structurally truncated before calling vLLM; never sent if still over cap "
-            "(default: 14000, aligned with vLLM --max-model-len 16384 minus --llm_max_tokens)."
+            f"(default: {PICS_V3_HARD_PROMPT_TOKEN_CAP}, aligned with vLLM --max-model-len 32768 "
+            "minus --llm_max_tokens 1024)."
         ),
     )
     parser.add_argument(
@@ -14000,8 +14342,8 @@ def main():
         choices=("char4",),
         help=(
             "Token estimator for prompt budgeting: char4 = ceil(len/4) (default: char4). "
-            "Under structure_aware_v2 the Qwen chat tokenizer is used on chat-templated "
-            "system+user input so trial-count truncation matches vLLM."
+            "Under structure_aware_v2 / structure_aware_v3 the Qwen chat tokenizer is used on "
+            "chat-templated system+user input so trial-count truncation matches vLLM."
         ),
     )
     parser.add_argument(
@@ -14034,10 +14376,11 @@ def main():
     parser.add_argument(
         "--max_parent_chars",
         type=int,
-        default=4500,
+        default=PICS_V3_MAX_PARENT_CHARS,
         help=(
             "Max characters per parent program inserted into LLM prompts (0 = no truncation). "
-            "Candidate code is never truncated for evaluation. Default: 6000."
+            f"Candidate code is never truncated for evaluation. Default: {PICS_V3_MAX_PARENT_CHARS} "
+            "(PICS v3; existing ~70%% head + marker + ~30%% tail compaction)."
         ),
     )
     parser.add_argument(
@@ -14587,10 +14930,9 @@ def main():
             return
 
     prompt_contract_scope(
-        limited_data_protocol_revision(
-            getattr(args, "limited_data_protocol", "structure_aware_v2")
+        uses_training_only_sa40(
+            getattr(args, "limited_data_protocol", "structure_aware_v3")
         )
-        == "v2"
     ).__enter__()
     if args.phase == "evolution" and args.refinement_phase:
         print("Note: --refinement_phase is ignored when --phase evolution.")
@@ -14850,6 +15192,19 @@ def main():
 
     teh_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
     evo_iters = int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0)
+    prefer_auto_llm_prompt = bool(
+        evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False) or t_pics_gated
+    )
+    # PICS v3 global-only G.1 with --prefer_auto_llm_prompt must fail closed (no
+    # reference / merge fallback). Scoped to structure_aware_v3 so historical v1 /
+    # preliminary-v2 G.1 keep their previous soft-fallback behavior. There is no
+    # --require_auto_llm_prompt CLI flag; this wires setup_teh_run_prompts(...).
+    g1_require_auto = bool(
+        getattr(args, "prefer_auto_llm_prompt", False)
+        and getattr(args, "global_phase", False)
+        and int(getattr(args, "n_iterations", 0) or 0) == 0
+        and str(getattr(args, "limited_data_protocol", "") or "") == "structure_aware_v3"
+    )
     run_prompts_dir = setup_teh_run_prompts(
         Path(base_run_dir),
         args.dataset,
@@ -14869,9 +15224,7 @@ def main():
             getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
-        prefer_auto_llm_prompt=bool(
-            evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False) or t_pics_gated
-        ),
+        prefer_auto_llm_prompt=prefer_auto_llm_prompt,
         dataset_prompt_file=getattr(args, "dataset_prompt_file", None),
         split_ratio=float(args.split_ratio),
         split_seed=int(args.split_seed),
@@ -14880,7 +15233,7 @@ def main():
         limited_data_protocol=str(args.limited_data_protocol),
         limited_train_val=args.limited_train_val,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-        require_auto_llm_prompt=bool(t_pics_gated),
+        require_auto_llm_prompt=bool(t_pics_gated or g1_require_auto),
         llm_decoding_seed=(int(args.split_seed) + 90_000) if t_pics_gated else None,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")

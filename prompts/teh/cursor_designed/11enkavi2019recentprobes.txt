@@ -13,12 +13,9 @@ def choose(problem, history):
     Evaluated by log-likelihood.
     Goal: maximize log-likelihood of the observed human choices.
 
-    problem: dict with keys
+    problem: dict with keys (choice-time observables only)
         - memory_set_letters: List[str]  (typically 6 letters shown before the probe)
         - probe_letter: str  (single probe letter, usually uppercase)
-        - probe_in_set: bool  (oracle membership: probe_letter in memory_set_letters)
-          NOTE: this is deterministically computable from the two letter fields.
-          Humans are imperfect; do NOT return hard 0/1 from oracle membership alone.
         - yes_key: str  (key meaning "yes / was in the set")
         - no_key: str   (key meaning "no / was not in the set")
         - option_keys: [no_key, yes_key]  ALWAYS in this order for this dataset
@@ -27,10 +24,13 @@ def choose(problem, history):
         - schema_type: "B"
         - dataset_alias / experiment_id may also be present
 
-    history: list of prior recognition trials. Each entry typically has
-        - action: int (0 or 1)
-        - and may include prior memory_set_letters / probe_letter / probe_in_set
-        Use history for bias, fatigue, or recent yes/no rate when helpful.
+    IMPORTANT: there is NO precomputed membership / correctness / oracle field in
+    problem. Compute whether the probe matches a memory letter yourself with a
+    loop of equality checks (sandbox may forbid `set(...)` / `in set`).
+
+    history: list of prior recognition trials (often empty for this independent-
+        trial dataset). Each entry typically has action: int (0 or 1).
+        Do not invent problem-only keys inside history entries.
 
     Action coding (exact TEH coding):
         - action 0 -> no  (option_keys[0] / no_key)  : "probe was NOT in the set"
@@ -64,7 +64,7 @@ Requirements:
 - Ensure every variable used in expressions is defined on all branches.
 
 CALIBRATION (CRITICAL for log-likelihood):
-- Humans make false alarms and misses. Soft probabilities beat hard 0/1 oracle.
+- Humans make false alarms and misses. Soft probabilities beat hard 0/1 membership.
 - Prefer something like base ≈ 0.15–0.35 for "no" and ≈ 0.65–0.85 for "yes"
   when evidence is clear, then adjust with history bias / position effects.
 - Never return a constant ~0.5 for every trial; P must track membership evidence.
@@ -73,12 +73,13 @@ CALIBRATION (CRITICAL for log-likelihood):
 
 What is NOT available / do NOT invent:
 - No response times, no display durations, no eye-tracking.
+- No precomputed membership / correctness / outcome fields on the current problem.
 - No gamble_A / gamble_B / product ratings fields (NOT Choice13k / NOT Hilbig).
 - Do not assume option_keys are always ["Q","C"]; read them from the problem.
 
 Behavioral notes (useful strategies — pick what fits the participant):
 - Primary signal: is probe_letter among memory_set_letters? (loop equality checks).
-  You may use problem["probe_in_set"] as the same oracle bit, but soften it.
+  Soften hard membership into a calibrated probability (humans err).
 - Position / recency: letters later in the memory list are often remembered better;
   early letters may be weaker (serial-position). Soft-weight by index.
 - Similarity / confusions: near-miss letters can raise false-alarm rates.

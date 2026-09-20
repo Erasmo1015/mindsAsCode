@@ -1,6 +1,11 @@
-# ICLR T-PICS v2 — training-only SA40
+# ICLR T-PICS v2 — training-only SA40 (preliminary / non-final)
 
-This file describes **T-PICS v2** as implemented. v1 remains the frozen method in [Documentation.md](../Documentation.md) and in jobs **257174–257188**, schema-v4 annotations, Occurrence-EB job **257756**, and `occurrence_eb_schema4_iter10.yaml`. v2 is a new method version. It does not overwrite those artifacts.
+> **Superseded for future ICLR runs by [Documentation_pics_v3.md](Documentation_pics_v3.md)**
+> (`pics_v3` / `structure_aware_v3` / 32768·30000·1024 / `max_parent_chars=5000`).
+> This file remains the historical record of preliminary T-PICS v2; do not treat it
+> as the final method.
+
+This file describes **T-PICS v2** as implemented. v1 remains the frozen method in [Documentation.md](../Documentation.md) and in jobs **257174–257188**, schema-v4 annotations, Occurrence-EB job **257756**, and `occurrence_eb_schema4_iter10.yaml`. v2 is a preliminary method version. It does not overwrite those artifacts.
 
 | Role | v1 (frozen) | v2 (this document) |
 | --- | --- | --- |
@@ -20,7 +25,7 @@ For each **target** dataset a v2 gated job still runs G.1 reuse-or-rebuild → d
 What v2 changes is the **data contract**:
 
 1. SA40 caps only train+val used for prompts, generation, fitting, ranking, elite pools, G.2 gating, parent selection, and stopping.
-2. Held-out test keeps original membership, order, problems, labels, and legitimate pre-choice histories.
+2. Held-out test keeps original membership, order, problems, and labels. Legitimate pre-choice histories are kept only for sequential/continuous tasks; independent-trial loader histories are cleared.
 3. Kool observed count is a hard 40 (no stage-1 backup to 41).
 4. Candidate examples are complete sanitized snapshots with history cap 8.
 5. Prompt units are selected structure-aware and packed as a balanced prefix under 14k Qwen tokens.
@@ -29,7 +34,7 @@ What v2 changes is the **data contract**:
 $$
 |T_{\mathrm{train}}^{40}|+|T_{\mathrm{val}}^{40}|\le 40,
 \qquad
-T_{\mathrm{test}}=T_{\mathrm{test}}^{\mathrm{raw}}.
+T_{\mathrm{test}}=T_{\mathrm{test}}^{\mathrm{raw}}\ \text{(membership/actions; independent history cleared)}.
 $$
 
 Observed union for fitness:
@@ -60,18 +65,21 @@ The displayed prompt subset \(T_{\mathrm{prompt}}\subseteq T_{\mathrm{obs}}^{40}
 
 ---
 
-## 3. Original test evaluation
+## 3. Test evaluation and history semantics
 
-**Scientific protocol.** Test trial \(i\) may condition on all behavior realized **before** that choice, including earlier test trials and omitted pre-SA40 session trials. It must not see the current action, the current outcome, or any future test trial.
+**Scientific protocol.** Test trial \(i\) may condition on all behavior realized **before** that choice **only when that history is scientifically meaningful for the task** (resetting within-unit sequences; continuous sessions). It must not see the current action, the current outcome, or any future test trial.
 
-**v1 vs v2**
+**Independent-trial rule (v1 and v2).** Datasets registered as `independent_trial` (Wulff, Hilbig, Enkavi, mixed gambles, Bergert) always use `history=[]` on **train, val, and test**. Parser/loader-accumulated cross-trial history is treated as an artifact and does not override task semantics. This supersedes any earlier draft that restored raw Enkavi/Hilbig test histories under v2.
+
+**v1 vs v2 (non-independent)**
 
 | Dataset class | v1 | v2 |
 | --- | --- | --- |
 | Resetting units | Test-unit histories rebuilt from the held-out unit (already matched raw) | Keep original test trials (fingerprints unchanged) |
-| Independent, empty history (Wulff, mixed gambles, Bergert) | Force `history=[]` on test | Leave raw (still empty) |
-| Independent with accumulated test history (Hilbig, Enkavi) | Force `history=[]` on **test** | Restore raw accumulated test histories |
+| Independent (all five) | Force `history=[]` on all splits | Force `history=[]` on all splits (same semantics) |
 | Continuous (Speekenbrink, Kool) | Rebuild test history from the retained 40/41 suffix | Restore full original pre-choice history |
+
+**Runtime sanitizer.** `sanitize_problem_for_choose` is shared by prompt examples, runtime schema / contract inference, and every T-PICS `choose(problem, history)` fitness/diagnostic path (`evaluate_choice13k_program`, categorical eval, CPC18 helpers). Current-answer / correctness / outcome fields (including Enkavi `probe_in_set`) never reach `choose()` and must not appear in automatic-prompt schema, `llm_input_prompt`, `infer_single_choice`, or `runtime_contract`. Programs that index a sanitized-away key are `runtime_valid=False` with `avg_loglik=-inf` (not a chance score).
 
 ---
 
@@ -81,7 +89,7 @@ Unchanged except Kool overshoot.
 
 | Category | Datasets | Observed-set rule |
 | --- | --- | --- |
-| Independent | Wulff, Hilbig, Enkavi, mixed gambles, Bergert | Deterministic sample of train+val trials, seed 0, cap 40; empty history on retained train+val |
+| Independent | Wulff, Hilbig, Enkavi, mixed gambles, Bergert | Deterministic sample of train+val trials, seed 0, cap 40; **empty history on train, val, and test** |
 | Resetting | Choice13k, CPC18, CCT, Frey Risk, Badham, Guan, Steyvers, Schulz | Complete units then a chronological prefix; stop at 40; never exceed 40 |
 | Continuous | Speekenbrink, Kool | Contiguous pre-test suffix of train+val, cap 40; rebuild **train+val** histories from retained earlier observations only |
 
@@ -154,9 +162,37 @@ v1 `_prompt_block_key` gamble-signature collapse is not used for v2.
 
 ## 9. Token packing
 
-Frozen limits: display 60 trials; Qwen chat-templated input 14,000; output reserve 1,024; vLLM 16,384.
+Frozen limits: display 60 trials; Qwen chat-templated input 14,000; output reserve 1,024; vLLM 16,384. The budget is the **exact final chat-templated prompt** after every component has been appended, including the runtime contract. There is no unchecked re-append after packing. Final input tokens must be ≤14,000 and input + 1,024 output ≤16,384. If required instruction + one parent + (G.2 transfer) source suffix + contract cannot fit, packing fails clearly (`PairedPackingFitError`).
 
-v2 packs a **balanced prefix** of the selection, then renders grouped by participant and chronological order. It does not sort the pool and tail-drop (that removed later people). Required task/API/parent content is preserved; parent-drop order is unchanged. If required content cannot fit with zero examples, fail fast. Packing uses the real Qwen tokenizer when available and refuses to silently substitute a different counter.
+v2 packs a **balanced prefix** of the selection, then renders grouped by participant and chronological order. It does not sort the pool and tail-drop (that removed later people). Packing uses the real Qwen tokenizer when available and refuses to silently substitute a different counter.
+
+### G.2 paired target-example packing
+
+Control and transfer share one frozen target-example set. The cap is computed under the **transfer** condition (real source suffix + final runtime contract + one parent reserved at `max_parent_chars=3500`). Exact example IDs and order are written to `g2_paired_packing.json` (`g2_paired_pack_v1`) before either arm runs and are reused for all five G.2 iterations.
+
+| Rule | Behavior |
+| --- | --- |
+| Shared examples | Identical IDs/order in control and transfer. Control is never padded with extra target examples. |
+| Source suffix | Transfer receives the frozen source rank-1 + one source train+val example. Control does not. Suffix is never dropped to make room for examples. |
+| Token accounting | `assemble` includes instruction, snapshots, parents, template/rules, and runtime contract before the Qwen chat-template count. |
+| Example trim | Frozen G.2 IDs are not put through the 40→30→20→10→5 trial-cap ladder. Independent per-iteration subsample seeds do not re-select examples. |
+| Parent trim | Compress whitespace → strip comments → drop extra parents (keep ≥1) → parent-char slice. Parent retention may differ by arm only when actual evolved parent lengths require it; that difference is recorded. |
+| Later iterations | Frozen examples stay identical across arms. Later parent-code length must not independently change example identities or counts. Matched RNG, candidate counts, and parent-sampling draws are unchanged. |
+| Fail | Required instruction + one parent + suffix + contract overflow, or frozen examples plus one retained parent still overflow. |
+
+G.1 still uses the older trial-cap packing path (drop extra parents **before** trial caps). That priority is not changed here. If completed G.1 jobs collapsed every normal 8-parent request to one parent, that is a **separate G.1 blocker**, not a reason to reorder G.2 parent vs example trimming.
+
+### Diagnostic fields (every generation request)
+
+`prompt_diagnostics.jsonl` records, when G.2 paired packing is active:
+
+- `g2_arm`
+- `final_chat_template_tokens`
+- `target_examples_available` / `target_examples_included` / `target_example_ids`
+- `g2_shared_paired_packing_cap` / `g2_paired_pack_version`
+- `parents_before` / `parents_after` / `parent_ids_before` / `parent_ids_after` / `parent_retention_differed`
+- `source_suffix_tokens` / `g2_reserved_source_suffix_tokens` / `source_suffix_present`
+- `trim_actions` / `trim_reason`
 
 ---
 
@@ -213,10 +249,10 @@ Constants: `utils/teh/t_pics_v2.py`.
 | --- | --- | --- |
 | T-PICS | Entire v2 stack (prompts + source map + all 15 targets) | Do not rerun v1 jobs in place |
 | OpenEvolve | No existing ICLR jobs; all **future** jobs use v2 splits | — |
-| Centaur | Speekenbrink, Kool (test history + unscored context); Hilbig, Enkavi (restored test history). Mixed gambles only if the A/B prompt correction was not already rerun | Resetting datasets whose test fingerprints match v1; Wulff, Bergert, mixed gambles if already empty and prompt-correct |
-| LM / PT | Speekenbrink, Kool, Hilbig, Enkavi if features use `history`; Kool also for the 41→40 observed set | Resetting datasets with unchanged observed+test fingerprints; empty-history independents except if TV subsample identity is the only change (still refit if you need exact v2 observed sets) |
+| Centaur | Speekenbrink, Kool (test history + unscored context). Mixed gambles only if the A/B prompt correction was not already rerun | Resetting datasets whose test fingerprints match v1; **all independents** (empty history on all splits); Hilbig/Enkavi no longer restore loader-accumulated test history |
+| LM / PT | Speekenbrink, Kool if features use `history`; Kool also for the 41→40 observed set | Independents (empty hist); resetting with unchanged fingerprints |
 
-Observed-set identity also changes for every dataset whose train+val subsample is used in fitting. Conservatively, **LM/PT should be refit on all 15 under v2** if paper tables mix SA40 observed likelihoods. Test-history-driven features change only on Speekenbrink, Kool, Hilbig, Enkavi.
+Observed-set identity also changes for every dataset whose train+val subsample is used in fitting. Conservatively, **LM/PT should be refit on all 15 under v2** if paper tables mix SA40 observed likelihoods. Test-history-driven features change only on Speekenbrink and Kool (independents stay empty under the corrected v2 rule).
 
 ---
 
@@ -236,13 +272,13 @@ See `analysis/config/T-PICS/v2/dry_run_commands.sh`. Submitters must pass `--con
 
 ## 16. Tests
 
-`utils/teh_psych/test_tpics_v2_protocol.py` covers all 15 categories (one person), Kool 41/45 exact-40, original test histories, Badham/Frey fields, sanitizer parity, balanced packing, Centaur unscored context, gate/OE/LM test isolation. v1 Kool-41 behavior remains in `test_iclr_baseline_guards.py`.
+`utils/teh_psych/test_tpics_v2_protocol.py` covers all 15 categories (one person), Kool 41/45 exact-40, original test histories, Badham/Frey fields, sanitizer parity, balanced packing, Centaur unscored context, gate/OE/LM test isolation. v1 Kool-41 behavior remains in `test_iclr_baseline_guards.py`. `utils/teh_psych/test_g2_paired_packing.py` reproduces all 15 G.2 control/transfer pairs with the real Qwen tokenizer for iteration 0, mixed-size parents, and maximum permitted parent context.
 
 ---
 
 ## 17. Known limitations
 
-- v2 source YAML does not exist until G.1+EB complete. Default gated T-PICS now **points at** `Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml`; gated jobs fail until that file is written. Replay v1 with `--t_pics_source_config analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml`.
+- v2 source YAML exists at `Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml` after v2 G.1 + Occurrence-EB. Replay v1 with `--t_pics_source_config analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml`.
 - CLI default is `--limited_data_protocol structure_aware_v2 --limited_train_val 40` (teh.py, Centaur, LM, PT, OpenEvolve). Full-data reruns pass `--limited_data_protocol off`.
 - Cluster submitters under `cluster/` are gitignored; v2 dry-run lives in `analysis/config/T-PICS/v2/`. G.1 workers: `cluster/v2/ours/Qwen/`.
 - Full production-table fingerprints (all ordinals × 15) are CPU-heavy; the checked-in test uses one person per dataset plus Kool 41/45.

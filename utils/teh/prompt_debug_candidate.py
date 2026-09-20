@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from utils.prompt_flags import single_code_template_prompt_suffix
 from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES, sanitize_evolution_candidate_code
+from utils.teh.prompt_snapshots import sanitize_problem_for_choose
 
 
 def _teh_helpers():
@@ -176,7 +177,10 @@ def _validate_candidate(code: str, trial: Optional[Dict[str, Any]]) -> List[str]
         log.append("smoke_call: skipped (no trial)")
         return log
     try:
-        out = choose_fn(trial["problem"], trial.get("history", []))
+        out = choose_fn(
+            sanitize_problem_for_choose(trial.get("problem") or {}),
+            trial.get("history", []),
+        )
         log.append(f"smoke_call: OK (return type={type(out).__name__}, value={out!r})")
     except Exception as exc:
         log.append(f"smoke_call: FAIL ({exc})")

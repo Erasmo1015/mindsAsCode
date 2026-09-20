@@ -1,6 +1,6 @@
 """Optional structure-aware limited-data protocol shared by PICS, LM, and PT.
 
-CLI default is ``structure_aware_v2`` with train+val budget 40 (ICLR T-PICS v2).
+CLI default is ``structure_aware_v3`` with train+val budget 40 (ICLR PICS v3).
 Pass ``--limited_data_protocol off`` for the legacy TEH split and
 ``apply_max_observed_trials`` (random train+val cap, test untouched).
 
@@ -9,7 +9,9 @@ combined train+validation observations per participant. Test is reserved first
 and is never counted toward the 40. v1 also rebuilds continuous-session test
 histories from the retained suffix and may retain 41 Kool trials.
 
-``--limited_data_protocol structure_aware_v2`` is the ICLR T-PICS v2 protocol:
+``--limited_data_protocol structure_aware_v3`` is the final ICLR PICS v3 protocol
+(same SA40/history semantics as preliminary ``structure_aware_v2``).
+``--limited_data_protocol structure_aware_v2`` remains the preliminary T-PICS v2 protocol:
 the same train+val cap, original test histories, and a hard Kool cap of 40.
 
 Speekenbrink uses a chronological session split by default (full data and SA40).
@@ -41,6 +43,7 @@ from utils.teh.limited_data_registry import (
     LIMITED_DATA_PROTOCOL_OFF,
     LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
     LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3,
     LIMITED_DATA_PROTOCOLS,
     RESETTING_UNIT,
     is_structure_aware_protocol,
@@ -48,6 +51,7 @@ from utils.teh.limited_data_registry import (
     limited_data_spec,
     normalize_limited_data_protocol,
     normalize_limited_dataset_alias,
+    uses_training_only_sa40,
 )
 from utils.teh.sparse_observations import (
     SparseObservationAudit,
@@ -175,17 +179,19 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
     parser.add_argument(
         "--limited_data_protocol",
         type=str,
-        default=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+        default=LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3,
         metavar="NAME",
         help=(
             "Observation-selection protocol after the train/val/test split. "
-            "Default 'structure_aware_v2' is ICLR T-PICS v2: hard cap 40, "
-            "original test histories, train+val histories rebuilt only from retained "
-            "observations. 'structure_aware' is frozen v1 (may rebuild continuous "
-            "test histories; Kool may retain 41). 'off' keeps the legacy random "
-            "train+val cap via --max_observed_trials_per_participant. "
-            "Speekenbrink's session split is chronological by default "
-            "(see --speekenbrink_split), independent of this protocol."
+            "Default 'structure_aware_v3' is final ICLR PICS v3: hard cap 40, "
+            "original continuous/resetting test histories, independent history=[], "
+            "train+val histories rebuilt only from retained observations. "
+            "'structure_aware_v2' is preliminary T-PICS v2 (same SA40 semantics). "
+            "'structure_aware' is frozen v1 (may rebuild continuous test histories; "
+            "Kool may retain 41). 'off' keeps the legacy random train+val cap via "
+            "--max_observed_trials_per_participant. Speekenbrink's session split is "
+            "chronological by default (see --speekenbrink_split), independent of "
+            "this protocol."
         ),
     )
     parser.add_argument(
@@ -205,7 +211,8 @@ def add_limited_data_cli_arguments(parser: Any) -> None:
         default=40,
         metavar="N",
         help=(
-            "Under --limited_data_protocol structure_aware or structure_aware_v2, "
+            "Under --limited_data_protocol structure_aware, structure_aware_v2, or "
+            "structure_aware_v3, "
             "keep at most N combined train+validation observations per participant "
             "(test is reserved first and never counted). Default 40. Ignored when "
             "protocol is 'off'. If omitted under a structure-aware protocol, "
@@ -798,12 +805,15 @@ def apply_structure_aware_protocol(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], SparseObservationAudit, LimitedDataManifest]:
     spec = limited_data_spec(dataset)
     alias = spec.dataset
-    is_v2 = str(revision).strip().lower() == "v2"
-    protocol_name = (
-        LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
-        if is_v2
-        else LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
-    )
+    rev = str(revision).strip().lower()
+    # v2 and v3 share the training-only SA40 path (exact-40, original test histories).
+    is_v2 = rev in ("v2", "v3")
+    if rev == "v3":
+        protocol_name = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
+    elif rev == "v2":
+        protocol_name = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+    else:
+        protocol_name = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
     tagged_train, tagged_val, tagged_test = tag_split_trials(
         alias, train_trials, val_trials, test_trials
     )
@@ -833,12 +843,13 @@ def apply_structure_aware_protocol(
         if original_n_train + original_n_val < budget:
             fallback = "insufficient_train_val"
         new_train, new_val, new_test = sparse_train, sparse_val, sparse_test
-        for row in new_train + new_val:
+        # Independent-trial semantics: each decision is a new unit. Loader-
+        # accumulated cross-trial history is an artifact and must not appear in
+        # train, val, or test (v1 and v2). Continuous/resetting tasks are
+        # unchanged below.
+        for row in new_train + new_val + new_test:
             row["history"] = []
-        if not is_v2:
-            for row in new_test:
-                row["history"] = []
-        hist_status = "original_test_histories_preserved" if is_v2 else "pass"
+        hist_status = "independent_empty_history"
         train_idx = sparse_audit.selected_train_indices
         val_idx = sparse_audit.selected_val_indices
     elif spec.category == RESETTING_UNIT:
@@ -961,7 +972,11 @@ def apply_structure_aware_protocol(
             fallback = (fallback + ";" if fallback else "") + "budget_overshoot"
 
     assert_no_split_overlap(new_train, new_val, new_test)
-    if hist_status not in ("pass", "original_test_histories_preserved"):
+    if hist_status not in (
+        "pass",
+        "original_test_histories_preserved",
+        "independent_empty_history",
+    ):
         raise AssertionError(hist_status)
 
     fp = structure_aware_subset_fingerprint(
@@ -1045,11 +1060,15 @@ def apply_structure_aware_protocol(
         extra={
             "prefix_valid": spec.prefix_valid,
             "chronological_split": spec.chronological_split,
-            "sa40_revision": "v2" if is_v2 else "v1",
+            "sa40_revision": rev if rev in ("v2", "v3") else "v1",
             "test_history_policy": (
-                "original_pre_choice"
-                if is_v2
-                else "v1_rebuilt_or_emptied"
+                "independent_empty_all_splits"
+                if spec.category == INDEPENDENT_TRIAL
+                else (
+                    "original_pre_choice"
+                    if is_v2
+                    else "v1_rebuilt_or_emptied"
+                )
             ),
         },
     )

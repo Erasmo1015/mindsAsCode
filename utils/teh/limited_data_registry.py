@@ -18,10 +18,12 @@ CONTINUOUS_SESSION = "continuous_session"
 LIMITED_DATA_PROTOCOL_OFF = "off"
 LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE = "structure_aware"
 LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2 = "structure_aware_v2"
+LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3 = "structure_aware_v3"
 LIMITED_DATA_PROTOCOLS = (
     LIMITED_DATA_PROTOCOL_OFF,
     LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
     LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+    LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3,
 )
 
 
@@ -130,7 +132,8 @@ LIMITED_DATA_REGISTRY: Dict[str, LimitedDataSpec] = {
         history_resets_at_unit=True,
         prefix_valid=True,
         chronological_split=False,
-        notes="IID product-pair choices with empty history; parser emits one block.",
+        notes="IID product-pair choices with empty history; parser may accumulate "
+        "loader history, but SA40 clears it as an independent-trial artifact.",
     ),
     "10frey2017risk": _spec(
         "10frey2017risk",
@@ -152,7 +155,8 @@ LIMITED_DATA_REGISTRY: Dict[str, LimitedDataSpec] = {
         history_resets_at_unit=True,
         prefix_valid=True,
         chronological_split=False,
-        notes="Each probe is a new memory-set recognition trial; history is empty.",
+        notes="Each probe is a new memory-set recognition trial; history is empty "
+        "(loader-accumulated cross-trial history is an artifact).",
     ),
     "12badham2017deficits": _spec(
         "12badham2017deficits",
@@ -271,9 +275,17 @@ def normalize_limited_data_protocol(value: object) -> str:
         "training_only",
     }:
         return LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2
+    if text in {
+        "structure_aware_v3",
+        "structureaware_v3",
+        "v3",
+        "sa40_v3",
+        "pics_v3",
+    }:
+        return LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
     raise ValueError(
-        f"limited_data_protocol must be 'off', 'structure_aware', or "
-        f"'structure_aware_v2', got {value!r}"
+        f"limited_data_protocol must be 'off', 'structure_aware', "
+        f"'structure_aware_v2', or 'structure_aware_v3', got {value!r}"
     )
 
 
@@ -282,11 +294,20 @@ def is_structure_aware_protocol(value: object) -> bool:
     return proto in (
         LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE,
         LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2,
+        LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3,
     )
 
 
 def limited_data_protocol_revision(value: object) -> str:
+    """Return 'v1', 'v2', or 'v3'. v2 and v3 share the training-only SA40 data path."""
     proto = normalize_limited_data_protocol(value)
+    if proto == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3:
+        return "v3"
     if proto == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V2:
         return "v2"
     return "v1"
+
+
+def uses_training_only_sa40(value: object) -> bool:
+    """True for structure_aware_v2 and structure_aware_v3 (exact-40, original test hist)."""
+    return limited_data_protocol_revision(value) in ("v2", "v3")

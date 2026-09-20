@@ -15,7 +15,7 @@ python baseline_methods/Psych101/run_openevolve.py \
   --n_iterations 350 \
   --parallel_participants 1 \
   --parallel_evaluations 4 \
-  --limited_data_protocol structure_aware_v2 \
+  --limited_data_protocol structure_aware_v3 \
   --limited_train_val 40 \
   --max_prompt_train_trials 60
 
@@ -26,7 +26,7 @@ Dataset description is the registry task text (Choice13k / mixed-gambles vanilla
 only for those two schemas). The choose() interface is a short mechanically generated
 Bernoulli or categorical contract. Official island inspirations are prompt-only
 contextual examples (not co-parents) and are dropped before observed examples if
-the 14,000-token Qwen input ceiling is exceeded.
+the 30000-token Qwen input ceiling is exceeded.
 
 Evolution optimizes trial-pooled mean log-likelihood on the observed train+val union
 (combined_score). Per-split train_loglik and val_loglik are logged separately. Test
@@ -35,15 +35,16 @@ best-by-observed-union program.
 
 OpenEvolve still uses islands / MAP-Elites / archive for parent selection. The LLM
 sees one current mutable parent plus official optional contextual blocks when they
-fit the 14,000-token Qwen input ceiling: previous-attempt history, artifacts when
+fit the 30000-token Qwen input ceiling: previous-attempt history, artifacts when
 include_artifacts is on, num_top_programs=3, leftover diverse programs via official
 random.sample, then num_diverse_programs=2 island inspirations (not co-parents).
 Observed train+val examples outrank optional context. Optional blocks are dropped
 before examples are reduced. The complete MAP-Elites database is never serialized.
 
 ICLR freeze: --n_iterations 350, --parallel_participants 1, --parallel_evaluations 4,
-SA40 (--limited_data_protocol structure_aware_v2 --limited_train_val 40;
-v1 `structure_aware` remains available for replay),
+SA40 (--limited_data_protocol structure_aware_v3 --limited_train_val 40;
+v1 `structure_aware` / preliminary-v2 remain available for replay),
+--hard_prompt_token_cap 30000, --max_model_len 32768, --llm_max_tokens 1024,
 --max_prompt_train_trials 60 (prompt display only; fitness uses the complete
 retained train+val union). Do not copy the obsolete 10×10 example or PICS
 --max_workers 100.
@@ -172,7 +173,9 @@ ICLR_FROZEN_PARALLEL_PARTICIPANTS = 1
 ICLR_FROZEN_PARALLEL_EVALUATIONS = 4
 ICLR_FROZEN_LIMITED_DATA_PROTOCOL = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
 ICLR_V2_LIMITED_DATA_PROTOCOL = "structure_aware_v2"
-ICLR_DEFAULT_LIMITED_DATA_PROTOCOL = ICLR_V2_LIMITED_DATA_PROTOCOL
+ICLR_V3_LIMITED_DATA_PROTOCOL = "structure_aware_v3"
+# Future ICLR OpenEvolve jobs share structure_aware_v3 + 32k/30k/1024 context.
+ICLR_DEFAULT_LIMITED_DATA_PROTOCOL = ICLR_V3_LIMITED_DATA_PROTOCOL
 ICLR_FROZEN_LIMITED_TRAIN_VAL = 40
 ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS = 60  # T-PICS prompt-display cap on train+val union
 ICLR_FROZEN_SPLIT_RATIO = 0.6
@@ -181,7 +184,9 @@ ICLR_FROZEN_LLM_MAX_TOKENS = 1024
 ICLR_FROZEN_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 ICLR_FROZEN_NUM_DIVERSE_PROGRAMS = 2  # official OpenEvolve PromptConfig default
 ICLR_FROZEN_NUM_TOP_PROGRAMS = 3  # official PromptConfig default; worker injects via top_programs=
-ICLR_FROZEN_INPUT_TOKEN_CEILING = 14000
+ICLR_FROZEN_INPUT_TOKEN_CEILING = 30000
+ICLR_PRELIMINARY_V2_INPUT_TOKEN_CEILING = 14000
+ICLR_FROZEN_VLLM_MAX_MODEL_LEN = 32768
 ICLR_FROZEN_INCLUDE_ARTIFACTS = True  # official PromptConfig.include_artifacts default
 ICLR_FROZEN_MAX_PROGRAM_CHARS = 10000  # audited production bound for packing tests
 EXPECTED_OPENEVOLVE_GIT_SHA = "411fb59c886c18704caaffb611e17cf9e7d824d2"
@@ -516,6 +521,8 @@ def iclr_frozen_argv(dataset: str, *, api_base: str = "http://localhost:8000/v1"
         str(ICLR_FROZEN_LLM_MAX_TOKENS),
         "--hard_prompt_token_cap",
         str(ICLR_FROZEN_INPUT_TOKEN_CEILING),
+        "--max_model_len",
+        str(ICLR_FROZEN_VLLM_MAX_MODEL_LEN),
         "--api_base",
         api_base,
     ]
@@ -1651,7 +1658,7 @@ def _patched_build_prompt(
     metrics = program_metrics or {}
     trials_compact = ctx.get("trials_compact", "")
     reserved = int(ctx.get("llm_max_tokens", ICLR_FROZEN_LLM_MAX_TOKENS))
-    model_len = int(ctx.get("max_model_len", 16384))
+    model_len = int(ctx.get("max_model_len", ICLR_FROZEN_VLLM_MAX_MODEL_LEN))
     max_prompt_tokens = min(
         int(ctx.get("hard_prompt_token_cap", ICLR_FROZEN_INPUT_TOKEN_CEILING)),
         ICLR_FROZEN_INPUT_TOKEN_CEILING,
@@ -1709,7 +1716,7 @@ def _patched_generate_with_context(self, system_message, messages, **kwargs):
     ctx = _WORKER_VANILLA
     if ctx and messages:
         reserved = int(ctx.get("llm_max_tokens", ICLR_FROZEN_LLM_MAX_TOKENS))
-        model_len = int(ctx.get("max_model_len", 16384))
+        model_len = int(ctx.get("max_model_len", ICLR_FROZEN_VLLM_MAX_MODEL_LEN))
         cap = min(
             int(ctx.get("hard_prompt_token_cap", ICLR_FROZEN_INPUT_TOKEN_CEILING)),
             ICLR_FROZEN_INPUT_TOKEN_CEILING,
@@ -2587,8 +2594,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Legacy name. Prompt-display cap on the combined observed train+validation "
             "union (T-PICS 60). Fitness still uses the complete retained train+val set. "
-            "0 = no prompt cap. SA40 participants usually have <=40 observations, so 40 "
-            "and 60 select the same examples except Kool's optional +1 stage-1 pairing."
+            "0 = no prompt cap. Under structure_aware_v3, SA40 participants have at most "
+            "40 retained train+val observations (exact-40 for Kool), so 40 and 60 select "
+            "the same examples whenever |TV|<=40."
         ),
     )
     p.add_argument("--max_prompt_trials_per_problem", type=int, default=5)
@@ -2599,7 +2607,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top_p", type=float, default=None)
     p.add_argument("--llm_max_tokens", type=int, default=ICLR_FROZEN_LLM_MAX_TOKENS)
-    p.add_argument("--max_model_len", type=int, default=16384)
+    p.add_argument("--max_model_len", type=int, default=ICLR_FROZEN_VLLM_MAX_MODEL_LEN)
     p.add_argument("--hard_prompt_token_cap", type=int, default=ICLR_FROZEN_INPUT_TOKEN_CEILING)
     p.add_argument("--llm_timeout", type=int, default=300)
     p.add_argument("--llm_retries", type=int, default=3)
@@ -2794,8 +2802,8 @@ def main() -> None:
         "OpenEvolve islands/MAP-Elites/archive still select one formal parent; official "
         "optional contextual blocks (artifacts, previous attempts, 3 island-best top, "
         "random.sample diverse leftover, 2 inspirations) are packed in 411fb59 template "
-        "order and dropped before reducing observed examples if the 14k Qwen input "
-        "ceiling is exceeded. The MAP-Elites database is not serialized into the prompt."
+        "order and dropped before reducing observed examples if the 30000-token Qwen "
+        "input ceiling is exceeded. The MAP-Elites database is not serialized into the prompt."
     )
 
     _patch_process_parallel_worker()

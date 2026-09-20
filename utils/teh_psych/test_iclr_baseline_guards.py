@@ -32,6 +32,7 @@ from Centaur import (  # noqa: E402
     _prepare_mixed_gambles_centaur_trials,
     build_centaur_prompt_prefix_indexed,
     centaur_display_keys,
+    run_smoke_prompt_check,
 )
 from run_openevolve import (  # noqa: E402
     CHOOSE_API_BERNOULLI,
@@ -49,6 +50,7 @@ from run_openevolve import (  # noqa: E402
     ICLR_FROZEN_N_ITERATIONS,
     ICLR_FROZEN_NUM_TOP_PROGRAMS,
     ICLR_FROZEN_INPUT_TOKEN_CEILING,
+    ICLR_FROZEN_VLLM_MAX_MODEL_LEN,
     ICLR_FROZEN_PARALLEL_EVALUATIONS,
     ICLR_FROZEN_PARALLEL_PARTICIPANTS,
     ICLR_FROZEN_SPLIT_RATIO,
@@ -197,6 +199,119 @@ def test_mixed_gambles_v2_raw_prefix_is_remapped_to_ab():
     prefix = build_centaur_prompt_prefix_indexed(prompt, scores[0])
     assert "Option A delivers" in prefix
     assert "<<0>>" not in prefix
+
+
+def test_speekenbrink_smoke_uses_v2_raw_timeline_under_structure_aware_v3():
+    """Continuous Speekenbrink test histories exceed retained SA40 TV length."""
+    info = run_smoke_prompt_check(
+        "5speekenbrink2008learning",
+        0,
+        split_ratio=0.6,
+        split_seed=0,
+        psych_dataset_split="train",
+        local_dataset=None,
+        limited_data_protocol="structure_aware_v3",
+        limited_train_val=40,
+        speekenbrink_split="chronological",
+    )
+    assert info["limited_data_protocol"] == "structure_aware_v3"
+    assert info["timeline_mode"] == "v2_raw_pretest"
+    retained_tv = int(info["retained_n_train"]) + int(info["retained_n_val"])
+    assert retained_tv <= 40
+    assert int(info["prompt_timeline_n"]) > retained_tv + int(info["n_test"])
+    assert info["samples"]
+    assert info["samples"][0]["history_len"] > retained_tv
+    assert all(s["prefix_tail"].rstrip().endswith("You press") for s in info["samples"])
+
+
+def test_centaur_suffix_softmax_normalizes_binary_and_categorical():
+    """PICS-fair metric: softmax over legal <<key>>. suffix logprobs (no session NLL)."""
+    import math
+    from Centaur import CentaurChooser
+
+    class _FakeChooser(CentaurChooser):
+        def __init__(self, lps_by_suffix):
+            self.model_name = "fake"
+            self.max_seq_length = 32768
+            self.load_in_4bit = True
+            self.task_instruction = ""
+            self._model = object()
+            self._tokenizer = object()
+            self.last_prob_debug = {}
+            self._lps = lps_by_suffix
+
+        def _suffix_logprob_detailed(self, prefix: str, suffix: str):
+            return float(self._lps[suffix]), None
+
+    trials_bin = [
+        {
+            "problem": {
+                "dataset_alias": "7hilbig2014generalized",
+                "option_keys": ["L", "R"],
+                "schema_type": "B",
+            },
+            "history": [],
+            "action": 1,
+        }
+    ]
+    chooser = _FakeChooser({"<<L>>.": 0.0, "<<R>>.": math.log(3.0)})
+    probs = chooser.action_probs_from_suffixes(trials_bin, 0)
+    assert len(probs) == 2
+    assert abs(sum(probs) - 1.0) < 1e-9
+    assert abs(probs[1] - 0.75) < 1e-9
+
+    trials_cat = [
+        {
+            "problem": {
+                "dataset_alias": "steyvers_2009_bandit",
+                "option_keys": [0, 1, 2, 3],
+                "schema_type": "categorical_bandit",
+                "game": 1,
+                "trial": 1,
+                "n_arms": 4,
+            },
+            "history": [],
+            "action": 2,
+        }
+    ]
+    chooser_k = _FakeChooser(
+        {f"<<{k}>>.": float(i) for i, k in enumerate(["1", "2", "3", "4"])}
+    )
+    probs_k = chooser_k.action_probs_from_suffixes(trials_cat, 0)
+    assert len(probs_k) == 4
+    assert abs(sum(probs_k) - 1.0) < 1e-9
+    assert probs_k.index(max(probs_k)) == 3
+
+
+def test_baseline_wandb_completion_requires_full_finite_cohort():
+    from utils.teh.baseline_wandb_completion import wandb_completion_fields
+
+    complete = wandb_completion_fields(
+        [{"test_loglik": -1.0}, {"test_loglik": -2.0}],
+        expected_n=2,
+        run_finished=True,
+        distinguish_failures=True,
+    )
+    assert complete["final/is_complete"] is True
+    assert complete["final/mean_test_loglik"] == -1.5
+
+    partial = wandb_completion_fields(
+        [{"test_loglik": -1.0}],
+        expected_n=2,
+        run_finished=True,
+        distinguish_failures=True,
+    )
+    assert partial["final/is_complete"] is False
+    assert "final/mean_test_loglik" not in partial
+
+    failed = wandb_completion_fields(
+        [{"test_loglik": -1.0}, {"status": "failed", "test_loglik": None}],
+        expected_n=2,
+        run_finished=True,
+        distinguish_failures=True,
+    )
+    assert failed["final/is_complete"] is False
+    assert "final/mean_test_loglik" not in failed
 
 
 def test_enkavi_probe_in_set_is_oracle_and_stripped_from_program_input():
@@ -795,7 +910,7 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.n_iterations == ICLR_FROZEN_N_ITERATIONS == 350
     assert args.parallel_participants == ICLR_FROZEN_PARALLEL_PARTICIPANTS == 1
     assert args.parallel_evaluations == ICLR_FROZEN_PARALLEL_EVALUATIONS == 4
-    assert args.limited_data_protocol == ICLR_DEFAULT_LIMITED_DATA_PROTOCOL == "structure_aware_v2"
+    assert args.limited_data_protocol == ICLR_DEFAULT_LIMITED_DATA_PROTOCOL == "structure_aware_v3"
     assert ICLR_FROZEN_LIMITED_DATA_PROTOCOL == "structure_aware"
     assert args.limited_train_val == ICLR_FROZEN_LIMITED_TRAIN_VAL == 40
     assert args.split_ratio == ICLR_FROZEN_SPLIT_RATIO == 0.6
@@ -805,7 +920,8 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.num_diverse_programs == 2
     assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 3
     assert args.max_prompt_train_trials == ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS == 60
-    assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
+    assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 30000
+    assert args.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 32768
     assert args.include_artifacts is True
     assert args.base_prompt is None
     assert args.n_iterations != 600
@@ -824,14 +940,16 @@ def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():
         assert parsed.n_iterations == 350
         assert parsed.parallel_participants == 1
         assert parsed.parallel_evaluations == 4
-        assert parsed.limited_data_protocol == "structure_aware_v2"
+        assert parsed.limited_data_protocol == "structure_aware_v3"
         assert parsed.limited_train_val == 40
         assert parsed.max_prompt_train_trials == 60
         assert parsed.num_diverse_programs == 2
         assert parsed.num_top_programs == 3
         assert argv[argv.index("--num_top_programs") + 1] == "3"
-        assert parsed.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
-        assert argv[argv.index("--hard_prompt_token_cap") + 1] == "14000"
+        assert parsed.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 30000
+        assert argv[argv.index("--hard_prompt_token_cap") + 1] == "30000"
+        assert parsed.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 32768
+        assert argv[argv.index("--max_model_len") + 1] == "32768"
         assert "--max_prompt_train_trials" in argv
         assert argv[argv.index("--max_prompt_train_trials") + 1] == "60"
         assert parsed.range_start_ordinal == start

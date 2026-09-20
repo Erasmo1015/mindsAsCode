@@ -642,4 +642,10 @@ Authoritative: `baseline_methods/Psych101/docs/Documentation_Openevolve.md`. Off
 
 New method version, not a v1 overwrite. Flag: `--limited_data_protocol structure_aware_v2` (**CLI default** for teh.py / Centaur / LM / PT / OpenEvolve; `--limited_train_val` default 40). Cap 40 is **train+val only**; test keeps original histories (Speekenbrink/Kool restored; Hilbig/Enkavi no longer emptied). Kool 41/45 are exact-40 (no +1 stage-1). Snapshots + unit sampling in `utils/teh/prompt_snapshots.py` / `prompt_units.py`. Docs/paths: `analysis/config/T-PICS/docs/Documentation_v2.md`, `analysis/config/T-PICS/v2/`. Frozen v1 YAML/jobs 257174–257188/257756 untouched. Gated jobs default to `Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml` (not written until G.1+EB). Cluster G.1: `cluster/v2/ours/Qwen/`. Generated outputs use KIND `t_pics_g1_sa40_v2` / `t_pics_gated_sa40_v2` (v1 folders untouched).
 
+---
+
+## Short update (Sep 20 2026 — PICS v3)
+
+Final ICLR method. Protocol flag: `structure_aware_v3` (same SA40/history semantics as v2; new flag). Kinds: `pics_v3_g1` (global-only G.1) / `pics_v3` (gated target). Context: **32768 / 30000 / 1024**, `max_parent_chars=5000`. G.1 is **not** gated/YAML (no transfer suffix); fail-closed auto-prompt when prefer_auto ∧ global ∧ `n_iterations=0` ∧ v3. Authoritative doc: `analysis/config/T-PICS/docs/Documentation_pics_v3.md`. Constants: `utils/teh/pics_v3.py`. Submit 15 G.1: `bash cluster/v2/ours/Qwen/submit_g1_pics_v3.sh` (`H100_DATASETS=…` splits H100NVL/L40S; `DRY_RUN=0 CONFIRM_SUBMIT=1` to submit). Planned after G.1: schema-v4 annotate → Occurrence-EB → `Transfer_source/pics_v3/…_pics_v3.yaml`. Baselines share the v3 data contract only (OE: 350 / 30000 / 32768; Centaur Mixed Gambles A/B).
+
 

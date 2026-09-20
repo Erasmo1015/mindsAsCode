@@ -1,4 +1,4 @@
-"""CPU tests: ICLR OpenEvolve prompts fit the Qwen 14k input ceiling."""
+"""CPU tests: ICLR OpenEvolve prompts fit the Qwen 30000 input ceiling."""
 from __future__ import annotations
 
 import random
@@ -32,6 +32,7 @@ from run_openevolve import (  # noqa: E402
     ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS,
     ICLR_FROZEN_NUM_DIVERSE_PROGRAMS,
     ICLR_FROZEN_NUM_TOP_PROGRAMS,
+    ICLR_FROZEN_VLLM_MAX_MODEL_LEN,
     RequiredPromptOverflowError,
     _drop_inspiration_section,
     build_arg_parser,
@@ -113,7 +114,7 @@ def _pack(
         trials_compact=_examples(alias, n=n_examples),
         max_prompt_tokens=max_prompt_tokens,
         reserved_completion_tokens=ICLR_FROZEN_LLM_MAX_TOKENS,
-        model_context_len=16384,
+        model_context_len=ICLR_FROZEN_VLLM_MAX_MODEL_LEN,
         categorical=is_categorical_output_dataset(alias),
         n_actions=dataset_n_actions(alias),
         top_programs=list(top or []),
@@ -128,7 +129,7 @@ def _assert_required(alias: str, prompt: dict, state, *, n_examples: int = 60) -
     n = chat_input_token_count(prompt["system"], prompt["user"])
     assert n == state.estimated_tokens
     assert n <= ICLR_FROZEN_INPUT_TOKEN_CEILING
-    assert n + ICLR_FROZEN_LLM_MAX_TOKENS <= 16384
+    assert n + ICLR_FROZEN_LLM_MAX_TOKENS <= ICLR_FROZEN_VLLM_MAX_MODEL_LEN
     assert state.examples_available == n_examples
     assert state.examples_included == n_examples
     assert state.prompt_trial_count == n_examples
@@ -158,7 +159,7 @@ def test_official_inspiration_default_is_two_not_zero():
     assert args.num_diverse_programs == ICLR_FROZEN_NUM_DIVERSE_PROGRAMS == 2
     assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 3
     assert args.max_prompt_train_trials == ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS == 60
-    assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
+    assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 30000
     assert args.llm_max_tokens == ICLR_FROZEN_LLM_MAX_TOKENS == 1024
     assert args.include_artifacts is ICLR_FROZEN_INCLUDE_ARTIFACTS is True
 
@@ -226,8 +227,11 @@ def test_all_15_mixed_size_keeps_examples_and_some_optional():
         prompt, state = _pack(alias, parent, top=top, diverse=diverse, inspirations=insp)
         _assert_required(alias, prompt, state)
         kept = state.top_programs_kept + state.diverse_programs_kept + state.inspirations_kept
+        # Under the 30000 ceiling, mixed-size optional blocks may all fit; never
+        # trim the 60 examples before optional programs are considered.
         assert state.top_programs_kept == 3
-        assert kept < 7
+        assert kept <= 7
+        assert state.examples_included == 60
         stripped = _drop_inspiration_section(prompt["user"])
         assert stripped.count("split=") == 60
         assert "# API" in stripped
@@ -243,7 +247,7 @@ def test_all_15_max_10k_programs_drop_optional_keep_examples():
         insp = [_prog(f"i{i}", huge, -0.8 - 0.1 * i) for i in range(2)]
         prompt, state = _pack(alias, parent, top=top, diverse=diverse, inspirations=insp)
         n = _assert_required(alias, prompt, state)
-        assert n + ICLR_FROZEN_LLM_MAX_TOKENS <= 16384
+        assert n + ICLR_FROZEN_LLM_MAX_TOKENS <= ICLR_FROZEN_VLLM_MAX_MODEL_LEN
         kept = state.top_programs_kept + state.diverse_programs_kept + state.inspirations_kept
         assert kept < 7
         assert any(s.startswith("drop_") for s in state.steps)

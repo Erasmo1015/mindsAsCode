@@ -25,9 +25,13 @@ from utils.teh.prompt_snapshots import (
 )
 
 PROMPT_DISPLAY_CEILING = 60
-QWEN_INPUT_CEILING = 14_000
+# Final PICS v3 Qwen chat-templated ceilings (supersede preliminary-v2 14k/16k).
+QWEN_INPUT_CEILING = 30_000
 OUTPUT_RESERVE = 1_024
-VLLM_CONTEXT = 16_384
+VLLM_CONTEXT = 32_768
+# Frozen preliminary-v2 ceilings (audits / replay only; do not use as production default).
+PRELIMINARY_V2_QWEN_INPUT_CEILING = 14_000
+PRELIMINARY_V2_VLLM_CONTEXT = 16_384
 QWEN_TOKENIZER_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
 # Qwen2.5 chat template inserts this when the first message is not system.
 # vLLM OpenAI serving does the same for teh.py's user-only candidate calls.
@@ -247,6 +251,88 @@ def largest_balanced_prefix_that_fits(
     return kept, diag
 
 
+def _local_qwen_snapshot():
+    """Resolve a local Qwen2.5-Coder-32B-Instruct tokenizer.json snapshot."""
+    import os
+    from pathlib import Path
+
+    candidates = []
+    env = os.environ.get("QWEN_TOKENIZER_PATH") or os.environ.get("HF_HUB_CACHE")
+    if env:
+        candidates.append(Path(env))
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE  # type: ignore
+
+        candidates.append(Path(HF_HUB_CACHE))
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            Path.home() / ".cache/huggingface/hub",
+            Path("/careAIDrive/zichang/cache/huggingface/hub"),
+        ]
+    )
+    seen = set()
+    for hub in candidates:
+        if hub in seen or not hub:
+            continue
+        seen.add(hub)
+        if (hub / "tokenizer.json").is_file():
+            return hub
+        snaps = hub / "models--Qwen--Qwen2.5-Coder-32B-Instruct" / "snapshots"
+        if snaps.is_dir():
+            for snap in sorted(snaps.iterdir()):
+                if (snap / "tokenizer.json").is_file():
+                    return snap
+    return None
+
+
+class _LocalQwenTokenizer:
+    """tokenizers-backend + Qwen2.5 chat template when transformers AutoTokenizer fails."""
+
+    def __init__(self, snapshot) -> None:
+        from tokenizers import Tokenizer  # type: ignore
+
+        self._tok = Tokenizer.from_file(str(snapshot / "tokenizer.json"))
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=True
+    ):
+        if tokenize:
+            raise ValueError("tokenize=True is not supported on the local Qwen fallback")
+        msgs = list(messages or [])
+        if not msgs:
+            raise ValueError("empty messages")
+        parts = []
+        if msgs[0].get("role") == "system":
+            parts.append(
+                "<|im_start|>system\n"
+                + (msgs[0].get("content") or "")
+                + "<|im_end|>\n"
+            )
+        else:
+            parts.append(
+                "<|im_start|>system\n" + QWEN_DEFAULT_SYSTEM + "<|im_end|>\n"
+            )
+        for i, message in enumerate(msgs):
+            role = str(message.get("role") or "")
+            content = message.get("content") or ""
+            tool_calls = message.get("tool_calls")
+            if (
+                role == "user"
+                or (role == "system" and i != 0)
+                or (role == "assistant" and not tool_calls)
+            ):
+                parts.append(f"<|im_start|>{role}\n{content}<|im_end|>\n")
+        if add_generation_prompt:
+            parts.append("<|im_start|>assistant\n")
+        return "".join(parts)
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return list(self._tok.encode(text or "").ids)
+
+
 def _ensure_qwen_tokenizer():
     """Load the Qwen tokenizer once. Fail clearly; never silently fall back to char/4."""
     global _QWEN_TOKENIZER, _QWEN_TOKENIZER_FAILED
@@ -254,24 +340,31 @@ def _ensure_qwen_tokenizer():
         if _QWEN_TOKENIZER_FAILED:
             raise RuntimeError(_QWEN_TOKENIZER_FAILED)
         if _QWEN_TOKENIZER is None:
+            errors = []
             try:
                 from transformers import AutoTokenizer  # type: ignore
-            except Exception as exc:
-                _QWEN_TOKENIZER_FAILED = (
-                    f"Qwen tokenizer unavailable ({type(exc).__name__}: {exc}). "
-                    "Refusing to silently change T-PICS v2 packing. Install/cache "
-                    f"{QWEN_TOKENIZER_NAME} or pass a tokenizer in tests."
-                )
-                raise RuntimeError(_QWEN_TOKENIZER_FAILED) from exc
-            try:
+
                 _QWEN_TOKENIZER = AutoTokenizer.from_pretrained(
                     QWEN_TOKENIZER_NAME, trust_remote_code=True
                 )
             except Exception as exc:
+                errors.append(f"AutoTokenizer: {type(exc).__name__}: {exc}")
+                snap = _local_qwen_snapshot()
+                if snap is not None:
+                    try:
+                        _QWEN_TOKENIZER = _LocalQwenTokenizer(snap)
+                    except Exception as exc2:
+                        errors.append(
+                            f"local snapshot {snap}: {type(exc2).__name__}: {exc2}"
+                        )
+            if _QWEN_TOKENIZER is None:
                 _QWEN_TOKENIZER_FAILED = (
-                    f"Failed to load {QWEN_TOKENIZER_NAME}: {type(exc).__name__}: {exc}"
+                    "Qwen tokenizer unavailable. Refusing to silently change "
+                    "T-PICS v2 packing. "
+                    + " | ".join(errors)
+                    + f". Install/cache {QWEN_TOKENIZER_NAME}."
                 )
-                raise RuntimeError(_QWEN_TOKENIZER_FAILED) from exc
+                raise RuntimeError(_QWEN_TOKENIZER_FAILED)
         return _QWEN_TOKENIZER
 
 

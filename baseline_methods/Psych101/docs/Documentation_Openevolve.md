@@ -1,21 +1,40 @@
-# ICLR OpenEvolve baseline (frozen)
+# ICLR OpenEvolve baseline (frozen for PICS v3 comparison)
 
-This document is the authoritative description of the ICLR OpenEvolve (OE) baseline as implemented in `baseline_methods/Psych101/run_openevolve.py` against official OpenEvolve commit `411fb59c886c18704caaffb611e17cf9e7d824d2`. Claims below are taken from that runner, its generated evaluator, the shared SA40 loaders, and the pinned official library API. Older analysis notes are supplementary only.
+**How OpenEvolve is used in this paper.** We run the **pinned official
+OpenEvolve** library (one mutable parent per generation, island / MAP-Elites
+search) as a participant-level Python `choose(problem, history)` baseline.
+Each person is an independent 350-iteration evolution job under the shared
+PICS v3 data contract `structure_aware_v3` (training-only SA40). Fitness is
+count-pooled mean log-likelihood on the retained train+validation union; test
+is scored once after program selection. Generation uses Qwen2.5-Coder-32B with
+**32768 / 30000 / 1024** context ceilings. OpenEvolve does **not** use PICS
+transfer, G.1/G.2/G.3, Occurrence-EB, or PICS automatic prompt evolution.
 
-Labels used throughout:
+This document is the authoritative ICLR OpenEvolve description for
+`baseline_methods/Psych101/run_openevolve.py` against official commit
+`411fb59c886c18704caaffb611e17cf9e7d824d2`. Older 14k / `structure_aware` /
+600-iteration notes are **obsolete** for final ICLR launches.
 
 | Label | Meaning |
 |---|---|
 | **Frozen scientific setting** | ICLR comparison knob; do not change in place |
 | **Implementation detail** | Necessary adapter/runtime behavior |
-| **Diagnostic/reporting only** | Logged or displayed; not used for evolution, ranking, or paper-safe means unless stated |
-| **Unresolved audit item** | Operational or documentation gap; not silently treated as fixed |
+| **Diagnostic/reporting only** | Logged; not used for evolution/ranking/paper means unless stated |
+| **Historical / non-final** | Prior configs; do not launch as final |
 
 ## Overview
 
-We use official OpenEvolve’s one-parent, island / MAP-Elites search as a participant-level behavioral-program baseline. Each person is an independent evolution job: the library samples one mutable parent per generation, proposes one child program, and scores it on that person’s observed data. Search uses the same SA40 observed-data protocol as the main method (structure-aware cap of 40 train+val observations; current Kool loader behavior may retain 41 observations via stage-1 pairing, **unresolved audit item** pending the forthcoming SA40 audit, not the final paper protocol) and a matched nominal full-pipeline generation budget of 350 generations per person.
+Official OpenEvolve samples one mutable parent per generation, proposes one
+child, and scores it on that person’s observed data. Search uses
+`structure_aware_v3` (≤40 train+val; Kool exact-40; independent histories empty
+on all splits). Nominal generation budget: **350 iterations per participant**.
+Prompts show a registry task description, neutral `choose()` API, the current
+parent, observed TV examples (display-capped), and official optional contextual
+programs when they fit the **30000**-token Qwen chat-template ceiling.
+Contextual programs are **not** extra formal parents.
 
-Evolution maximizes count-pooled mean log-likelihood on the observed train+validation union. Held-out test log-likelihood is computed only after the best-by-observed-union program is frozen. Prompts show a vanilla task description, a neutral `choose(problem, history)` contract, the current parent, observed train+val examples, and official optional contextual programs when they fit a 14,000-token Qwen chat-template ceiling. Contextual programs are not extra parents.
+Evolution maximizes observed-union `combined_score`. Held-out test log-likelihood
+is computed only after the best-by-observed program is frozen.
 
 ---
 
@@ -23,7 +42,7 @@ Evolution maximizes count-pooled mean log-likelihood on the observed train+valid
 
 **Why OpenEvolve is included.** Official OpenEvolve is an island/MAP-Elites program-evolution library. We include it as an official OpenEvolve search core with a task-specific adapter for evolving Python `choose()` predictors of human choices, against which template/PICS methods can be compared under a shared data protocol and a matched nominal full-pipeline generation budget. Prompt construction, full-rewrite configuration, failure-score compatibility, and data/evaluator interfaces are adapted; islands/MAP-Elites and parent selection remain official.
 
-**What constitutes one run.** One OS process of `run_openevolve.py` for one `--dataset` alias, over a frozen ordinal range of participants, writing one timestamped `run_*` directory (or `--output_dir`). **Frozen scientific setting:** 350 iterations per participant, SA40, split 0.6 / seed 0, Qwen2.5-Coder-32B-Instruct.
+**What constitutes one run.** One OS process of `run_openevolve.py` for one `--dataset` alias, over a frozen ordinal range of participants, writing one timestamped `run_*` directory (or `--output_dir`). **Frozen scientific setting:** 350 iterations per participant, `structure_aware_v3` SA40, split 0.6 / seed 0, Qwen2.5-Coder-32B-Instruct, **max_model_len 32768**, hard input **30000**, output **1024**.
 
 **What constitutes one participant.** One `run_participant()` call: load that person’s trials, write train+val evolution JSON and a post-hoc test JSON, copy the seed program, generate `evaluator.py`, construct official `OpenEvolve(...)`, run `oe.run(iterations=n_iterations)`, select the best checkpoint program by observed `combined_score`, then score train, val, and test once.
 
@@ -86,12 +105,12 @@ All knobs live as `ICLR_FROZEN_*` in the runner and as argparse defaults / `iclr
 | `--n_iterations` | 350 | Frozen scientific setting |
 | `--model` | `Qwen/Qwen2.5-Coder-32B-Instruct` | Frozen scientific setting |
 | `--llm_max_tokens` (output) | 1024 | Frozen scientific setting |
-| `--hard_prompt_token_cap` (input) | 14000 chat-templated tokens | Frozen scientific setting |
-| `--max_model_len` | 16384 | Frozen scientific setting |
+| `--hard_prompt_token_cap` (input) | **30000** chat-templated tokens | Frozen scientific setting |
+| `--max_model_len` | **32768** | Frozen scientific setting |
 | `--parallel_participants` | 1 | Frozen scientific setting |
 | `--parallel_evaluations` | 4 | Frozen scientific setting |
 | `--split_ratio` / `--split_seed` | 0.6 / 0 | Frozen scientific setting |
-| `--limited_data_protocol` / `--limited_train_val` | `structure_aware` / 40 (SA40) | Frozen scientific setting |
+| `--limited_data_protocol` / `--limited_train_val` | **`structure_aware_v3`** / 40 (SA40) | Frozen scientific setting |
 | `--max_prompt_train_trials` | 60 (display only) | Frozen scientific setting |
 | `--num_top_programs` / `--num_diverse_programs` | 3 / 2 | Frozen scientific setting |
 | `--include_artifacts` | `True` (official PromptConfig default) | Frozen scientific setting |
@@ -133,7 +152,7 @@ All knobs live as `ICLR_FROZEN_*` in the runner and as argparse defaults / `iclr
 | `evaluator.parallel_evaluations=1` | 4 | Concurrent island workers vs local vLLM |
 | `evaluator.timeout=300`, `max_retries=3` | 120, 2 | Shorter hung-eval wait |
 | `llm.max_tokens=4096`, `timeout=60` | 1024, 300 | Output ceiling + slower local vLLM |
-| Stock full-rewrite user template | Patched vanilla prompt | Task interface + observed examples + 14k packer |
+| Stock full-rewrite user template | Patched vanilla prompt | Task interface + observed examples + 30000 packer |
 
 Official `max_code_length=10000` is left at the library default (`ICLR_FROZEN_MAX_PROGRAM_CHARS` documents the audited bound; packing tests use it).
 
@@ -170,9 +189,9 @@ Failed OE iterations still consume budget. LLM HTTP retries (`--llm_retries 3` �
 
 **SA40.** After the split, `apply_structure_aware_protocol` keeps at most \(N=40\) observed trials, preserving task structure (`INDEPENDENT_TRIAL` / `RESETTING_UNIT` / `CONTINUOUS_SESSION` in `LIMITED_DATA_REGISTRY`). Test is never truncated.
 
-**Kool cardinality.** Registry notes: history carries across days; the split is a contiguous usable-day cut (**split seed unused**). If the contiguous TV suffix of length 40 would start on a stage-2 trial, the matching stage-1 is prepended (`kool_include_matching_stage1`), yielding \(|T_{\mathrm{obs}}|=41\). This is the **current loader/test behavior** (`test_sa40_kool_stage2_cut_retains_41`; `fallback != kool_include_matching_stage1` is excluded from the hard \(\le 40\) assertion). **Unresolved audit item:** whether Kool-41 is the final paper SA40 protocol is subject to the forthcoming SA40 audit; do not treat the current +1 pairing as the settled paper rule.
+**Kool cardinality.** Registry notes: history carries across days; the split is a contiguous usable-day cut (**split seed unused**). Under final ICLR **`structure_aware_v3`**, Kool retains **exact-40** observed train+val (stage-1 pairing keeps the continuous session without the v1 +1). The older v1 `structure_aware` path that could yield \(|T_{\mathrm{obs}}|=41\) via `kool_include_matching_stage1` is **historical / non-final** only.
 
-**Prompt-example cap 60 vs observed cap 40.** Fitness always uses the complete retained \(T_{\mathrm{obs}}\). Prompts display a subsample of \(T_{\mathrm{obs}}\) of size \(\le 60\) (`cap_and_subsample_prompt_trials`; T-PICS `--max_prompt_train_trials`). Under current SA40 code, \(|T_{\mathrm{obs}}|\le 40\) except Kool’s loader +1 (41; **unresolved audit item**, forthcoming SA40 audit), so 40 vs 60 select the same examples except that a Kool-41 union is **kept** by cap 60 and would be cut by a cap of 40.
+**Prompt-example cap 60 vs observed cap 40.** Fitness always uses the complete retained \(T_{\mathrm{obs}}\). Prompts display a subsample of \(T_{\mathrm{obs}}\) of size \(\le 60\) (`cap_and_subsample_prompt_trials`; T-PICS `--max_prompt_train_trials`). Under `structure_aware_v3`, \(|T_{\mathrm{obs}}|\le 40\) (Kool exact-40 via stage-1 pairing), so the display cap 60 does not further truncate the retained union.
 
 **Test isolation.** Evolution JSON (`trials_evolution_split.json`) stores only train+val. Test is `trials_test_posthoc.json` outside the evaluator directory. The generated evaluator never reads `data["test"]`. Test log-likelihood is computed in `run_participant` after selection.
 
@@ -253,7 +272,7 @@ def choose(problem, history):
 | `guan_2020_stopping` | Optimal stopping | Bernoulli | 2 | choices13k.py | env/pos/values | resetting problem | Prefix `values_observed`; analysis keys popped |
 | `steyvers_2009_bandit` | 4-arm bandit | Categorical | 4, \(0..3\) | categorical_uniform.py | game/trial/n_arms | resetting game | History resets each game |
 | `13schulz2020finding` | 8-arm bandit | Categorical | 8, \(0..7\) | categorical_uniform.py | round/trial/n_arms | resetting round | History `{action, reward}`; options reset each round |
-| `14kool2016when` | Daw two-step | Bernoulli (both stages) | 2 | choices13k.py | stage 1/2 fields | continuous session | Same `choose()` for stage 1 and 2; history carries across days; current SA40 +1 pairing (pending SA40 audit) |
+| `14kool2016when` | Daw two-step | Bernoulli (both stages) | 2 | choices13k.py | stage 1/2 fields | continuous session | Same `choose()` for stage 1 and 2; history carries across days; `structure_aware_v3` exact-40 (stage-1 pairing) |
 
 `vanilla_dataset_description()` uses registered `task_description` / `TASK_DESCRIPTION` for **all 15** aliases via `dataset_task_description()` (Psych-101 `PSYCH101_BINARY_DATASETS`, mixed-gambles `data_modules.mixed_gambles.TASK_DESCRIPTION`, external `EXTERNAL_DATASET_META`). The universal `# API` block is supplied separately by in-runner `choose_api_text()`. It never loads `prompts/openevolve_vanilla/*/infer_single_choice.txt`, `prompts/teh/`, or `prompts/external/` PICS strategy files (`reference_prompt` paths exist on dataset specs but are not used by this runner). Legacy vanilla infer files may still exist for `deprecated_run_openevolve.py --prompt_mode vanilla`; ICLR OE ignores them even if `--base_prompt` points at those paths.
 
@@ -295,7 +314,7 @@ Compact examples include `y=<action>` and `split=train|val`. That is **observed-
 
 ## 10. Token-budget behavior
 
-Chat-templated input (Qwen `apply_chat_template`, `add_generation_prompt=True`) must be \(\le 14000\). Output `max_tokens=1024`. Required: \(14000+1024 \le 16384\).
+Chat-templated input (Qwen `apply_chat_template`, `add_generation_prompt=True`) must be \(\le 30000\). Output `max_tokens=1024`. Required: \(30000+1024 \le 32768\).
 
 **Required (never trimmed):** system, task, API contract, current parent (plus the parser output-format block).
 
@@ -303,7 +322,7 @@ Chat-templated input (Qwen `apply_chat_template`, `add_generation_prompt=True`) 
 
 **Drop order (reverse):** inspirations → diverse → top → previous attempts → artifacts. The generate-time safety guard uses the same order, then drops example lines from the end only.
 
-**Example reduction** (only if required+examples still exceed 14k with **all** optional already omitted): deterministic prefix caps `(60, 40, 30, 20, 10, 5)` on the already-capped/subsampled display list (`ICLR_PROMPT_EXAMPLE_REDUCTION_CAPS`). Fitness is unchanged.
+**Example reduction** (only if required+examples still exceed 30000 with **all** optional already omitted): deterministic prefix caps `(60, 40, 30, 20, 10, 5)` on the already-capped/subsampled display list (`ICLR_PROMPT_EXAMPLE_REDUCTION_CAPS`). Fitness is unchanged.
 
 **Fail-fast.** `RequiredPromptOverflowError` if system/task/interface/parent alone exceeds the ceiling (or required + 5 examples still cannot fit). The worker iteration then errors; no LLM call.
 
@@ -359,7 +378,7 @@ Checkpoint JSON: IEEE \(-\infty\) is not JSON-safe; the finite floor also avoids
 
 `--parallel_participants=1`: one person at a time in a thread pool of size 1. `--parallel_evaluations=4`: official `ProcessPoolExecutor(max_workers=4)` for **evolution iterations** (parent sample → LLM → eval). Approximate simultaneous vLLM generate requests \(\approx 1\times 4=4\). This is unrelated to PICS `--max_workers 100`.
 
-OE is slow relative to PICS-at-width-10 because each iteration is a full-program rewrite, evaluation walks the full observed union in-process, islands keep a large population, and vLLM sees long prompts (up to 14k input + 1k output). Retries (`llm_retries=3`) multiply HTTP attempts on failures, not iteration count.
+OE is slow relative to PICS-at-width-10 because each iteration is a full-program rewrite, evaluation walks the full observed union in-process, islands keep a large population, and vLLM sees long prompts (up to 30000 input + 1024 output). Retries (`llm_retries=3`) multiply HTTP attempts on failures, not iteration count.
 
 ---
 
@@ -394,7 +413,7 @@ Important files: `run_config.json`, `log/` SA40 manifests, `participant_details_
 | Observed examples | None | Cap 60 from train+val | Necessary fairness vs T-PICS | Prompt supervision ≠ fitness cap |
 | Failure metrics | `{error: 0.0}` | Floor \(\log\varepsilon-1\) | Necessary for NLL | Failures cannot win |
 | Data | User evaluator | SA40 + split 0.6/0 | Frozen scientific setting | Same protocol as main method |
-| Token packing | None | 14k drop-optional-first | Necessary vs 16k server | No silent mid-string truncation |
+| Token packing | None | 30000 drop-optional-first | Necessary vs 32768 server | No silent mid-string truncation |
 | Model | Caller | Qwen2.5-Coder-32B-Instruct, vLLM | Frozen scientific setting | Shared model family with other ICLR runs |
 | Concurrency | `parallel_evaluations=1` | 4; people=1 | Discretionary runtime | Throughput, not extra candidates |
 | Candidate budget | `max_iterations=10000` | 350 | Frozen scientific setting | Matched nominal full-pipeline generation budget (generous to OE; see §4) |
@@ -429,7 +448,7 @@ git -C reference_repos/openevolve rev-parse HEAD
 
 Dry-run / preflight (no GPU): `python baseline_methods/Psych101/run_openevolve.py --help` (argparse exits before the SHA check). There is no `--dry-run` flag. A real `main()` without the checkout `SystemExit`s in `require_openevolve_checkout()`.
 
-Expected vLLM (example host script `scripts/utils/vllm_3090_gpu.sh`; **do not run here**): `vllm serve Qwen/Qwen2.5-Coder-32B-Instruct --port 8000 --tensor-parallel-size 4 --max-model-len 16384`.
+Expected vLLM (example host script `scripts/utils/vllm_3090_gpu.sh`; **do not run here**): `vllm serve Qwen/Qwen2.5-Coder-32B-Instruct --port 8000 --tensor-parallel-size 4 --max-model-len 32768`.
 
 Canonical production template (substitute `ALIAS`, `START`, `END` from §5):
 
@@ -445,27 +464,35 @@ python baseline_methods/Psych101/run_openevolve.py \
   --n_iterations 350 \
   --parallel_participants 1 \
   --parallel_evaluations 4 \
-  --limited_data_protocol structure_aware \
+  --limited_data_protocol structure_aware_v3 \
   --limited_train_val 40 \
   --max_prompt_train_trials 60 \
   --model Qwen/Qwen2.5-Coder-32B-Instruct \
   --llm_max_tokens 1024 \
-  --hard_prompt_token_cap 14000 \
+  --hard_prompt_token_cap 30000 \
+  --max_model_len 32768 \
   --num_diverse_programs 2 \
   --num_top_programs 3 \
   --api_base http://localhost:8000/v1
 ```
 
-Do not pass `--max_workers`. Do not use `10×10` participant/eval concurrency or `--n_iterations 600`.
+Do not pass `--max_workers`. Do not use `10×10` participant/eval concurrency, `--n_iterations 600`, `--hard_prompt_token_cap 14000`, `--max_model_len 16384`, or `--limited_data_protocol structure_aware` for final ICLR results.
 
+### Remaining launch requirements (final ICLR)
+
+1. Pin checkout `reference_repos/openevolve` at `411fb59c886c18704caaffb611e17cf9e7d824d2` (`require_openevolve_checkout` SystemExits on miss/mismatch; this host currently may show a different HEAD until checked out).
+2. Serve Qwen2.5-Coder-32B-Instruct with `--max-model-len 32768`.
+3. Launch **all 15** datasets with the template above and EMNLP ordinals from §5.
+4. Treat any prior 14k / 16384 / `structure_aware` / 600-iteration / incomplete W&B run as **non-final**.
+5. Quote paper means only when `final/is_complete=true` for the full expected cohort.
 ---
 
 ## 18. Tests and audits
 
 | File | Protects |
 |---|---|
-| `utils/teh_psych/test_iclr_baseline_guards.py` | 15 aliases, SA40 (incl. Kool 41), test isolation, failure floor, interface source of truth, SHA miss/mismatch, official `random.sample` diverse split, one `parent_id`, frozen CLI |
-| `utils/teh_psych/test_openevolve_prompt_budget.py` | 14k packing, early/mixed/max-10k programs, no example trim under audited bounds, coaching-sentence absence, required overflow |
+| `utils/teh_psych/test_iclr_baseline_guards.py` | 15 aliases, SA40 `structure_aware_v3` (Kool exact-40), test isolation, failure floor, interface source of truth, SHA miss/mismatch, official `random.sample` diverse split, one `parent_id`, frozen CLI |
+| `utils/teh_psych/test_openevolve_prompt_budget.py` | 30000 packing, early/mixed/max-10k programs, no example trim under audited bounds, coaching-sentence absence, required overflow |
 | `utils/teh_psych/test_openevolve_failure_checkpoint_roundtrip.py` | CPU evaluator→database→checkpoint using the **audit** clone (skips if missing) |
 
 These two modules currently define **43 tests** (34 + 9). `test_all_15_use_registered_task_descriptions_not_vanilla_files` asserts every ICLR alias uses `dataset_task_description` and that Choice13k / mixed-gambles vanilla infer files are not loaded as `# Task` text. `test_openevolve_failure_checkpoint_roundtrip.py` skips unless `reference_repos/openevolve_official_audit` exists.
@@ -479,7 +506,8 @@ These two modules currently define **43 tests** (34 + 9). `test_all_15_use_regis
 - Full rewrite and disabled template stochasticity are frozen ICLR choices, not official OE defaults.  
 - 350 is a matched **nominal full-pipeline generation budget** versus gated T-PICS, not equal per-participant compute; the accounting is generous to OE (all 350 OE candidates are participant-specific).  
 - Production depends on a gitignored pinned checkout the runner will not create.  
-- Current Kool SA40 loader may retain 41 observed trials (`kool_include_matching_stage1`); this is **unresolved audit item** pending the forthcoming SA40 audit, not the final paper protocol.  
+- Final ICLR launches must use `--limited_data_protocol structure_aware_v3` (Kool exact-40). Historical `structure_aware` / 14k / 16384 / 600-iteration runs are **non-final** and must not be reported as paper results.  
+
 - No first-class resume CLI.  
 - Optional previous-attempt section is official island-best programs, not a true parent-lineage trace.
 

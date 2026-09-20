@@ -8,6 +8,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from utils.teh.prompt_snapshots import sanitize_problem_for_choose
+
 LOGLIK_EPS = 1e-9
 
 
@@ -115,7 +117,7 @@ def evaluate_categorical_program(
         errors = 0
         warnings = 0
         for t in trials:
-            problem = t.get("problem") or {}
+            problem = sanitize_problem_for_choose(t.get("problem") or {})
             target = t.get("target_action", t.get("action"))
             if target is None:
                 errors += 1

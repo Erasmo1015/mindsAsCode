@@ -160,15 +160,33 @@ def _partition_trials_by_stage(
     return dict(buckets)
 
 
+def _trials_for_prompt_schema(trials: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy trials with choose()-observable problems only (shared sanitizer)."""
+    from utils.teh.prompt_snapshots import sanitize_problem_for_choose
+
+    out: List[Dict[str, Any]] = []
+    for t in trials:
+        nt = dict(t)
+        nt["problem"] = sanitize_problem_for_choose(t.get("problem") or {})
+        out.append(nt)
+    return out
+
+
 def infer_recursive_runtime_schema(trials: Sequence[Dict[str, Any]]) -> str:
     """
     Recursive runtime schema from parsed train trials.
 
     Marks always/sometimes keys and, when ``stage`` varies, documents
     stage-conditional problem key availability separately.
+
+    Problem dicts are sanitized first so oracle / current-outcome fields
+    (e.g. Enkavi ``probe_in_set``) never appear in schema, contracts, or
+    prompt-generation LLM inputs.
     """
     if not trials:
         return "- (no parsed trial examples provided)"
+
+    trials = _trials_for_prompt_schema(trials)
 
     lines: List[str] = []
     schemas = sorted(
@@ -285,7 +303,9 @@ def infer_recursive_runtime_schema(trials: Sequence[Dict[str, Any]]) -> str:
 
 
 def _trial_structure_fingerprint(trial: Dict[str, Any]) -> str:
-    p = trial.get("problem") or {}
+    from utils.teh.prompt_snapshots import sanitize_problem_for_choose
+
+    p = sanitize_problem_for_choose(trial.get("problem") or {})
     keys = tuple(sorted(str(k) for k in p.keys() if k not in _SKIP_PROBLEM_META))
     stage = p.get("stage", "")
     schema = p.get("schema_type", "")
@@ -331,11 +351,12 @@ def _trial_to_example_dict(
         trial.get("history") or [],
         max_entries=history_max_entries,
     )
+    # Label is never a choose() input; keep it outside ``problem``.
     out: Dict[str, Any] = {
         "index": index,
         "problem": problem,
-        "action": trial.get("action"),
         "history": hist,
+        "observed_action_label": trial.get("action"),
     }
     if was_trunc:
         out["history_truncated"] = True
@@ -606,6 +627,23 @@ def causal_history_ok(trial: Dict[str, Any], *, previous_action: Optional[int]) 
     return True
 
 
+GENERATION_ORACLE_FORBIDDEN_TOKENS = (
+    "probe_in_set",
+    "probeInSet",
+)
+
+
+def assert_no_generation_oracle_leak(text: str, *, context: str = "prompt") -> None:
+    """Hard-fail if generation text names Enkavi membership oracle fields."""
+    hay = text or ""
+    for tok in GENERATION_ORACLE_FORBIDDEN_TOKENS:
+        if tok in hay:
+            raise RuntimeError(
+                f"Generation-time oracle leak in {context}: found {tok!r}. "
+                "Sanitize schema/examples/contracts before writing prompts."
+            )
+
+
 def build_deterministic_runtime_contract(
     trials: Sequence[Dict[str, Any]],
     *,
@@ -613,6 +651,7 @@ def build_deterministic_runtime_contract(
 ) -> str:
     """Exact runtime contract appended to final generation prompts (not the base file)."""
     schema = infer_recursive_runtime_schema(trials) if trials else "- (no observed trials)"
+    assert_no_generation_oracle_leak(schema, context="runtime_schema")
     k = infer_action_cardinality(trials) if trials else 2
     problem_keys = problem_keys_note_from_schema(schema)
     history_keys = history_keys_note_from_schema(schema)
