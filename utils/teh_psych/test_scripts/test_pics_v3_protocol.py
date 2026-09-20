@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "baseline_methods" / "Psych101"))
 
@@ -109,10 +109,8 @@ def test_pics_v3_constants_and_defaults():
     assert ns.max_parent_chars == 5_000
     assert ns.llm_max_tokens == 1024
     assert ns.max_prompt_train_trials == 60
-    if SOURCE_YAML.is_file():
-        assert ns.t_pics_source_config == str(SOURCE_YAML)
-    else:
-        assert ns.t_pics_source_config == str(V2_SOURCE_YAML)
+    assert SOURCE_YAML.is_file()
+    assert ns.t_pics_source_config == str(SOURCE_YAML)
 
 
 def test_teh_cli_pics_v3_token_defaults():
@@ -130,6 +128,30 @@ def test_teh_cli_pics_v3_token_defaults():
     assert args.max_parent_chars == 5_000
     assert args.llm_max_tokens == 1024
     assert args.max_prompt_train_trials == 60
+
+
+def test_effective_hard_prompt_token_cap_matches_llm_max_tokens():
+    from utils.teh.prompt_units import (
+        OUTPUT_RESERVE,
+        VLLM_CONTEXT,
+        effective_hard_prompt_token_cap,
+    )
+
+    assert (
+        effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, OUTPUT_RESERVE)
+        == HARD_PROMPT_TOKEN_CAP
+    )
+    assert effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, 1024) == 30_000
+    assert (
+        effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, 4096)
+        == VLLM_CONTEXT - 4096
+        == 28_672
+    )
+    assert effective_hard_prompt_token_cap(20_000, 4096) == 20_000
+    with pytest.raises(ValueError):
+        effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, VLLM_CONTEXT)
+    with pytest.raises(ValueError):
+        effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, 0)
 
 
 def test_v1_and_preliminary_v2_protocols_still_selectable():

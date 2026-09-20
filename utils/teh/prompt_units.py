@@ -27,11 +27,37 @@ from utils.teh.prompt_snapshots import (
 PROMPT_DISPLAY_CEILING = 60
 # Final PICS v3 Qwen chat-templated ceilings (supersede preliminary-v2 14k/16k).
 QWEN_INPUT_CEILING = 30_000
+# Default twin of PICS v3 ``LLM_MAX_TOKENS`` / ``--llm_max_tokens`` when unset.
+# Live packing must use the CLI ``--llm_max_tokens`` (via ``output_reserve`` /
+# ``effective_hard_prompt_token_cap``), not this constant alone.
 OUTPUT_RESERVE = 1_024
 VLLM_CONTEXT = 32_768
 # Frozen preliminary-v2 ceilings (audits / replay only; do not use as production default).
 PRELIMINARY_V2_QWEN_INPUT_CEILING = 14_000
 PRELIMINARY_V2_VLLM_CONTEXT = 16_384
+
+
+def effective_hard_prompt_token_cap(
+    hard_prompt_token_cap: int,
+    llm_max_tokens: int,
+    *,
+    vllm_context: int = VLLM_CONTEXT,
+) -> int:
+    """Input budget that still leaves ``llm_max_tokens`` room in ``vllm_context``.
+
+    ``min(hard_prompt_token_cap, vllm_context - llm_max_tokens)``. Under PICS v3
+    defaults (30000 / 1024 / 32768) this equals 30000 unchanged.
+    """
+    hard = int(hard_prompt_token_cap)
+    reserved = int(llm_max_tokens)
+    ctx = int(vllm_context)
+    if reserved < 1:
+        raise ValueError(f"llm_max_tokens must be >= 1, got {reserved}")
+    if reserved >= ctx:
+        raise ValueError(
+            f"llm_max_tokens ({reserved}) must be < vLLM context ({ctx})"
+        )
+    return min(hard, ctx - reserved)
 QWEN_TOKENIZER_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
 # Qwen2.5 chat template inserts this when the first message is not system.
 # vLLM OpenAI serving does the same for teh.py's user-only candidate calls.

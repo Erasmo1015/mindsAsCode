@@ -381,7 +381,7 @@ Sampled parent count also decays (`_decayed_sampled_parents_k_for_iteration`) fr
 
 ### 7.1 Per-person score (same formula as evolution `train_val`)
 
-Let \(n_\mathrm{tr}, n_\mathrm{vl}\) be that person’s SA40 train/val trial counts, and \(\ell_\mathrm{tr}, \ell_\mathrm{vl}\) the average log-likelihoods (`n_eval_seeds=3`). Test is discarded.
+Let \(n_\mathrm{tr}, n_\mathrm{vl}\) be that person’s SA40 train/val trial counts, and \(\ell_\mathrm{tr}, \ell_\mathrm{vl}\) the average log-likelihoods (`n_eval_seeds=1` by default; historically often 3). Test is discarded.
 
 \[
 s_i =
@@ -549,7 +549,7 @@ Cluster `PICS_ARGS` in `job_gated_l40s.sh` plus `apply_gated_cli_defaults` and a
 | `--max_prompt_train_trials` / `--max_prompt_trials_per_problem` | 60 / 5 |
 | `--max_parent_chars` | 3500 |
 | `--hard_prompt_token_cap` / `--strict_prompt_budget` | 14000 / True (argparse defaults) |
-| `--n_eval_seeds` | 3 (argparse default) |
+| `--n_eval_seeds` | 1 (argparse default) |
 | `--max_error_prompt_chars` / `--error-feedback-mode` | 0 / `legacy` |
 | `--mdl_lambda` | 0 |
 | `--no-refinement_phase` | required |

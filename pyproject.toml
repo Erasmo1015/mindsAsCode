@@ -116,5 +116,5 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "utils/teh_psych"]
+testpaths = ["tests", "utils/teh_psych/test_scripts"]
 python_files = ["test_*.py"]

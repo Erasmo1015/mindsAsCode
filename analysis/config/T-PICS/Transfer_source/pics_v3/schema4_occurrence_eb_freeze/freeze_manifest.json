@@ -1,0 +1,60 @@
+{
+  "created_utc": "2026-09-20T13:01:24.378445+00:00",
+  "files": [
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/FROZEN_SPEC.json",
+      "sha256": "7b1c0c1e1567efe33b397a632250de7122a0c10ad5097dadb243d8afd2ea2be0",
+      "role": "FROZEN_SPEC.json"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/occurrence_signatures.csv",
+      "sha256": "96edfaa37bfe80945aec7d413d2674db6e5ee37730c5f63c10297b3f6d21fac1",
+      "role": "occurrence_signatures.csv"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/occurrence_model_summary.csv",
+      "sha256": "ba0264d47773a23da6f0d9c4f2c2fa2ea770bffcd3ad31633a0b5035ffeb6260",
+      "role": "occurrence_model_summary.csv"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/frozen_ranks_15targets_occurrence.csv",
+      "sha256": "a49da2623543d2b42ed51e2c79397606b33cf0dd9784290848c18ede6ba8261a",
+      "role": "frozen_ranks_15targets_occurrence.csv"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/frozen_ranks_6x6_occurrence.csv",
+      "sha256": "365a1674f33fdc751bf5a83e61f435f26643478ebc89a9fbdcd77b25264da096",
+      "role": "frozen_ranks_6x6_occurrence.csv"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/analysis_panel.csv",
+      "sha256": "4e956071629cba290b148576f497f73030ba6a84c8442e2e4b34a52f80bf6bdb",
+      "role": "analysis_panel.csv"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/panel_stats.json",
+      "sha256": "ede8eda18cdacb36d76275fb59f02f3664736928fb43d65e0cf898364d40a056",
+      "role": "panel_stats.json"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/eval_6x6_summary.json",
+      "sha256": "370dc0d0e98c234e352af8dca16b7c82373d69c009c24d597249bbb14ccb5446",
+      "role": "eval_6x6_summary.json"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/occurrence_dataset_eb.csv",
+      "sha256": "2c341c3a85ead79a1d4db116dbe67204448f0a249223e36df1947d5cc6043e8e",
+      "role": "occurrence_dataset_eb.csv"
+    },
+    {
+      "path": "analysis/config/T-PICS/Transfer_source/pics_v3/schema4_occurrence_eb_freeze/eval_6x6_detail_occurrence.csv",
+      "sha256": "4f1ca6965149b6a84d481f4c2dd9ac9ca919d0be505daf8dbc77f594a4bb6ec6",
+      "role": "eval_6x6_detail_occurrence.csv"
+    }
+  ],
+  "runtime_required": true,
+  "runtime_yaml": {
+    "path": "analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml",
+    "sha256": "a52f050806014dac0b6891a46a2e718fea2ac1a3f244c1ad0c51568c85ea0f9b"
+  }
+}

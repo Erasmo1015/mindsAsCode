@@ -27,7 +27,7 @@ from baseline_methods.teh_psych.features import (
     prospect_theory_support_reason,
 )
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[3]
 _RUN = _REPO / "generated_outputs_teh_psych" / "run_260722_004944"
 _CACHE = _RUN / "parse_plan_cache"
 _BY = _RUN / "prototype_summary" / "by_dataset"

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 AUDIT_OE = REPO_ROOT / "reference_repos" / "openevolve_official_audit"
 if not AUDIT_OE.is_dir():
     pytest.skip("OpenEvolve audit checkout missing", allow_module_level=True)

@@ -41,11 +41,11 @@ DATASETS=(
 
 if [[ "${SKIP_PYTEST:-0}" != "1" ]]; then
   $prefix pytest -q \
-    utils/teh_psych/test_pics_v3_protocol.py \
-    utils/teh_psych/test_pics_v3_g1_orchestration.py \
-    utils/teh_psych/test_tpics_v2_protocol.py \
-    utils/teh_psych/test_g2_paired_packing.py \
-    utils/teh_psych/test_iclr_baseline_guards.py
+    utils/teh_psych/test_scripts/test_pics_v3_protocol.py \
+    utils/teh_psych/test_scripts/test_pics_v3_g1_orchestration.py \
+    utils/teh_psych/test_scripts/test_tpics_v2_protocol.py \
+    utils/teh_psych/test_scripts/test_g2_paired_packing.py \
+    utils/teh_psych/test_scripts/test_iclr_baseline_guards.py
 fi
 
 echo "# GPU templates (vLLM Qwen2.5-Coder-32B-Instruct --max-model-len 32768):"
@@ -87,13 +87,15 @@ echo "# 4) Occurrence-EB refit (unchanged formulas) -> freeze YAML"
 $prefix echo "write analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml"
 
 echo "# 5) validate source map (no transfer/test/G.2 peek)"
-$prefix echo "validate pics_v3 source YAML"
+$prefix python -m utils.teh.t_pics_gated_transfer validate \
+  --config analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml
 
 echo "# 6) regenerate G.2 paired-packing audit with selected pics_v3 sources"
-$prefix echo "audit g2_paired_pack_pics_v3 under 30000/5000"
+$prefix pytest -q utils/teh_psych/test_scripts/test_g2_paired_packing.py
 
 echo "# 7) 15 pics_v3 gated target jobs (only after steps 4-6; not G.1)"
-$prefix echo "gated pics_v3 targets after Occurrence-EB freeze (separate from G.1)"
+$prefix echo "DRY_RUN=1 bash cluster/v2/ours/Qwen/submit_gated_pics_v3.sh"
+$prefix echo "DRY_RUN=0 CONFIRM_SUBMIT=1 bash cluster/v2/ours/Qwen/submit_gated_pics_v3.sh"
 
 echo "# 8) baselines share structure_aware_v3 context; OpenEvolve is not pics_v3"
 $prefix echo "Centaur/LM/PT/OE with --limited_data_protocol structure_aware_v3 (report, do not launch here)"

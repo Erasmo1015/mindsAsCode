@@ -121,7 +121,7 @@ Transitive packages from the old export are omitted on purpose.
 |---------|-----|
 | `scipy` | Also used by `analysis/code/mixed_gambles/train_MLE.py` |
 | `matplotlib` / `pandas` / `seaborn` / `PyYAML` | Analysis scripts under `analysis/code/**` (already in core) |
-| `pytest` | `tests/` and `utils/teh_psych/test_*.py` |
+| `pytest` | `tests/` and `utils/teh_psych/test_scripts/test_*.py` |
 
 ### Human experiments (`[human]` + NiceWebRL)
 

@@ -1,0 +1,322 @@
+selector:
+  name: occurrence_eb_schema4_5construct_iter10_pics_v3
+  method: hierarchical_motif_occurrence_eb_cosine
+  estimator: empirical_bayes_logit_random_intercept
+  equation: X_dje ~ Bern(p_de); logit(p_de)=alpha_e + b_de, b~N(0,tau_e^2)
+  smoothing: Jeffreys p=(k+0.5)/(n+1); alpha=logit(overall Jeffreys)
+  signature: invlogit(alpha_e + b_hat_{d,e}) per motif
+  selection_rule: argmax cosine among six-source allowlist; self excluded; lexicographic source-id tie-break
+  iteration_prefix: 1-10
+  iteration_prefix_note: Full 10 source-population iterations frozen; structure_aware_v3 / pics_v3_g1.
+  schema_version: 4
+  limited_data_protocol: structure_aware_v3
+  motifs:
+  - history
+  - value
+  - probability_used
+  - feedback
+  - learning
+  peeked_transfer_at_freeze: false
+  status: frozen_candidate_source_map
+  construct_subset_note: 'Five-construct subset of schema-v4 annotations: excludes explicit_risk_mechanism
+    (rare cross-dataset support; conceptually nested in value/probability use). Annotations remain schema-v4;
+    selector uses a five-construct presence subset.'
+artifacts:
+  root: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check
+  frozen_spec: analysis_2026Sep/Sep20_V3/others/source_selection/FROZEN_SPEC.json
+  occurrence_signatures: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check/occurrence_signatures_5construct.csv
+  occurrence_model_summary: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check/occurrence_model_summary_5construct.csv
+  frozen_ranks_15targets: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check/ranks_15targets_occurrence_5construct.csv
+  frozen_ranks_6x6: analysis_2026Sep/Sep20_V3/others/source_selection/frozen_ranks_6x6_occurrence.csv
+  analysis_panel: analysis_2026Sep/Sep20_V3/others/source_selection/analysis_panel.csv
+  meeting_report: analysis_2026Sep/Sep20_V3/others/source_selection/meeting_report/MEETING_REPORT_OCCURRENCE_EB.md
+  annotations_root: analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations
+  g1_config: analysis/config/T-PICS/pics_v3/config_pics_v3_schema4.yaml
+  five_construct_summary: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check/five_construct_summary.json
+  six_construct_freeze_not_overwritten: analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml
+six_source_allowlist:
+- 1peterson2021using
+- 3frey2017cct
+- 4wulff2018description
+- 7hilbig2014generalized
+- 11enkavi2019recentprobes
+- mixed_gambles
+source_population_runs_used_to_fit:
+  1peterson2021using:
+    job_id: '259052'
+    run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
+    rank1_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+    n_annotated_programs: 95
+  2plonsky2018when:
+    job_id: '259053'
+    run_dir: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3_g1/job_259053
+    rank1_program: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3_g1/job_259053/global_phase/best_program.py
+    n_annotated_programs: 99
+  3frey2017cct:
+    job_id: '259054'
+    run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
+    rank1_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+    n_annotated_programs: 94
+  4wulff2018description:
+    job_id: '259055'
+    run_dir: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055
+    rank1_program: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055/global_phase/best_program.py
+    n_annotated_programs: 100
+  5speekenbrink2008learning:
+    job_id: '259056'
+    run_dir: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_259056
+    rank1_program: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_259056/global_phase/best_program.py
+    n_annotated_programs: 90
+  7hilbig2014generalized:
+    job_id: '259057'
+    run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_259057
+    rank1_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_259057/global_phase/best_program.py
+    n_annotated_programs: 100
+  10frey2017risk:
+    job_id: '259058'
+    run_dir: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_259058
+    rank1_program: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_259058/global_phase/best_program.py
+    n_annotated_programs: 100
+  11enkavi2019recentprobes:
+    job_id: '259059'
+    run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_259059
+    rank1_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_259059/global_phase/best_program.py
+    n_annotated_programs: 100
+  12badham2017deficits:
+    job_id: '259191'
+    run_dir: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_259191
+    rank1_program: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_259191/global_phase/best_program.py
+    n_annotated_programs: 95
+  mixed_gambles:
+    job_id: '259192'
+    run_dir: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_259192
+    rank1_program: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_259192/global_phase/best_program.py
+    n_annotated_programs: 100
+  bergert_nosofsky_2007:
+    job_id: '259193'
+    run_dir: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_259193
+    rank1_program: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_259193/global_phase/best_program.py
+    n_annotated_programs: 100
+  guan_2020_stopping:
+    job_id: '259194'
+    run_dir: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_259194
+    rank1_program: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_259194/global_phase/best_program.py
+    n_annotated_programs: 98
+  steyvers_2009_bandit:
+    job_id: '259195'
+    run_dir: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_259195
+    rank1_program: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_259195/global_phase/best_program.py
+    n_annotated_programs: 94
+  13schulz2020finding:
+    job_id: '259196'
+    run_dir: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_259196
+    rank1_program: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_259196/global_phase/best_program.py
+    n_annotated_programs: 97
+  14kool2016when:
+    job_id: '259197'
+    run_dir: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_259197
+    rank1_program: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_259197/global_phase/best_program.py
+    n_annotated_programs: 83
+provenance:
+  schema4_run_config: analysis/config/T-PICS/pics_v3/config_pics_v3_schema4.yaml
+  frozen_spec: analysis_2026Sep/Sep20_V3/others/source_selection/FROZEN_SPEC.json
+  signatures: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check/occurrence_signatures_5construct.csv
+  frozen_ranks: analysis_2026Sep/Sep20_V3/others/source_selection/five_construct_check/ranks_15targets_occurrence_5construct.csv
+  meeting_report: analysis_2026Sep/Sep20_V3/others/source_selection/meeting_report/MEETING_REPORT_OCCURRENCE_EB.md
+  v1_map_not_overwritten: analysis/config/T-PICS/Transfer_source/occurrence_eb_schema4_iter10.yaml
+  v2_map_not_overwritten: analysis/config/T-PICS/Transfer_source/v2/occurrence_eb_schema4_iter10_sa40_v2.yaml
+  fit_time_utc: '2026-09-20T17:07:03.104665+00:00'
+  n_annotated_programs_used: 1445
+  n_manifest_programs: 1446
+  annotation_gap:
+    dataset: 12badham2017deficits
+    missing_resume_key: 12badham2017deficits|job_259191|7|candidate_9|global_iteration_3_candidate_9
+    reason: JSON parse / truncated guided decode after retries; job exited 0 with n_fail=1
+  six_construct_map_not_overwritten: analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml
+notes:
+- Five-construct occurrence-EB freeze (schema-v4 annotations; selector subset excludes explicit_risk_mechanism).
+- Selected sources identical to six-construct freeze for all 15 targets; source program paths unchanged.
+- Does not overwrite occurrence_eb_schema4_iter10_pics_v3.yaml.
+- peeked_transfer_at_freeze=false; do not retune from transfer outcomes.
+sources:
+  10frey2017risk: 3frey2017cct
+  11enkavi2019recentprobes: 4wulff2018description
+  12badham2017deficits: 3frey2017cct
+  13schulz2020finding: 3frey2017cct
+  14kool2016when: 1peterson2021using
+  1peterson2021using: mixed_gambles
+  2plonsky2018when: 1peterson2021using
+  3frey2017cct: 1peterson2021using
+  4wulff2018description: 11enkavi2019recentprobes
+  5speekenbrink2008learning: 3frey2017cct
+  7hilbig2014generalized: 4wulff2018description
+  bergert_nosofsky_2007: 7hilbig2014generalized
+  guan_2020_stopping: 3frey2017cct
+  mixed_gambles: 1peterson2021using
+  steyvers_2009_bandit: 1peterson2021using
+targets:
+  1peterson2021using:
+    target_label: Choice13k
+    selected_source: mixed_gambles
+    selected_source_label: Mixed Gambles
+    cosine: 0.9774055280881142
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_259192
+    selected_source_job_id: '259192'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_259192/global_phase/best_program.py
+    top3_source_ids: mixed_gambles;3frey2017cct;11enkavi2019recentprobes
+    top3_cosines: 0.977406;0.924279;0.822225
+  2plonsky2018when:
+    target_label: CPC18
+    selected_source: 1peterson2021using
+    selected_source_label: Choice13k
+    cosine: 0.9415973967340024
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
+    selected_source_job_id: '259052'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+    top3_source_ids: 1peterson2021using;mixed_gambles;3frey2017cct
+    top3_cosines: 0.941597;0.914821;0.879398
+  3frey2017cct:
+    target_label: Frey CCT
+    selected_source: 1peterson2021using
+    selected_source_label: Choice13k
+    cosine: 0.9242789848280304
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
+    selected_source_job_id: '259052'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+    top3_source_ids: 1peterson2021using;mixed_gambles;7hilbig2014generalized
+    top3_cosines: 0.924279;0.917401;0.877694
+  4wulff2018description:
+    target_label: Wulff
+    selected_source: 11enkavi2019recentprobes
+    selected_source_label: Enkavi
+    cosine: 0.9999142744458294
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_259059
+    selected_source_job_id: '259059'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_259059/global_phase/best_program.py
+    top3_source_ids: 11enkavi2019recentprobes;7hilbig2014generalized;mixed_gambles
+    top3_cosines: 0.999914;0.933480;0.921258
+  5speekenbrink2008learning:
+    target_label: Speekenbrink
+    selected_source: 3frey2017cct
+    selected_source_label: Frey CCT
+    cosine: 0.7757371802589313
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
+    selected_source_job_id: '259054'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+    top3_source_ids: 3frey2017cct;1peterson2021using;mixed_gambles
+    top3_cosines: 0.775737;0.710109;0.637155
+  7hilbig2014generalized:
+    target_label: Hilbig
+    selected_source: 4wulff2018description
+    selected_source_label: Wulff
+    cosine: 0.9334800359998062
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055
+    selected_source_job_id: '259055'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055/global_phase/best_program.py
+    top3_source_ids: 4wulff2018description;11enkavi2019recentprobes;3frey2017cct
+    top3_cosines: 0.933480;0.933342;0.877694
+  10frey2017risk:
+    target_label: Frey Risk
+    selected_source: 3frey2017cct
+    selected_source_label: Frey CCT
+    cosine: 0.9281423745141064
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
+    selected_source_job_id: '259054'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+    top3_source_ids: 3frey2017cct;1peterson2021using;mixed_gambles
+    top3_cosines: 0.928142;0.855888;0.779600
+  11enkavi2019recentprobes:
+    target_label: Enkavi
+    selected_source: 4wulff2018description
+    selected_source_label: Wulff
+    cosine: 0.9999142744458294
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055
+    selected_source_job_id: '259055'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055/global_phase/best_program.py
+    top3_source_ids: 4wulff2018description;7hilbig2014generalized;mixed_gambles
+    top3_cosines: 0.999914;0.933342;0.923757
+  12badham2017deficits:
+    target_label: Badham
+    selected_source: 3frey2017cct
+    selected_source_label: Frey CCT
+    cosine: 0.7806007696424547
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
+    selected_source_job_id: '259054'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+    top3_source_ids: 3frey2017cct;1peterson2021using;mixed_gambles
+    top3_cosines: 0.780601;0.696051;0.625775
+  mixed_gambles:
+    target_label: Mixed Gambles
+    selected_source: 1peterson2021using
+    selected_source_label: Choice13k
+    cosine: 0.9774055280881142
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
+    selected_source_job_id: '259052'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+    top3_source_ids: 1peterson2021using;11enkavi2019recentprobes;4wulff2018description
+    top3_cosines: 0.977406;0.923757;0.921258
+  bergert_nosofsky_2007:
+    target_label: Bergert
+    selected_source: 7hilbig2014generalized
+    selected_source_label: Hilbig
+    cosine: 0.9238435133019638
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_259057
+    selected_source_job_id: '259057'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_259057/global_phase/best_program.py
+    top3_source_ids: 7hilbig2014generalized;3frey2017cct;4wulff2018description
+    top3_cosines: 0.923844;0.837132;0.725117
+  guan_2020_stopping:
+    target_label: Guan
+    selected_source: 3frey2017cct
+    selected_source_label: Frey CCT
+    cosine: 0.9360655467027692
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
+    selected_source_job_id: '259054'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+    top3_source_ids: 3frey2017cct;1peterson2021using;mixed_gambles
+    top3_cosines: 0.936066;0.823662;0.752558
+  steyvers_2009_bandit:
+    target_label: Steyvers
+    selected_source: 1peterson2021using
+    selected_source_label: Choice13k
+    cosine: 0.5810712394566205
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
+    selected_source_job_id: '259052'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+    top3_source_ids: 1peterson2021using;3frey2017cct;mixed_gambles
+    top3_cosines: 0.581071;0.562424;0.495611
+  13schulz2020finding:
+    target_label: Schulz
+    selected_source: 3frey2017cct
+    selected_source_label: Frey CCT
+    cosine: 0.7321354009787142
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
+    selected_source_job_id: '259054'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+    top3_source_ids: 3frey2017cct;1peterson2021using;mixed_gambles
+    top3_cosines: 0.732135;0.649512;0.582245
+  14kool2016when:
+    target_label: Kool
+    selected_source: 1peterson2021using
+    selected_source_label: Choice13k
+    cosine: 0.7005337395810319
+    n_ties: 1
+    selected_source_run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
+    selected_source_job_id: '259052'
+    selected_source_rank1_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+    top3_source_ids: 1peterson2021using;3frey2017cct;mixed_gambles
+    top3_cosines: 0.700534;0.697445;0.629162

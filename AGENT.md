@@ -648,4 +648,14 @@ New method version, not a v1 overwrite. Flag: `--limited_data_protocol structure
 
 Final ICLR method. Protocol flag: `structure_aware_v3` (same SA40/history semantics as v2; new flag). Kinds: `pics_v3_g1` (global-only G.1) / `pics_v3` (gated target). Context: **32768 / 30000 / 1024**, `max_parent_chars=5000`. G.1 is **not** gated/YAML (no transfer suffix); fail-closed auto-prompt when prefer_auto ∧ global ∧ `n_iterations=0` ∧ v3. Authoritative doc: `analysis/config/T-PICS/docs/Documentation_pics_v3.md`. Constants: `utils/teh/pics_v3.py`. Submit 15 G.1: `bash cluster/v2/ours/Qwen/submit_g1_pics_v3.sh` (`H100_DATASETS=…` splits H100NVL/L40S; `DRY_RUN=0 CONFIRM_SUBMIT=1` to submit). Planned after G.1: schema-v4 annotate → Occurrence-EB → `Transfer_source/pics_v3/…_pics_v3.yaml`. Baselines share the v3 data contract only (OE: 350 / 30000 / 32768; Centaur Mixed Gambles A/B).
 
+---
+
+## Short update (Sep 21 2026 — ICLR Method freeze + gated + professor report)
+
+Professor-facing name: **ICLR Method** (not PICS v3). Terminology: `analysis/config/T-PICS/docs/paper_writing/ICLR_PAPER_TERMINOLOGY.md`. Gate keeps **one** highest-scoring target-pop program → best-program-conditioned participant exploration.
+
+Occurrence-EB on pics_v3 G.1 schema-v4 annotations (1445/1446): fit/stability under `analysis_2026Sep/Sep20_V3/others/source_selection/`; full fitness-score recovery 1445/1445; Occurrence retained for stability (not transfer mean). Authoritative Occurrence bootstrap: seed `20260920`, cluster `(iteration, parent_id)`, **B=1000**. Six-construct freeze kept: `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml`. **Five-construct** selector subset (drop `explicit_risk_mechanism`; same 15 sources): `…/occurrence_eb_schema4_5construct_iter10_pics_v3.yaml`. Professor report+figs: `…/source_selection/report/`.
+
+Gated submit: `cluster/v3/ours/main/` (`submit_gated.sh`, exact pics_v3 YAML, refuse v1/v2). `teh.py` / v3 G.1 default `--n_eval_seeds 1`. Do not retune freezes from transfer; do not cancel running G.2 jobs when adding freezes.
+
 

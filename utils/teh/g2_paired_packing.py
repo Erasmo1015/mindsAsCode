@@ -165,9 +165,20 @@ def final_prompt_tokens(prompt: str) -> int:
     return int(qwen_user_prompt_token_count(prompt))
 
 
-def fits_input_and_context(tokens: int, *, input_ceiling: int = QWEN_INPUT_CEILING) -> bool:
+def fits_input_and_context(
+    tokens: int,
+    *,
+    input_ceiling: int = QWEN_INPUT_CEILING,
+    output_reserve: int = OUTPUT_RESERVE,
+    vllm_context: int = VLLM_CONTEXT,
+) -> bool:
+    """True when tokens fit the input ceiling and leave room for completion.
+
+    ``output_reserve`` should match ``--llm_max_tokens`` (default
+    ``OUTPUT_RESERVE`` = PICS v3 1024).
+    """
     return int(tokens) <= int(input_ceiling) and (
-        int(tokens) + int(OUTPUT_RESERVE) <= int(VLLM_CONTEXT)
+        int(tokens) + int(output_reserve) <= int(vllm_context)
     )
 
 
@@ -204,6 +215,7 @@ def freeze_g2_target_examples(
     prompt_train_trials_seed: int,
     hard_prompt_token_cap: int = QWEN_INPUT_CEILING,
     sample_size: int = 8,
+    output_reserve: int = OUTPUT_RESERVE,
 ) -> Dict[str, Any]:
     """Choose the largest target-example prefix that fits the transfer condition.
 
@@ -228,12 +240,20 @@ def freeze_g2_target_examples(
     reservation_parent = pad_parent_to_max_chars(seed_code, int(max_parent_chars))
     transfer_instruction = _instruction_with_suffix(infer_text, source_suffix)
     n_reserve = max(1, min(int(sample_size), 8))
+    out_reserve = int(output_reserve)
 
     def parent_ctx(n: int) -> str:
         codes = [reservation_parent] * max(1, int(n))
         if len(codes) == 1:
             return freeze_reservation_parent_context(codes[0])
         return n_parent_context(codes)
+
+    def _fits(n_tok: int) -> bool:
+        return fits_input_and_context(
+            n_tok,
+            input_ceiling=hard_prompt_token_cap,
+            output_reserve=out_reserve,
+        )
 
     required = assemble_candidate_prompt(
         instruction=transfer_instruction,
@@ -245,11 +265,11 @@ def freeze_g2_target_examples(
         runtime_contract=runtime_contract,
     )
     required_tokens = final_prompt_tokens(required)
-    if not fits_input_and_context(required_tokens, input_ceiling=hard_prompt_token_cap):
+    if not _fits(required_tokens):
         raise PairedPackingFitError(
             "G.2 required instruction + one parent + source suffix + runtime contract "
             f"is {required_tokens} tokens (cap {hard_prompt_token_cap}; "
-            f"input+{OUTPUT_RESERVE} vs vLLM {VLLM_CONTEXT})."
+            f"input+{out_reserve} vs vLLM {VLLM_CONTEXT})."
         )
 
     # Prefer reserving sample_size parents when selecting examples (stricter transfer arm).
@@ -264,9 +284,7 @@ def freeze_g2_target_examples(
             candidate_output_rules=candidate_output_rules,
             runtime_contract=runtime_contract,
         )
-        if fits_input_and_context(
-            final_prompt_tokens(probe), input_ceiling=hard_prompt_token_cap
-        ):
+        if _fits(final_prompt_tokens(probe)):
             reserved_n = n
             break
 
@@ -292,7 +310,7 @@ def freeze_g2_target_examples(
     while lo <= hi:
         mid = (lo + hi) // 2
         _prompt, tr, va, n_tok = pack_prefix(mid)
-        if fits_input_and_context(n_tok, input_ceiling=hard_prompt_token_cap):
+        if _fits(n_tok):
             best_k = mid
             best_tokens = n_tok
             best_train, best_val = tr, va
@@ -312,9 +330,7 @@ def freeze_g2_target_examples(
             candidate_output_rules=candidate_output_rules,
             runtime_contract=runtime_contract,
         )
-        if fits_input_and_context(
-            final_prompt_tokens(prompt), input_ceiling=hard_prompt_token_cap
-        ):
+        if _fits(final_prompt_tokens(prompt)):
             paired_parent_count = n
             best_tokens = final_prompt_tokens(prompt)
             break
@@ -344,6 +360,7 @@ def freeze_g2_target_examples(
         "max_prompt_train_trials": max_trials,
         "prompt_train_trials_seed": int(prompt_train_trials_seed),
         "hard_prompt_token_cap": int(hard_prompt_token_cap),
+        "output_reserve": out_reserve,
         "max_parent_chars_reserved": int(max_parent_chars),
         "sample_size_reserved": int(n_reserve),
         "parents_reserved_at_example_freeze": int(reserved_n),
@@ -442,6 +459,7 @@ def drop_parents_until_fit(
     compress_instruction: Optional[Callable[[str], str]] = None,
     strip_parent: Optional[Callable[[str], str]] = None,
     truncate_parent: Optional[Callable[[str, int], Tuple[str, bool]]] = None,
+    output_reserve: int = OUTPUT_RESERVE,
 ) -> Tuple[str, Dict[str, Any], List[str]]:
     """Keep frozen examples; drop extra parents / slice parent chars if needed."""
     steps: List[str] = []
@@ -451,6 +469,7 @@ def drop_parents_until_fit(
     if len(ids) < len(parents):
         ids = ids + [f"parent_{i}" for i in range(len(ids), len(parents))]
     n_before = len(parents)
+    out_reserve = int(output_reserve)
 
     def assemble(cur_parents: List[str]) -> str:
         return assemble_candidate_prompt(
@@ -494,10 +513,15 @@ def drop_parents_until_fit(
             steps.append("parent_char_truncation")
             prompt = assemble(parents)
     tokens_after = token_count(prompt)
-    if not fits_input_and_context(tokens_after, input_ceiling=hard_prompt_token_cap):
+    if not fits_input_and_context(
+        tokens_after,
+        input_ceiling=hard_prompt_token_cap,
+        output_reserve=out_reserve,
+    ):
         raise PairedPackingFitError(
             "G.2 packed prompt still exceeds budget after parent drops with frozen "
-            f"target examples: {tokens_after} tokens (cap {hard_prompt_token_cap}). "
+            f"target examples: {tokens_after} tokens (cap {hard_prompt_token_cap}, "
+            f"output_reserve={out_reserve}). "
             f"trim={trim_reason(steps)}"
         )
     diag = {

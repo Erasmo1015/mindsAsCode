@@ -109,7 +109,15 @@ from utils.teh.g2_paired_packing import (
     write_paired_pack_freeze,
     fits_input_and_context,
 )
-from utils.teh.prompt_units import OUTPUT_RESERVE, VLLM_CONTEXT
+from utils.teh.prompt_units import (
+    OUTPUT_RESERVE,
+    VLLM_CONTEXT,
+    effective_hard_prompt_token_cap,
+)
+from utils.teh.llm_reasoning import (
+    maybe_wrap_openai_client,
+    normalize_llm_reasoning_effort,
+)
 from utils.teh.pics_v3 import (
     G2_PAIRED_PACK_FILENAME,
     G2_PAIRED_PACK_VERSION,
@@ -184,7 +192,7 @@ from utils.teh.t_pics_gated_transfer import (
     build_transfer_argv,
     decide_gate,
     default_seed_path,
-    evaluate_mean_train_val_loglik,
+    evaluate_pooled_train_val_loglik,
     gated_independent_enabled,
     gated_run_metadata,
     gate_record_payload,
@@ -195,6 +203,7 @@ from utils.teh.t_pics_gated_transfer import (
     resolve_gated_transfer_source_rank1,
     run_layout,
     selected_source_for_target,
+    make_explicit_independent_source_entry,
     selected_stage_is_complete,
     validate_frozen_transfer_config,
     write_gate_record,
@@ -1365,8 +1374,23 @@ def _wandb_log_participant_metrics(
 
     Uses per-participant step via p{pid}_step (see wandb.define_metric); do not pass a global
     wandb.log(step=...) — parallel participants would race on the shared run step axis.
+
+    PICS v3 (``KIND=pics_v3*`` / project ``teh_pics_v3``): do not upload dynamic
+    ``p{pid}/*`` Runs-table scalars. Gated reporter remaps to fixed ``participant/*``;
+    raw G.1 W&B skips the upload (local CSV/JSON remain authoritative).
     """
+    from utils.teh.t_pics_gated_wandb import (
+        suppress_dynamic_participant_wandb_scalars,
+    )
+
     payload = _wandb_participant_chart_dict(log_dict, participant_id, step)
+    # Gated reporter: always remap via .log (strips p{pid}/* internally).
+    if hasattr(wandb_module, "_remap"):
+        with _WANDB_PARTICIPANT_LOG_LOCK:
+            wandb_module.log(payload)
+        return
+    if suppress_dynamic_participant_wandb_scalars():
+        return
     with _WANDB_PARTICIPANT_LOG_LOCK:
         wandb_module.log(payload)
 
@@ -3419,12 +3443,31 @@ def run_global_evolution_phase(
         )
 
         selected_results: List[Dict[str, Any]] = []
+        evaluated_audit: List[Dict[str, Any]] = []
         num_invalid_candidates = 0
+
         for idx, code in enumerate(candidate_codes):
             if iter_dir is not None:
                 (iter_dir / "candidates" / f"candidate_{idx}.py").write_text(code or "")
             code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
+            program_id = f"global_iteration_{iteration_step}_candidate_{idx}"
+            source = (
+                candidate_sources[idx]
+                if idx < len(candidate_sources)
+                else "normal"
+            )
+            audit_base: Dict[str, Any] = {
+                "idx": idx,
+                "program_id": program_id,
+                "source": source,
+                "code": code or "",
+                "runtime_valid": False,
+                "train_loglik": None,
+                "val_loglik": None,
+                "selection_score": None,
+            }
             if not code:
+                evaluated_audit.append(audit_base)
                 continue
             choose_fn, compile_error = compile_program_with_error(code)
             if choose_fn is None:
@@ -3440,6 +3483,7 @@ def run_global_evolution_phase(
                     n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
+                evaluated_audit.append(audit_base)
                 continue
             try:
                 train_eval = _evaluate_loglik_for_dataset(
@@ -3458,6 +3502,7 @@ def run_global_evolution_phase(
                     n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
+                evaluated_audit.append(audit_base)
                 continue
             if train_eval.get("errors", 0) != 0:
                 num_invalid_candidates += 1
@@ -3472,8 +3517,10 @@ def run_global_evolution_phase(
                     n_candidates_in_iteration=n_candidates_per_iteration,
                     history_path=error_history_path,
                 )
+                evaluated_audit.append(audit_base)
                 continue
             train_loglik = float(train_eval["avg_loglik"])
+            audit_base["train_loglik"] = train_loglik
             val_loglik: Optional[float] = None
             if use_train_val and pooled_val:
                 try:
@@ -3494,6 +3541,7 @@ def run_global_evolution_phase(
                         n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
+                    evaluated_audit.append(audit_base)
                     continue
                 if val_eval.get("errors", 0) != 0:
                     num_invalid_candidates += 1
@@ -3508,6 +3556,7 @@ def run_global_evolution_phase(
                         n_candidates_in_iteration=n_candidates_per_iteration,
                         history_path=error_history_path,
                     )
+                    evaluated_audit.append(audit_base)
                     continue
                 val_loglik = float(val_eval["avg_loglik"])
             selection_score = _evolution_selection_score(
@@ -3541,6 +3590,14 @@ def run_global_evolution_phase(
                 selection_score=selection_score,
             )
             selected_results.append(row)
+            audit_base.update(
+                {
+                    "runtime_valid": True,
+                    "val_loglik": val_loglik,
+                    "selection_score": selection_score,
+                }
+            )
+            evaluated_audit.append(audit_base)
 
         print(
             "Iteration invalid summary: "
@@ -3579,6 +3636,7 @@ def run_global_evolution_phase(
 
         sort_elites(elite_parents, mdl_lambda)
         elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+        # Prune after all candidates are evaluated (audit rows recorded above).
         elite_parents = elite_parents[:elite_cap]
         pool_best_ll = _train_loglik_from_elite_tuple(
             elite_parents[0], evolution_selection_score=evolution_selection_score
@@ -3622,14 +3680,10 @@ def run_global_evolution_phase(
                 if mem_best_parent_rec is not None
                 else None
             )
-            for result in selected_results:
-                idx = int(result["idx"])
-                program_id = f"global_iteration_{iteration_step}_candidate_{idx}"
-                source = (
-                    candidate_sources[idx]
-                    if idx < len(candidate_sources)
-                    else "normal"
-                )
+            for audit in evaluated_audit:
+                idx = int(audit["idx"])
+                program_id = str(audit["program_id"])
+                source = str(audit.get("source") or "normal")
                 if source == "fresh":
                     reference_kind = "seed_baseline"
                     cand_ref_id = "global_baseline"
@@ -3646,11 +3700,9 @@ def run_global_evolution_phase(
                         if p.get("program_id") is not None
                     ]
                     ref_exact = True
-                cand_score = result.get("selection_score")
-                if cand_score is None:
-                    cand_score = result.get("fitness")
-                    if cand_score is not None and not use_train_val:
-                        cand_score = result.get("train_loglik", cand_score)
+                cand_score = audit.get("selection_score")
+                if cand_score is None and audit.get("runtime_valid"):
+                    cand_score = audit.get("train_loglik")
                 append_mem_trace_record(
                     mem_trace_file,
                     build_candidate_record(
@@ -3663,10 +3715,10 @@ def run_global_evolution_phase(
                         candidate_id=program_id,
                         candidate_idx=idx,
                         source=str(source),
-                        code=result.get("code") or "",
-                        runtime_valid=bool(result.get("runtime_valid", False)),
-                        train_loglik=_safe_float(result.get("train_loglik")),
-                        val_loglik=_safe_float(result.get("val_loglik")),
+                        code=audit.get("code") or "",
+                        runtime_valid=bool(audit.get("runtime_valid", False)),
+                        train_loglik=_safe_float(audit.get("train_loglik")),
+                        val_loglik=_safe_float(audit.get("val_loglik")),
                         selection_score=_safe_float(cand_score),
                         reference_parent_id=cand_ref_id,
                         reference_parent_score=_safe_float(cand_ref_score),
@@ -4278,6 +4330,7 @@ def _ensure_g2_paired_pack_freeze(
             prompt_train_trials_seed=example_seed,
             hard_prompt_token_cap=int(args.hard_prompt_token_cap),
             sample_size=int(getattr(args, "sample_size", 8) or 8),
+            output_reserve=int(args.llm_max_tokens),
         )
     payload["source_dataset"] = str(source_dataset)
     payload["source_rank1"] = str(source_rank1)
@@ -4312,13 +4365,28 @@ def _run_t_pics_gated_population_arms(
     run_prompts_dir: str,
 ) -> List[Tuple[Any, ...]]:
     """Matched G.2 control vs transfer arms, train_val observed-data gate, retain winner elite pool."""
-    cfg_path = Path(str(args.t_pics_source_config))
-    if not cfg_path.is_absolute():
-        cfg_path = (_REPO_ROOT / cfg_path).resolve()
-    cfg = load_frozen_transfer_config(cfg_path)
-    entry = selected_source_for_target(str(args.dataset), config=cfg)
-    layout = run_layout(Path(run_root))
     independent = gated_independent_enabled(args)
+    explicit_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
+    if explicit_source:
+        if not independent:
+            raise RuntimeError(
+                "--t_pics_gated_source requires --t_pics_gated_independent"
+            )
+        entry = make_explicit_independent_source_entry(
+            target=str(args.dataset),
+            source=explicit_source,
+        )
+        cfg_path = Path("(none)")
+        selector_name = "explicit_t_pics_gated_source"
+    else:
+        cfg_path = Path(str(args.t_pics_source_config))
+        if not cfg_path.is_absolute():
+            cfg_path = (_REPO_ROOT / cfg_path).resolve()
+        cfg = load_frozen_transfer_config(cfg_path)
+        entry = selected_source_for_target(str(args.dataset), config=cfg)
+        cfg_path = cfg.path
+        selector_name = cfg.selector_name
+    layout = run_layout(Path(run_root))
     for key in ("control", "transfer", "gate", "selected"):
         layout[key].mkdir(parents=True, exist_ok=True)
     if independent:
@@ -4358,8 +4426,13 @@ def _run_t_pics_gated_population_arms(
         raise RuntimeError(f"control argv leaked source-conditioning flags: {control_src}")
     print(
         f"[T-PICS gated] target={args.dataset} selected_source={entry.selected_source} "
-        f"rank-1={source_rank1} config={cfg.path} "
+        f"rank-1={source_rank1} config={cfg_path} "
         f"g1={'live independent' if independent else 'frozen YAML reuse'}"
+        + (
+            f" explicit_source={explicit_source}"
+            if explicit_source
+            else ""
+        )
     )
     print(
         f"[T-PICS gated] G.2 sequential matched arms "
@@ -4489,7 +4562,7 @@ def _run_t_pics_gated_population_arms(
     control_score = None
     transfer_score = None
     if control_ok:
-        control_score = evaluate_mean_train_val_loglik(
+        control_score = evaluate_pooled_train_val_loglik(
             layout["control_rank1"],
             dataset=str(args.dataset),
             participant_ids=participants,
@@ -4511,7 +4584,7 @@ def _run_t_pics_gated_population_arms(
             f"{control_score} ({layout['control_rank1']})"
         )
     if transfer_ok and transfer_program_ok:
-        transfer_score = evaluate_mean_train_val_loglik(
+        transfer_score = evaluate_pooled_train_val_loglik(
             layout["transfer_rank1"],
             dataset=str(args.dataset),
             participant_ids=participants,
@@ -4547,8 +4620,8 @@ def _run_t_pics_gated_population_arms(
         control_rank1=layout["control_rank1"],
         transfer_rank1=transfer_rank1,
         retained_pool=retained_pool,
-        config_path=cfg.path,
-        selector_name=cfg.selector_name,
+        config_path=cfg_path,
+        selector_name=selector_name,
         selected_source_rank1=source_rank1,
     )
     write_gate_record(layout["gate_record"], record)
@@ -4559,8 +4632,8 @@ def _run_t_pics_gated_population_arms(
         {
             "gate_record_path": str(layout["gate_record"]),
             "gate": record,
-            "mean_train_val_loglik_control": decision.control_score,
-            "mean_train_val_loglik_transfer": decision.transfer_score,
+            "pooled_train_val_loglik_control": decision.control_score,
+            "pooled_train_val_loglik_transfer": decision.transfer_score,
             "gate_reason": decision.reason,
             "selected_arm": decision.selected_arm,
             "retained_pool_path": str(retained_pool),
@@ -5284,12 +5357,14 @@ def _truncate_psych_prompt_to_budget(
     pre_capped_val: bool,
     runtime_contract: str = "",
     freeze_examples: bool = False,
+    output_reserve: int = OUTPUT_RESERVE,
 ) -> Tuple[str, Dict[str, Any], List[str]]:
     """
     Structured truncation for Psych/TEH prompts. Returns (prompt, diagnostics, steps).
     """
     steps: List[str] = []
     compact = False
+    out_reserve = int(output_reserve)
     use_shared_trial_budget = (
         val_trials_source is not None and not refinement_val_observations
     )
@@ -5504,13 +5579,13 @@ def _truncate_psych_prompt_to_budget(
         prompt, _, _, n_train, n_val, n_parents = _assemble()
         tokens_after = estimate_tokens(prompt, estimator=prompt_token_estimator)
 
-    if tokens_after > hard_prompt_token_cap or tokens_after + OUTPUT_RESERVE > VLLM_CONTEXT:
+    if tokens_after > hard_prompt_token_cap or tokens_after + out_reserve > VLLM_CONTEXT:
         if freeze_examples:
             raise PairedPackingFitError(
                 "G.2 paired packing: frozen target examples plus retained parents "
                 f"still overflow after parent-only trim "
                 f"(tokens={tokens_after}, cap={hard_prompt_token_cap}, "
-                f"vllm={tokens_after}+{OUTPUT_RESERVE}>{VLLM_CONTEXT}). "
+                f"vllm={tokens_after}+{out_reserve}>{VLLM_CONTEXT}). "
                 "Required instruction + one parent + source suffix + runtime "
                 "contract cannot be reduced without changing the frozen example set."
             )
@@ -9579,6 +9654,7 @@ Provide only the code for choose(...) as a complete function body.
         pre_capped_val=pre_capped_val,
         runtime_contract=runtime_contract,
         freeze_examples=freeze_examples,
+        output_reserve=int(max_tokens),
     )
 
     parent_lengths_after = [len(p) for p in prompt_parent_programs]
@@ -9685,10 +9761,15 @@ Provide only the code for choose(...) as a complete function body.
 
     tokens_final = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
     if freeze_examples:
-        if not fits_input_and_context(tokens_final, input_ceiling=hard_prompt_token_cap):
+        if not fits_input_and_context(
+            tokens_final,
+            input_ceiling=hard_prompt_token_cap,
+            output_reserve=int(max_tokens),
+        ):
             raise PairedPackingFitError(
                 "G.2 packed prompt overflowed after truncation with frozen examples "
-                f"(tokens={tokens_final}, cap={hard_prompt_token_cap}). "
+                f"(tokens={tokens_final}, cap={hard_prompt_token_cap}, "
+                f"output_reserve={int(max_tokens)}). "
                 "No post-packing re-append or example shrink is allowed."
             )
         # Contract is already inside the packed prompt. Do not re-append.
@@ -14042,7 +14123,21 @@ def main():
             "dataset from --t_pics_source_config, then train a live 10-iter G.1 "
             "source population in this run. Does not reuse frozen G.1 programs. "
             "Requires --t_pics_gated_transfer. G.2 dual-arm gate, G.3 rank-1 "
-            "explore, and person evolution stay the same."
+            "explore, and person evolution stay the same. "
+            "Or pass --t_pics_gated_source DATASET to name the live source "
+            "without a transfer map."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_gated_source",
+        type=str,
+        default=None,
+        metavar="DATASET",
+        help=(
+            "With --t_pics_gated_independent: use this source dataset for the live "
+            "G.1 (under <job>/source_population/) instead of looking up a frozen "
+            "transfer map. Does not require --t_pics_source_config. Ignored unless "
+            "--t_pics_gated_independent is set."
         ),
     )
     parser.add_argument(
@@ -14136,8 +14231,11 @@ def main():
     parser.add_argument(
         "--n_eval_seeds",
         type=int,
-        default=3,
-        help="Number of evaluation runs per program (averaged for final accuracy). Default: 3",
+        default=1,
+        help=(
+            "Number of evaluation runs per program (averaged for final accuracy). "
+            "Default: 1 (sufficient for deterministic choose; raise for stochastic programs)."
+        ),
     )
     parser.add_argument(
         "--model_name",
@@ -14316,14 +14414,27 @@ def main():
         ),
     )
     parser.add_argument(
+        "--llm_reasoning_effort",
+        type=str,
+        default=None,
+        choices=("low", "medium", "high", "none", "off"),
+        help=(
+            "Harmony / gpt-oss reasoning effort stamped on every chat.completions.create "
+            "via extra_body.reasoning_effort (low|medium|high). Use low to shrink the "
+            "analysis channel so more of --llm_max_tokens lands in final content. "
+            "none/off leaves the server default. Ignored for non-Harmony models."
+        ),
+    )
+    parser.add_argument(
         "--hard_prompt_token_cap",
         type=int,
         default=PICS_V3_HARD_PROMPT_TOKEN_CAP,
         help=(
             "Hard input-token budget for each LLM prompt (estimated via --prompt_token_estimator). "
-            "Prompts are structurally truncated before calling vLLM; never sent if still over cap "
-            f"(default: {PICS_V3_HARD_PROMPT_TOKEN_CAP}, aligned with vLLM --max-model-len 32768 "
-            "minus --llm_max_tokens 1024)."
+            "Prompts are structurally truncated before calling vLLM; never sent if still over cap. "
+            f"Effective cap is min(this value, {VLLM_CONTEXT} - --llm_max_tokens) so input+output "
+            f"fit the vLLM context (default: {PICS_V3_HARD_PROMPT_TOKEN_CAP}; with "
+            f"--llm_max_tokens 1024 that remains {PICS_V3_HARD_PROMPT_TOKEN_CAP})."
         ),
     )
     parser.add_argument(
@@ -14528,15 +14639,23 @@ def main():
     args = parser.parse_args()
     t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
+    t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
     if t_pics_gated_independent and not t_pics_gated:
         print("Error: --t_pics_gated_independent requires --t_pics_gated_transfer.")
+        return
+    if t_pics_gated_source and not t_pics_gated_independent:
+        print(
+            "Error: --t_pics_gated_source requires --t_pics_gated_independent "
+            "(and --t_pics_gated_transfer)."
+        )
         return
     if t_pics_gated:
         if bool(getattr(args, "t_pics", False)) or getattr(args, "t_pics_source", None) is not None:
             print(
                 "Error: --t_pics_gated_transfer cannot be combined with "
                 "--t_pics / --t_pics_source (those are the leftover non-gated live-source "
-                "pipeline). Use --t_pics_gated_independent for a live G.1 inside gated T-PICS."
+                "pipeline). Use --t_pics_gated_independent for a live G.1 inside gated T-PICS "
+                "(optionally with --t_pics_gated_source DATASET)."
             )
             return
         apply_gated_cli_defaults(args)
@@ -14585,37 +14704,52 @@ def main():
         if int(args.explore_candidates) <= 0:
             print("Error: --t_pics_gated_transfer requires --explore_candidates > 0.")
             return
-        try:
-            cfg_path = Path(str(args.t_pics_source_config))
-            if not cfg_path.is_absolute():
-                cfg_path = (_REPO_ROOT / cfg_path).resolve()
-            cfg = load_frozen_transfer_config(cfg_path)
-            errors = validate_frozen_transfer_config(
-                cfg, require_files=not t_pics_gated_independent
+        if t_pics_gated_source:
+            try:
+                entry = make_explicit_independent_source_entry(
+                    target=str(args.dataset),
+                    source=str(t_pics_gated_source),
+                )
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                return
+            print(
+                f"[T-PICS gated] preflight OK (explicit independent source; "
+                f"target={entry.target} source={entry.selected_source}; "
+                f"no transfer map required; live G.1)"
             )
-        except (OSError, ValueError, KeyError) as exc:
-            print(f"Error: T-PICS gated transfer config failed: {exc}")
-            return
-        if errors:
-            print("Error: T-PICS gated transfer config failed validation:")
-            for err in errors:
-                print(f"  - {err}")
-            return
-        try:
-            selected_source_for_target(str(args.dataset), config=cfg)
-        except (ValueError, KeyError) as exc:
-            print(f"Error: {exc}")
-            return
-        print(
-            f"[T-PICS gated] preflight OK ({cfg.path}; "
-            f"{len(cfg.targets)} targets, {len(cfg.source_runs)} source runs"
-            + (
-                "; independent live G.1, YAML source-dataset lookup only"
-                if t_pics_gated_independent
-                else "; rank-1 choose() validated; no GPU yet"
+        else:
+            try:
+                cfg_path = Path(str(args.t_pics_source_config))
+                if not cfg_path.is_absolute():
+                    cfg_path = (_REPO_ROOT / cfg_path).resolve()
+                cfg = load_frozen_transfer_config(cfg_path)
+                errors = validate_frozen_transfer_config(
+                    cfg, require_files=not t_pics_gated_independent
+                )
+            except (OSError, ValueError, KeyError) as exc:
+                print(f"Error: T-PICS gated transfer config failed: {exc}")
+                return
+            if errors:
+                print("Error: T-PICS gated transfer config failed validation:")
+                for err in errors:
+                    print(f"  - {err}")
+                return
+            try:
+                selected_source_for_target(str(args.dataset), config=cfg)
+            except (ValueError, KeyError) as exc:
+                print(f"Error: {exc}")
+                return
+            print(
+                f"[T-PICS gated] preflight OK ({cfg.path}; "
+                f"{len(cfg.targets)} targets, {len(cfg.source_runs)} source runs"
+                + (
+                    "; independent live G.1, YAML source-dataset lookup only"
+                    if t_pics_gated_independent
+                    else "; rank-1 choose() validated; no GPU yet"
+                )
+                + ")"
             )
-            + ")"
-        )
     if args.fitness_metric == "loglik" and not is_binary_loglik_dataset(args.dataset) and not (
         args.dataset == "cpc18" and not args.cpc18_official_mse
     ):
@@ -14651,6 +14785,41 @@ def main():
     if args.hard_prompt_token_cap < 256:
         print("Error: --hard_prompt_token_cap must be >= 256.")
         return
+    requested_hard_cap = int(args.hard_prompt_token_cap)
+    try:
+        effective_hard_cap = effective_hard_prompt_token_cap(
+            requested_hard_cap,
+            int(args.llm_max_tokens),
+            vllm_context=VLLM_CONTEXT,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+    if effective_hard_cap < 256:
+        print(
+            "Error: effective hard_prompt_token_cap must be >= 256 "
+            f"(got {effective_hard_cap} from hard={requested_hard_cap}, "
+            f"llm_max_tokens={args.llm_max_tokens}, vllm_context={VLLM_CONTEXT})."
+        )
+        return
+    if effective_hard_cap != requested_hard_cap:
+        print(
+            f"[TEH] clamping hard_prompt_token_cap {requested_hard_cap} -> {effective_hard_cap} "
+            f"so input + llm_max_tokens={args.llm_max_tokens} fits vLLM context {VLLM_CONTEXT}"
+        )
+    args.hard_prompt_token_cap = int(effective_hard_cap)
+    try:
+        args.llm_reasoning_effort = normalize_llm_reasoning_effort(
+            getattr(args, "llm_reasoning_effort", None)
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+    if args.llm_reasoning_effort:
+        print(
+            f"[TEH] llm_reasoning_effort={args.llm_reasoning_effort} "
+            "(Harmony analysis channel; stamped on every chat.completions.create)"
+        )
     if args.max_parent_chars < 0:
         print("Error: --max_parent_chars must be >= 0 (0 = no truncation).")
         return
@@ -15052,9 +15221,12 @@ def main():
             participants_to_process = list(range(args.num_agents_to_sample))
 
     if wandb is not None and args.dataset in _PARTICIPANT_DATASETS and not t_pics_gated:
-        for pid in participants_to_process:
-            wandb.define_metric(f"p{pid}_step")
-            wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
+        from utils.teh.t_pics_gated_wandb import suppress_dynamic_participant_wandb_scalars
+
+        if not suppress_dynamic_participant_wandb_scalars():
+            for pid in participants_to_process:
+                wandb.define_metric(f"p{pid}_step")
+                wandb.define_metric(f"p{pid}/*", step_metric=f"p{pid}_step")
 
     if args.dataset in _PARTICIPANT_DATASETS:
         _valid_ids_path = valid_participant_ids_path(
@@ -15153,34 +15325,66 @@ def main():
     print(f"Wrote full command line to {cmd_log}")
     gated_meta: Optional[Dict[str, Any]] = None
     if t_pics_gated:
-        cfg_path = Path(str(args.t_pics_source_config))
-        if not cfg_path.is_absolute():
-            cfg_path = (_REPO_ROOT / cfg_path).resolve()
-        _gated_cfg = load_frozen_transfer_config(cfg_path)
-        _gated_entry = selected_source_for_target(str(args.dataset), config=_gated_cfg)
-        _gated_rank1 = resolve_gated_transfer_source_rank1(
-            independent=t_pics_gated_independent,
-            entry=_gated_entry,
-            run_root=Path(base_run_dir),
-        )
-        gated_meta = gated_run_metadata(
-            config_path=_gated_cfg.path,
-            target=str(args.dataset),
-            selected_source=_gated_entry.selected_source,
-            selected_source_rank1=_gated_rank1,
-            selector_name=_gated_cfg.selector_name,
-            extra={
-                "error_feedback_mode": _normalize_error_feedback_mode(
-                    args.error_feedback_mode
-                ),
-                "global_iters": int(args.global_iters),
-                "n_iterations": int(args.n_iterations),
-                "explore_candidates": int(args.explore_candidates),
-                "explore_population_top_k": int(args.explore_population_top_k),
-                "independent_source_population": bool(t_pics_gated_independent),
-                "reused_frozen_g1_rank1": not bool(t_pics_gated_independent),
-            },
-        )
+        explicit_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
+        if explicit_source:
+            _gated_entry = make_explicit_independent_source_entry(
+                target=str(args.dataset),
+                source=explicit_source,
+            )
+            _gated_rank1 = resolve_gated_transfer_source_rank1(
+                independent=True,
+                entry=_gated_entry,
+                run_root=Path(base_run_dir),
+            )
+            gated_meta = gated_run_metadata(
+                config_path=Path("(none)"),
+                target=str(args.dataset),
+                selected_source=_gated_entry.selected_source,
+                selected_source_rank1=_gated_rank1,
+                selector_name="explicit_t_pics_gated_source",
+                extra={
+                    "error_feedback_mode": _normalize_error_feedback_mode(
+                        args.error_feedback_mode
+                    ),
+                    "global_iters": int(args.global_iters),
+                    "n_iterations": int(args.n_iterations),
+                    "explore_candidates": int(args.explore_candidates),
+                    "explore_population_top_k": int(args.explore_population_top_k),
+                    "independent_source_population": True,
+                    "reused_frozen_g1_rank1": False,
+                    "explicit_t_pics_gated_source": True,
+                    "t_pics_gated_source": _gated_entry.selected_source,
+                },
+            )
+        else:
+            cfg_path = Path(str(args.t_pics_source_config))
+            if not cfg_path.is_absolute():
+                cfg_path = (_REPO_ROOT / cfg_path).resolve()
+            _gated_cfg = load_frozen_transfer_config(cfg_path)
+            _gated_entry = selected_source_for_target(str(args.dataset), config=_gated_cfg)
+            _gated_rank1 = resolve_gated_transfer_source_rank1(
+                independent=t_pics_gated_independent,
+                entry=_gated_entry,
+                run_root=Path(base_run_dir),
+            )
+            gated_meta = gated_run_metadata(
+                config_path=_gated_cfg.path,
+                target=str(args.dataset),
+                selected_source=_gated_entry.selected_source,
+                selected_source_rank1=_gated_rank1,
+                selector_name=_gated_cfg.selector_name,
+                extra={
+                    "error_feedback_mode": _normalize_error_feedback_mode(
+                        args.error_feedback_mode
+                    ),
+                    "global_iters": int(args.global_iters),
+                    "n_iterations": int(args.n_iterations),
+                    "explore_candidates": int(args.explore_candidates),
+                    "explore_population_top_k": int(args.explore_population_top_k),
+                    "independent_source_population": bool(t_pics_gated_independent),
+                    "reused_frozen_g1_rank1": not bool(t_pics_gated_independent),
+                },
+            )
     metadata_log = _write_run_metadata(
         Path(base_run_dir),
         error_feedback_mode=args.error_feedback_mode,
@@ -15190,7 +15394,10 @@ def main():
 
     seed_program_path = _resolve_default_seed_program_path(args, 0)
 
-    teh_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+    teh_client = maybe_wrap_openai_client(
+        OpenAI(**client_kwargs) if client_kwargs else OpenAI(),
+        getattr(args, "llm_reasoning_effort", None),
+    )
     evo_iters = int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0)
     prefer_auto_llm_prompt = bool(
         evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False) or t_pics_gated
@@ -15273,7 +15480,9 @@ def main():
                 "live" if t_pics_gated_independent else str(_gated_entry.job_id)
             ),
             source_rank1=Path(_gated_rank1),
-            source_config_path=Path(_gated_cfg.path),
+            source_config_path=Path(
+                (gated_meta or {}).get("t_pics_source_config") or "(none)"
+            ),
             source_config_sha256=(gated_meta or {}).get("t_pics_source_config_sha256"),
             prompt_mode=prompt_meta.get("prompt_mode"),
             expected_participant_ids=[int(p) for p in participants_to_process],
@@ -15613,7 +15822,10 @@ def main():
             if wandb is not None:
                 wandb.finish()
             return
-        refine_client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        refine_client = maybe_wrap_openai_client(
+            OpenAI(**client_kwargs) if client_kwargs else OpenAI(),
+            getattr(args, "llm_reasoning_effort", None),
+        )
         try:
             run_loglik_refine_from_prev_experiment(
                 dataset=args.dataset,
@@ -16070,7 +16282,10 @@ def main():
                 print(f"Auto-detected seed program: {seed_path}")
         output_dir = base_run_dir if base_run_dir else f"{output_root_dir}/gridworld/non_strict/{run_dir_name}"
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        client = OpenAI(**client_kwargs) if client_kwargs else OpenAI()
+        client = maybe_wrap_openai_client(
+            OpenAI(**client_kwargs) if client_kwargs else OpenAI(),
+            getattr(args, "llm_reasoning_effort", None),
+        )
         episode_results, mean_test_acc = run_evolution_gridworld_rote_episodes(
             seed_program_path=seed_path,
             data_path=args.data_path,

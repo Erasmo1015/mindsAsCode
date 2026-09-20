@@ -491,9 +491,9 @@ Do not pass `--max_workers`. Do not use `10×10` participant/eval concurrency, `
 
 | File | Protects |
 |---|---|
-| `utils/teh_psych/test_iclr_baseline_guards.py` | 15 aliases, SA40 `structure_aware_v3` (Kool exact-40), test isolation, failure floor, interface source of truth, SHA miss/mismatch, official `random.sample` diverse split, one `parent_id`, frozen CLI |
-| `utils/teh_psych/test_openevolve_prompt_budget.py` | 30000 packing, early/mixed/max-10k programs, no example trim under audited bounds, coaching-sentence absence, required overflow |
-| `utils/teh_psych/test_openevolve_failure_checkpoint_roundtrip.py` | CPU evaluator→database→checkpoint using the **audit** clone (skips if missing) |
+| `utils/teh_psych/test_scripts/test_iclr_baseline_guards.py` | 15 aliases, SA40 `structure_aware_v3` (Kool exact-40), test isolation, failure floor, interface source of truth, SHA miss/mismatch, official `random.sample` diverse split, one `parent_id`, frozen CLI |
+| `utils/teh_psych/test_scripts/test_openevolve_prompt_budget.py` | 30000 packing, early/mixed/max-10k programs, no example trim under audited bounds, coaching-sentence absence, required overflow |
+| `utils/teh_psych/test_scripts/test_openevolve_failure_checkpoint_roundtrip.py` | CPU evaluator→database→checkpoint using the **audit** clone (skips if missing) |
 
 These two modules currently define **43 tests** (34 + 9). `test_all_15_use_registered_task_descriptions_not_vanilla_files` asserts every ICLR alias uses `dataset_task_description` and that Choice13k / mixed-gambles vanilla infer files are not loaded as `# Task` text. `test_openevolve_failure_checkpoint_roundtrip.py` skips unless `reference_repos/openevolve_official_audit` exists.
 

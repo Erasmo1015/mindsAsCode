@@ -10,7 +10,7 @@ import pytest
 
 REPO_ROOT = Path("/home/zichang/repo/mindsAsCode")
 if not (REPO_ROOT / "baseline_methods/Psych101/run_openevolve.py").is_file():
-    REPO_ROOT = Path(__file__).resolve().parents[2]
+    REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "baseline_methods" / "Psych101"))
 
@@ -47,7 +47,7 @@ from run_openevolve import (  # noqa: E402
     vanilla_dataset_description,
 )
 from utils.teh.teh_datasets import is_categorical_output_dataset  # noqa: E402
-from utils.teh_psych.test_iclr_baseline_guards import ICLR_15  # noqa: E402
+from utils.teh_psych.test_scripts.test_iclr_baseline_guards import ICLR_15  # noqa: E402
 
 pytest.importorskip("transformers")
 

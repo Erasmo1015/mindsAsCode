@@ -1,0 +1,173 @@
+{
+  "created_utc": "2026-09-20T12:58:54.844708+00:00",
+  "peeked_transfer_at_freeze": false,
+  "six_allowlist": [
+    "1peterson2021using",
+    "3frey2017cct",
+    "4wulff2018description",
+    "7hilbig2014generalized",
+    "11enkavi2019recentprobes",
+    "mixed_gambles"
+  ],
+  "selection_rule": "argmax cosine among SIX allowlist; self excluded; lexicographic source id tie-break",
+  "motifs_v4": [
+    "history",
+    "value",
+    "probability_used",
+    "feedback",
+    "learning",
+    "explicit_risk_mechanism"
+  ],
+  "occurrence": {
+    "method": "empirical_bayes_logit_random_intercept",
+    "formula": "logit(p_{d,j,e}) = alpha_e + b_{d,e}, b ~ N(0, tau^2)",
+    "smoothing": "Jeffreys p=(k+0.5)/(n+1); alpha=logit(overall Jeffreys)",
+    "tau2": "MoM max(0, Var_d(logit_d) - mean sampling_var); sampling_var=1/(n p (1-p))",
+    "signature": "invlogit(alpha + b_hat) per motif",
+    "motifs": [
+      "history",
+      "value",
+      "probability_used",
+      "feedback",
+      "learning",
+      "explicit_risk_mechanism"
+    ],
+    "n_datasets": 15,
+    "peeked_transfer": false
+  },
+  "fitness_support_gates": {
+    "min_positive_rows": 20,
+    "min_datasets_with_positive": 3,
+    "min_datasets_with_both": 2
+  },
+  "fitness_supported_transitions": [
+    "history_added",
+    "history_removed",
+    "history_modified",
+    "value_added",
+    "value_modified",
+    "probability_used_added",
+    "probability_used_removed",
+    "probability_used_modified",
+    "feedback_added",
+    "learning_added",
+    "learning_modified"
+  ],
+  "fitness_signature_transitions": [
+    "history_added",
+    "history_removed",
+    "history_modified",
+    "value_added",
+    "value_modified",
+    "probability_used_added",
+    "probability_used_removed",
+    "probability_used_modified",
+    "feedback_added",
+    "learning_added",
+    "learning_modified"
+  ],
+  "combined": {
+    "method": "combined_equal_block_zscore",
+    "occurrence_dims": [
+      "history",
+      "value",
+      "probability_used",
+      "feedback",
+      "learning",
+      "explicit_risk_mechanism"
+    ],
+    "fitness_dims": [
+      "history_added",
+      "history_removed",
+      "history_modified",
+      "value_added",
+      "value_modified",
+      "probability_used_added",
+      "probability_used_removed",
+      "probability_used_modified",
+      "feedback_added",
+      "learning_added",
+      "learning_modified"
+    ],
+    "feature_names": [
+      "occ_z__history",
+      "occ_z__value",
+      "occ_z__probability_used",
+      "occ_z__feedback",
+      "occ_z__learning",
+      "occ_z__explicit_risk_mechanism",
+      "fit_z__history_added",
+      "fit_z__history_removed",
+      "fit_z__history_modified",
+      "fit_z__value_added",
+      "fit_z__value_modified",
+      "fit_z__probability_used_added",
+      "fit_z__probability_used_removed",
+      "fit_z__probability_used_modified",
+      "fit_z__feedback_added",
+      "fit_z__learning_added",
+      "fit_z__learning_modified"
+    ],
+    "weighting": "zscore each block across 15 datasets, then scale each block by sqrt(1/2) so occurrence and fitness contribute equal weight",
+    "peeked_transfer": false,
+    "n_occurrence_dims": 6,
+    "n_fitness_dims": 11
+  },
+  "methods": {
+    "occurrence": {
+      "vector_columns": [
+        "history",
+        "value",
+        "probability_used",
+        "feedback",
+        "learning",
+        "explicit_risk_mechanism"
+      ],
+      "signature_file": "occurrence_signatures.csv",
+      "n_dims": 6
+    },
+    "fitness": {
+      "vector_columns": [
+        "history_added",
+        "history_removed",
+        "history_modified",
+        "value_added",
+        "value_modified",
+        "probability_used_added",
+        "probability_used_removed",
+        "probability_used_modified",
+        "feedback_added",
+        "learning_added",
+        "learning_modified"
+      ],
+      "signature_file": "fitness_signatures.csv",
+      "n_dims": 11
+    },
+    "combined": {
+      "vector_columns": [
+        "occ_z__history",
+        "occ_z__value",
+        "occ_z__probability_used",
+        "occ_z__feedback",
+        "occ_z__learning",
+        "occ_z__explicit_risk_mechanism",
+        "fit_z__history_added",
+        "fit_z__history_removed",
+        "fit_z__history_modified",
+        "fit_z__value_added",
+        "fit_z__value_modified",
+        "fit_z__probability_used_added",
+        "fit_z__probability_used_removed",
+        "fit_z__probability_used_modified",
+        "fit_z__feedback_added",
+        "fit_z__learning_added",
+        "fit_z__learning_modified"
+      ],
+      "signature_file": "combined_signatures.csv",
+      "n_dims": 17
+    }
+  },
+  "score_recovery_note": "\u0394F uses recovered elite/metrics scores: global_elite_pool global_fitness, per-iter pool_best_selection_score, and results.json baseline_global_train_loglik for global_baseline. Non-elite candidates typically lack persisted selection scores and are excluded from fitness-effect MEM rows.",
+  "transfer_matrix_for_eval_only": "/common/home/users/z/zichang.ge.2023/repo/mindsAsCode/generated_outputs_transfer_old/teh_transfer/run_260616_235649/summary_csv/single_transfer/matrix_improve_test_loglik.csv",
+  "do_not_use_category_based_t_pics_6x6": true
+}

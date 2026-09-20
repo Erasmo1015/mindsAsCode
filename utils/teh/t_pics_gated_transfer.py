@@ -3,10 +3,10 @@
 Uses the frozen schema-v4 occurrence-EB cosine map as-is. Does not recompute
 source similarity, retune the selector, or inspect transfer outcomes.
 
-The observed-data performance gate (train_val) scores each arm's best
-target-generated program on the union of target train+validation trials —
-the same ``evolution_selection_score=train_val`` definition used in G.2.
-SA40 validation alone is too small for arm selection. Target test is never
+The observed-data performance gate (PICS v3) scores each arm's pooled-TV
+rank-1 on the **count-pooled** union of target train+validation trials —
+the same ``evolution_selection_score=train_val`` objective used for G.2 arm
+ranking. Equal-person means are not used for the gate. Target test is never
 used for the gate.
 
 G.3 matches Stage G / old T-PICS: the winner arm's full elite pool is loaded
@@ -76,11 +76,11 @@ DEFAULT_GLOBAL_ITERS = 5
 DEFAULT_EXPLORE_CANDIDATES = 50
 DEFAULT_N_ITERATIONS = 10
 DEFAULT_EXPLORE_POPULATION_TOP_K = 1
-GATE_SCORE_FIELD = "mean_train_val_loglik"
+GATE_SCORE_FIELD = "pooled_train_val_loglik"
 GATE_NAME = "train_val"
-GATE_LABEL = "observed-data performance gate"
+GATE_LABEL = "observed-data performance gate (count-pooled train_val)"
 GATE_TIE_TOLERANCE = 1e-12
-GATE_RECORD_SCHEMA = "t_pics_gated_transfer_gate_v2"
+GATE_RECORD_SCHEMA = "t_pics_gated_transfer_gate_v3"
 EVOLUTION_SELECTION_SCORE = "train_val"
 DEFAULT_N_CANDIDATES_PER_ITER = 10
 
@@ -407,6 +407,33 @@ def selected_source_for_target(
     return entry
 
 
+def make_explicit_independent_source_entry(
+    *,
+    target: str,
+    source: str,
+) -> SelectedSourceEntry:
+    """Synthetic map entry for ``--t_pics_gated_independent --t_pics_gated_source``.
+
+    Independent mode trains a live G.1 under the job's ``source_population/``;
+    frozen rank-1 / job_id paths are placeholders and are never read.
+    """
+    target_alias = normalize_t_pics_dataset(target)
+    source_alias = normalize_t_pics_dataset(source)
+    if source_alias not in PARTICIPANT_DATASETS:
+        raise ValueError(
+            f"--t_pics_gated_source={source_alias!r} is not a known TEH participant "
+            f"dataset (known: {sorted(PARTICIPANT_DATASETS)})"
+        )
+    return SelectedSourceEntry(
+        target=target_alias,
+        selected_source=source_alias,
+        selected_source_label=source_alias,
+        run_dir=Path(""),
+        job_id="live",
+        rank1_program=Path(""),
+    )
+
+
 def resolve_gated_transfer_source_rank1(
     *,
     independent: bool,
@@ -580,7 +607,7 @@ def decide_gate(
     transfer_program_ok: bool = True,
     tie_tolerance: float = GATE_TIE_TOLERANCE,
 ) -> GateDecision:
-    """Select transfer only when mean train_val loglik is strictly greater.
+    """Select transfer only when pooled train_val loglik is strictly greater.
 
     Exact ties, tolerance ties, missing/non-finite scores, failed transfer
     arms, invalid transfer programs, and missing arms all select control.
@@ -646,11 +673,12 @@ def gate_record_payload(
         "gate_name": GATE_NAME,
         "gate_label": GATE_LABEL,
         "evolution_selection_score": EVOLUTION_SELECTION_SCORE,
-        "participant_weighting": "equal",
+        "participant_weighting": "pooled_trial",
+        "aggregation": "count_pooled_train_val",
         "observed_splits": ["train", "val"],
         "tie_tolerance": decision.tie_tolerance,
-        "control_mean_train_val_loglik": decision.control_score,
-        "transfer_mean_train_val_loglik": decision.transfer_score,
+        "control_pooled_train_val_loglik": decision.control_score,
+        "transfer_pooled_train_val_loglik": decision.transfer_score,
         GATE_SCORE_FIELD + "_control": decision.control_score,
         GATE_SCORE_FIELD + "_transfer": decision.transfer_score,
         "score_difference": decision.score_difference,
@@ -659,8 +687,10 @@ def gate_record_payload(
         "control_rank1_path": str(control_rank1),
         "transfer_rank1_path": None if transfer_rank1 is None else str(transfer_rank1),
         "retained_pool_path": str(retained_pool),
+        "g3_explore_parent": "winning_arm_pooled_tv_rank1",
         "never_evaluated_raw_source_on_target": True,
         "never_used_target_test_for_gate": True,
+        "never_used_equal_person_mean_for_gate": True,
     }
 
 
@@ -698,14 +728,17 @@ def apply_gated_cli_defaults(args: Any, argv: Optional[Sequence[str]] = None) ->
     if not cli_flag_was_passed("--explore_candidates", argv):
         args.explore_candidates = DEFAULT_EXPLORE_CANDIDATES
     if getattr(args, "t_pics_source_config", None) in (None, ""):
-        # Final pics_v3 YAML appears after G.1 → annotate → Occurrence-EB.
-        # Until then, bootstrap from the frozen preliminary-v2 map for topology /
-        # allowlist validation only (G.1 independent does not consume rank-1 files
-        # when require_files=False). Do not treat the v2 map as the final PICS v3 source.
-        cfg_path = FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG
-        if not Path(cfg_path).is_file():
-            cfg_path = FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG_V2
-        args.t_pics_source_config = str(cfg_path)
+        # Final PICS v3 map only. Do not fall back to preliminary-v2 / v1 YAMLs.
+        # Explicit --t_pics_gated_source (independent) does not need a map.
+        if not str(getattr(args, "t_pics_gated_source", "") or "").strip():
+            cfg_path = Path(FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG)
+            if not cfg_path.is_file():
+                raise FileNotFoundError(
+                    "PICS v3 frozen source map missing: "
+                    f"{cfg_path}. Refusing preliminary-v2/v1 fallback; pass "
+                    "--t_pics_source_config explicitly only for intentional audits."
+                )
+            args.t_pics_source_config = str(cfg_path)
     if not cli_flag_was_passed("--limited_data_protocol", argv):
         args.limited_data_protocol = LIMITED_DATA_PROTOCOL_PICS_V3
     if not cli_flag_was_passed("--limited_train_val", argv):
@@ -1190,6 +1223,112 @@ def participant_train_val_loglik(
     )
 
 
+def evaluate_pooled_train_val_loglik(
+    program_path: Path,
+    *,
+    dataset: str,
+    participant_ids: Sequence[int],
+    split_ratio: float,
+    split_seed: int,
+    psych_dataset_split: str = "train",
+    filter_mixed_gambles: bool = False,
+    local_dataset: Optional[str] = None,
+    mixed_gambles_csv: Optional[str] = None,
+    n_eval_seeds: int = 3,
+    limited_data_protocol: str = "off",
+    limited_train_val: Optional[int] = None,
+    max_observed_trials_per_participant: Optional[int] = None,
+    speekenbrink_split: str = "chronological",
+) -> Optional[float]:
+    """Count-pooled train_val loglik — same objective as G.2 arm ranking.
+
+    Concatenate all target people' train trials and val trials, evaluate the
+    program once on each pooled split, then apply
+    ``evolution_selection_score=train_val`` (trial-count-weighted). Never
+    evaluates test. This is the PICS v3 gate score.
+    """
+    from teh import (
+        _collect_pooled_split_trials_for_participants,
+        _collect_pooled_train_trials_for_participants,
+        _evaluate_loglik_for_dataset,
+        _evolution_selection_score,
+        compile_program,
+    )
+
+    path = _repo_path(program_path)
+    ok, _msg = program_has_valid_choose(path)
+    if not ok:
+        return None
+    code = path.read_text(encoding="utf-8")
+    choose_fn = compile_program(code)
+    if choose_fn is None:
+        return None
+    from data_modules.mixed_gambles import DEFAULT_CSV_PATH
+
+    csv_path = mixed_gambles_csv or DEFAULT_CSV_PATH
+    pids = [int(p) for p in participant_ids]
+    pooled_train = _collect_pooled_train_trials_for_participants(
+        dataset,
+        pids,
+        split_ratio=float(split_ratio),
+        split_seed=int(split_seed),
+        filter_mixed_gambles=bool(filter_mixed_gambles),
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=csv_path,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
+    )
+    pooled_val = _collect_pooled_split_trials_for_participants(
+        dataset,
+        pids,
+        split="val",
+        split_ratio=float(split_ratio),
+        split_seed=int(split_seed),
+        filter_mixed_gambles=bool(filter_mixed_gambles),
+        psych_dataset_split=psych_dataset_split,
+        local_dataset=local_dataset,
+        mixed_gambles_csv=csv_path,
+        max_observed_trials_per_participant=max_observed_trials_per_participant,
+        limited_data_protocol=limited_data_protocol,
+        limited_train_val=limited_train_val,
+        speekenbrink_split=speekenbrink_split,
+    )
+    n_train = len(pooled_train or [])
+    n_val = len(pooled_val or [])
+    if n_train + n_val <= 0:
+        return None
+    train_ll: Optional[float] = None
+    val_ll: Optional[float] = None
+    if n_train > 0:
+        train_result = _evaluate_loglik_for_dataset(
+            dataset, choose_fn, list(pooled_train), n_seeds=int(n_eval_seeds)
+        )
+        train_ll = _finite_score(train_result.get("avg_loglik"))
+        if train_ll is None:
+            return None
+    if n_val > 0:
+        val_result = _evaluate_loglik_for_dataset(
+            dataset, choose_fn, list(pooled_val), n_seeds=int(n_eval_seeds)
+        )
+        val_ll = _finite_score(val_result.get("avg_loglik"))
+        if val_ll is None:
+            return None
+    if n_train == 0:
+        return val_ll
+    return float(
+        _evolution_selection_score(
+            float(train_ll),
+            val_ll,
+            n_train,
+            n_val,
+            evolution_selection_score=EVOLUTION_SELECTION_SCORE,
+        )
+    )
+
+
 def evaluate_mean_train_val_loglik(
     program_path: Path,
     *,
@@ -1209,10 +1348,9 @@ def evaluate_mean_train_val_loglik(
 ) -> Optional[float]:
     """Equal-person mean of per-participant train_val loglik. Never evaluates test.
 
-    Each person is scored on the union of their observed train+validation
-    trials (SA40: all retained train+val, typically 40) using the same
-    ``evolution_selection_score=train_val`` formula as G.2 ranking. People
-    are then averaged with equal weight, not pooled-trial weight.
+    Kept for diagnostics / regressions that contrast with the PICS v3
+    count-pooled gate (``evaluate_pooled_train_val_loglik``). Not used by the
+    v3 gate decision.
     """
     from teh import (
         _evaluate_loglik_for_dataset,

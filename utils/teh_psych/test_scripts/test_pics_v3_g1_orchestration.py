@@ -10,7 +10,7 @@ from unittest import mock
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 from utils.teh.teh_datasets import emnlp_ordinal_range
@@ -185,6 +185,7 @@ def test_pics_v3_g1_required_settings_and_auto_prompt(g1_commands):
         assert _flag_value(argv, "--hard_prompt_token_cap") == "30000"
         assert _flag_value(argv, "--llm_max_tokens") == "1024"
         assert _flag_value(argv, "--max_parent_chars") == "5000"
+        assert _flag_value(argv, "--n_eval_seeds") == "1"
         assert _flag_value(argv, "--global_iters") == "10"
         assert _flag_value(argv, "--n_iterations") == "0"
         assert _flag_value(argv, "--explore_candidates") == "0"
@@ -314,6 +315,7 @@ def test_pics_v3_g1_accepted_by_teh_parser(g1_commands):
         assert int(ns.hard_prompt_token_cap) == 30000
         assert int(ns.llm_max_tokens) == 1024
         assert int(ns.max_parent_chars) == 5000
+        assert int(ns.n_eval_seeds) == 1
         assert bool(ns.prefer_auto_llm_prompt) is True
         assert ns.participant_scope == "range"
         assert int(ns.global_iters) == 10

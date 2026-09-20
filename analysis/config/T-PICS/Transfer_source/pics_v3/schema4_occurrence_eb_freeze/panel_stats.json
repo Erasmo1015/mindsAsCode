@@ -1,0 +1,37 @@
+{
+  "n_rows": 1445,
+  "n_datasets": 15,
+  "n_exact": 1445,
+  "n_exact_with_delta_f": 743,
+  "n_exact_missing_candidate_score": 702,
+  "n_exact_missing_parent_score": 0,
+  "score_recovery_note": "\u0394F uses recovered elite/metrics scores: global_elite_pool global_fitness, per-iter pool_best_selection_score, and results.json baseline_global_train_loglik for global_baseline. Non-elite candidates typically lack persisted selection scores and are excluded from fitness-effect MEM rows.",
+  "datasets": [
+    "10frey2017risk",
+    "11enkavi2019recentprobes",
+    "12badham2017deficits",
+    "13schulz2020finding",
+    "14kool2016when",
+    "1peterson2021using",
+    "2plonsky2018when",
+    "3frey2017cct",
+    "4wulff2018description",
+    "5speekenbrink2008learning",
+    "7hilbig2014generalized",
+    "bergert_nosofsky_2007",
+    "guan_2020_stopping",
+    "mixed_gambles",
+    "steyvers_2009_bandit"
+  ],
+  "n_manifest_programs": 1446,
+  "ann_stats": {
+    "ann_root": "analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations",
+    "n_by_dataset_keys": 1445,
+    "n_shard_keys": 0,
+    "n_union_keys": 1445,
+    "n_only_shards": 0,
+    "n_only_by_dataset": 1445,
+    "prefer_by_dataset": true,
+    "n_preferred_layer": 1445
+  }
+}

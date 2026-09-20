@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Sequence
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 from utils.teh.g2_paired_packing import (
@@ -30,8 +30,8 @@ from utils.teh.g2_paired_packing import (
 )
 from utils.teh.prompt_snapshots import prompt_contract_scope
 from utils.teh.prompt_units import QWEN_INPUT_CEILING, OUTPUT_RESERVE, VLLM_CONTEXT
+from utils.teh.pics_v3 import SOURCE_YAML as PICS_V3_SOURCE_YAML
 from utils.teh.t_pics_gated_transfer import default_seed_path, load_frozen_transfer_config
-from utils.teh.t_pics_v2 import V2_SOURCE_YAML
 
 CAP = QWEN_INPUT_CEILING
 MAX_PARENT_CHARS = 5000
@@ -46,7 +46,8 @@ BEFORE_CSV = (
     / "analysis_2026Sep/Sep20_V2/others/debug/g2_control_transfer_prompt_budget.csv"
 )
 AFTER_CSV = (
-    REPO / "analysis_2026Sep/Sep20_V2/others/debug/g2_paired_packing_before_after.csv"
+    REPO
+    / "analysis_2026Sep/Sep20_V3/others/debug/g2_paired_packing_before_after_pics_v3.csv"
 )
 
 LABELS = {
@@ -68,8 +69,22 @@ LABELS = {
 }
 
 
+def test_fits_input_and_context_uses_live_output_reserve() -> None:
+    """Raising output_reserve must tighten the vLLM fit check (OE-style)."""
+    assert fits_input_and_context(30_000, input_ceiling=CAP, output_reserve=OUTPUT_RESERVE)
+    assert not fits_input_and_context(30_000, input_ceiling=CAP, output_reserve=4096)
+    assert fits_input_and_context(
+        28_672, input_ceiling=28_672, output_reserve=4096
+    )
+    assert not fits_input_and_context(
+        28_673, input_ceiling=28_672, output_reserve=4096
+    )
+    assert 28_672 + 4096 == VLLM_CONTEXT
+
+
 def _cfg():
-    return load_frozen_transfer_config(V2_SOURCE_YAML)
+    assert PICS_V3_SOURCE_YAML.is_file(), f"missing {PICS_V3_SOURCE_YAML}"
+    return load_frozen_transfer_config(PICS_V3_SOURCE_YAML)
 
 
 def _targets() -> List[str]:

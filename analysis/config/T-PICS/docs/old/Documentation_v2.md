@@ -260,7 +260,7 @@ Observed-set identity also changes for every dataset whose train+val subsample i
 
 See `analysis/config/T-PICS/v2/dry_run_commands.sh`. Submitters must pass `--confirm` before any `sbatch`. Order:
 
-1. CPU preflight (`pytest utils/teh_psych/test_tpics_v2_protocol.py` plus optional full fingerprint script)
+1. CPU preflight (`pytest utils/teh_psych/test_scripts/test_tpics_v2_protocol.py` plus optional full fingerprint script)
 2. 15 v2 G.1 source-population jobs (`structure_aware_v2`, new output kind)
 3. Schema-v4 annotation of **new** G.1 programs (same motif code/prompts)
 4. Occurrence-EB refit (same formulas) → freeze `..._sa40_v2.yaml`
@@ -272,7 +272,7 @@ See `analysis/config/T-PICS/v2/dry_run_commands.sh`. Submitters must pass `--con
 
 ## 16. Tests
 
-`utils/teh_psych/test_tpics_v2_protocol.py` covers all 15 categories (one person), Kool 41/45 exact-40, original test histories, Badham/Frey fields, sanitizer parity, balanced packing, Centaur unscored context, gate/OE/LM test isolation. v1 Kool-41 behavior remains in `test_iclr_baseline_guards.py`. `utils/teh_psych/test_g2_paired_packing.py` reproduces all 15 G.2 control/transfer pairs with the real Qwen tokenizer for iteration 0, mixed-size parents, and maximum permitted parent context.
+`utils/teh_psych/test_scripts/test_tpics_v2_protocol.py` covers all 15 categories (one person), Kool 41/45 exact-40, original test histories, Badham/Frey fields, sanitizer parity, balanced packing, Centaur unscored context, gate/OE/LM test isolation. v1 Kool-41 behavior remains in `test_scripts/test_iclr_baseline_guards.py`. `utils/teh_psych/test_scripts/test_g2_paired_packing.py` reproduces all 15 G.2 control/transfer pairs with the real Qwen tokenizer for iteration 0, mixed-size parents, and maximum permitted parent context.
 
 ---
 

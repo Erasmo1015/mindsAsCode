@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "baseline_methods" / "Psych101"))
 
@@ -150,14 +150,8 @@ def test_cli_and_gated_defaults_are_v2():
     apply_gated_cli_defaults(ns, argv=["--t_pics_gated_transfer"])
     assert ns.limited_data_protocol == "structure_aware_v3"
     assert ns.limited_train_val == 40
-    assert ns.t_pics_source_config in {
-        str(PICS_V3_SOURCE_YAML),
-        str(V2_SOURCE_YAML),
-    }
-    if PICS_V3_SOURCE_YAML.is_file():
-        assert ns.t_pics_source_config == str(PICS_V3_SOURCE_YAML)
-    else:
-        assert ns.t_pics_source_config == str(V2_SOURCE_YAML)
+    assert PICS_V3_SOURCE_YAML.is_file()
+    assert ns.t_pics_source_config == str(PICS_V3_SOURCE_YAML)
     # Preliminary v2 map remains frozen on disk.
     assert V2_SOURCE_YAML.is_file()
     assert V1_FROZEN_SOURCE_YAML.is_file()
@@ -167,7 +161,7 @@ def test_cli_and_gated_defaults_are_v2():
 
 def test_gate_independent_of_test():
     assert EVOLUTION_SELECTION_SCORE == "train_val"
-    assert GATE_SCORE_FIELD == "mean_train_val_loglik"
+    assert GATE_SCORE_FIELD == "pooled_train_val_loglik"
 
 
 def test_badham_frey_v2_formatter():

@@ -21,7 +21,7 @@ Tracked constants: `utils/teh/pics_v3.py`. Gated pipeline:
 | 5 | Occurrence-EB + map freeze | Nominate one source per target | schema-v4 presence counts | annotations only | n/a | n/a | cosine on 6-source allowlist | `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` (**planned**) | no | no |
 | 6 | G.2 control arm | Target population **without** source context | target people, shared auto prompt, seed | train+val | target seed; elite parents | **5 × 10** | pooled `train_val` | control `best_program.py` + pool | no | no |
 | 7 | G.2 transfer arm | Matched target population **with** source suffix | same target data + selected source rank-1 + 1 source TV example | train+val (+ source TV in prompt only) | target seed; elite parents | **5 × 10** | pooled `train_val` | transfer `best_program.py` + pool | **yes** (suffix only) | no |
-| 8 | G.2 gate | Pick control vs transfer on observed data | both arm rank-1s | train+val (equal-person mean) | n/a | n/a | strict `S_tr > S_ctl` beyond \(10^{-12}\) | `gate/gate_record.json`, `selected/` | decision only | **no** |
+| 8 | G.2 gate | Pick control vs transfer on observed data | both arm rank-1s | train+val (**count-pooled**, same as G.2 ranking) | n/a | n/a | strict `S_tr > S_ctl` beyond \(10^{-12}\) | `gate/gate_record.json`, `selected/` | decision only | **no** |
 | 9 | G.3 exploration | 50 candidates from retained **target** rank-1 | that person’s TV; winner pool loaded for later | train+val prompts | **rank-1 only** (`explore_population_top_k=1`); no source suffix | **50** explore cands / person | explore best by `train_val` | explore elites merged into person pool | no | no |
 | 10 | Participant evolution | Per-person TEH after G.3 | person’s SA40 TV; full winner elite as initial pool | train+val | full retained pool + seed-fresh | **10 × 10** / person | `train_val` | `participant_*/` best + traces | no | no |
 | 11 | Held-out eval / reporting | Passive test scores + W&B finals | frozen programs | test (passive) | n/a | n/a | n/a | `final/mean_*`, CSVs, completeness | n/a | **reporting only** |
@@ -61,6 +61,7 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Method / gated target kind | `pics_v3` | Output folder KIND for gated dual-arm target jobs |
 | G.1 kind | `pics_v3_g1` | Output folder KIND for global-only source populations |
 | Independent-source kind | `pics_v3_independent` | Optional live source-pop under gated independent mode |
+| Explicit independent source | `--t_pics_gated_source DATASET` | With `--t_pics_gated_independent`: name the live G.1 source dataset **without** a transfer map / `--t_pics_source_config`. Default map lookup unchanged when this flag is omitted. |
 | Data protocol | `structure_aware_v3` | Training-only SA40 revision (same data path as v2; new flag) |
 | Annotation taxonomy | `schema_v4` | Unchanged six-motif population schema |
 | Runtime source YAML (**planned**) | `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` | Written after v3 G.1 → annotate → Occurrence-EB |
@@ -239,6 +240,7 @@ Seeds: G.1 uses ordinary prefer_auto path; gated auto-prompt decoding seed
 | Hard input (templated) | 30000 |
 | Output | 1024 |
 | `--max_parent_chars` | 5000 |
+| `--n_eval_seeds` (G.1) | **1** (deterministic `choose`; matches TEH CLI default) |
 | `--sample_size` | 8 |
 
 **Parent copies** (`_truncate_parent_program_for_prompt` in `teh.py`): if over
@@ -298,6 +300,7 @@ or `--output_kind` (not a `teh.py` flag; KIND is path-only).
 | Error feedback | `--max_error_prompt_chars 0 --error-feedback-mode legacy` |
 | Protocol | `structure_aware_v3`, `limited_train_val=40` |
 | Context | hard 30000, parent 5000, out 1024 |
+| `--n_eval_seeds` | **1** (v3 G.1 override; deterministic programs) |
 | Auto prompt | `--prefer_auto_llm_prompt` + fail-closed wiring |
 | Ordinals | explicit `--participant_scope range` + EMNLP start/end |
 | Seeds | `choices13k.py` except Steyvers/Schulz → `categorical_uniform.py` |
@@ -333,7 +336,10 @@ programs into a **new package path** (do not overwrite v1 annotations).
 | Prompt id | `population_transition_v4_2` |
 | Kind | `population_program_motif_transition` |
 | Annotator | `analysis/mem/annotate_population_programs.py` |
+| Model | `Qwen/Qwen2.5-Coder-32B-Instruct` (same as G.1) |
+| vLLM `--max-model-len` | **32768** (same as PICS v3; was 16384 in older PopAnnot jobs) |
 | Planned outputs | `analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations/` |
+| Cluster template | `cluster/v2/ours/Qwen/job_pop_annot_dataset.sh` (`VLLM_MAX_MODEL_LEN`, default 32768) |
 
 ### Six motifs (verbatim definitions)
 
@@ -373,17 +379,16 @@ selectors from retrospective transfer diagnostics).
 | Selected artifact | source identity + path to that source’s G.1 **rank-1** |
 | Peek policy | no transfer / test / G.2 peek at freeze |
 
-**Planned runtime YAML:**  
+**Runtime YAML:**  
 `analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml`  
-(currently **absent**; README states wait for G.1→annotate→EB). Planned freeze
-dir: `Transfer_source/pics_v3/schema4_occurrence_eb_freeze/`.
+(frozen; `peeked_transfer_at_freeze: false`). Freeze companions:
+`Transfer_source/pics_v3/schema4_occurrence_eb_freeze/`.
 
-Fitting the map ≠ evaluating it retrospectively. Do **not** claim final G.2
-source identities until this YAML exists.
+Fitting the map ≠ evaluating it retrospectively. Do **not** retune source
+identities from transfer outcomes.
 
-Default gated loader constant points at the pics_v3 path; if the file is
-missing, code may fall back to preliminary-v2 for topology only—that fallback
-is **not** the final method map and must not be used as ICLR source identities.
+Gated defaults and submitters **require** this pics_v3 path. There is **no**
+preliminary-v2/v1 fallback for production PICS v3 targets.
 
 ---
 
@@ -430,17 +435,20 @@ Fitness/ranking: **pooled** target TV across people. Rank-1 =
 
 | Item | Spec |
 | --- | --- |
-| Inputs | each arm’s target-generated rank-1 + complete pools |
-| Per-person score | same `train_val` formula as evolution (trial-count-weighted TV mean; `n_eval_seeds=3`) |
-| Aggregation | **equal-person** mean \(S=\frac1M\sum s_i\) (not pooled-trial) |
+| Inputs | each arm’s **pooled-TV** rank-1 (`global_phase/best_program.py`) + complete pools |
+| Score | **count-pooled** `train_val` on the target population — identical objective to G.2 arm ranking (`evaluate_pooled_train_val_loglik` / `GATE_SCORE_FIELD=pooled_train_val_loglik`) |
+| Aggregation | trial-count-weighted over the pooled train+val union (**not** equal-person mean) |
 | Decision | transfer only if finite scores and \(S_\mathrm{tr}>S_\mathrm{ctl}\) by more than \(10^{-12}\) |
 | Ties / failures | keep **control** (`exact_tie`, `tolerance_tie`, invalid/missing/failed transfer) |
-| Record | `gate/gate_record.json` (`t_pics_gated_transfer_gate_v2`) |
+| Record | `gate/gate_record.json` (`t_pics_gated_transfer_gate_v3`) with `control_pooled_train_val_loglik` / `transfer_pooled_train_val_loglik` |
 | Pointers | `selected/SELECTED_ARM.txt`; winner pool → `selected/retained_global_elite_pool` |
 | Test | never used (`never_used_target_test_for_gate`) |
+| Equal-person | **not** used for the gate (`never_used_equal_person_mean_for_gate`) |
 
-Retained for G.3 / person: winner arm’s **full elite pool** + rank-1 as explore
-parent. Raw source programs are never scored on the target.
+Retained for G.3 / person: winner arm’s **full elite pool**; G.3 explore parent =
+that arm’s pooled-TV rank-1 only (`explore_population_top_k=1`). No re-rank by
+participant-mean; personalization starts in G.3 (per-person TV). Raw source
+programs are never scored on the target.
 
 ---
 
@@ -484,6 +492,7 @@ parent. Raw source programs are never scored on the target.
 | Gated W&B group/tags | group `t_pics_gated_main`; tags include `ICLR`, `SA40`, `gated_t_pics` (reporter defaults) |
 | Layout | `generated_outputs/psych101_train/teh/<target>/pics_v3/job_<id>/` with `target_population/{control,transfer}`, `gate/`, `selected/` |
 | G.1 W&B | project `teh_pics_v3`; `RUN_TAG=g5e50p10_occurrence_eb_pics_v3` |
+| Per-person W&B | **local CSV/JSON + dirs remain authoritative**; W&B keeps one `final/participant_table` and fixed keys (`dataset`, `status/*`, `progress/*`, `gate/*`, `final/*`, `global/*`, `g2/*`, `participant/*`). **No** dynamic Runs-table scalars `p{pid}/*` / `p{pid}_*` (reporting-only filter in `t_pics_gated_wandb.py`; G.1 skips those uploads). Historical W&B runs unchanged. |
 
 Local CSVs / `INTENDED_ARGV.txt` / `log/run_metadata.json` are provenance;
 authoritative gated results require complete participant set.
@@ -499,7 +508,9 @@ authoritative gated results require complete participant set.
 3. **Occurrence-EB fit** (CPU) → planned YAML under `Transfer_source/pics_v3/`.
 4. **Validate** YAML paths/hashes/identities; `peeked_transfer_at_freeze: false`.
 5. **Final G.2 paired-packing audit** with selected v3 sources (CPU).
-6. **15 gated targets** (`KIND=pics_v3`, `--t_pics_gated_transfer`, GPU).
+6. **15 gated targets** (`KIND=pics_v3`, `--t_pics_gated_transfer`, GPU) —
+   `cluster/v3/ours/main/submit_gated.sh` (default `DRY_RUN=1`;
+   explicit `--t_pics_source_config` → pics_v3 YAML only).
 7. **Completeness / result checks** (CPU + W&B).
 
 | If G.1 changes | Must regenerate |
@@ -532,7 +543,7 @@ and Qwen 32768/30000/1024 but are **not** PICS. Do not rename OE outputs
 | G.2 packing | n/a / older | unmatched risk | `g2_paired_pack_v1` @14k | **`g2_paired_pack_pics_v3` @30k**, `paired_parent_count` |
 | G.1 kind / path | older | `t_pics_source_pop10` | `t_pics_g1_sa40_v2` | **`pics_v3_g1`** |
 | Gated kind | n/a | `t_pics_gated` | `t_pics_gated_sa40_v2` | **`pics_v3`** |
-| Source YAML | n/a | `occurrence_eb_schema4_iter10.yaml` | `Transfer_source/v2/..._sa40_v2.yaml` | **`Transfer_source/pics_v3/..._pics_v3.yaml` (planned)** |
+| Source YAML | n/a | `occurrence_eb_schema4_iter10.yaml` | `Transfer_source/v2/..._sa40_v2.yaml` | **`Transfer_source/pics_v3/..._pics_v3.yaml` (frozen)** |
 | Normative doc | older notes | `docs/Documentation.md` (historical) | `Documentation_v2.md` (historical) | **this file** |
 
 ---
@@ -544,8 +555,8 @@ and Qwen 32768/30000/1024 but are **not** PICS. Do not rename OE outputs
   (v3 must use v3 G.1 + v3 map).
 - Treating preliminary-v2 YAML or job 258518 as final.
 - OpenEvolve / Centaur / LM / PT as part of the PICS method body.
-- Claiming completed v3 annotations, YAML, or G.2 source identities before they
-  exist on disk.
+- Claiming completed v3 annotations or G.2 source identities from preliminary-v2
+  maps (use the frozen pics_v3 YAML only).
 
 ---
 
@@ -563,7 +574,7 @@ protocol / packing / W&B code.
 | v1 §4 / freeze Occurrence-EB + motifs | **Retained unchanged** scientifically; **updated** paths to planned `pics_v3` package; v1 numbers labeled historical |
 | v1 §5 G.1 | **Updated** — final G.1 is `pics_v3_g1` global-only; not YAML-bootstrap |
 | v1 §6 G.2 arms | **Updated** — protocol v3, 30k/5k, `g2_paired_pack_pics_v3` |
-| v1 §7 gate | **Retained unchanged** (equal-person, \(10^{-12}\), control on ties) |
+| v1 §7 gate | **Changed in v3** — count-pooled TV (same as G.2 ranking); equal-person mean removed from the gate; tie rule unchanged |
 | v1 §8 G.3 | **Retained unchanged** (50 from rank-1, no source suffix) |
 | v1 §9 person evolution | **Retained unchanged** knobs; protocol/context v3 |
 | v1 §10–11 SA40 / which trials | **Updated** → `structure_aware_v3` / training-only SA40 |
@@ -577,7 +588,7 @@ protocol / packing / W&B code.
 | v2 §7–9 prompt / packing / auto prompt | **Updated** into §C–D (30k/5k; fail-closed G.1) |
 | v2 §11–12 OpenEvolve / versioning | **Baselines only** / frozen non-final list |
 | v2 G.2 14k pack | **Superseded** by `g2_paired_pack_pics_v3` |
-| v1 target→source identity table | **Not applicable** as v3 identities (map not yet fit) |
+| v1 target→source identity table | **Superseded** — use `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` |
 | v1 annotated program counts (1385) | **Historical only** — v3 counts TBD after annotate |
 
 ---

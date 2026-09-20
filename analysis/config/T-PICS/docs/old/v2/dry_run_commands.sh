@@ -20,7 +20,7 @@ DATASETS=(
   13schulz2020finding 14kool2016when
 )
 
-$prefix pytest -q utils/teh_psych/test_tpics_v2_protocol.py utils/teh_psych/test_iclr_baseline_guards.py
+$prefix pytest -q utils/teh_psych/test_scripts/test_tpics_v2_protocol.py utils/teh_psych/test_scripts/test_iclr_baseline_guards.py
 
 echo "# 1) CPU preflight (above). 2) 15 v2 G.1 source-population jobs:"
 for ds in "${DATASETS[@]}"; do

@@ -31,6 +31,42 @@ JOB_TYPE = "t_pics_gated"
 TAGS = ("ICLR", "SA40", "gated_t_pics")
 WANDB_RUN_FILENAME = "wandb_run.json"
 _ID_SAFE = re.compile(r"[^a-zA-Z0-9_-]+")
+# Dynamic per-person Runs-table columns (one key per participant). Never upload.
+# Matches p0/test_loglik and p12_train_acc only — not fixed ``participant/*``.
+_DYNAMIC_PARTICIPANT_SCALAR_KEY = re.compile(r"^p\d+(?:/|_)")
+
+
+def is_dynamic_participant_wandb_key(key: Any) -> bool:
+    """True for per-participant scalar keys that explode the W&B Runs table."""
+    return bool(_DYNAMIC_PARTICIPANT_SCALAR_KEY.match(str(key)))
+
+
+def strip_dynamic_participant_wandb_keys(
+    data: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Drop ``p{pid}/*`` / ``p{pid}_*`` keys; keep fixed contract (incl. ``participant/*``)."""
+    return {
+        str(k): v
+        for k, v in data.items()
+        if not is_dynamic_participant_wandb_key(k)
+    }
+
+
+def suppress_dynamic_participant_wandb_scalars() -> bool:
+    """PICS v3 jobs (G.1 or gated) should not upload per-person scalar columns.
+
+    Detection is env-based (cluster workers export ``KIND`` / ``WANDB_PROJECT_NAME``).
+    Does not affect Centaur/OpenEvolve.
+    """
+    kind = str(os.environ.get("KIND") or "").strip()
+    if kind.startswith("pics_v3"):
+        return True
+    project = str(
+        os.environ.get("WANDB_PROJECT_NAME")
+        or os.environ.get("WANDB_PROJECT")
+        or ""
+    ).strip()
+    return project == "teh_pics_v3"
 
 
 def _warn(message: str) -> None:
@@ -506,9 +542,12 @@ class GatedWandbReporter:
     def _safe_log(self, data: Mapping[str, Any], **kwargs: Any) -> None:
         if not self._enabled or self._wandb is None or not data:
             return
+        payload = strip_dynamic_participant_wandb_keys(data)
+        if not payload:
+            return
         try:
             with self._lock:
-                self._wandb.log(dict(data), **kwargs)
+                self._wandb.log(dict(payload), **kwargs)
         except Exception as exc:
             _warn(f"log failed (ignored): {exc}")
 
@@ -517,9 +556,12 @@ class GatedWandbReporter:
             return
         if not self._enabled or self._run is None:
             return
+        cleaned = strip_dynamic_participant_wandb_keys(fields)
+        if not cleaned:
+            return
         try:
             with self._lock:
-                for key, value in fields.items():
+                for key, value in cleaned.items():
                     self._run.summary[key] = value
         except Exception as exc:
             _warn(f"summary failed (ignored): {exc}")
@@ -537,7 +579,12 @@ class GatedWandbReporter:
             str(k).startswith(("g2/", "participant/", "progress/", "gate/", "final/", "status/"))
             for k in keys
         ):
-            return {k: v for k, v in data.items() if v is not None}
+            # Fixed-contract payloads: keep non-None fixed keys only (never p{pid}/*).
+            return {
+                k: v
+                for k, v in strip_dynamic_participant_wandb_keys(data).items()
+                if v is not None
+            }
         if "global/selection_score" in data or "global/train_loglik" in data:
             arm = self._g2_arm or "control"
             iteration = data.get("global/iteration", step)
@@ -551,6 +598,7 @@ class GatedWandbReporter:
             return {k: v for k, v in out.items() if v is not None}
         pid, ordinal, iteration = self._participant_coords(data, step)
         if pid is None:
+            # Drop unknown / dynamic-only payloads rather than forwarding p{pid} scalars.
             return {}
         if data.get(f"p{pid}_is_baseline") == 1 or data.get(f"p{pid}/is_baseline") == 1:
             return {}
@@ -610,12 +658,13 @@ class GatedWandbReporter:
             return
         self._safe_summary(
             {
-                "gate/control_mean_train_val_loglik": record.get(
-                    "control_mean_train_val_loglik"
+                "gate/control_pooled_train_val_loglik": record.get(
+                    "control_pooled_train_val_loglik"
                 ),
-                "gate/transfer_mean_train_val_loglik": record.get(
-                    "transfer_mean_train_val_loglik"
+                "gate/transfer_pooled_train_val_loglik": record.get(
+                    "transfer_pooled_train_val_loglik"
                 ),
+                "gate/score_field": record.get("score_field"),
                 "gate/score_difference": record.get("score_difference"),
                 "gate/selected_arm": record.get("selected_arm"),
                 "gate/reason": record.get("reason"),

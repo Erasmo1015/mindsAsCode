@@ -1,0 +1,65 @@
+{
+  "transfer_matrix": "/common/home/users/z/zichang.ge.2023/repo/mindsAsCode/generated_outputs_transfer_old/teh_transfer/run_260616_235649/summary_csv/single_transfer/matrix_improve_test_loglik.csv",
+  "six_allowlist": [
+    "1peterson2021using",
+    "3frey2017cct",
+    "4wulff2018description",
+    "7hilbig2014generalized",
+    "11enkavi2019recentprobes",
+    "mixed_gambles"
+  ],
+  "methods": {
+    "occurrence": {
+      "method": "occurrence",
+      "n_targets": 6,
+      "candidate_pool": "SIX_old_unaffected",
+      "positive": 0.5,
+      "nonnegative": 0.5,
+      "mean": -0.06633333333333333,
+      "median": -0.010700000000000001,
+      "worst": -0.2764,
+      "top1": 0.16666666666666666,
+      "mean_regret": 0.10476666666666666,
+      "random_plus": 0.46666666666666673,
+      "random_plus_definition": "mean over targets of fraction of allowlisted other sources with improve_test_loglik > 0"
+    },
+    "fitness": {
+      "method": "fitness",
+      "n_targets": 6,
+      "candidate_pool": "SIX_old_unaffected",
+      "positive": 0.5,
+      "nonnegative": 0.5,
+      "mean": -0.05093333333333333,
+      "median": -0.01455,
+      "worst": -0.2433,
+      "top1": 0.3333333333333333,
+      "mean_regret": 0.08936666666666666,
+      "random_plus": 0.46666666666666673,
+      "random_plus_definition": "mean over targets of fraction of allowlisted other sources with improve_test_loglik > 0"
+    },
+    "combined": {
+      "method": "combined",
+      "n_targets": 6,
+      "candidate_pool": "SIX_old_unaffected",
+      "positive": 0.3333333333333333,
+      "nonnegative": 0.3333333333333333,
+      "mean": -0.08226666666666665,
+      "median": -0.0601,
+      "worst": -0.2433,
+      "top1": 0.0,
+      "mean_regret": 0.12069999999999999,
+      "random_plus": 0.46666666666666673,
+      "random_plus_definition": "mean over targets of fraction of allowlisted other sources with improve_test_loglik > 0"
+    }
+  },
+  "metrics": [
+    "positive",
+    "nonnegative",
+    "mean",
+    "median",
+    "worst",
+    "top1",
+    "mean_regret",
+    "random_plus"
+  ]
+}
