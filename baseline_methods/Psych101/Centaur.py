@@ -346,6 +346,17 @@ def _prepare_mixed_gambles_centaur_trials(
     return out
 
 
+def _ensure_mixed_gambles_centaur_contract(
+    dataset: str, trials: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Force A/B keys on every mixed-gambles row (v1 splits and v2 raw prefix)."""
+    alias = normalize_psych101_dataset_alias(dataset)
+    rows = list(trials)
+    if is_mixed_gambles_dataset(dataset) or is_mixed_gambles_dataset(alias):
+        return _prepare_mixed_gambles_centaur_trials(rows)
+    return rows
+
+
 # ----- Psych-101 transcript-style prompt construction -----
 
 GAMBLE_TASK_INTRO = (
@@ -822,6 +833,16 @@ class CentaurChooser:
         prefix = build_centaur_prompt_prefix_indexed(
             trials, trial_index, instruction=self.task_instruction
         )
+        alias = str(problem.get("dataset_alias") or "")
+        if alias == MIXED_GAMBLES or is_mixed_gambles_dataset(alias):
+            if keys != ["A", "B"]:
+                raise ValueError(
+                    f"mixed_gambles Centaur must score <<A>>/<<B>>, got display keys {keys!r}"
+                )
+            if "Option A delivers" not in prefix:
+                raise ValueError(
+                    "mixed_gambles Centaur prefix is missing Option A/B gamble text"
+                )
         lps: List[float] = []
         reasons: List[Optional[str]] = []
         for key in keys:
@@ -1018,10 +1039,9 @@ def _load_centaur_trials(
         speekenbrink_split=speekenbrink_split,
         data_dir=data_dir,
     )
-    if is_mixed_gambles_dataset(dataset) or is_mixed_gambles_dataset(alias):
-        train_trials = _prepare_mixed_gambles_centaur_trials(train_trials)
-        val_trials = _prepare_mixed_gambles_centaur_trials(val_trials)
-        test_trials = _prepare_mixed_gambles_centaur_trials(test_trials)
+    train_trials = _ensure_mixed_gambles_centaur_contract(alias, train_trials)
+    val_trials = _ensure_mixed_gambles_centaur_contract(alias, val_trials)
+    test_trials = _ensure_mixed_gambles_centaur_contract(alias, test_trials)
     instruction = _task_instruction_for_participant(
         alias,
         int(participant_row_index),
@@ -1301,6 +1321,8 @@ def _evaluate_participant(
             local_dataset=local_dataset,
             speekenbrink_split=speekenbrink_split,
         )
+        raw_train = _ensure_mixed_gambles_centaur_contract(dataset, raw_train)
+        raw_val = _ensure_mixed_gambles_centaur_contract(dataset, raw_val)
         prompt_trials, score_indices = _centaur_prompt_timeline_v2(
             raw_train, raw_val, test_trials
         )
@@ -1313,6 +1335,7 @@ def _evaluate_participant(
             train_trials, val_trials, test_trials
         )
         timeline_note = f"v1 prefix on train+val+test n={len(prompt_trials)}"
+    prompt_trials = _ensure_mixed_gambles_centaur_contract(dataset, prompt_trials)
     print(
         f"[Split] {dataset} participant row {participant_row_index}: "
         f"train={len(train_trials)}, val={len(val_trials)}, test={len(test_trials)} "

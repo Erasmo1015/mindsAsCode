@@ -27,6 +27,8 @@ sys.modules.setdefault("openevolve.process_parallel", _oe_pp)
 
 from Centaur import (  # noqa: E402
     _build_generic_prefix,
+    _centaur_prompt_timeline_v2,
+    _ensure_mixed_gambles_centaur_contract,
     _prepare_mixed_gambles_centaur_trials,
     build_centaur_prompt_prefix_indexed,
     centaur_display_keys,
@@ -174,6 +176,27 @@ def test_mixed_gambles_prepared_prefix_is_ab_gamble_text():
     prefix = build_centaur_prompt_prefix_indexed([prepared], 0)
     assert "Option A delivers" in prefix
     assert "Option B delivers" in prefix
+
+
+def test_mixed_gambles_v2_raw_prefix_is_remapped_to_ab():
+    raw = {
+        "problem": {
+            "dataset_alias": "mixed_gambles",
+            "option_keys": [0, 1],
+            "gamble_A": {"rewards": [4.0, -1.0], "probs": [0.5, 0.5]},
+            "gamble_B": {"rewards": [0.0], "probs": [1.0]},
+        },
+        "history": [],
+        "action": 0,
+    }
+    test = _prepare_mixed_gambles_centaur_trials([dict(raw)])
+    prompt, scores = _centaur_prompt_timeline_v2([raw] * 3, [raw] * 2, test)
+    prompt = _ensure_mixed_gambles_centaur_contract("mixed_gambles", prompt)
+    assert scores == [5]
+    assert all(centaur_display_keys(t["problem"]) == ["A", "B"] for t in prompt)
+    prefix = build_centaur_prompt_prefix_indexed(prompt, scores[0])
+    assert "Option A delivers" in prefix
+    assert "<<0>>" not in prefix
 
 
 def test_enkavi_probe_in_set_is_oracle_and_stripped_from_program_input():
