@@ -532,7 +532,10 @@ def participant_run_is_complete(
     if not ok:
         return False
     if int(expected_explore_candidates) > 0:
-        explore_metrics = path / "explore" / "metrics.json"
+        # Production TEH writes explore_phase/; accept legacy explore/ as well.
+        explore_metrics = path / "explore_phase" / "metrics.json"
+        if not explore_metrics.is_file():
+            explore_metrics = path / "explore" / "metrics.json"
         if not explore_metrics.is_file():
             return False
         try:

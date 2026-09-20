@@ -375,9 +375,48 @@ class GatedWandbReporter:
         self._output_root: Optional[Path] = None
         self.run_id: Optional[str] = None
         self.project: Optional[str] = None
+        self._last_milestone: Optional[str] = None
+        self._milestone_path: Optional[Path] = None
 
     def __bool__(self) -> bool:
         return True
+
+    def _milestone(self, message: str) -> None:
+        """Short status line for humans (summary + Files/milestones.log).
+
+        Console capture stays off so TEH/vLLM stdout does not flood the W&B Logs tab.
+        """
+        text = " ".join(str(message).split())
+        if not text or text == self._last_milestone:
+            return
+        self._last_milestone = text
+        line = f"[pics_v3] {text}"
+        print(line, flush=True)
+        self._safe_summary({"status/last_message": text})
+        if not self._enabled or self._run is None or self._wandb is None:
+            return
+        try:
+            if self._milestone_path is None:
+                raw_dir = str(getattr(self._run, "dir", "") or "").strip()
+                # Path("") is_dir() is True (cwd) — do not write into the repo.
+                if not raw_dir:
+                    return
+                run_dir = Path(raw_dir)
+                if not run_dir.is_dir():
+                    return
+                files_dir = run_dir / "files"
+                files_dir.mkdir(parents=True, exist_ok=True)
+                self._milestone_path = files_dir / "milestones.log"
+            with self._milestone_path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+            # Live-upload the small milestone file (not full TEH logs).
+            self._wandb.save(
+                str(self._milestone_path),
+                base_path=str(self._milestone_path.parent),
+                policy="live",
+            )
+        except Exception as exc:
+            _warn(f"milestone write failed (ignored): {exc}")
 
     def attach_context(
         self,
@@ -406,6 +445,7 @@ class GatedWandbReporter:
                 "status/state": "running",
             }
         )
+        self._milestone(f"G.2 {arm} arm started")
 
     def init(
         self,
@@ -513,6 +553,10 @@ class GatedWandbReporter:
                 }
             )
             _warn(f"run id={run_id} project={project} resume=allow")
+            self._milestone(
+                f"started dataset={args.dataset} source={selected_source} "
+                f"persons={self._expected_n} job={slurm_job_id or 'local'}"
+            )
         except Exception as exc:
             self._enabled = False
             self._wandb = None
@@ -674,6 +718,11 @@ class GatedWandbReporter:
                 "progress/stage": "gate",
             }
         )
+        self._milestone(
+            f"gate selected_arm={record.get('selected_arm')} "
+            f"ctrl={record.get('control_pooled_train_val_loglik')} "
+            f"xfer={record.get('transfer_pooled_train_val_loglik')}"
+        )
 
     def maybe_backfill_g2_arm(self, arm: str, arm_dir: Path) -> None:
         self._g2_arm = str(arm)
@@ -711,6 +760,15 @@ class GatedWandbReporter:
                 "progress/completed_participants": completed,
             }
         )
+        # Sparse person-progress milestones (not every sync).
+        if completed > 0 and (
+            completed == self._expected_n
+            or completed % max(1, self._expected_n // 5) == 0
+            or completed in {1, 5, 10, 25}
+        ):
+            self._milestone(
+                f"person progress {completed}/{self._expected_n} complete"
+            )
 
     def publish_final(self) -> bool:
         """Write final/* only when every expected participant is complete. Returns is_complete."""
@@ -761,6 +819,10 @@ class GatedWandbReporter:
                 "status/last_completed_stage": "completed",
                 "progress/stage": "completed",
             }
+        )
+        self._milestone(
+            f"completed mean_test_loglik={mean_te} "
+            f"mean_train_val_loglik={mean_tv} persons={completed}/{self._expected_n}"
         )
         return True
 
