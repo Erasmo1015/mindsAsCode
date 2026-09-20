@@ -658,4 +658,10 @@ Occurrence-EB on pics_v3 G.1 schema-v4 annotations (1445/1446): fit/stability un
 
 Gated submit: `cluster/v3/ours/main/` (`submit_gated.sh`, exact pics_v3 YAML, refuse v1/v2). `teh.py` / v3 G.1 default `--n_eval_seeds 1`. Do not retune freezes from transfer; do not cancel running G.2 jobs when adding freezes.
 
+---
+
+## Short update (Sep 21 2026 — Schema v5 five-construct taxonomy)
+
+Final annotation taxonomy: **schema v5** / prompt `population_transition_v5` — constructs `history`, `value`, `probability_used`, `feedback`, `learning` only (explicit risk removed). Module: `utils/mem/schema_population_motif_v5.py`. Package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/` (does not overwrite `pics_v3_g1_schema_v4`). Config: `analysis/config/T-PICS/pics_v3/config_pics_v3_schema5.yaml`. Freeze dir: `Transfer_source/pics_v3/schema5_occurrence_eb_freeze/`. Submit annot: `bash cluster/v3/ours/main/submit_pop_annot_schema_v5.sh --submit`. After annot: `python analysis_2026Sep/mem/pics_v3_g1_schema_v5/run_occurrence_eb_compare.py` — write `occurrence_eb_schema5_iter10_pics_v3.yaml` only if winners match frozen map. Active G.2 runtime YAML left unchanged mid-flight.
+
 

@@ -6,7 +6,8 @@ Does not overwrite v1 or preliminary-v2 artifacts.
 Concepts (do not conflate):
 - Method / output kind: ``pics_v3`` / ``pics_v3_g1`` / ``pics_v3_independent``
 - Shared data protocol: ``structure_aware_v3``
-- Annotation taxonomy: existing ``schema_v4``
+- Annotation taxonomy: ``schema_v5`` (five constructs; final). Schema-v4 artifacts
+  remain frozen and must not be overwritten.
 """
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ KIND = "pics_v3"
 G1_KIND = "pics_v3_g1"
 INDEPENDENT_KIND = "pics_v3_independent"
 RUN_TAG = "g5e50p10_occurrence_eb_pics_v3"
-ANNOTATION_PACKAGE = "pics_v3_g1_schema_v4"
+ANNOTATION_PACKAGE = "pics_v3_g1_schema_v4"  # legacy completed package
+ANNOTATION_PACKAGE_V5 = "pics_v3_g1_schema_v5"
 
 LIMITED_DATA_PROTOCOL = "structure_aware_v3"
 LIMITED_TRAIN_VAL = 40
@@ -38,10 +40,19 @@ G2_PAIRED_PACK_VERSION = "g2_paired_pack_pics_v3"
 G2_PAIRED_PACK_FILENAME = "g2_paired_packing.json"
 
 SOURCE_DIR = _REPO_ROOT / "analysis/config/T-PICS/Transfer_source/pics_v3"
+# Active runtime map for currently submitted G.2 jobs (do not change mid-flight).
 SOURCE_YAML = SOURCE_DIR / "occurrence_eb_schema4_iter10_pics_v3.yaml"
+# Five-construct selector freeze (schema-v4 annotations, construct subset).
+SOURCE_YAML_5CONSTRUCT = SOURCE_DIR / "occurrence_eb_schema4_5construct_iter10_pics_v3.yaml"
+# Schema-v5 freeze (written only after v5 reannotation + identical-map check).
+SOURCE_YAML_SCHEMA5 = SOURCE_DIR / "occurrence_eb_schema5_iter10_pics_v3.yaml"
 FREEZE_DIR = SOURCE_DIR / "schema4_occurrence_eb_freeze"
+FREEZE_DIR_SCHEMA5 = SOURCE_DIR / "schema5_occurrence_eb_freeze"
 ANNOTATIONS_ROOT = (
     _REPO_ROOT / "analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations"
+)
+ANNOTATIONS_ROOT_V5 = (
+    _REPO_ROOT / "analysis_2026Sep/mem/pics_v3_g1_schema_v5/annotations"
 )
 DOCS = _REPO_ROOT / "analysis/config/T-PICS/docs/Documentation_pics_v3.md"
 

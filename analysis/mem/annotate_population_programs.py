@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""Annotate population programs for motif presence + parent→candidate transitions.
+"""Annotate population programs for construct presence + parent→candidate transitions.
 
 Schema v3: single-program presence only.
-Schema v4: reference state + modified motifs + per-motif candidate details;
-candidate_motif_state is derived from complete motif_details.
+Schema v4: six-construct reference state + modified + per-construct candidate details.
+Schema v5: five-construct final taxonomy (history, value, probability_used, feedback,
+learning); same transition/detail contract as v4 without explicit risk.
+
+Candidate presence inventories are derived from complete motif_details.
 
 Resume keys: ``dataset|run_id|iteration|candidate|parent``.
 Existing successful annotations are skipped (append-only resume).
-
-Hardening:
-  * batch failure → per-program singleton retry
-  * higher default max_tokens for v4
-  * bounded retries on vLLM InternalServerError (exit 75 after exhaustion so
-    the job script can restart the server and re-invoke)
 """
 from __future__ import annotations
 
@@ -40,6 +37,7 @@ except Exception:  # noqa: BLE001 — login-node site-packages can be broken
 
 from utils.mem import schema_population_motif as schema_v3
 from utils.mem import schema_population_motif_v4 as schema_v4
+from utils.mem import schema_population_motif_v5 as schema_v5
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = (
@@ -56,6 +54,7 @@ _IO_LOCK = threading.Lock()
 EXIT_VLLM_DEAD = 75
 
 DEFAULT_MAX_TOKENS_V4 = 8192
+DEFAULT_MAX_TOKENS_V5 = 8192
 DEFAULT_MAX_TOKENS_V3 = 2048
 DEFAULT_SERVER_RETRIES = 5
 DEFAULT_SERVER_RETRY_SLEEP_SEC = 15.0
@@ -66,11 +65,19 @@ class VLLMServerDeadError(RuntimeError):
 
 
 def _schema_mod(schema_version: int):
+    if int(schema_version) == 5:
+        return schema_v5
     if int(schema_version) == 4:
         return schema_v4
     if int(schema_version) == 3:
         return schema_v3
-    raise ValueError(f"unsupported schema_version={schema_version} (expected 3 or 4)")
+    raise ValueError(
+        f"unsupported schema_version={schema_version} (expected 3, 4, or 5)"
+    )
+
+
+def _is_transition_schema(schema_version: int) -> bool:
+    return int(schema_version) in (4, 5)
 
 
 def _out_name(schema_version: int) -> str:
@@ -82,15 +89,28 @@ Report which motifs from the allowed taxonomy are present in the program's logic
 Do NOT invent edits, transitions, added/removed/modified labels, or fitness changes.
 Return ONLY a JSON array matching the requested schema."""
 
-_SYSTEM_V4 = """You annotate behavioral motifs for a parent→candidate program pair.
-Report motif presence in the reference (parent), which shared motifs were modified,
-and per-motif details for the CANDIDATE (presence, applicability, confidence,
-rationale, code_evidence) covering EVERY allowed motif.
+_SYSTEM_V4 = """You annotate behavioral constructs for a parent→candidate program pair.
+Report construct presence in the reference (parent), which shared constructs were
+modified, and per-construct details for the CANDIDATE (presence, applicability,
+confidence, rationale, code_evidence) covering EVERY allowed construct.
 Candidate presence inventories are taken from motif_details.presence — do not emit
 a separate candidate_motif_state list.
 Do NOT invent fitness/ΔF values.
 Distinguish carefully:
 - probability_used vs explicit_risk_mechanism (linear p*x is probability_used only)
+- feedback vs learning (learning requires an across-trial update rule)
+Return ONLY a JSON array matching the requested schema."""
+
+_SYSTEM_V5 = """You annotate behavioral constructs for a parent→candidate program pair.
+Report construct presence in the reference (parent), which shared constructs were
+modified, and per-construct details for the CANDIDATE (presence, applicability,
+confidence, rationale, code_evidence) covering EVERY allowed construct.
+Candidate presence inventories are taken from motif_details.presence — do not emit
+a separate candidate_motif_state list.
+Do NOT invent fitness/ΔF values.
+Distinguish carefully:
+- probability_used means reading/using problem probability fields (including linear p*x);
+  empirical rates from feedback history alone are feedback/learning, not probability_used
 - feedback vs learning (learning requires an across-trial update rule)
 Return ONLY a JSON array matching the requested schema."""
 
@@ -187,7 +207,7 @@ def _load_completed(path: Path, *, schema_version: int) -> Set[str]:
             if int(row.get("schema_version", -1) or -1) != int(schema_version):
                 continue
             kind = row.get("annotation_kind")
-            if schema_version == 4:
+            if _is_transition_schema(schema_version):
                 if kind not in (
                     "population_program_motif_transition",
                     "population_program_motif_state",
@@ -222,10 +242,10 @@ def _annotate_batch(
     server_retries: int = DEFAULT_SERVER_RETRIES,
     server_retry_sleep_sec: float = DEFAULT_SERVER_RETRY_SLEEP_SEC,
 ) -> Tuple[List[Dict[str, Any]], str, str]:
-    if schema_mod.SCHEMA_VERSION == 4:
+    if _is_transition_schema(schema_mod.SCHEMA_VERSION):
         expected_ids = [str(x["candidate_id"]) for x in batch]
         user = _build_user_prompt_v4(batch, schema_mod=schema_mod)
-        system = _SYSTEM_V4
+        system = _SYSTEM_V5 if schema_mod.SCHEMA_VERSION == 5 else _SYSTEM_V4
     else:
         expected_ids = [str(x["program_id"]) for x in batch]
         user = _build_user_prompt_v3(batch, schema_mod=schema_mod)
@@ -301,7 +321,9 @@ def _write_success_rows(
     schema_mod: Any,
     out_jsonl: Path,
 ) -> int:
-    id_key = "candidate_id" if schema_mod.SCHEMA_VERSION == 4 else "program_id"
+    id_key = (
+        "candidate_id" if _is_transition_schema(schema_mod.SCHEMA_VERSION) else "program_id"
+    )
     by_id = {r[id_key]: r for r in rows}
     n_ok = 0
     for p in batch:
@@ -446,11 +468,12 @@ def annotate_programs(
 ) -> Dict[str, Any]:
     schema_mod = _schema_mod(schema_version)
     if max_tokens is None:
-        max_tokens = (
-            DEFAULT_MAX_TOKENS_V4
-            if schema_mod.SCHEMA_VERSION == 4
-            else DEFAULT_MAX_TOKENS_V3
-        )
+        if schema_mod.SCHEMA_VERSION == 5:
+            max_tokens = DEFAULT_MAX_TOKENS_V5
+        elif schema_mod.SCHEMA_VERSION == 4:
+            max_tokens = DEFAULT_MAX_TOKENS_V4
+        else:
+            max_tokens = DEFAULT_MAX_TOKENS_V3
     raw_dir.mkdir(parents=True, exist_ok=True)
     done = _load_completed(out_jsonl, schema_version=schema_mod.SCHEMA_VERSION)
     todo = [p for p in programs if p["resume_key"] not in done]
@@ -467,7 +490,7 @@ def annotate_programs(
         for p in chunk:
             code = (REPO / p["code_path"]).read_text(encoding="utf-8")
             item = {**p, "code": code}
-            if schema_mod.SCHEMA_VERSION == 4:
+            if _is_transition_schema(schema_mod.SCHEMA_VERSION):
                 parent_rel = p.get("parent_code_path")
                 if not parent_rel:
                     raise FileNotFoundError(
@@ -574,6 +597,31 @@ def _demo_v4_payload(candidate_id: str = "demo") -> List[Dict[str, Any]]:
     ]
 
 
+def _demo_v5_payload(candidate_id: str = "demo") -> List[Dict[str, Any]]:
+    details = []
+    present = {"history", "value", "probability_used"}
+    for m in schema_v5.BEHAVIORAL_MOTIFS:
+        details.append(
+            {
+                "motif": m,
+                "presence": m in present,
+                "applicability": "applicable",
+                "confidence": 0.85,
+                "rationale": f"demo rationale for {m}",
+                "code_evidence": [f"demo evidence for {m}"] if m in present else [],
+            }
+        )
+    return [
+        {
+            "candidate_id": candidate_id,
+            "reference_motif_state": ["history", "value"],
+            "modified_motifs": ["value"],
+            "motif_details": details,
+            "confidence": 0.85,
+        }
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=str, default=str(DEFAULT_MANIFEST))
@@ -596,8 +644,8 @@ def main() -> None:
         "--schema_version",
         type=int,
         default=4,
-        choices=(3, 4),
-        help="Population motif schema (default 4).",
+        choices=(3, 4, 5),
+        help="Population construct schema (3, 4, or 5; default 4).",
     )
     parser.add_argument(
         "--dry_run",
@@ -625,9 +673,12 @@ def main() -> None:
     out_jsonl = out_dir / _out_name(args.schema_version)
 
     if args.dry_run:
-        if args.schema_version == 4:
+        if _is_transition_schema(args.schema_version):
+            demo_fn = (
+                _demo_v5_payload if args.schema_version == 5 else _demo_v4_payload
+            )
             ok, err, rows = schema_mod.validate_program_motif_response(
-                _demo_v4_payload("demo"),
+                demo_fn("demo"),
                 expected_ids=["demo"],
             )
             assert ok and rows, err
@@ -637,24 +688,40 @@ def main() -> None:
                 "probability_used",
             ]
             assert rows[0]["added_motifs"] == ["probability_used"]
-            # Mismatched legacy candidate_motif_state is ignored if present.
-            mismatched = _demo_v4_payload("demo2")
+            mismatched = demo_fn("demo2")
             mismatched[0]["candidate_motif_state"] = ["learning"]  # ignored
             ok2, err2, rows2 = schema_mod.validate_program_motif_response(
                 mismatched, expected_ids=["demo2"]
             )
             assert ok2 and rows2, err2
             assert "learning" not in rows2[0]["candidate_motif_state"]
-            # Missing motif rejected
-            bad = _demo_v4_payload("demo3")
+            bad = demo_fn("demo3")
             bad[0]["motif_details"] = bad[0]["motif_details"][:3]
             bad_ok, bad_err, _ = schema_mod.validate_program_motif_response(
                 bad, expected_ids=["demo3"]
             )
             assert not bad_ok and "missing motifs" in bad_err
+            if args.schema_version == 5:
+                # Reject explicit_risk if the model invents it.
+                bad_risk = demo_fn("demo4")
+                bad_risk[0]["motif_details"].append(
+                    {
+                        "motif": "explicit_risk_mechanism",
+                        "presence": False,
+                        "applicability": "applicable",
+                        "confidence": 0.5,
+                        "rationale": "should be rejected",
+                        "code_evidence": [],
+                    }
+                )
+                risk_ok, risk_err, _ = schema_mod.validate_program_motif_response(
+                    bad_risk, expected_ids=["demo4"]
+                )
+                assert not risk_ok
+                assert "explicit_risk" in risk_err or "invalid motif" in risk_err
             rk = schema_mod.resume_key("ds", "job_1", 2, "candidate_0", "global_baseline")
             assert rk == "ds|job_1|2|candidate_0|global_baseline"
-            done = _load_completed(out_jsonl, schema_version=4)
+            done = _load_completed(out_jsonl, schema_version=args.schema_version)
             assert isinstance(done, set)
         else:
             ok, err, rows = schema_mod.validate_program_motif_response(
