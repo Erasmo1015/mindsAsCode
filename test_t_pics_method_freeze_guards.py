@@ -326,8 +326,8 @@ class GatedSourceExamplePidTests(unittest.TestCase):
         self.assertIn("emnlp_ordinal_range(source_dataset)", text)
         self.assertIn("pid = int(pids[start])", text)
         self.assertNotIn("pid = int(pids[0])", text)
-        self.assertEqual(emnlp_ordinal_range("4wulff2018description"), (1290, 1339))
-        self.assertEqual(emnlp_ordinal_range("11enkavi2019recentprobes"), (0, 49))
+        self.assertEqual(emnlp_ordinal_range("4wulff2018description"), (1290, 1319))
+        self.assertEqual(emnlp_ordinal_range("11enkavi2019recentprobes"), (0, 29))
 
 
 if __name__ == "__main__":

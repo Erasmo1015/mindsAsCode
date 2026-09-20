@@ -71,15 +71,17 @@ LABELS = {
 
 def test_fits_input_and_context_uses_live_output_reserve() -> None:
     """Raising output_reserve must tighten the vLLM fit check (OE-style)."""
-    assert fits_input_and_context(30_000, input_ceiling=CAP, output_reserve=OUTPUT_RESERVE)
-    assert not fits_input_and_context(30_000, input_ceiling=CAP, output_reserve=4096)
+    assert fits_input_and_context(14_000, input_ceiling=CAP, output_reserve=OUTPUT_RESERVE)
+    assert not fits_input_and_context(14_000, input_ceiling=CAP, output_reserve=4096)
     assert fits_input_and_context(
-        28_672, input_ceiling=28_672, output_reserve=4096
+        12_288, input_ceiling=12_288, output_reserve=4096
     )
     assert not fits_input_and_context(
-        28_673, input_ceiling=28_672, output_reserve=4096
+        12_289, input_ceiling=12_288, output_reserve=4096
     )
-    assert 28_672 + 4096 == VLLM_CONTEXT
+    assert 12_288 + 4096 == VLLM_CONTEXT
+    assert CAP == 14_000
+    assert VLLM_CONTEXT == 16_384
 
 
 def _cfg():

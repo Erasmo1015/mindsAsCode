@@ -4,8 +4,10 @@ Control and transfer freeze the same target-example IDs under the *transfer*
 token condition (source suffix + runtime contract + reserved parent copies).
 Transfer then receives the suffix; control does not. Parent *count* is paired
 under the stricter (transfer) budget; parent *identities* may differ by arm.
-Existing parent-copy compaction (per-parent ``max_parent_chars`` head/tail) and
-drop-extra-parents-before-examples order are preserved.
+Existing parent-copy compaction (per-parent ``max_parent_chars`` head/tail) is
+preserved. At freeze time, examples are chosen under the transfer budget so
+runtime G.2 (``freeze_examples=True``) only parent-trims; it must not drop the
+frozen example set. Non-frozen prompts drop whole trials before extra parents.
 """
 from __future__ import annotations
 

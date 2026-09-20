@@ -67,32 +67,33 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Runtime source YAML (**planned**) | `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` | Written after v3 G.1 → annotate → Occurrence-EB |
 | Annotation package (**planned**) | `pics_v3_g1_schema_v4` | Schema-v4 annotations of v3 G.1 programs |
 | W&B project (G.1) | `teh_pics_v3` | G.1 submitter default |
-| `RUN_TAG` | `g5e50p10_occurrence_eb_pics_v3` | Gated run tag constant |
+| `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` | Gated run tag constant |
 
 These axes are separate: method KIND ≠ data protocol ≠ annotation taxonomy.
 
-**Fifteen datasets** (production EMNLP ordinals into `valid_participant_ids.json`):
+**Fifteen datasets** (production EMNLP ordinals into `valid_participant_ids.json`).
+Where the historical table was 50 people, PICS v3 uses the **first 30**:
 
 | Dataset | Ordinals |
 | --- | --- |
-| `1peterson2021using` | 0–49 |
-| `2plonsky2018when` | 0–49 |
-| `3frey2017cct` | 0–49 |
-| `4wulff2018description` | **1290–1339** |
+| `1peterson2021using` | 0–29 |
+| `2plonsky2018when` | 0–29 |
+| `3frey2017cct` | 0–29 |
+| `4wulff2018description` | **1290–1319** |
 | `5speekenbrink2008learning` | **0–22** |
-| `7hilbig2014generalized` | 0–49 |
-| `10frey2017risk` | 0–49 |
-| `11enkavi2019recentprobes` | 0–49 |
+| `7hilbig2014generalized` | 0–29 |
+| `10frey2017risk` | 0–29 |
+| `11enkavi2019recentprobes` | 0–29 |
 | `12badham2017deficits` | **0–9** |
-| `mixed_gambles` | 0–49 |
-| `bergert_nosofsky_2007` | 0–49 |
-| `guan_2020_stopping` | 0–49 |
-| `steyvers_2009_bandit` | 0–49 |
-| `13schulz2020finding` | 0–49 |
-| `14kool2016when` | 0–49 |
+| `mixed_gambles` | 0–29 |
+| `bergert_nosofsky_2007` | 0–29 |
+| `guan_2020_stopping` | 0–29 |
+| `steyvers_2009_bandit` | 0–29 |
+| `13schulz2020finding` | 0–29 |
+| `14kool2016when` | 0–29 |
 
 Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
-1290–1339 currently maps to raw ids ≈1550–1599).
+1290–1319 maps into the higher-trial cohort).
 
 **Artifact status**
 
@@ -107,7 +108,9 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | preliminary-v2 G.1 (incl. 258518), v2 YAML | **frozen non-final** |
 
 **v1 and preliminary v2 are not the final ICLR method.** Do not treat their
-kinds, 14k/16k ceilings, or YAML maps as normative for PICS v3.
+kinds or YAML maps as normative for PICS v3. Production v3 ceilings match the
+proven preliminary-v2 16k-class pair (16384 / 14000 / 1024) with first-30
+ordinals and trial-first overflow truncation.
 
 ---
 
@@ -236,8 +239,8 @@ Seeds: G.1 uses ordinary prefer_auto path; gated auto-prompt decoding seed
 | Knob | Value |
 | --- | ---: |
 | Model | `Qwen/Qwen2.5-Coder-32B-Instruct` |
-| vLLM `--max-model-len` | 32768 |
-| Hard input (templated) | 30000 |
+| vLLM `--max-model-len` | **16384** |
+| Hard input (templated) | **14000** |
 | Output | 1024 |
 | `--max_parent_chars` | 5000 |
 | `--n_eval_seeds` (G.1) | **1** (deterministic `choose`; matches TEH CLI default) |
@@ -245,9 +248,10 @@ Seeds: G.1 uses ordinary prefer_auto path; gated auto-prompt decoding seed
 
 **Parent copies** (`_truncate_parent_program_for_prompt` in `teh.py`): if over
 cap, keep ≈**70% head** + `# truncated; keep concise` + ≈**30% tail**. Complete
-on-disk programs are always used for evaluation. Under token pressure, drop
-extra parent **copies** before dropping observed examples; keep ≥1 parent via
-existing retention. “Up to 8 parents” and “up to 60 examples” are caps, not
+on-disk programs are always used for evaluation. Under token pressure on
+**non-frozen** prompts, drop whole observed trials first, then extra parent
+**copies** (keep ≥1). Frozen G.2 keeps the freeze-chosen example set and
+parent-trims only. “Up to 8 parents” and “up to 60 examples” are caps, not
 guarantees.
 
 **Fitness vs display:** fitness always uses the full SA40 observed union;
@@ -258,13 +262,11 @@ record `paired_parent_count`).
 
 **Prompt-budget audit:** regenerator
 `analysis/config/T-PICS/pics_v3/audit_prompt_budget.py`. Final per-dataset
-retained-example/parent table is **not yet frozen** for 30k/5000 (requires
+retained-example/parent table is **not yet frozen** for 14k/5000 (requires
 completed v3 G.1 + map for transfer audits). Known structural extremes under
-the snapshot contract (from protocol + packing design, not a completed 30k
-table): **Badham** (tiny cohort / rich feature problems), **Frey Risk** (balloon
-state in problem), **Kool** (long parents often still under 5000 chars),
-**Speekenbrink** (continuous history). Do not treat preliminary 14k tables as
-final.
+the snapshot contract: **Badham** (tiny cohort / rich feature problems),
+**Frey Risk** (balloon state in problem), **Kool** (long parents often still
+under 5000 chars), **Speekenbrink** (continuous history).
 
 ---
 
@@ -299,7 +301,7 @@ or `--output_kind` (not a `teh.py` flag; KIND is path-only).
 | Refinement | `--no-refinement_phase` |
 | Error feedback | `--max_error_prompt_chars 0 --error-feedback-mode legacy` |
 | Protocol | `structure_aware_v3`, `limited_train_val=40` |
-| Context | hard 30000, parent 5000, out 1024 |
+| Context | hard 14000, parent 5000, out 1024 |
 | `--n_eval_seeds` | **1** (v3 G.1 override; deterministic programs) |
 | Auto prompt | `--prefer_auto_llm_prompt` + fail-closed wiring |
 | Ordinals | explicit `--participant_scope range` + EMNLP start/end |
@@ -337,9 +339,9 @@ programs into a **new package path** (do not overwrite v1 annotations).
 | Kind | `population_program_motif_transition` |
 | Annotator | `analysis/mem/annotate_population_programs.py` |
 | Model | `Qwen/Qwen2.5-Coder-32B-Instruct` (same as G.1) |
-| vLLM `--max-model-len` | **32768** (same as PICS v3; was 16384 in older PopAnnot jobs) |
+| vLLM `--max-model-len` | **16384** (aligned with PICS v3 production) |
 | Planned outputs | `analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations/` |
-| Cluster template | `cluster/v2/ours/Qwen/job_pop_annot_dataset.sh` (`VLLM_MAX_MODEL_LEN`, default 32768) |
+| Cluster template | `cluster/v2/ours/Qwen/job_pop_annot_dataset.sh` (`VLLM_MAX_MODEL_LEN`, default 16384) |
 
 ### Six motifs (verbatim definitions)
 
@@ -409,9 +411,11 @@ feedback off, sequential control **then** transfer.
 2. Both arms reuse that set for all five iterations.
 3. Record `paired_parent_count`; both arms use that parent **count** (identities
    may differ naturally). No control padding with fake source text.
-4. Drop extra parent copies before dropping complete target examples.
+4. Drop whole target examples before dropping extra parent copies (runtime
+   non-frozen path); freeze-time packing still parent-trims under the transfer
+   budget so frozen G.2 examples are not dropped at runtime.
 5. Do not re-append runtime contracts or transfer suffixes after packing.
-6. Both fully templated prompts ≤30000 tokens.
+6. Both fully templated prompts ≤14000 tokens.
 
 **Transfer suffix only** (`_cross_task_source_suffix` /
 `build_rank1_explore_prompt_suffix`):
@@ -491,7 +495,7 @@ programs are never scored on the target.
 | Resume | skip complete arms/people; persist `{output_root}/wandb_run.json`; stable id `tpg_{alias}_{sha256[:20]}` from `method|run_tag|dataset|output_root`; init `resume="allow"` (never overwrite a conflicting persisted id) |
 | Gated W&B group/tags | group `t_pics_gated_main`; tags include `ICLR`, `SA40`, `gated_t_pics` (reporter defaults) |
 | Layout | `generated_outputs/psych101_train/teh/<target>/pics_v3/job_<id>/` with `target_population/{control,transfer}`, `gate/`, `selected/` |
-| G.1 W&B | project `teh_pics_v3`; `RUN_TAG=g5e50p10_occurrence_eb_pics_v3` |
+| G.1 W&B | project `teh_pics_v3`; `RUN_TAG=g5e50p30_occurrence_eb_pics_v3` |
 | Per-person W&B | **local CSV/JSON + dirs remain authoritative**; W&B keeps one `final/participant_table` and fixed keys (`dataset`, `status/*`, `progress/*`, `gate/*`, `final/*`, `global/*`, `g2/*`, `participant/*`). **No** dynamic Runs-table scalars `p{pid}/*` / `p{pid}_*` (reporting-only filter in `t_pics_gated_wandb.py`; G.1 skips those uploads). Historical W&B runs unchanged. |
 
 Local CSVs / `INTENDED_ARGV.txt` / `log/run_metadata.json` are provenance;
@@ -525,8 +529,9 @@ TP=4; dtype BF16 (L40S/H100). Seeds: `split_seed=0`; phase decoding seeds as in
 gated helpers (`split_seed+80_000+…`).
 
 **Baselines:** Centaur / LM / PT / OpenEvolve may **share** `structure_aware_v3`
-and Qwen 32768/30000/1024 but are **not** PICS. Do not rename OE outputs
-`pics_v3`. OE search (350 iterations, official packing) is a separate baseline.
+but keep their own ceilings (OE frozen **32768/30000/1024**) and are **not**
+PICS. Do not rename OE outputs `pics_v3`. OE search (350 iterations, official
+packing) is a separate baseline.
 
 ---
 
@@ -534,13 +539,13 @@ and Qwen 32768/30000/1024 but are **not** PICS. Do not rename OE outputs
 
 | Surface | EMNLP PICS | v1 gated T-PICS | Preliminary v2 | **PICS v3 (final)** |
 | --- | --- | --- | --- | --- |
-| Datasets / ordinals | EMNLP table | same 15 + ordinals | same | same |
+| Datasets / ordinals | EMNLP table | same 15 + ordinals | same | **first 30** where table was 50 |
 | Protocol | full / early sparse | `structure_aware` | `structure_aware_v2` | **`structure_aware_v3`** |
 | Snapshots | compact one-liners (v1) | one-liners | JSON snapshots | JSON snapshots |
-| vLLM / hard / out | smaller | 16k-class / 14k / 1024 | 16384 / 14000 / 1024 | **32768 / 30000 / 1024** |
+| vLLM / hard / out | smaller | 16k-class / 14k / 1024 | 16384 / 14000 / 1024 | **16384 / 14000 / 1024** (30 people) |
 | `max_parent_chars` | varies | 3500 | 3500 | **5000** |
 | Enkavi `probe_in_set` | risk of leak | sanitized in later code | sanitized | sanitized + full 15 G.1 rerun |
-| G.2 packing | n/a / older | unmatched risk | `g2_paired_pack_v1` @14k | **`g2_paired_pack_pics_v3` @30k**, `paired_parent_count` |
+| G.2 packing | n/a / older | unmatched risk | `g2_paired_pack_v1` @14k | **`g2_paired_pack_pics_v3` @14k**, `paired_parent_count` |
 | G.1 kind / path | older | `t_pics_source_pop10` | `t_pics_g1_sa40_v2` | **`pics_v3_g1`** |
 | Gated kind | n/a | `t_pics_gated` | `t_pics_gated_sa40_v2` | **`pics_v3`** |
 | Source YAML | n/a | `occurrence_eb_schema4_iter10.yaml` | `Transfer_source/v2/..._sa40_v2.yaml` | **`Transfer_source/pics_v3/..._pics_v3.yaml` (frozen)** |
@@ -573,19 +578,19 @@ protocol / packing / W&B code.
 | v1 §3 default vs independent | **Updated** — independent remains optional; default after v3 map reuses **v3** G.1 rank-1 |
 | v1 §4 / freeze Occurrence-EB + motifs | **Retained unchanged** scientifically; **updated** paths to planned `pics_v3` package; v1 numbers labeled historical |
 | v1 §5 G.1 | **Updated** — final G.1 is `pics_v3_g1` global-only; not YAML-bootstrap |
-| v1 §6 G.2 arms | **Updated** — protocol v3, 30k/5k, `g2_paired_pack_pics_v3` |
+| v1 §6 G.2 arms | **Updated** — protocol v3, 14k/5k, `g2_paired_pack_pics_v3` |
 | v1 §7 gate | **Changed in v3** — count-pooled TV (same as G.2 ranking); equal-person mean removed from the gate; tie rule unchanged |
 | v1 §8 G.3 | **Retained unchanged** (50 from rank-1, no source suffix) |
 | v1 §9 person evolution | **Retained unchanged** knobs; protocol/context v3 |
 | v1 §10–11 SA40 / which trials | **Updated** → `structure_aware_v3` / training-only SA40 |
-| v1 §12 production knobs | **Updated** — 30000/5000; KIND `pics_v3` |
+| v1 §12 production knobs | **Updated** — 14000/5000; KIND `pics_v3` |
 | v1 §13 diagnostic test policy | **Retained unchanged** |
 | v1 §14 outputs / W&B / resume | **Updated** — kinds/paths/W&B project; metrics names retained |
 | v1 §15–18 CLI / commands / warnings | **Superseded** by v3 submitters; not copied as normative commands |
 | v1 §19 checklist | **Updated** into sections A–M |
 | v1 §21 splits/histories | **Updated** — snapshots replace one-line prompt notes; independent empty history |
 | v2 §1–4 SA40 / histories / Kool | **Updated** into §B (v3 flag; same data path as v2) |
-| v2 §7–9 prompt / packing / auto prompt | **Updated** into §C–D (30k/5k; fail-closed G.1) |
+| v2 §7–9 prompt / packing / auto prompt | **Updated** into §C–D (14k/5k; trial-first truncate; fail-closed G.1) |
 | v2 §11–12 OpenEvolve / versioning | **Baselines only** / frozen non-final list |
 | v2 G.2 14k pack | **Superseded** by `g2_paired_pack_pics_v3` |
 | v1 target→source identity table | **Superseded** — use `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` |

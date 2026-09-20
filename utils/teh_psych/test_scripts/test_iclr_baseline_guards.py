@@ -929,7 +929,7 @@ def test_frozen_iclr_openevolve_cli_defaults():
 
 def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():
     expected = {
-        "4wulff2018description": (1290, 1339),
+        "4wulff2018description": (1290, 1319),
         "5speekenbrink2008learning": (0, 22),
         "12badham2017deficits": (0, 9),
     }

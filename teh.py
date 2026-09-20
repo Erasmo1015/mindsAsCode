@@ -5489,16 +5489,13 @@ def _truncate_psych_prompt_to_budget(
     steps.append("strip_parent_comments")
     prompt, _, _, n_train, n_val, n_parents = _assemble()
 
-    # 3) drop extra parents (keep >=1)
-    while len(parents) > 1 and estimate_tokens(prompt, estimator=prompt_token_estimator) > hard_prompt_token_cap:
-        parents = parents[:-1]
-        steps.append("drop_extra_parent")
-        prompt, _, _, n_train, n_val, n_parents = _assemble()
-
-    # 4) trial caps (monotone 40 -> 30 -> 20 -> 10 -> 5)
-    # Frozen G.2 examples skip this ladder so both arms keep the same IDs.
+    # 3) whole-trial drops (monotone caps) before dropping parent copies.
+    # Frozen G.2 examples skip this ladder so both arms keep the same IDs;
+    # freeze already chose the max trial prefix under the transfer budget.
     if not freeze_examples:
         for cap in _TRAIN_TRIAL_CAP_STEPS:
+            if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+                break
             if use_shared_trial_budget:
                 effective_max_total = (
                     min(effective_max_total, cap) if effective_max_total > 0 else cap
@@ -5509,30 +5506,34 @@ def _truncate_psych_prompt_to_budget(
                 )
             steps.append(f"train_trials_cap_{cap}")
             prompt, _, _, n_train, n_val, n_parents = _assemble()
-            if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
-                break
 
-        # 5) per-problem caps (when flat sampling was used, enable block caps under budget pressure)
+        # 4) per-problem caps (when flat sampling was used, enable block caps under budget pressure)
         if max_prompt_trials_per_problem <= 0:
             for cap in _PER_PROBLEM_CAP_STEPS:
+                if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
+                    break
                 effective_per_problem = cap
                 steps.append(f"per_problem_cap_{cap}")
                 prompt, _, _, n_train, n_val, n_parents = _assemble()
-                if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
-                    break
 
-        # 6) compact serialization (v1 only: rewrite trials as one-liners).
-        # v2 keeps snapshot JSON and continues dropping trial counts instead.
-        if not compact and not using_v2_prompt_contract():
+        # 5) compact serialization (v1 only: rewrite trials as one-liners).
+        # v2/v3 keep snapshot JSON and continue dropping trial counts instead.
+        if (
+            estimate_tokens(prompt, estimator=prompt_token_estimator) > hard_prompt_token_cap
+            and not compact
+            and not using_v2_prompt_contract()
+        ):
             compact = True
             steps.append("compact_trial_serialization")
             prompt, _, _, n_train, n_val, n_parents = _assemble()
 
-        # 7) val-only trial caps when train and val are capped separately
+        # 6) val-only trial caps when train and val are capped separately
         if not use_shared_trial_budget:
             min_val = _MIN_VAL_TRIALS_REFINEMENT if refinement_val_observations else 1
             for cap in _VAL_TRIAL_CAP_STEPS:
                 if val_trials_source is None:
+                    break
+                if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
                     break
                 next_cap = max(cap, min_val) if refinement_val_observations else cap
                 effective_max_val = (
@@ -5540,8 +5541,12 @@ def _truncate_psych_prompt_to_budget(
                 )
                 steps.append(f"val_trials_cap_{effective_max_val}")
                 prompt, _, _, n_train, n_val, n_parents = _assemble()
-                if estimate_tokens(prompt, estimator=prompt_token_estimator) <= hard_prompt_token_cap:
-                    break
+
+    # 7) drop extra parents (keep >=1) — after whole-trial drops when not frozen
+    while len(parents) > 1 and estimate_tokens(prompt, estimator=prompt_token_estimator) > hard_prompt_token_cap:
+        parents = parents[:-1]
+        steps.append("drop_extra_parent")
+        prompt, _, _, n_train, n_val, n_parents = _assemble()
 
     # 8) parent char truncation (comments already stripped)
     if max_parent_chars > 0:

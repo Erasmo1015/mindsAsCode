@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded CPU exact-tokenizer prompt-budget audit for PICS v3 (no GPU/Slurm).
 
-Audits G.1-style prompts under structure_aware_v3 + 30000/5000 for all 15
+Audits G.1-style prompts under structure_aware_v3 + 14000/5000 for all 15
 datasets. G.2 transfer uses preliminary source programs for preflight only;
 regenerate after final pics_v3 Occurrence-EB.
 """
@@ -222,8 +222,8 @@ def _audit_g1(alias: str) -> List[Dict[str, Any]]:
                 "parents_retained": parents_after,
                 "final_chat_template_tokens": tokens,
                 "input_plus_1024": tokens + LLM_MAX_TOKENS,
-                "fits_30000": tokens <= HARD_PROMPT_TOKEN_CAP,
-                "fits_32768": tokens + LLM_MAX_TOKENS <= VLLM_MAX_MODEL_LEN,
+                "fits_14000": tokens <= HARD_PROMPT_TOKEN_CAP,
+                "fits_16384": tokens + LLM_MAX_TOKENS <= VLLM_MAX_MODEL_LEN,
                 "examples_removed": removed_ex,
                 "parent_copies_compacted_at_5000": bool(parent_clipped),
                 "trim_steps": ",".join(steps) if steps else "none",
@@ -246,7 +246,7 @@ def main() -> int:
         w.writeheader()
         w.writerows(all_rows)
     print(f"wrote {OUT} n={len(all_rows)}")
-    fails = [r for r in all_rows if not r["fits_30000"] or not r["fits_32768"]]
+    fails = [r for r in all_rows if not r["fits_14000"] or not r["fits_16384"]]
     if fails:
         print("OVER_BUDGET:")
         for r in fails:

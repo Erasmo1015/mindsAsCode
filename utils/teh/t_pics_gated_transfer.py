@@ -897,7 +897,7 @@ def _char4_tokens(text: str) -> int:
 def audit_gated_transfer_prompt_budgets(
     *,
     config: Optional[FrozenTransferConfig] = None,
-    hard_prompt_token_cap: int = 30000,
+    hard_prompt_token_cap: int = 14000,
     max_parent_chars: int = 5000,
     sample_size: int = 8,
     max_prompt_train_trials: int = 60,

@@ -1,85 +1,88 @@
 # PICS v3 G.1 source-pop registry for Schema v5 annotation (five constructs).
-# Same G.1 job paths as config_pics_v3_schema4.yaml; taxonomy is schema 5 /
-# population_transition_v5. Does not overwrite schema-v4 annotation trees.
+# Lineage: g5e50p30 (first-30 ordinals, max_model_len 16k, trial-first truncate).
+# Separate from the frozen 50-person G.1 registry in config_pics_v3_schema4.yaml
+# and analysis/config/T-PICS/pics_v3/g1_job_paths.tsv (jobs 259052–259197).
+# Path ledger: g1_job_paths_g5e50p30.tsv
 #
 step1:
   protocol: structure_aware_v3
   limited_train_val: 40
   kind: pics_v3_g1
+  run_tag: g5e50p30_occurrence_eb_pics_v3
   gpu: h100nvl
   source_pops:
     1peterson2021using:
-      job_id: '259052'
+      job_id: '265753'
       phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052
-      best_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_259052/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_265753
+      best_program: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3_g1/job_265753/global_phase/best_program.py
     2plonsky2018when:
-      job_id: '259053'
+      job_id: '265754'
       phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3_g1/job_259053
-      best_program: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3_g1/job_259053/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3_g1/job_265754
+      best_program: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3_g1/job_265754/global_phase/best_program.py
     3frey2017cct:
-      job_id: '259054'
+      job_id: '265755'
       phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054
-      best_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_259054/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_265755
+      best_program: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3_g1/job_265755/global_phase/best_program.py
     4wulff2018description:
-      job_id: '259055'
+      job_id: '265756'
       phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055
-      best_program: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_259055/global_phase/best_program.py
+      run_dir: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_265756
+      best_program: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_265756/global_phase/best_program.py
     5speekenbrink2008learning:
-      job_id: '259056'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_259056
-      best_program: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_259056/global_phase/best_program.py
+      job_id: '265757'
+      phase: RUNNING
+      run_dir: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_265757
+      best_program: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_265757/global_phase/best_program.py
     7hilbig2014generalized:
-      job_id: '259057'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_259057
-      best_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_259057/global_phase/best_program.py
+      job_id: '265758'
+      phase: RUNNING
+      run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_265758
+      best_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_265758/global_phase/best_program.py
     10frey2017risk:
-      job_id: '259058'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_259058
-      best_program: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_259058/global_phase/best_program.py
+      job_id: '265759'
+      phase: RUNNING
+      run_dir: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_265759
+      best_program: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_265759/global_phase/best_program.py
     11enkavi2019recentprobes:
-      job_id: '259059'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_259059
-      best_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_259059/global_phase/best_program.py
+      job_id: '265760'
+      phase: RUNNING
+      run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_265760
+      best_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_265760/global_phase/best_program.py
     12badham2017deficits:
-      job_id: '259191'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_259191
-      best_program: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_259191/global_phase/best_program.py
-    mixed_gambles:
-      job_id: '259192'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_259192
-      best_program: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_259192/global_phase/best_program.py
-    bergert_nosofsky_2007:
-      job_id: '259193'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_259193
-      best_program: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_259193/global_phase/best_program.py
-    guan_2020_stopping:
-      job_id: '259194'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_259194
-      best_program: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_259194/global_phase/best_program.py
-    steyvers_2009_bandit:
-      job_id: '259195'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_259195
-      best_program: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_259195/global_phase/best_program.py
+      job_id: '265761'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_265761
+      best_program: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_265761/global_phase/best_program.py
     13schulz2020finding:
-      job_id: '259196'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_259196
-      best_program: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_259196/global_phase/best_program.py
+      job_id: '265766'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_265766
+      best_program: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_265766/global_phase/best_program.py
     14kool2016when:
-      job_id: '259197'
-      phase: COMPLETE
-      run_dir: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_259197
-      best_program: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_259197/global_phase/best_program.py
+      job_id: '265767'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_265767
+      best_program: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_265767/global_phase/best_program.py
+    bergert_nosofsky_2007:
+      job_id: '265763'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_265763
+      best_program: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_265763/global_phase/best_program.py
+    guan_2020_stopping:
+      job_id: '265764'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_265764
+      best_program: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_265764/global_phase/best_program.py
+    steyvers_2009_bandit:
+      job_id: '265765'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_265765
+      best_program: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_265765/global_phase/best_program.py
+    mixed_gambles:
+      job_id: '265762'
+      phase: PENDING
+      run_dir: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_265762
+      best_program: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_265762/global_phase/best_program.py

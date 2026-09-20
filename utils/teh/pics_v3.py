@@ -19,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 KIND = "pics_v3"
 G1_KIND = "pics_v3_g1"
 INDEPENDENT_KIND = "pics_v3_independent"
-RUN_TAG = "g5e50p10_occurrence_eb_pics_v3"
+RUN_TAG = "g5e50p30_occurrence_eb_pics_v3"
 ANNOTATION_PACKAGE = "pics_v3_g1_schema_v4"  # legacy completed package
 ANNOTATION_PACKAGE_V5 = "pics_v3_g1_schema_v5"
 
@@ -27,9 +27,10 @@ LIMITED_DATA_PROTOCOL = "structure_aware_v3"
 LIMITED_TRAIN_VAL = 40
 
 # Qwen2.5-Coder-32B-Instruct production context (fully chat-templated).
+# 16k-class ceiling (preliminary-v2 pair): 14000 input + 1024 out ≤ 16384.
 MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
-VLLM_MAX_MODEL_LEN = 32_768
-HARD_PROMPT_TOKEN_CAP = 30_000
+VLLM_MAX_MODEL_LEN = 16_384
+HARD_PROMPT_TOKEN_CAP = 14_000
 LLM_MAX_TOKENS = 1_024
 MAX_PARENT_CHARS = 5_000
 MAX_PROMPT_TRAIN_TRIALS = 60

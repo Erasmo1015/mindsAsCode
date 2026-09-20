@@ -1,4 +1,4 @@
-"""ICLR PICS v3: structure_aware_v3, 30k/5k context, parent cap, Enkavi oracle."""
+"""ICLR PICS v3: structure_aware_v3, 14k/16k context, parent cap, Enkavi oracle."""
 from __future__ import annotations
 
 import argparse
@@ -74,9 +74,9 @@ def test_pics_v3_constants_and_defaults():
     assert G1_KIND == "pics_v3_g1"
     assert INDEPENDENT_KIND == "pics_v3_independent"
     assert LIMITED_DATA_PROTOCOL == "structure_aware_v3"
-    assert HARD_PROMPT_TOKEN_CAP == 30_000
+    assert HARD_PROMPT_TOKEN_CAP == 14_000
     assert MAX_PARENT_CHARS == 5_000
-    assert VLLM_MAX_MODEL_LEN == 32_768
+    assert VLLM_MAX_MODEL_LEN == 16_384
     assert PRELIMINARY_V2_HARD_PROMPT_TOKEN_CAP == 14_000
     assert PRELIMINARY_V2_MAX_PARENT_CHARS == 3_500
     assert GATED_KIND == KIND
@@ -95,7 +95,7 @@ def test_pics_v3_constants_and_defaults():
         t_pics_source_config=None,
         limited_data_protocol="off",
         limited_train_val=None,
-        hard_prompt_token_cap=14000,
+        hard_prompt_token_cap=8000,
         max_parent_chars=3500,
         llm_max_tokens=800,
         max_prompt_train_trials=40,
@@ -105,7 +105,7 @@ def test_pics_v3_constants_and_defaults():
     )
     apply_gated_cli_defaults(ns, argv=["--t_pics_gated_transfer"])
     assert ns.limited_data_protocol == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
-    assert ns.hard_prompt_token_cap == 30_000
+    assert ns.hard_prompt_token_cap == 14_000
     assert ns.max_parent_chars == 5_000
     assert ns.llm_max_tokens == 1024
     assert ns.max_prompt_train_trials == 60
@@ -124,7 +124,7 @@ def test_teh_cli_pics_v3_token_defaults():
     p.add_argument("--max_prompt_train_trials", type=int, default=60)
     args = p.parse_args([])
     assert args.limited_data_protocol == "structure_aware_v3"
-    assert args.hard_prompt_token_cap == 30_000
+    assert args.hard_prompt_token_cap == 14_000
     assert args.max_parent_chars == 5_000
     assert args.llm_max_tokens == 1024
     assert args.max_prompt_train_trials == 60
@@ -141,13 +141,13 @@ def test_effective_hard_prompt_token_cap_matches_llm_max_tokens():
         effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, OUTPUT_RESERVE)
         == HARD_PROMPT_TOKEN_CAP
     )
-    assert effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, 1024) == 30_000
+    assert effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, 1024) == 14_000
     assert (
         effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, 4096)
         == VLLM_CONTEXT - 4096
-        == 28_672
+        == 12_288
     )
-    assert effective_hard_prompt_token_cap(20_000, 4096) == 20_000
+    assert effective_hard_prompt_token_cap(10_000, 4096) == 10_000
     with pytest.raises(ValueError):
         effective_hard_prompt_token_cap(HARD_PROMPT_TOKEN_CAP, VLLM_CONTEXT)
     with pytest.raises(ValueError):
@@ -256,6 +256,83 @@ def test_preliminary_v2_parent_cap_unchanged():
     assert clipped_v2 is True
     _, clipped_v3 = _truncate_parent_program_for_prompt(code, MAX_PARENT_CHARS)
     assert clipped_v3 is False
+
+
+def test_v3_truncation_drops_trials_before_extra_parents(monkeypatch):
+    """Non-frozen overflow: whole-trial caps before drop_extra_parent; no compact rewrite."""
+    import teh
+    from utils.teh.prompt_snapshots import prompt_contract_scope, stamp_prompt_participant_id
+
+    def fake_estimate(text, *, estimator="char4"):
+        # Stay over budget until trials are capped AND at least one parent dropped.
+        n_ex = text.count("### example")
+        n_parents = text.count("PARENT_COPY_")
+        if n_ex > 30:
+            return 20_000
+        if n_parents > 1:
+            return 15_000
+        return 1_000
+
+    monkeypatch.setattr(teh, "estimate_tokens", fake_estimate)
+    trials = []
+    for i in range(80):
+        trials.append(
+            stamp_prompt_participant_id(
+                {
+                    "problem": {
+                        "dataset_alias": "7hilbig2014generalized",
+                        "option_keys": [0, 1],
+                    },
+                    "action": 0,
+                    "history": [{"action": 0, "reward": 1}],
+                    "split": "train",
+                },
+                i % 10,
+            )
+        )
+    parents = [
+        f"def choose(problem, history):\n    marker = 'PARENT_COPY_{i}'\n    return {i}\n"
+        for i in range(3)
+    ]
+
+    def _parent_ctx(*, prompt_parent_programs, **_):
+        return "\n".join(prompt_parent_programs)
+
+    with prompt_contract_scope(True):
+        prompt, diag, steps = teh._truncate_psych_prompt_to_budget(
+            base_prompt="TASK",
+            train_trials=trials[:60],
+            train_trials_source=trials,
+            val_trials=None,
+            val_trials_source=None,
+            extra_prompt_trials_label="validation",
+            parent_programs=parents,
+            parent_context_builder=_parent_ctx,
+            parent_context_kwargs={},
+            code_template_suffix="TEMPLATE",
+            candidate_output_rules="RULES",
+            dataset="7hilbig2014generalized",
+            dataset_type="7hilbig2014generalized",
+            hard_prompt_token_cap=HARD_PROMPT_TOKEN_CAP,
+            prompt_token_estimator="char4",
+            max_prompt_train_trials=60,
+            max_prompt_trials_per_problem=5,
+            prompt_train_trials_seed=0,
+            max_parent_chars=MAX_PARENT_CHARS,
+            refinement_val_observations=False,
+            pre_capped_train=False,
+            pre_capped_val=False,
+        )
+
+    trial_idxs = [i for i, s in enumerate(steps) if s.startswith("train_trials_cap_")]
+    parent_idxs = [i for i, s in enumerate(steps) if s == "drop_extra_parent"]
+    assert trial_idxs, steps
+    assert parent_idxs, steps
+    assert trial_idxs[0] < parent_idxs[0], steps
+    assert "compact_trial_serialization" not in steps
+    assert diag.get("compact_serialization") is False
+    assert "### example" in prompt
+    assert diag["parents_after"] < diag["parents_before"]
 
 
 def test_enkavi_no_probe_in_set_in_prompts_and_sanitize():

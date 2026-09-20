@@ -25,14 +25,15 @@ from utils.teh.prompt_snapshots import (
 )
 
 PROMPT_DISPLAY_CEILING = 60
-# Final PICS v3 Qwen chat-templated ceilings (supersede preliminary-v2 14k/16k).
-QWEN_INPUT_CEILING = 30_000
+# Final PICS v3 Qwen chat-templated ceilings (16k-class; was briefly 30k/32k).
+QWEN_INPUT_CEILING = 14_000
 # Default twin of PICS v3 ``LLM_MAX_TOKENS`` / ``--llm_max_tokens`` when unset.
 # Live packing must use the CLI ``--llm_max_tokens`` (via ``output_reserve`` /
 # ``effective_hard_prompt_token_cap``), not this constant alone.
 OUTPUT_RESERVE = 1_024
-VLLM_CONTEXT = 32_768
-# Frozen preliminary-v2 ceilings (audits / replay only; do not use as production default).
+VLLM_CONTEXT = 16_384
+# Frozen preliminary-v2 ceilings (audits / replay only; same numeric pair as
+# current production defaults — kept for explicit historical naming).
 PRELIMINARY_V2_QWEN_INPUT_CEILING = 14_000
 PRELIMINARY_V2_VLLM_CONTEXT = 16_384
 
@@ -46,7 +47,7 @@ def effective_hard_prompt_token_cap(
     """Input budget that still leaves ``llm_max_tokens`` room in ``vllm_context``.
 
     ``min(hard_prompt_token_cap, vllm_context - llm_max_tokens)``. Under PICS v3
-    defaults (30000 / 1024 / 32768) this equals 30000 unchanged.
+    defaults (14000 / 1024 / 16384) this equals 14000 unchanged.
     """
     hard = int(hard_prompt_token_cap)
     reserved = int(llm_max_tokens)

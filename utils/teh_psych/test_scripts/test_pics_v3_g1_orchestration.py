@@ -34,7 +34,7 @@ DATASETS = [
 ]
 
 EXPECTED_RANGES = {
-    "4wulff2018description": (1290, 1339),
+    "4wulff2018description": (1290, 1319),
     "5speekenbrink2008learning": (0, 22),
     "12badham2017deficits": (0, 9),
 }
@@ -168,7 +168,7 @@ def test_pics_v3_g1_fifteen_commands_and_ranges(g1_commands):
         assert _flag_value(argv, "--participant_scope") == "range"
         expected = EXPECTED_RANGES.get(ds)
         if expected is None:
-            expected = (0, 49)
+            expected = (0, 29)
         assert (start, end) == expected, ds
         assert (start, end) == emnlp_ordinal_range(ds), ds
     assert seen == DATASETS
@@ -182,7 +182,7 @@ def test_pics_v3_g1_required_settings_and_auto_prompt(g1_commands):
         assert "--require_auto_llm_prompt" not in argv
         assert "--dataset_prompt_file" not in argv
         assert _flag_value(argv, "--limited_data_protocol") == "structure_aware_v3"
-        assert _flag_value(argv, "--hard_prompt_token_cap") == "30000"
+        assert _flag_value(argv, "--hard_prompt_token_cap") == "14000"
         assert _flag_value(argv, "--llm_max_tokens") == "1024"
         assert _flag_value(argv, "--max_parent_chars") == "5000"
         assert _flag_value(argv, "--n_eval_seeds") == "1"
@@ -312,7 +312,7 @@ def test_pics_v3_g1_accepted_by_teh_parser(g1_commands):
     for argv in g1_commands:
         ns = _parse_teh_argv(argv)
         assert ns.limited_data_protocol == "structure_aware_v3"
-        assert int(ns.hard_prompt_token_cap) == 30000
+        assert int(ns.hard_prompt_token_cap) == 14000
         assert int(ns.llm_max_tokens) == 1024
         assert int(ns.max_parent_chars) == 5000
         assert int(ns.n_eval_seeds) == 1
