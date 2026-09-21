@@ -36,12 +36,12 @@ log-likelihood is computed only after evolution on the participant's
 best-by-observed-union program.
 
 OpenEvolve still uses islands / MAP-Elites / archive for parent selection. The LLM
-sees one current mutable parent plus official optional contextual blocks when they
-fit the 14000-token Qwen input ceiling: previous-attempt history, artifacts when
-include_artifacts is on, num_top_programs=3, leftover diverse programs via official
-random.sample, then num_diverse_programs=2 island inspirations (not co-parents).
-Observed train+val examples outrank optional context. Optional blocks are dropped
-before examples are reduced. The complete MAP-Elites database is never serialized.
+sees one current mutable parent. Official optional contextual blocks (previous
+attempts, artifacts, top/diverse programs, island inspirations) default OFF for
+ICLR lean runs (matched to EMNLP production: num_top=0, num_diverse=0,
+include_artifacts=False, enable_artifacts=False, no previous-attempt history).
+They remain CLI-toggleable. Observed train+val examples fill the prompt. The
+complete MAP-Elites database is never serialized.
 
 ICLR freeze (matched to PICS v3 g5e50p30): --n_iterations 350, --parallel_participants 1,
 --parallel_evaluations 10, SA40 (--limited_data_protocol structure_aware_v3
@@ -186,8 +186,15 @@ ICLR_FROZEN_SPLIT_RATIO = 0.6
 ICLR_FROZEN_SPLIT_SEED = 0
 ICLR_FROZEN_LLM_MAX_TOKENS = 1024
 ICLR_FROZEN_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
-ICLR_FROZEN_NUM_DIVERSE_PROGRAMS = 2  # official OpenEvolve PromptConfig default
-ICLR_FROZEN_NUM_TOP_PROGRAMS = 3  # official PromptConfig default; worker injects via top_programs=
+# Official OpenEvolve PromptConfig defaults are 3/2/True; ICLR lean freeze turns
+# those optional contextual blocks OFF (EMNLP production used 1/0/False; we go
+# fully off so prompts stay parent+task+examples only).
+ICLR_FROZEN_NUM_DIVERSE_PROGRAMS = 0
+ICLR_FROZEN_NUM_TOP_PROGRAMS = 0
+ICLR_FROZEN_INCLUDE_ARTIFACTS = False
+ICLR_FROZEN_ENABLE_ARTIFACTS = False
+ICLR_FROZEN_INCLUDE_PREVIOUS_ATTEMPTS = False
+ICLR_FROZEN_LOG_PROMPTS = False
 # Active freeze = PICS v3 16k-class pair (14000 input + 1024 out ≤ 16384).
 ICLR_FROZEN_INPUT_TOKEN_CEILING = 14000
 ICLR_FROZEN_VLLM_MAX_MODEL_LEN = 16384
@@ -196,7 +203,6 @@ ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING = 30000
 ICLR_HISTORICAL_32K_VLLM_MAX_MODEL_LEN = 32768
 # Alias kept for older imports/tests that named the 14k cap "preliminary-v2".
 ICLR_PRELIMINARY_V2_INPUT_TOKEN_CEILING = ICLR_FROZEN_INPUT_TOKEN_CEILING
-ICLR_FROZEN_INCLUDE_ARTIFACTS = True  # official PromptConfig.include_artifacts default
 ICLR_FROZEN_MAX_PROGRAM_CHARS = 10000  # audited production bound for packing tests
 EXPECTED_OPENEVOLVE_GIT_SHA = "411fb59c886c18704caaffb611e17cf9e7d824d2"
 # Token-budget example ladder used only after all optional contextual blocks are omitted.
@@ -519,6 +525,11 @@ def iclr_frozen_argv(dataset: str, *, api_base: str = "http://localhost:8000/v1"
         str(ICLR_FROZEN_NUM_DIVERSE_PROGRAMS),
         "--num_top_programs",
         str(ICLR_FROZEN_NUM_TOP_PROGRAMS),
+        "--no-include_artifacts",
+        "--no-enable_artifacts",
+        "--no-include_previous_attempts",
+        "--no-cascade_evaluation",
+        "--no-use_llm_feedback",
         "--limited_data_protocol",
         ICLR_DEFAULT_LIMITED_DATA_PROTOCOL,
         "--limited_train_val",
@@ -1678,6 +1689,7 @@ def _patched_build_prompt(
     num_top = int(getattr(cfg, "num_top_programs", ICLR_FROZEN_NUM_TOP_PROGRAMS))
     num_diverse = int(getattr(cfg, "num_diverse_programs", ICLR_FROZEN_NUM_DIVERSE_PROGRAMS))
     include_artifacts = bool(getattr(cfg, "include_artifacts", ICLR_FROZEN_INCLUDE_ARTIFACTS))
+    include_previous = bool(ctx.get("include_previous_attempts", ICLR_FROZEN_INCLUDE_PREVIOUS_ATTEMPTS))
     top, diverse, insp = split_official_optional_programs(
         kwargs.get("top_programs") or [],
         kwargs.get("inspirations") or [],
@@ -1685,6 +1697,7 @@ def _patched_build_prompt(
         num_diverse=num_diverse,
     )
     artifacts = kwargs.get("program_artifacts") if include_artifacts else None
+    previous_programs = (kwargs.get("previous_programs") or []) if include_previous else []
     try:
         prompt, state = truncate_vanilla_messages(
             task_text=task_text,
@@ -1700,7 +1713,7 @@ def _patched_build_prompt(
             top_programs=top,
             diverse_programs=diverse,
             inspirations=insp,
-            previous_programs=kwargs.get("previous_programs") or [],
+            previous_programs=previous_programs,
             artifacts=artifacts if isinstance(artifacts, dict) else None,
         )
     except RequiredPromptOverflowError:
@@ -1937,6 +1950,9 @@ class VanillaProcessParallelController(ProcessParallelController):
             "n_actions": ctx.get("n_actions"),
             "interface_text": ctx.get("interface_text"),
             "diagnostics_path": ctx.get("diagnostics_path"),
+            "include_previous_attempts": bool(
+                ctx.get("include_previous_attempts", ICLR_FROZEN_INCLUDE_PREVIOUS_ATTEMPTS)
+            ),
         }
         return snap
 
@@ -2199,7 +2215,7 @@ def _build_config(args, iterations: int) -> Config:
     cfg.prompt.num_top_programs = args.num_top_programs
     cfg.prompt.num_diverse_programs = args.num_diverse_programs
     cfg.prompt.include_artifacts = args.include_artifacts
-    cfg.prompt.use_template_stochasticity = False
+    cfg.prompt.use_template_stochasticity = False  # official optional; always off
     cfg.database.population_size = args.population_size
     cfg.database.archive_size = args.archive_size
     cfg.database.num_islands = args.num_islands
@@ -2210,7 +2226,7 @@ def _build_config(args, iterations: int) -> Config:
     cfg.database.migration_rate = args.migration_rate
     cfg.database.feature_dimensions = list(args.feature_dimensions)
     cfg.database.feature_bins = args.feature_bins
-    cfg.database.log_prompts = True
+    cfg.database.log_prompts = bool(args.log_prompts)
     cfg.database.random_seed = args.random_seed
 
     cfg.evaluator.timeout = args.evaluator_timeout
@@ -2385,6 +2401,7 @@ def run_participant(
         "max_model_len": args.max_model_len,
         "diagnostics_path": str(diagnostics_path),
         "categorical": categorical,
+        "include_previous_attempts": bool(args.include_previous_attempts),
     }
 
     oe_output = participant_dir / "openevolve_output"
@@ -2655,14 +2672,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=ICLR_FROZEN_NUM_DIVERSE_PROGRAMS,
         help=(
-            "Official OpenEvolve inspiration count (contextual examples, not co-parents). "
-            "Default 2 matches PromptConfig.num_diverse_programs at 411fb59."
+            "Official OpenEvolve inspiration/diverse count (contextual examples, not co-parents). "
+            "ICLR lean default 0 (official PromptConfig default at 411fb59 is 2)."
         ),
     )
-    p.add_argument("--include_artifacts", action=argparse.BooleanOptionalAction, default=ICLR_FROZEN_INCLUDE_ARTIFACTS)
-    p.add_argument("--use_llm_feedback", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--cascade_evaluation", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--enable_artifacts", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--include_artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=ICLR_FROZEN_INCLUDE_ARTIFACTS,
+        help="Official optional: render parent evaluation artifacts into the prompt. Lean default off.",
+    )
+    p.add_argument(
+        "--include_previous_attempts",
+        action=argparse.BooleanOptionalAction,
+        default=ICLR_FROZEN_INCLUDE_PREVIOUS_ATTEMPTS,
+        help="Official optional: inject previous_programs history into the prompt. Lean default off.",
+    )
+    p.add_argument(
+        "--use_llm_feedback",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Official optional: extra LLM code-quality scoring. Always off for ICLR.",
+    )
+    p.add_argument(
+        "--cascade_evaluation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Official optional: multi-stage cascade evaluation. Always off for ICLR.",
+    )
+    p.add_argument(
+        "--enable_artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=ICLR_FROZEN_ENABLE_ARTIFACTS,
+        help="Official optional: capture evaluator artifacts side-channel. Lean default off.",
+    )
+    p.add_argument(
+        "--log_prompts",
+        action=argparse.BooleanOptionalAction,
+        default=ICLR_FROZEN_LOG_PROMPTS,
+        help="Official optional: store full prompts in the OE database. Lean default off.",
+    )
     p.add_argument("--feature_dimensions", nargs="+", type=str, default=["complexity", "diversity"])
     p.add_argument("--feature_bins", type=int, default=10)
     p.add_argument("--early_stopping_patience", type=int, default=None)

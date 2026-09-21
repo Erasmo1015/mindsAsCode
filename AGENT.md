@@ -675,4 +675,9 @@ Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first
 
 Submit gated: `DRY_RUN=0 CONFIRM_SUBMIT=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh` (defaults to schema5 YAML).
 
+---
+
+## Short update (Sep 21 2026 — participant transition Schema v5)
+
+Population schema5 does **not** cover person MEM. Legacy annotate is still v3 (`risk`/`other_behavioral`). Added versioned `participant_transition_v5` (`utils/mem/schema_participant_transition_v5.py`; `--schema_version 5` → `annotations_v5.jsonl`): five constructs, global resume keys, strict official reference (no silent parent fallback), ΔF consistency, retained-construct `eligible_*_modified`, joint `--eligibility_mode restrict`. Audit: `…/source_selection_schema_v5/report/PARTICIPANT_TRANSITION_SCHEMA_V5_AUDIT.md`. Full person annot **not** started (pilot after main experiments).
 

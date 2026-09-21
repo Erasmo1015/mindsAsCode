@@ -166,14 +166,17 @@ def _assert_required(
     return n
 
 
-def test_official_inspiration_default_is_two_not_zero():
+def test_official_optional_blocks_default_off_for_lean_iclr():
     args = build_arg_parser().parse_args([])
-    assert args.num_diverse_programs == ICLR_FROZEN_NUM_DIVERSE_PROGRAMS == 2
-    assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 3
+    assert args.num_diverse_programs == ICLR_FROZEN_NUM_DIVERSE_PROGRAMS == 0
+    assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 0
     assert args.max_prompt_train_trials == ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS == 60
     assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
     assert args.llm_max_tokens == ICLR_FROZEN_LLM_MAX_TOKENS == 1024
-    assert args.include_artifacts is ICLR_FROZEN_INCLUDE_ARTIFACTS is True
+    assert args.include_artifacts is ICLR_FROZEN_INCLUDE_ARTIFACTS is False
+    assert args.enable_artifacts is False
+    assert args.include_previous_attempts is False
+    assert args.log_prompts is False
     assert args.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 16384
 
 

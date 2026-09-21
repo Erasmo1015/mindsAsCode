@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Fit joint multi-motif MixedLM with participant random slopes.
 
-Shared fixed-effect design (all joint models):
+Shared fixed-effect design is **not** auto-selected for Schema v5. Pass an
+explicit formula / fixed list after running coverage_eligibility_v5.py.
+The legacy default below is schema-v3 era (includes risk_*) and must not be
+assumed for participant_transition_v5:
 
   delta_f ~ history_added + value_added + risk_added + learning_added
           + history_modified + value_modified + risk_modified + learning_modified
@@ -11,13 +14,18 @@ Random effects are a subset of those motif columns (plus intercept), chosen via
 ``--random_slopes``. Primary optimizer is REML + lbfgs (matches focal pipeline);
 optional secondary methods (cg, powell) are also fit and stored.
 
-Eligibility (schema_v3 CSV only):
-  --eligibility_mode off       (default) use all rows; legacy v2 OK
-  --eligibility_mode fe_adjust requires all relevant eligible_* columns;
-                       includes eligible_* as fixed covariates. This is an
-                       exploratory FE adjustment — not a validated joint model
-                       and does **not** intersect eligibility sets (unlike
-                       focal --eligibility_mode restrict). Refuses v2/missing.
+Eligibility (schema_v3/v5 CSV):
+  --eligibility_mode off        use all rows; legacy v2 OK
+  --eligibility_mode fe_adjust  exploratory: add eligible_* as FE covariates
+                                (does **not** put each effect on its risk set)
+  --eligibility_mode restrict   **validated joint construction**: keep only
+                                rows in the intersection of the appropriate
+                                risk set for every included motif effect.
+                                Reports exact eligibility rules in outputs.
+                                For ``*_modified``, risk set =
+                                retained-construct set
+                                (reference_has AND candidate_has);
+                                contrast is modified vs retained_unmodified.
 """
 
 from __future__ import annotations
@@ -39,6 +47,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from analysis.mem.bh_fdr import bh_fdr  # noqa: E402
+from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
+    risk_set_definition,
+)
 
 
 DEFAULT_FIXED_EFFECTS = [
@@ -68,12 +79,108 @@ def _parse_csv_list(s: str) -> List[str]:
     return [x.strip() for x in (s or "").split(",") if x.strip()]
 
 
+def _motif_effects(fixed_effects: Sequence[str], random_slopes: Sequence[str]) -> List[str]:
+    """Directional construct effects included in the joint design (excl. iteration)."""
+    out: List[str] = []
+    seen = set()
+    for t in list(fixed_effects) + list(random_slopes):
+        if t == "iteration" or str(t).startswith("eligible_"):
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def apply_joint_eligibility_restrict(
+    df: pd.DataFrame,
+    *,
+    motif_effects: Sequence[str],
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Intersect appropriate risk sets for every included motif effect.
+
+    Row kept iff eligible_<effect>==1 for all effects in ``motif_effects``.
+    """
+    if not motif_effects:
+        raise ValueError("motif_effects must be non-empty for eligibility_mode=restrict")
+
+    definitions: List[Dict[str, str]] = []
+    missing: List[str] = []
+    per_effect: Dict[str, Any] = {}
+    mask = pd.Series(True, index=df.index)
+    n_before = int(len(df))
+
+    for effect in motif_effects:
+        try:
+            defn = risk_set_definition(effect)
+        except ValueError:
+            # Non-directional FE (e.g. structural_*): skip risk-set gate.
+            definitions.append(
+                {
+                    "effect": effect,
+                    "risk_set_name": "none_non_directional",
+                    "rule": "not gated by construct eligibility",
+                }
+            )
+            continue
+        elig_col = defn["eligibility_column"]
+        definitions.append(defn)
+        if elig_col not in df.columns:
+            missing.append(elig_col)
+            continue
+        if df[elig_col].isna().any():
+            raise ValueError(
+                f"eligibility_mode=restrict: {elig_col} has nulls; "
+                "missing state ≠ ineligible"
+            )
+        elig = pd.to_numeric(df[elig_col], errors="coerce").fillna(0).astype(int)
+        n_elig = int((elig == 1).sum())
+        per_effect[effect] = {
+            **defn,
+            "n_rows_in_risk_set": n_elig,
+            "n_rows_out_of_risk_set": int(n_before - n_elig),
+        }
+        mask &= elig == 1
+
+    if missing:
+        raise ValueError(
+            "eligibility_mode=restrict requires eligibility columns for every "
+            f"included motif effect; missing: {missing}"
+        )
+
+    work = df.loc[mask].copy()
+    report: Dict[str, Any] = {
+        "mode": "restrict",
+        "construction": (
+            "intersection: row kept iff it lies in the appropriate risk set "
+            "for every included motif effect (eligible_<effect>==1 for all)"
+        ),
+        "n_rows_before": n_before,
+        "n_rows_after": int(len(work)),
+        "n_rows_excluded": int(n_before - len(work)),
+        "included_effects": list(motif_effects),
+        "risk_set_definitions": definitions,
+        "per_effect": per_effect,
+        "modified_effects_note": (
+            "For *_modified effects, eligible_c_modified is the "
+            "retained-construct modification risk set "
+            "(reference_has_c AND candidate_has_c), not the broader "
+            "pre-transition opportunity reference_has_c / "
+            "modification_opportunity_c. Within that set the contrast is "
+            "c_modified vs retained_unmodified_c."
+        ),
+    }
+    return work, report
+
+
 def prepare_joint_frame(
     df: pd.DataFrame,
     *,
     fixed_effects: Sequence[str],
     random_slopes: Sequence[str],
     phase: Optional[str] = "evolution",
+    eligibility_report: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Coerce motif columns, drop incomplete rows, return fingerprint meta."""
     work = df.copy()
@@ -136,6 +243,7 @@ def prepare_joint_frame(
         "fingerprint_sha256": fingerprint,
         "motif_support": support,
         "motif_columns": motif_cols,
+        "eligibility": eligibility_report,
     }
     return work, meta
 
@@ -284,6 +392,7 @@ def fit_joint_random_slopes(
     reml: bool = True,
     maxiter: int = 200,
     phase: Optional[str] = "evolution",
+    eligibility_report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     smf = _require_statsmodels()
     work, prep_meta = prepare_joint_frame(
@@ -291,6 +400,7 @@ def fit_joint_random_slopes(
         fixed_effects=fixed_effects,
         random_slopes=random_slopes,
         phase=phase,
+        eligibility_report=eligibility_report,
     )
 
     # Every RE slope must appear as FE
@@ -570,6 +680,8 @@ def write_outputs(fit: Dict[str, Any], out_dir: Path) -> None:
             "re_labels",
             "random_slopes",
             "fixed_effects",
+            "eligibility_mode",
+            "eligibility_report",
             "prep",
             "primary_method",
             "reml",
@@ -605,6 +717,7 @@ def write_outputs(fit: Dict[str, Any], out_dir: Path) -> None:
         f"- status: `{fit.get('status')}`",
         f"- formula: `{fit.get('formula')}`",
         f"- re_formula: `{fit.get('re_formula')}`",
+        f"- eligibility_mode: `{fit.get('eligibility_mode')}`",
         f"- n_rows: {fit.get('prep', {}).get('n_rows')}",
         f"- fingerprint: `{fit.get('prep', {}).get('fingerprint_sha256')}`",
         f"- primary: `{fit.get('primary_method')}` reml={fit.get('reml')} maxiter={fit.get('maxiter')}",
@@ -616,6 +729,37 @@ def write_outputs(fit: Dict[str, Any], out_dir: Path) -> None:
         f"- singular_or_boundary: {fit.get('singular_or_boundary')}",
         f"- hessian: {fit.get('hessian', {}).get('hessian_status')}",
         "",
+        "## Eligibility construction",
+        "",
+    ]
+    elig = fit.get("eligibility_report") or (fit.get("prep") or {}).get("eligibility")
+    if elig:
+        lines.append(f"- mode: `{elig.get('mode')}`")
+        lines.append(f"- construction: {elig.get('construction')}")
+        if elig.get("n_rows_before") is not None:
+            lines.append(
+                f"- rows: {elig.get('n_rows_before')} → {elig.get('n_rows_after')} "
+                f"(excluded {elig.get('n_rows_excluded')})"
+            )
+        if elig.get("modified_effects_note"):
+            lines.append(f"- modified note: {elig.get('modified_effects_note')}")
+        lines.append("")
+        lines.append("| effect | risk set | rule | n_in_set |")
+        lines.append("|---|---|---|---:|")
+        for effect, info in (elig.get("per_effect") or {}).items():
+            lines.append(
+                f"| {effect} | {info.get('risk_set_name')} | `{info.get('rule')}` | "
+                f"{info.get('n_rows_in_risk_set')} |"
+            )
+        lines.append("")
+    else:
+        lines.append(
+            "- mode: `off` or `fe_adjust` (no risk-set intersection; "
+            "fe_adjust alone is not validated joint eligibility)."
+        )
+        lines.append("")
+
+    lines += [
         "## Fixed effects (motif BH family)",
         "",
         "| term | coef | se | p | q_BH |",
@@ -666,11 +810,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--eligibility_mode",
-        choices=["off", "fe_adjust"],
+        choices=["off", "fe_adjust", "restrict"],
         default="off",
-        help="off: all rows. fe_adjust: add eligible_* as FE covariates for motif "
-        "terms (requires schema_v3; refuses v2). FE-adjust ≠ validated joint "
-        "eligibility intersection.",
+        help="off: all rows. fe_adjust: exploratory eligible_* FE covariates "
+        "(insufficient alone). restrict: intersect appropriate risk sets for "
+        "every included motif effect; report construction in summary.",
     )
     args = parser.parse_args()
 
@@ -681,6 +825,31 @@ def main() -> None:
     eligibility_mode = str(args.eligibility_mode)
 
     df = pd.read_csv(args.input_csv)
+    eligibility_report: Optional[Dict[str, Any]] = None
+
+    # Apply phase filter before eligibility so risk-set counts match the analysis frame.
+    if args.phase and "phase" in df.columns:
+        df = df[df["phase"] == args.phase].copy()
+
+    if eligibility_mode == "restrict":
+        motif_fes = _motif_effects(fixed_effects, random_slopes)
+        try:
+            df, eligibility_report = apply_joint_eligibility_restrict(
+                df, motif_effects=motif_fes
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(
+            f"[fit_joint] eligibility_mode=restrict "
+            f"n_rows={eligibility_report['n_rows_after']} "
+            f"(from {eligibility_report['n_rows_before']}); "
+            f"effects={motif_fes}",
+            flush=True,
+        )
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(args.output_dir) / "eligibility_construction.json").write_text(
+            json.dumps(eligibility_report, indent=2) + "\n", encoding="utf-8"
+        )
 
     if eligibility_mode == "fe_adjust":
         motif_fes = [
@@ -775,9 +944,11 @@ def main() -> None:
         primary_method=args.primary_method,
         reml=reml,
         maxiter=args.maxiter,
-        phase=args.phase or None,
+        phase=None,
+        eligibility_report=eligibility_report,
     )
     fit["eligibility_mode"] = eligibility_mode
+    fit["eligibility_report"] = eligibility_report
     if args.assert_n_rows and fit.get("prep", {}).get("n_rows") != args.assert_n_rows:
         raise SystemExit(
             f"n_rows={fit.get('prep', {}).get('n_rows')} != assert {args.assert_n_rows}"

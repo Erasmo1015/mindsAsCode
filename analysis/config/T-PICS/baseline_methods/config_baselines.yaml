@@ -1,0 +1,108 @@
+# PICS v3 g5e50p30 baseline paths (LM / PT / Centaur).
+#
+# Participant table = analysis/config/teh_datasets.yaml (first 30 of the
+# historical 50-person table). Exceptions: Speekenbrink 0-22, Badham 0-9,
+# Wulff 1290-1319. Equal-person means over those people only.
+#
+# Empty string = missing or invalid (needs a new run). Do not use discarded
+# 3090 jobs (Speekenbrink v1 backup; mixed −2.004; Kool v1 6/50).
+#
+# LM / PT: per-person scores already existed except Bergert PT, which was
+# rerun under structure_aware_v3 for ordinals 0-29. Other dirs are 30-person
+# slices (independent per-person fits, so the slice equals re-eval).
+#   independents / resetting — SA40 v1 job_253730_* (v2/v3: skip LM/PT rerun)
+#   Speekenbrink + Kool — SA40 v3 job_259085_v3
+#   Bergert PT — SA40 v3 job_g5e50p30 (chance ln 0.5; cue-count-balanced pairs)
+#
+# Centaur: 3090 README is the contract.
+#   paper_keep SA40 (prefixes match v3): Bergert, Guan, Steyvers, Schulz,
+#     Hilbig, Enkavi, mixed A/B fix
+#   missing on 3090 → origami full-data (test membership unchanged vs SA40/v3):
+#     Peterson, Plonsky, CCT, Wulff, Frey Risk, Badham
+#   Speekenbrink / Kool: 3090 v3 reruns OOMed (chance); v1 Speekenbrink backup
+#     has the wrong test histories — leave empty
+#
+# Slice CSVs: analysis/config/T-PICS/baseline_methods/g5e50p30/<method>/<dataset>/
+# Provenance notes (not for git): generated_outputs/psych101_train/centaur/2026Sep/g5e50p30/
+
+protocol: structure_aware_v3
+limited_train_val: 40
+split_ratio: 0.6
+split_seed: 0
+ordinals: analysis/config/teh_datasets.yaml
+
+datasets:
+  1peterson2021using:  # Choice13k  0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/1peterson2021using
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/1peterson2021using
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/1peterson2021using
+
+  2plonsky2018when:  # CPC18  0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/2plonsky2018when
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/2plonsky2018when
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/2plonsky2018when
+
+  3frey2017cct:  # Frey CCT  0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/3frey2017cct
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/3frey2017cct
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/3frey2017cct
+
+  4wulff2018description:  # Wulff  1290-1319 (ids 1550-1579)
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/4wulff2018description
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/4wulff2018description
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/4wulff2018description
+
+  5speekenbrink2008learning:  # Speekenbrink  0-22
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/5speekenbrink2008learning
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/5speekenbrink2008learning
+    Centaur: ""  # 3090 v3 OOM chance; v1 backup is wrong histories
+
+  7hilbig2014generalized:  # Hilbig  0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/7hilbig2014generalized
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/7hilbig2014generalized
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/7hilbig2014generalized
+
+  10frey2017risk:  # Frey Risk  0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/10frey2017risk
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/10frey2017risk
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/10frey2017risk
+
+  11enkavi2019recentprobes:  # Enkavi  0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/11enkavi2019recentprobes
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/11enkavi2019recentprobes
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/11enkavi2019recentprobes
+
+  12badham2017deficits:  # Badham  0-9
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/12badham2017deficits
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/12badham2017deficits
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/12badham2017deficits
+
+  mixed_gambles:  # 0-29 (ids 101-130)
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/mixed_gambles
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/mixed_gambles
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/mixed_gambles
+
+  bergert_nosofsky_2007:  # 0-29 (ids 1-30)
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/bergert_nosofsky_2007
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/bergert_nosofsky_2007
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/bergert_nosofsky_2007
+
+  guan_2020_stopping:  # 0-29 (ids 1-30)
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/guan_2020_stopping
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/guan_2020_stopping
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/guan_2020_stopping
+
+  steyvers_2009_bandit:  # 0-29 (ids 1-30)
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/steyvers_2009_bandit
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/steyvers_2009_bandit
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/steyvers_2009_bandit
+
+  13schulz2020finding:  # 0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/13schulz2020finding
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/13schulz2020finding
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/13schulz2020finding
+
+  14kool2016when:  # 0-29
+    MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/14kool2016when
+    prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/14kool2016when
+    Centaur: ""  # 3090 v3 OOM chance

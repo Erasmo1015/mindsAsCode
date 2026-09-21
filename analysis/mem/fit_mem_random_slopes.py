@@ -10,11 +10,22 @@ CPU-only statsmodels MixedLM. Reports fixed effects, random-slope variance,
 participant-specific slopes, convergence / singularity diagnostics, and BH-FDR
 across planned motif tests.
 
-Eligibility (schema_v3 CSV only):
+Eligibility (schema_v3/v5 CSV):
   --eligibility_mode off      (default) use all rows; legacy v2 CSVs OK
   --eligibility_mode restrict require eligible_<focal> column; subset to
                       eligible==1. Refuses legacy / missing-state CSVs.
   Focal restrict ≠ joint FE-adjust (see fit_mem_joint_random_slopes.py).
+
+For ``*_modified`` focals under restrict, ``eligible_c_modified`` is the
+**retained-construct modification risk set** (reference_has_c AND
+candidate_has_c), not the broader pre-transition opportunity
+``reference_has_c`` / ``modification_opportunity_c``. Within that set the
+contrast is ``c_modified`` vs ``retained_unmodified_c``.
+
+Do not hard-code focals to every construct-operation combination: run
+coverage_eligibility_v5.py first, then pass --focal_motifs for effects with
+within-participant variation. Preserve reassessment of history_modified,
+value_modified, feedback_added, feedback_modified on final Schema-v5 runs.
 """
 
 from __future__ import annotations
@@ -36,8 +47,25 @@ from analysis.mem.bh_fdr import bh_fdr  # noqa: E402
 from analysis.mem.predictor_support import motif_support_report  # noqa: E402
 from utils.mem.schema_v2 import (  # noqa: E402
     DIRECTIONAL_SUFFIXES,
-    all_directional_behavioral_columns,
+    all_directional_behavioral_columns as all_directional_behavioral_columns_v2,
 )
+from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
+    all_directional_behavioral_columns as all_directional_behavioral_columns_v5,
+    risk_set_definition,
+)
+
+
+def all_directional_behavioral_columns() -> List[str]:
+    """Union of v2 and v5 directional columns (CSV may be either schema)."""
+    seen = set()
+    out: List[str] = []
+    for c in list(all_directional_behavioral_columns_v2()) + list(
+        all_directional_behavioral_columns_v5()
+    ):
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 def _require_statsmodels():
@@ -375,6 +403,22 @@ def main() -> None:
                     "refusing (missing state ≠ ineligible)."
                 )
             df_focal = df[df[elig_col].astype(int) == 1].copy()
+            # For modified focals: contrast is modified vs retained_unmodified
+            # inside the retained-construct risk set.
+            if focal.endswith("_modified"):
+                construct = focal[: -len("_modified")]
+                ret_col = f"retained_unmodified_{construct}"
+                if ret_col in df_focal.columns:
+                    mod_vals = pd.to_numeric(df_focal[focal], errors="coerce").fillna(0).astype(int)
+                    ret_vals = pd.to_numeric(df_focal[ret_col], errors="coerce").fillna(0).astype(int)
+                    # Within risk set, exactly one of modified / retained_unmodified.
+                    bad = ((mod_vals + ret_vals) != 1).sum()
+                    if int(bad) > 0:
+                        print(
+                            f"[fit_rs] warning: {focal}: {bad} rows in retained-construct "
+                            f"set are not a clean modified vs retained_unmodified partition",
+                            flush=True,
+                        )
         # Controls: other supported motifs; never opposite-direction averaging.
         controls = [c for c in supported if c != focal]
         # Prefer not to explode FE dim: keep same-direction and common others.
@@ -401,6 +445,11 @@ def main() -> None:
         )
         if eligibility_mode == "restrict":
             res["eligibility_mode"] = "restrict"
+            res["eligibility_column"] = f"eligible_{focal}"
+            try:
+                res["risk_set"] = risk_set_definition(focal)
+            except ValueError:
+                res["risk_set"] = None
             res["n_rows_eligible"] = int(len(df_focal))
             res["n_rows_full"] = int(len(df))
         results.append(res)

@@ -19,7 +19,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from utils.mem.schema_v2 import all_directional_behavioral_columns  # noqa: E402
+from utils.mem.schema_v2 import all_directional_behavioral_columns as cols_v2  # noqa: E402
+from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
+    all_directional_behavioral_columns as cols_v5,
+)
+
+
+def all_directional_behavioral_columns() -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for c in list(cols_v2()) + list(cols_v5()):
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 def motif_support_report(

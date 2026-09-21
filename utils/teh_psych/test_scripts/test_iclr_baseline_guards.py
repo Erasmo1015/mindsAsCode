@@ -919,12 +919,17 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.split_seed == ICLR_FROZEN_SPLIT_SEED == 0
     assert args.llm_max_tokens == ICLR_FROZEN_LLM_MAX_TOKENS == 1024
     assert args.model == ICLR_FROZEN_MODEL
-    assert args.num_diverse_programs == 2
-    assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 3
+    assert args.num_diverse_programs == ICLR_FROZEN_NUM_DIVERSE_PROGRAMS == 0
+    assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 0
     assert args.max_prompt_train_trials == ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS == 60
     assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
     assert args.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 16384
-    assert args.include_artifacts is True
+    assert args.include_artifacts is False
+    assert args.enable_artifacts is False
+    assert args.include_previous_attempts is False
+    assert args.log_prompts is False
+    assert args.cascade_evaluation is False
+    assert args.use_llm_feedback is False
     assert args.base_prompt is None
     assert args.n_iterations != 600
     assert ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING == 30000
@@ -947,9 +952,15 @@ def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():
         assert parsed.limited_data_protocol == "structure_aware_v3"
         assert parsed.limited_train_val == 40
         assert parsed.max_prompt_train_trials == 60
-        assert parsed.num_diverse_programs == 2
-        assert parsed.num_top_programs == 3
-        assert argv[argv.index("--num_top_programs") + 1] == "3"
+        assert parsed.num_diverse_programs == 0
+        assert parsed.num_top_programs == 0
+        assert argv[argv.index("--num_top_programs") + 1] == "0"
+        assert parsed.include_artifacts is False
+        assert parsed.enable_artifacts is False
+        assert parsed.include_previous_attempts is False
+        assert "--no-include_artifacts" in argv
+        assert "--no-enable_artifacts" in argv
+        assert "--no-include_previous_attempts" in argv
         assert parsed.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
         assert argv[argv.index("--hard_prompt_token_cap") + 1] == "14000"
         assert parsed.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 16384
