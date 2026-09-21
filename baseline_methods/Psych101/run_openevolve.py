@@ -195,6 +195,11 @@ ICLR_FROZEN_INCLUDE_ARTIFACTS = False
 ICLR_FROZEN_ENABLE_ARTIFACTS = False
 ICLR_FROZEN_INCLUDE_PREVIOUS_ATTEMPTS = False
 ICLR_FROZEN_LOG_PROMPTS = False
+# Disk hygiene defaults (implementation detail; not scientific knobs).
+# WARNING keeps OE's logger quiet; 0 checkpoint interval = only at run end.
+ICLR_FROZEN_LOG_LEVEL = "WARNING"
+ICLR_FROZEN_CHECKPOINT_INTERVAL = 0  # 0 => resolve to n_iterations (single final dump)
+ICLR_FROZEN_COMPACT_OE_ARTIFACTS = True
 # Active freeze = PICS v3 16k-class pair (14000 input + 1024 out ≤ 16384).
 ICLR_FROZEN_INPUT_TOKEN_CEILING = 14000
 ICLR_FROZEN_VLLM_MAX_MODEL_LEN = 16384
@@ -2183,10 +2188,22 @@ def evaluate(program_path: str) -> Dict[str, float]:
 '''
 
 
+def _resolve_checkpoint_interval(checkpoint_interval: int, iterations: int) -> int:
+    """Map CLI interval onto OE's positive interval.
+
+    ``<= 0`` means "only checkpoint at the end of the run" (single dump), which is
+    enough for our post-hoc best-program scan and much smaller on disk.
+    """
+    iters = max(1, int(iterations))
+    if int(checkpoint_interval) <= 0:
+        return iters
+    return min(int(checkpoint_interval), iters)
+
+
 def _build_config(args, iterations: int) -> Config:
     cfg = Config()
     cfg.max_iterations = iterations
-    cfg.checkpoint_interval = min(args.checkpoint_interval, args.n_iterations)
+    cfg.checkpoint_interval = _resolve_checkpoint_interval(args.checkpoint_interval, iterations)
     cfg.log_level = args.log_level
     cfg.random_seed = args.random_seed
     cfg.diff_based_evolution = False
@@ -2276,6 +2293,187 @@ def _find_best_program_by_observed_loglik(checkpoint_dir: Path) -> Tuple[Optiona
 def _program_code_from_json(prog_json: Path) -> str:
     data = json.loads(prog_json.read_text(encoding="utf-8"))
     return data.get("code") or ""
+
+
+def _is_failed_oe_metrics(metrics: Dict[str, Any]) -> bool:
+    """True when metrics look like an official failed eval (or our failure floor)."""
+    if not isinstance(metrics, dict):
+        return True
+    if metrics.get("timeout") is True:
+        return True
+    if "error" in metrics and "combined_score" not in metrics:
+        return True
+    cs = _safe_float(metrics.get("combined_score"))
+    if cs is not None and cs <= FAILED_COMBINED_SCORE + 1e-9:
+        return True
+    if "error" in metrics and cs is not None and cs <= FAILED_COMBINED_SCORE + 1e-9:
+        return True
+    return False
+
+
+def extract_evolution_records_from_checkpoint(
+    checkpoint_dir: Path,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Compact per-child records from one OE checkpoint (no full program code).
+
+    ``combined_score`` is the observed train+val pooled loglik used for evolution.
+    Returns ``(summary, rows)`` where ``rows`` is one entry per program in the
+    checkpoint (typically ≤ population; small CSV).
+    """
+    programs_dir = checkpoint_dir / "programs"
+    rows: List[Dict[str, Any]] = []
+    if not programs_dir.is_dir():
+        summary = {
+            "checkpoint": checkpoint_dir.name,
+            "n_programs": 0,
+            "n_valid": 0,
+            "n_failed": 0,
+            "n_timeout": 0,
+            "best_combined_score": None,
+            "best_iteration": None,
+            "best_program_id": None,
+        }
+        return summary, rows
+
+    best_cs: Optional[float] = None
+    best_iter: Optional[int] = None
+    best_id: Optional[str] = None
+    n_failed = 0
+    n_timeout = 0
+    n_valid = 0
+
+    for prog_file in sorted(programs_dir.glob("*.json")):
+        try:
+            data = json.loads(prog_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        metrics = data.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+        failed = _is_failed_oe_metrics(metrics)
+        timeout = bool(metrics.get("timeout") is True)
+        if timeout:
+            n_timeout += 1
+        if failed:
+            n_failed += 1
+        else:
+            n_valid += 1
+        cs = _safe_float(metrics.get("combined_score"))
+        if cs is None:
+            cs = _safe_float(metrics.get("observed_loglik"))
+        iteration = data.get("iteration_found", data.get("iteration"))
+        try:
+            iteration_i = int(iteration) if iteration is not None else None
+        except (TypeError, ValueError):
+            iteration_i = None
+        pid = str(data.get("id") or prog_file.stem)
+        row = {
+            "iteration": iteration_i,
+            "program_id": pid,
+            "combined_score": cs,
+            "train_loglik": _safe_float(metrics.get("train_loglik")),
+            "val_loglik": _safe_float(metrics.get("val_loglik")),
+            "failed": int(failed),
+            "timeout": int(timeout),
+        }
+        rows.append(row)
+        if cs is not None and (best_cs is None or cs > best_cs):
+            best_cs = cs
+            best_iter = iteration_i
+            best_id = pid
+
+    rows.sort(
+        key=lambda r: (
+            r["iteration"] is None,
+            r["iteration"] if r["iteration"] is not None else 10**9,
+            r["program_id"],
+        )
+    )
+    summary = {
+        "checkpoint": checkpoint_dir.name,
+        "n_programs": len(rows),
+        "n_valid": n_valid,
+        "n_failed": n_failed,
+        "n_timeout": n_timeout,
+        "best_combined_score": best_cs,
+        "best_iteration": best_iter,
+        "best_program_id": best_id,
+    }
+    return summary, rows
+
+
+def write_evolution_records(participant_dir: Path, checkpoint_dir: Path) -> Dict[str, Any]:
+    """Persist compact evolution metrics next to ``best_program.py`` (keeps code out)."""
+    summary, rows = extract_evolution_records_from_checkpoint(checkpoint_dir)
+    summary_path = participant_dir / "evolution_summary.json"
+    scores_path = participant_dir / "evolution_iteration_scores.csv"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    fields = [
+        "iteration",
+        "program_id",
+        "combined_score",
+        "train_loglik",
+        "val_loglik",
+        "failed",
+        "timeout",
+    ]
+    with scores_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(_round_floats_for_csv_rows(rows))
+    out = dict(summary)
+    out["evolution_summary_path"] = str(summary_path)
+    out["evolution_iteration_scores_path"] = str(scores_path)
+    return out
+
+
+def compact_openevolve_output(oe_output: Path, *, keep_latest_checkpoint: bool = False) -> Dict[str, Any]:
+    """Drop bulky OE dumps after best program + compact metrics are written.
+
+    Keeps ``openevolve_output/best/`` (official best copy). By default removes all
+    ``checkpoints/`` trees (full program JSON archives). Replaces ``logs/`` with a
+    tiny stub so the folder still exists but is not multi‑MB INFO spam.
+    """
+    report: Dict[str, Any] = {
+        "checkpoints_removed": [],
+        "checkpoints_kept": [],
+        "logs_compacted": False,
+    }
+    ckpt_root = oe_output / "checkpoints"
+    if ckpt_root.is_dir():
+        ckpt_dirs = sorted(
+            [p for p in ckpt_root.glob("checkpoint_*") if p.is_dir()],
+            key=lambda p: int(p.name.split("_")[-1]) if "_" in p.name else 0,
+        )
+        keep: Optional[Path] = ckpt_dirs[-1] if (keep_latest_checkpoint and ckpt_dirs) else None
+        for d in ckpt_dirs:
+            if keep is not None and d.resolve() == keep.resolve():
+                report["checkpoints_kept"].append(d.name)
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            report["checkpoints_removed"].append(d.name)
+        if keep is None and ckpt_root.is_dir() and not any(ckpt_root.iterdir()):
+            shutil.rmtree(ckpt_root, ignore_errors=True)
+
+    logs_dir = oe_output / "logs"
+    if logs_dir.is_dir():
+        for child in list(logs_dir.iterdir()):
+            try:
+                if child.is_file() or child.is_symlink():
+                    child.unlink(missing_ok=True)
+                elif child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                pass
+        stub = logs_dir / "COMPACTED.txt"
+        stub.write_text(
+            "OpenEvolve INFO logs discarded (compact_oe_artifacts default). "
+            "See participant evolution_summary.json / evolution_iteration_scores.csv "
+            "and best_program.py for retained metrics and the final program.\n",
+            encoding="utf-8",
+        )
+        report["logs_compacted"] = True
+    return report
 
 
 def _mean_loglik_rows(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
@@ -2420,6 +2618,8 @@ def run_participant(
     best_observed_ll: Optional[float] = None
 
     _set_thread_participant_ctx(participant_ctx)
+    evo_summary: Dict[str, Any] = {}
+    compact_report: Dict[str, Any] = {}
     try:
         best_program = _run_openevolve(oe, args.n_iterations)
         n_completed = oe.database.last_iteration if oe.database.last_iteration else args.n_iterations
@@ -2430,6 +2630,19 @@ def run_participant(
             key=lambda p: int(p.name.split("_")[-1]) if "_" in p.name else 0,
         )
         latest_ckpt = ckpt_dirs[-1] if ckpt_dirs else None
+        # Lean interval (= n_iterations) usually dumps once at the end; if OE skipped
+        # the dump (early stop / off-cycle), force one snapshot so we can still write
+        # compact evolution metrics and select best_program.py before pruning.
+        if latest_ckpt is None and hasattr(oe, "_save_checkpoint"):
+            try:
+                oe._save_checkpoint(int(n_completed) if n_completed else int(args.n_iterations))
+                ckpt_dirs = sorted(
+                    [p for p in ckpt_root.glob("checkpoint_*") if p.is_dir()],
+                    key=lambda p: int(p.name.split("_")[-1]) if "_" in p.name else 0,
+                )
+                latest_ckpt = ckpt_dirs[-1] if ckpt_dirs else None
+            except Exception:
+                latest_ckpt = None
 
         if latest_ckpt is not None:
             prog_json, best_observed_ll = _find_best_program_by_observed_loglik(latest_ckpt)
@@ -2438,6 +2651,13 @@ def run_participant(
                 best_program_path.write_text(code, encoding="utf-8")
             elif best_program is not None:
                 best_program_path.write_text(best_program.code, encoding="utf-8")
+            # Compact metrics BEFORE pruning checkpoints (needs programs/*.json).
+            try:
+                evo_summary = write_evolution_records(participant_dir, latest_ckpt)
+                if best_observed_ll is None:
+                    best_observed_ll = _safe_float(evo_summary.get("best_combined_score"))
+            except Exception as e:
+                evo_summary = {"error": f"evolution_records_failed: {e}"}
         elif best_program is not None:
             best_program_path.write_text(best_program.code, encoding="utf-8")
 
@@ -2475,6 +2695,13 @@ def run_participant(
                             json.loads(line)
                         except Exception:
                             pass
+
+        # After best_program.py + compact metrics exist, drop bulky OE dumps.
+        if bool(getattr(args, "compact_oe_artifacts", True)):
+            try:
+                compact_report = compact_openevolve_output(oe_output, keep_latest_checkpoint=False)
+            except Exception as e:
+                compact_report = {"error": f"compact_failed: {e}"}
     except Exception as e:
         status = "failed"
         error_msg = str(e)
@@ -2498,8 +2725,14 @@ def run_participant(
         "status": status,
         "error": error_msg,
         "best_observed_loglik_in_pool": best_observed_ll,
+        "n_programs_in_pool": evo_summary.get("n_programs"),
+        "n_valid_programs": evo_summary.get("n_valid"),
+        "n_failed_programs": evo_summary.get("n_failed"),
+        "n_timeout_programs": evo_summary.get("n_timeout"),
         "prompt_trials_resampled_per_candidate": True,
         "prompt_trials_source": "train+val_union",
+        "evolution_summary": evo_summary or None,
+        "compact_oe_artifacts": compact_report or None,
     }
     (participant_dir / "results.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
     return row
@@ -2560,6 +2793,10 @@ def _write_experiment_csvs(run_dir: Path, detail_rows: List[Dict[str, Any]]) -> 
         "n_test",
         "n_iterations_requested",
         "n_iterations_completed",
+        "n_programs_in_pool",
+        "n_valid_programs",
+        "n_failed_programs",
+        "n_timeout_programs",
         "best_program_path",
         "status",
         "error",
@@ -2613,7 +2850,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         limited_train_val=ICLR_FROZEN_LIMITED_TRAIN_VAL,
     )
     p.add_argument("--n_iterations", type=int, default=ICLR_FROZEN_N_ITERATIONS)
-    p.add_argument("--checkpoint_interval", type=int, default=50)
+    p.add_argument(
+        "--checkpoint_interval",
+        type=int,
+        default=ICLR_FROZEN_CHECKPOINT_INTERVAL,
+        help=(
+            "OE checkpoint cadence. Default 0 = only at end of the run (single dump). "
+            "Positive N checkpoints every N iterations. After selection we still write "
+            "best_program.py + compact evolution_*.{json,csv}; with --compact_oe_artifacts "
+            "the bulky checkpoint trees are then deleted."
+        ),
+    )
     p.add_argument(
         "--max_prompt_train_trials",
         type=int,
@@ -2648,7 +2895,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--evaluator_timeout", type=int, default=120)
     p.add_argument("--evaluator_max_retries", type=int, default=2)
     p.add_argument("--random_seed", type=int, default=0)
-    p.add_argument("--log_level", type=str, default="INFO")
+    p.add_argument(
+        "--log_level",
+        type=str,
+        default=ICLR_FROZEN_LOG_LEVEL,
+        help="OpenEvolve logger level (default WARNING to keep openevolve_output/logs small).",
+    )
+    p.add_argument(
+        "--compact_oe_artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=ICLR_FROZEN_COMPACT_OE_ARTIFACTS,
+        help=(
+            "After each person, keep best_program.py + evolution_summary.json + "
+            "evolution_iteration_scores.csv, keep openevolve_output/best/, and delete "
+            "bulky checkpoints/ plus replace logs/ with a stub (default: on)."
+        ),
+    )
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--local_dataset", type=str, default=None)
     p.add_argument("--mixed_gambles_csv", type=str, default=DEFAULT_CSV_PATH)

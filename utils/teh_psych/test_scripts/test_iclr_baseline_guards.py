@@ -41,13 +41,17 @@ from run_openevolve import (  # noqa: E402
     DEFAULT_SEED_PATH,
     EXPECTED_OPENEVOLVE_GIT_SHA,
     FAILED_COMBINED_SCORE,
+    ICLR_FROZEN_CHECKPOINT_INTERVAL,
+    ICLR_FROZEN_COMPACT_OE_ARTIFACTS,
     ICLR_FROZEN_LIMITED_DATA_PROTOCOL,
     ICLR_DEFAULT_LIMITED_DATA_PROTOCOL,
     ICLR_FROZEN_LIMITED_TRAIN_VAL,
     ICLR_FROZEN_LLM_MAX_TOKENS,
+    ICLR_FROZEN_LOG_LEVEL,
     ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS,
     ICLR_FROZEN_MODEL,
     ICLR_FROZEN_N_ITERATIONS,
+    ICLR_FROZEN_NUM_DIVERSE_PROGRAMS,
     ICLR_FROZEN_NUM_TOP_PROGRAMS,
     ICLR_FROZEN_INPUT_TOKEN_CEILING,
     ICLR_FROZEN_VLLM_MAX_MODEL_LEN,
@@ -62,12 +66,14 @@ from run_openevolve import (  # noqa: E402
     _patched_build_prompt,
     _adapt_official_failure_metrics_for_loglik,
     _render_evaluator_py,
+    _resolve_checkpoint_interval,
     _write_evolution_split_json,
     _write_posthoc_test_json,
     apply_iclr_frozen_range_ordinals,
     build_arg_parser,
     cap_and_subsample_prompt_trials,
     choose_api_text,
+    compact_openevolve_output,
     dataset_n_actions,
     format_trial_compact,
     iclr_frozen_argv,
@@ -80,6 +86,7 @@ from run_openevolve import (  # noqa: E402
     trials_for_participant,
     vanilla_dataset_description,
     vanilla_llm_user_prefix,
+    write_evolution_records,
 )
 from utils.teh.limited_data_protocol import (  # noqa: E402
     apply_structure_aware_protocol,
@@ -931,9 +938,79 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.cascade_evaluation is False
     assert args.use_llm_feedback is False
     assert args.base_prompt is None
+    assert args.log_level == ICLR_FROZEN_LOG_LEVEL == "WARNING"
+    assert args.checkpoint_interval == ICLR_FROZEN_CHECKPOINT_INTERVAL == 0
+    assert args.compact_oe_artifacts is True
+    assert _resolve_checkpoint_interval(0, 350) == 350
+    assert _resolve_checkpoint_interval(50, 350) == 50
     assert args.n_iterations != 600
     assert ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING == 30000
     assert ICLR_HISTORICAL_32K_VLLM_MAX_MODEL_LEN == 32768
+
+
+def test_oe_compact_evolution_records_and_artifact_prune(tmp_path: Path):
+    """Best-path metrics stay; bulky checkpoints/logs are removable."""
+    ckpt = tmp_path / "checkpoint_10" / "programs"
+    ckpt.mkdir(parents=True)
+    (ckpt / "good.json").write_text(
+        json.dumps(
+            {
+                "id": "g1",
+                "iteration_found": 3,
+                "code": "def choose(p, h):\n    return 0.5\n",
+                "metrics": {
+                    "combined_score": -0.4,
+                    "train_loglik": -0.41,
+                    "val_loglik": -0.39,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (ckpt / "bad.json").write_text(
+        json.dumps(
+            {
+                "id": "b1",
+                "iteration_found": 5,
+                "code": "bad",
+                "metrics": {"combined_score": FAILED_COMBINED_SCORE, "error": 0.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    person = tmp_path / "participant_0"
+    person.mkdir()
+    (person / "best_program.py").write_text(
+        "def choose(p, h):\n    return 0.5\n", encoding="utf-8"
+    )
+    summary = write_evolution_records(person, tmp_path / "checkpoint_10")
+    assert summary["n_programs"] == 2
+    assert summary["n_valid"] == 1
+    assert summary["n_failed"] == 1
+    assert summary["best_combined_score"] == pytest.approx(-0.4)
+    assert (person / "evolution_summary.json").is_file()
+    assert (person / "evolution_iteration_scores.csv").is_file()
+    assert (person / "best_program.py").is_file()
+
+    oe_out = tmp_path / "openevolve_output"
+    (oe_out / "checkpoints" / "checkpoint_5" / "programs").mkdir(parents=True)
+    (oe_out / "checkpoints" / "checkpoint_10" / "programs").mkdir(parents=True)
+    (oe_out / "checkpoints" / "checkpoint_5" / "programs" / "a.json").write_text("{}", encoding="utf-8")
+    (oe_out / "best").mkdir(parents=True)
+    (oe_out / "best" / "best_program.py").write_text(
+        "def choose(p, h):\n    return 0.5\n", encoding="utf-8"
+    )
+    logs = oe_out / "logs"
+    logs.mkdir()
+    (logs / "big.log").write_text("x" * 10000, encoding="utf-8")
+    report = compact_openevolve_output(oe_out)
+    assert report["logs_compacted"] is True
+    assert not list((oe_out / "checkpoints").glob("checkpoint_*")) if (oe_out / "checkpoints").exists() else True
+    assert (oe_out / "best" / "best_program.py").is_file()
+    assert (logs / "COMPACTED.txt").is_file()
+    assert not (logs / "big.log").exists()
+    # participant best untouched
+    assert "return 0.5" in (person / "best_program.py").read_text(encoding="utf-8")
 
 
 def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():

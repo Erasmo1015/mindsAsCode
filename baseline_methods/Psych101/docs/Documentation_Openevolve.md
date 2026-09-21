@@ -120,7 +120,9 @@ All knobs live as `ICLR_FROZEN_*` in the runner and as argparse defaults / `iclr
 | `--llm_timeout` / `--llm_retries` | 300 s / 3 | Implementation detail |
 | `--evaluator_timeout` / `--evaluator_max_retries` | 120 s / 2 | Implementation detail |
 | `--cascade_evaluation` | `False` | Implementation detail |
-| `--checkpoint_interval` | 50 | Implementation detail |
+| `--checkpoint_interval` | **`0`** (= only at end → resolved to `n_iterations`) | Disk hygiene default |
+| `--log_level` | **`WARNING`** | Disk hygiene default (keeps `logs/` small) |
+| `--compact_oe_artifacts` / `--no-compact_oe_artifacts` | **`True`** | After each person: keep `best_program.py` + compact evolution metrics; delete bulky `checkpoints/` and replace `logs/` with a stub |
 | `--max_prompt_trials_per_problem` | 5 (only if observed union \(> 60\)) | Implementation detail |
 | `--early_stopping_patience` | `None` (disabled) | Frozen scientific setting |
 
@@ -147,7 +149,8 @@ All knobs live as `ICLR_FROZEN_*` in the runner and as argparse defaults / `iclr
 | `use_template_stochasticity=True` | `False` | Reproducible prompt text |
 | `cascade_evaluation=True` | `False` | Single-stage loglik evaluator |
 | `max_iterations=10000` | 350 | Nominal ICLR budget |
-| `checkpoint_interval=100` | 50 | Finer checkpoints |
+| `checkpoint_interval=100` | **`0` → single end dump** | Disk hygiene (was 50) |
+| `log_level` (INFO-ish) | **`WARNING`** | Disk hygiene |
 | `random_seed=42` (Config/Database) | 0 | Align with split seed |
 | `evaluator.parallel_evaluations=1` | 10 | Concurrent island workers vs local vLLM |
 | `evaluator.timeout=300`, `max_retries=3` | 120, 2 | Shorter hung-eval wait |
@@ -352,9 +355,9 @@ If \(\ell_{\mathrm{va}}\) is non-finite, the pool falls back to \(\ell_{\mathrm{
 
 **Categorical:** \(p_i=\tilde p_i(y_i)\) after coercing/renormalizing nonnegative mass on valid ids, then \(\log\tilde p_i\). Malformed outputs **raise** (not uniform). An explicit uniform dict is valid.
 
-**Selection.** Maximize `combined_score` (official `get_fitness_score` prefers that key). `_find_best_program_by_observed_loglik` scans `checkpoint_*/programs/*.json` the same way after the run. Test is scored only on that frozen file.
+**Local files per participant:** `openevolve_experiment/{initial_program.py,evaluator.py,config.yaml,trials_evolution_split.json,vanilla_task_prompt.txt,vanilla_interface_contract.txt}`, `openevolve_output/best/` (official best copy; bulky `checkpoints/` and INFO `logs/` are pruned by default), `best_program.py`, `results.json`, `evolution_summary.json`, `evolution_iteration_scores.csv` (per-child observed `combined_score` / train+val / failed flags — small), `trials_test_posthoc.json`, `prompt_truncation_diagnostics.jsonl`.
 
-**Local files per participant:** `openevolve_experiment/{initial_program.py,evaluator.py,config.yaml,trials_evolution_split.json,vanilla_task_prompt.txt,vanilla_interface_contract.txt}`, `openevolve_output/` (official checkpoints, `best/`), `best_program.py`, `results.json`, `trials_test_posthoc.json`, `prompt_truncation_diagnostics.jsonl`.
+**Selection.** Maximize `combined_score` (official `get_fitness_score` prefers that key). `_find_best_program_by_observed_loglik` scans the latest `checkpoint_*/programs/*.json` the same way after the run (then compact mode deletes those trees). Test is scored only on the frozen `best_program.py`.
 
 ---
 
