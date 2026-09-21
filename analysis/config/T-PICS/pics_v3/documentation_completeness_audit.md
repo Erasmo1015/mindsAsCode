@@ -23,7 +23,7 @@ disposition only.
 | `Transfer_source/pics_v3/schema5_occurrence_eb_freeze/` | **yes** |
 | `analysis_2026Sep/mem/pics_v3_g1_schema_v5/` | **yes** (1414 programs) |
 | `pics_v3/g1_job_paths_g5e50p30.tsv` | **yes** (jobs 265753–265767) |
-| `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` | **yes** (jobs 271237–271251; dependency schema5) |
+| `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` | **yes** (orig `271237`–`271251` + resubmits `277676`/`277677`/`277678`/`277679`/`277697`; dependency schema5) |
 | `pics_v3_g1` / `pics_v3` job outputs | **yes** (g5e50p30 + gated in flight) |
 
 ## Historical (kept; not active runtime)

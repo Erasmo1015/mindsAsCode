@@ -2400,18 +2400,29 @@ def _evolution_selection_score(
     *,
     evolution_selection_score: str = "train_val",
     warn_key: Optional[str] = None,
+    strict_observed_union: bool = False,
 ) -> float:
     """
     Pool ranking score for evolution/explore/global phases.
 
     train: train_loglik only.
-    train_val: trial-count-weighted mean of train+val loglik; falls back to train_loglik
-    when val is missing or empty.
+    train_val: trial-count-weighted mean of train+val loglik.
+
+    Legacy (strict_observed_union=False): falls back to train_loglik when val is
+    missing or empty. PICS v3 (strict_observed_union=True): never falls back over
+    a non-empty non-finite val; returns -inf so the candidate cannot win.
     """
     mode = _normalize_evolution_selection_score(evolution_selection_score)
     train_ll = float(train_loglik)
     if mode == "train":
         return train_ll
+    if strict_observed_union:
+        from utils.teh.pics_v3_observed import count_pooled_observed_loglik
+
+        pooled = count_pooled_observed_loglik(
+            train_ll, val_loglik, n_train, n_val
+        )
+        return float(pooled) if pooled is not None else float("-inf")
     val_ll = _safe_float(val_loglik)
     if val_ll is None or int(n_val) <= 0:
         if warn_key is not None and warn_key not in _EVOLUTION_SELECTION_FALLBACK_WARNED:
@@ -2442,6 +2453,7 @@ def _apply_evolution_candidate_selection_fitness(
     use_train_val_selection: bool,
     warn_key: str,
     runtime_valid: bool,
+    strict_observed_union: bool = False,
 ) -> Tuple[float, Optional[float]]:
     """Compute pool-ranking fitness and optional selection_score for one candidate."""
     fitness = train_loglik if fitness_metric == "loglik" else train_acc
@@ -2453,13 +2465,67 @@ def _apply_evolution_candidate_selection_fitness(
             n_train,
             n_val,
             evolution_selection_score=evolution_selection_score,
-            warn_key=warn_key if use_train_val_selection else None,
+            warn_key=warn_key if use_train_val_selection and not strict_observed_union else None,
+            strict_observed_union=strict_observed_union,
         )
         if use_train_val_selection:
             fitness = selection_score
     if not runtime_valid:
         fitness = -1e9 if fitness_metric == "loglik" else float("-inf")
+    elif (
+        strict_observed_union
+        and use_train_val_selection
+        and fitness_metric == "loglik"
+        and selection_score is not None
+        and not math.isfinite(float(selection_score))
+    ):
+        fitness = float("-inf")
     return fitness, selection_score
+
+
+def _pics_v3_observed_runtime_valid(
+    *,
+    train_eval: Dict[str, Any],
+    val_eval: Optional[Dict[str, Any]],
+    n_train: int,
+    n_val: int,
+    strict_observed_union: bool,
+) -> bool:
+    """Under PICS v3, any observed-split error or non-finite score invalidates."""
+    train_errors = int(train_eval.get("errors", 0) or 0)
+    train_ll = train_eval.get("avg_loglik")
+    if not strict_observed_union:
+        return train_errors == 0
+    val_errors = int((val_eval or {}).get("errors", 0) or 0) if n_val > 0 else 0
+    val_ll = (val_eval or {}).get("avg_loglik") if n_val > 0 else None
+    from utils.teh.pics_v3_observed import observed_union_runtime_valid
+
+    return observed_union_runtime_valid(
+        train_errors=train_errors,
+        val_errors=val_errors,
+        n_train=n_train,
+        n_val=n_val,
+        train_loglik=train_ll,
+        val_loglik=val_ll,
+    )
+
+
+def _pics_v3_contract_preflight_ok(
+    choose_fn: Any,
+    train_trials: List[Dict[str, Any]],
+    val_trials: Optional[List[Dict[str, Any]]],
+    *,
+    strict_observed_union: bool,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Test-independent interface preflight; always ok when not on PICS v3."""
+    if not strict_observed_union:
+        return True, {"ok": True, "skipped": True, "test_trials_used": False}
+    from utils.teh.pics_v3_contract_preflight import preflight_invalidates_candidate
+    from utils.teh.pics_v3_observed import merge_observed_trials
+
+    observed = merge_observed_trials(train_trials, val_trials)
+    invalid, report = preflight_invalidates_candidate(choose_fn, observed)
+    return (not invalid), report
 
 
 def _mdl_n_for_score(
@@ -2975,6 +3041,7 @@ def _global_elite_to_participant_elite(
     evolution_selection_score: str = "train",
     selection_warn_key: Optional[str] = None,
     mdl_lambda: float = 0.0,
+    strict_observed_union: bool = False,
 ) -> Tuple[List[Tuple[Any, ...]], List[Optional[float]]]:
     """Map global pool into participant elite tuples; preserve global order (no sort)."""
     elite_parents: List[Tuple[Any, ...]] = []
@@ -2994,6 +3061,7 @@ def _global_elite_to_participant_elite(
         train_acc = 0.0
         runtime_valid = False
         choose_fn = compile_program(code)
+        val_eval: Optional[Dict[str, Any]] = None
         if choose_fn is not None:
             train_eval = _evaluate_loglik_for_dataset(
                 dataset, choose_fn, train_trials, n_seeds=n_eval_seeds
@@ -3001,13 +3069,27 @@ def _global_elite_to_participant_elite(
             train_ll = float(train_eval["avg_loglik"])
             train_acc = float(train_eval["accuracy"])
             test_acc = train_acc
-            runtime_valid = int(train_eval.get("errors", 0) or 0) == 0
             if val_trials:
                 val_eval = _evaluate_loglik_for_dataset(
                     dataset, choose_fn, val_trials, n_seeds=n_eval_seeds
                 )
                 val_ll = float(val_eval["avg_loglik"])
-                runtime_valid = runtime_valid and int(val_eval.get("errors", 0) or 0) == 0
+            runtime_valid = _pics_v3_observed_runtime_valid(
+                train_eval=train_eval,
+                val_eval=val_eval,
+                n_train=n_train,
+                n_val=n_val,
+                strict_observed_union=strict_observed_union,
+            )
+            if strict_observed_union and runtime_valid:
+                preflight_ok, _ = _pics_v3_contract_preflight_ok(
+                    choose_fn,
+                    train_trials,
+                    val_trials,
+                    strict_observed_union=True,
+                )
+                if not preflight_ok:
+                    runtime_valid = False
         pool_fitness = (
             _evolution_selection_score(
                 train_ll,
@@ -3015,11 +3097,14 @@ def _global_elite_to_participant_elite(
                 n_train,
                 n_val,
                 evolution_selection_score=evolution_selection_score,
-                warn_key=warn_key if use_train_val else None,
+                warn_key=warn_key if use_train_val and not strict_observed_union else None,
+                strict_observed_union=strict_observed_union,
             )
             if use_train_val
             else train_ll
         )
+        if strict_observed_union and use_train_val and not math.isfinite(float(pool_fitness)):
+            runtime_valid = False
         idx6 = train_ll if use_train_val else train_acc
         n_sel = _mdl_n_for_score(evolution_selection_score, n_train, n_val, val_ll)
         elite_parents.append(
@@ -3101,11 +3186,17 @@ def run_global_evolution_phase(
     ``mem_trace`` (default on) writes ``global_phase/mem_trace.jsonl`` for both
     source-population and target global runs. Disable with ``--no-mem_trace``.
     """
+    from utils.teh.pics_v3_observed import uses_pics_v3_observed_union
+
+    strict_observed_union = uses_pics_v3_observed_union(limited_data_protocol)
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     mdl_lambda = normalize_mdl_lambda(mdl_lambda)
+    from utils.teh.pics_v3_prompt_robustness import pics_v3_prompt_robustness_scope
+
     prompt_contract_scope(
         uses_training_only_sa40(limited_data_protocol)
     ).__enter__()
+    pics_v3_prompt_robustness_scope(strict_observed_union).__enter__()
     participant_ids = [int(p) for p in participants]
     sparse_audits: List[SparseObservationAudit] = []
     pooled_train = _collect_pooled_train_trials_for_participants(
@@ -3205,7 +3296,8 @@ def run_global_evolution_phase(
             len(pooled_train),
             len(pooled_val),
             evolution_selection_score=evolution_selection_score,
-            warn_key="global",
+            warn_key="global" if not strict_observed_union else None,
+            strict_observed_union=strict_observed_union,
         )
         if use_train_val
         else baseline_ll
@@ -3559,14 +3651,30 @@ def run_global_evolution_phase(
                     evaluated_audit.append(audit_base)
                     continue
                 val_loglik = float(val_eval["avg_loglik"])
+            if strict_observed_union:
+                preflight_ok, _ = _pics_v3_contract_preflight_ok(
+                    choose_fn,
+                    pooled_train,
+                    pooled_val,
+                    strict_observed_union=True,
+                )
+                if not preflight_ok:
+                    num_invalid_candidates += 1
+                    evaluated_audit.append(audit_base)
+                    continue
             selection_score = _evolution_selection_score(
                 train_loglik,
                 val_loglik,
                 len(pooled_train),
                 len(pooled_val),
                 evolution_selection_score=evolution_selection_score,
-                warn_key="global" if use_train_val else None,
+                warn_key="global" if use_train_val and not strict_observed_union else None,
+                strict_observed_union=strict_observed_union,
             )
+            if strict_observed_union and not math.isfinite(float(selection_score)):
+                num_invalid_candidates += 1
+                evaluated_audit.append(audit_base)
+                continue
             fitness = selection_score if use_train_val else train_loglik
             row: Dict[str, Any] = {
                 "idx": idx,
@@ -4281,8 +4389,13 @@ def _ensure_g2_paired_pack_freeze(
     participant_ids = [int(p) for p in participants]
     source_filter = bool(filter_mixed_gambles) or str(source_dataset) == "mixed_gambles"
 
+    from utils.teh.pics_v3_observed import uses_pics_v3_observed_union
+    from utils.teh.pics_v3_prompt_robustness import pics_v3_prompt_robustness_scope
+
     with prompt_contract_scope(
         uses_training_only_sa40(str(args.limited_data_protocol))
+    ), pics_v3_prompt_robustness_scope(
+        uses_pics_v3_observed_union(str(args.limited_data_protocol))
     ):
         pooled_train = _collect_pooled_train_trials_for_participants(
             str(args.dataset),
@@ -5322,8 +5435,14 @@ def _build_psych_prompt_text(
     candidate_output_rules: str,
     runtime_contract: str = "",
 ) -> str:
+    from utils.teh.pics_v3_prompt_robustness import (
+        maybe_attach_history_robustness_after_task_description,
+    )
+
+    # PICS v3: immutable robustness block immediately after dataset-adaptive task text.
+    task_text = maybe_attach_history_robustness_after_task_description(base_prompt)
     text = (
-        f"{base_prompt}\n{state_text}{extra_state_text}\n{parent_context}"
+        f"{task_text}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{code_template_suffix}\n{candidate_output_rules}\n"
     )
     if runtime_contract and str(runtime_contract).strip():
@@ -10020,6 +10139,7 @@ def _run_pre_evolution_explore_phase(
     baseline_selection_score: Optional[float] = None,
     baseline_val_loglik: Optional[float] = None,
     mdl_lambda: float = 0.0,
+    strict_observed_union: bool = False,
 ) -> None:
     """
     One-shot candidate generation before the evolution loop.
@@ -10213,7 +10333,22 @@ def _run_pre_evolution_explore_phase(
             continue
         train_loglik = float(train_eval["avg_loglik"])
         val_loglik = float(val_eval["avg_loglik"]) if val_eval is not None else None
-        runtime_valid = train_eval.get("errors", 0) == 0
+        runtime_valid = _pics_v3_observed_runtime_valid(
+            train_eval=train_eval,
+            val_eval=val_eval,
+            n_train=n_train,
+            n_val=n_val,
+            strict_observed_union=strict_observed_union,
+        )
+        if strict_observed_union and runtime_valid:
+            preflight_ok, _preflight = _pics_v3_contract_preflight_ok(
+                choose_fn,
+                train_trials,
+                val_trials,
+                strict_observed_union=True,
+            )
+            if not preflight_ok:
+                runtime_valid = False
         if fitness_metric == "loglik":
             selection_score = _evolution_selection_score(
                 train_loglik,
@@ -10221,7 +10356,8 @@ def _run_pre_evolution_explore_phase(
                 n_train,
                 n_val,
                 evolution_selection_score=evolution_selection_score,
-                warn_key=explore_warn_key if use_train_val else None,
+                warn_key=explore_warn_key if use_train_val and not strict_observed_union else None,
+                strict_observed_union=strict_observed_union,
             )
             fitness = selection_score if use_train_val else train_loglik
         else:
@@ -10229,6 +10365,15 @@ def _run_pre_evolution_explore_phase(
             fitness = float(train_eval["accuracy"])
         if not runtime_valid:
             fitness = float("-inf") if fitness_metric == "loglik" else 0.0
+        elif (
+            strict_observed_union
+            and use_train_val
+            and fitness_metric == "loglik"
+            and selection_score is not None
+            and not math.isfinite(float(selection_score))
+        ):
+            fitness = float("-inf")
+            runtime_valid = False
         row = {
             "idx": idx,
             "code": code,
@@ -10612,6 +10757,11 @@ def run_evolution(
     use_train_val_selection = _uses_train_val_evolution_selection(
         evolution_selection_score, fitness_metric
     )
+    from utils.teh.pics_v3_observed import uses_pics_v3_observed_union
+    from utils.teh.pics_v3_prompt_robustness import pics_v3_prompt_robustness_scope
+
+    strict_observed_union = uses_pics_v3_observed_union(limited_data_protocol)
+    pics_v3_prompt_robustness_scope(strict_observed_union).__enter__()
     selection_warn_key = f"p{participant_id}"
     invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
         error_feedback_mode
@@ -11178,6 +11328,7 @@ def run_evolution(
             evolution_selection_score=evolution_selection_score,
             selection_warn_key=selection_warn_key,
             mdl_lambda=mdl_lambda,
+            strict_observed_union=strict_observed_union,
         )
         global_pool_handoff = True
         print(
@@ -11311,6 +11462,7 @@ def run_evolution(
                 else None
             ),
             mdl_lambda=mdl_lambda,
+            strict_observed_union=strict_observed_union,
         )
         last_significant_best = float(elite_parents[0][1])
 
@@ -11810,7 +11962,40 @@ def run_evolution(
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = None
                 val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
-                runtime_valid = train_eval.get("errors", 0) == 0
+                runtime_valid = _pics_v3_observed_runtime_valid(
+                    train_eval=train_eval,
+                    val_eval=val_eval,
+                    n_train=len(train_trials),
+                    n_val=len(val_trials),
+                    strict_observed_union=strict_observed_union,
+                )
+                if strict_observed_union and runtime_valid:
+                    preflight_ok, preflight_report = _pics_v3_contract_preflight_ok(
+                        choose_fn,
+                        train_trials,
+                        val_trials,
+                        strict_observed_union=True,
+                    )
+                    if not preflight_ok:
+                        runtime_valid = False
+                        num_invalid_candidates += 1
+                        first_fail = (preflight_report.get("failures") or [{}])[0]
+                        _record_invalid_program_error(
+                            invalid_candidate_errors,
+                            code=code,
+                            exc=RuntimeError(
+                                f"interface_preflight:{first_fail.get('error_type')}: "
+                                f"{first_fail.get('error_message')}"
+                            ),
+                            iteration=iteration_step,
+                            participant_id=int(participant_id)
+                            if participant_id is not None
+                            else None,
+                            candidate_id=f"candidate_{idx}",
+                            eval_split="interface_preflight",
+                            n_candidates_in_iteration=n_candidates_per_iteration,
+                            history_path=error_history_path,
+                        )
                 if train_eval.get("errors", 0) != 0:
                     num_invalid_candidates += 1
                     _record_invalid_program_error_summary(
@@ -11852,6 +12037,7 @@ def run_evolution(
                     use_train_val_selection=use_train_val_selection,
                     warn_key=selection_warn_key,
                     runtime_valid=runtime_valid,
+                    strict_observed_union=strict_observed_union,
                 )
                 _row = {
                     "idx": idx,
@@ -11964,7 +12150,40 @@ def run_evolution(
                 train_loglik = train_eval["avg_loglik"]
                 test_loglik = None
                 val_loglik = val_eval["avg_loglik"] if val_eval is not None else None
-                runtime_valid = train_eval.get("errors", 0) == 0
+                runtime_valid = _pics_v3_observed_runtime_valid(
+                    train_eval=train_eval,
+                    val_eval=val_eval,
+                    n_train=len(train_trials),
+                    n_val=len(val_trials),
+                    strict_observed_union=strict_observed_union,
+                )
+                if strict_observed_union and runtime_valid:
+                    preflight_ok, preflight_report = _pics_v3_contract_preflight_ok(
+                        choose_fn,
+                        train_trials,
+                        val_trials,
+                        strict_observed_union=True,
+                    )
+                    if not preflight_ok:
+                        runtime_valid = False
+                        num_invalid_candidates += 1
+                        first_fail = (preflight_report.get("failures") or [{}])[0]
+                        _record_invalid_program_error(
+                            invalid_candidate_errors,
+                            code=code,
+                            exc=RuntimeError(
+                                f"interface_preflight:{first_fail.get('error_type')}: "
+                                f"{first_fail.get('error_message')}"
+                            ),
+                            iteration=iteration_step,
+                            participant_id=int(participant_id)
+                            if participant_id is not None
+                            else None,
+                            candidate_id=f"candidate_{idx}",
+                            eval_split="interface_preflight",
+                            n_candidates_in_iteration=n_candidates_per_iteration,
+                            history_path=error_history_path,
+                        )
                 if train_eval.get("errors", 0) != 0:
                     num_invalid_candidates += 1
                     _record_invalid_program_error_summary(
@@ -12006,6 +12225,7 @@ def run_evolution(
                     use_train_val_selection=use_train_val_selection,
                     warn_key=selection_warn_key,
                     runtime_valid=runtime_valid,
+                    strict_observed_union=strict_observed_union,
                 )
                 _row = {
                     "idx": idx,
@@ -12989,9 +13209,33 @@ def run_evolution(
         final_train_eval = _evaluate_loglik_for_dataset(
             dataset, final_best_fn, train_trials, n_seeds=n_eval_seeds
         )
-        final_test_eval = _evaluate_loglik_for_dataset(
-            dataset, final_best_fn, test_trials, n_seeds=n_eval_seeds
-        )
+        if strict_observed_union:
+            from utils.teh.pics_v3_elite_failover import (
+                evaluate_trials_with_frozen_elite_failover,
+                freeze_elite_program_fns,
+            )
+
+            frozen_elite = freeze_elite_program_fns(
+                elite_parents, compile_program=compile_program
+            )
+            if not frozen_elite:
+                frozen_elite = [
+                    (
+                        final_best_program_id,
+                        final_best_code or "",
+                        final_best_fn,
+                    )
+                ]
+            final_test_eval = evaluate_trials_with_frozen_elite_failover(
+                frozen_elite,
+                test_trials,
+                categorical=is_categorical_output_dataset(dataset),
+                n_seeds=n_eval_seeds,
+            )
+        else:
+            final_test_eval = _evaluate_loglik_for_dataset(
+                dataset, final_best_fn, test_trials, n_seeds=n_eval_seeds
+            )
         final_val_eval = (
             _evaluate_loglik_for_dataset(
                 dataset, final_best_fn, val_trials, n_seeds=n_eval_seeds
@@ -13020,8 +13264,13 @@ def run_evolution(
                 len(val_trials),
                 evolution_selection_score=evolution_selection_score,
                 warn_key=None,
+                strict_observed_union=strict_observed_union,
             )
             overall_best_train["evolution_selection_score"] = evolution_selection_score
+        if strict_observed_union and isinstance(
+            final_test_eval.get("elite_failover"), dict
+        ):
+            overall_best_train["elite_failover"] = final_test_eval["elite_failover"]
         overall_best_test = dict(overall_best_train)
     else:
         final_train_eval = evaluate_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
@@ -15108,6 +15357,14 @@ def main():
             getattr(args, "limited_data_protocol", "structure_aware_v3")
         )
     ).__enter__()
+    from utils.teh.pics_v3_observed import uses_pics_v3_observed_union
+    from utils.teh.pics_v3_prompt_robustness import pics_v3_prompt_robustness_scope
+
+    pics_v3_prompt_robustness_scope(
+        uses_pics_v3_observed_union(
+            getattr(args, "limited_data_protocol", "structure_aware_v3")
+        )
+    ).__enter__()
     if args.phase == "evolution" and args.refinement_phase:
         print("Note: --refinement_phase is ignored when --phase evolution.")
     if args.elite_pool_size is not None and args.elite_pool_size < 1:
@@ -16215,7 +16472,21 @@ def main():
                 if d.get("gated_test_loglik") is not None
             ]
             avg_train_loglik = float(np.mean(train_loglik_values)) if train_loglik_values else None
-            avg_test_loglik = float(np.mean(test_loglik_values)) if test_loglik_values else None
+            from utils.teh.pics_v3_observed import (
+                mean_test_loglik_with_failure_policy,
+                uses_pics_v3_observed_union,
+            )
+
+            if uses_pics_v3_observed_union(getattr(args, "limited_data_protocol", "off")):
+                # Never silently average finite-only people when any test LL is -inf/missing.
+                _test_policy = mean_test_loglik_with_failure_policy(
+                    [d.get("test_loglik") for d in participant_details_loglik]
+                )
+                avg_test_loglik = _test_policy["mean"]
+            else:
+                avg_test_loglik = (
+                    float(np.mean(test_loglik_values)) if test_loglik_values else None
+                )
             _sum_ll_row = {
                 "num_of_participants": len(participant_details_loglik),
                 "avg_train_loglik": avg_train_loglik,

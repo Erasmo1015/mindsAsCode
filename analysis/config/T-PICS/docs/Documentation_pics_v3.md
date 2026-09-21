@@ -104,7 +104,7 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | 15× `pics_v3_g1` G.1 jobs (g5e50p30) | **complete** (`265753`–`265767`) |
 | `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
 | `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
-| 15× `pics_v3` gated targets (schema5) | **submitted** (`271237`–`271251`; ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`) |
+| 15× `pics_v3` gated targets (schema5) | **in flight** (ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`; active IDs: completed/running `271238`–`271247`; resubmitted pending `277676` Peterson, `277677` guan, `277678` steyvers, `277679` Schulz, `277697` Kool — replaces cancelled `271237`/`271248`–`271251`) |
 | schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
 | preliminary-v2 G.1 (incl. 258518), v2 YAML | **frozen non-final** |
@@ -123,6 +123,29 @@ ordinals and trial-first overflow truncation.
 **Psych corpus:** `--psych_dataset_split train` (HF split name; not within-person).  
 **Speekenbrink:** `--speekenbrink_split chronological` (default).
 
+### Observed / training union (authoritative)
+
+PICS v3 has **no validation role**. After the loader’s legacy 60/20/20 fields are
+built, implementation `train` and `val` are one indivisible **observed/training
+set**:
+
+| Paper term | Implementation |
+| --- | --- |
+| Observed / training trials \(D^{\mathrm{train}}\) | chronologically ordered `train ∪ val` |
+| Held-out test trials | `test` only — evaluation / reporting |
+
+Helpers: `utils/teh/pics_v3_observed.py` (`merge_observed_trials`,
+`count_pooled_observed_loglik`, `uses_pics_v3_observed_union`). Under
+`structure_aware_v3` every ranking / elite / gate / parent / stopping decision
+uses **count-pooled mean log-likelihood on that union**. A runtime error or
+non-finite score on **any** observed trial invalidates the candidate (no
+train-only fallback when legacy `val` is non-empty but crashing). Separate
+`train_loglik` / `val_loglik` fields may remain as diagnostics only.
+
+Artificial re-partitions of the same observed trials must not change merged
+identities, prompt-example selection under the shared cap, the count-pooled
+score, elite order, G.2 winners, or the gate decision.
+
 ### Training-only SA40
 
 “Training-only SA40” means the 40-trial budget applies **only** to scored
@@ -130,14 +153,60 @@ observations used to build or select programs:
 
 | Used for | Split |
 | --- | --- |
-| Automatic dataset prompt | train+val only |
-| Candidate-generation examples | train+val only |
-| Evolution fitness / ranking / elite / gate / stopping | train+val only |
+| Automatic dataset prompt | observed union (`train∪val`) only |
+| Candidate-generation examples | observed union under **one** shared cap |
+| Evolution fitness / ranking / elite / gate / stopping | observed union only |
 | Held-out evaluation | test, **after** selection |
 
 Implementation: `uses_training_only_sa40` is true for `structure_aware_v2` and
 `structure_aware_v3` (shared data path; `limited_data_protocol_revision` → `v3`).
-v1 `structure_aware` remains a separate frozen path.
+v1 `structure_aware` remains a separate frozen path. **Strict observed-union
+selection (no train-only fallback; interface preflight) applies only to
+`structure_aware_v3`.**
+
+### Interface robustness (separate from observed-union scoring)
+
+History outcome fields (`feedback`, `reward`, and related keys) **may be
+absent** depending on trial/stage. Runtime contracts document this; programs
+must use `.get()` / membership checks.
+
+Every PICS v3 candidate-generation prompt inserts this **immutable** block
+immediately after the dataset-adaptive task description (not into trial JSON;
+genuine field absence is preserved):
+
+> `history` may be empty, and different history entries may contain different
+> fields. Never assume optional fields such as `feedback`, `reward`, or outcome
+> fields exist or are non-null. Check for a key or use `.get(...)` before reading
+> it. Only fields explicitly required by the current task/API contract may be
+> accessed directly.
+
+Before elite admission, PICS v3 runs a **test-independent** interface preflight
+(`utils/teh/pics_v3_contract_preflight.py`) on synthetic admissible
+`problem`/`history` variants: empty history, action-only entries, heterogeneous
+entries, missing/null optional outcomes, and valid dataset/stage required problem
+fields. A candidate that raises on any required variant cannot enter the elite
+pool. Test scores never drive selection or replacement.
+
+### Deployment-time elite failover (not test-set model selection)
+
+After elite order is frozen from **observed-union** scores only, held-out test
+execution may use a **per-trial** failover (`utils/teh/pics_v3_elite_failover.py`):
+
+1. Try rank-1 on that test trial.
+2. On exception or invalid/non-finite returned probability only, try rank-2, then
+   rank-3, … in the frozen order.
+3. Never switch because another program’s prediction or likelihood looks better.
+4. Never use the test label to choose, reorder, or validate programs.
+5. If every frozen elite fails on that trial, emit the uniform prediction
+   (`0.5` binary or `1/K` categorical).
+6. Failover is local to the trial — a one-trial failure does not discard rank-1
+   for remaining trials.
+
+This is a predefined **deployment-time execution fallback**, not model selection
+on the test set. Artifacts record `elite_failover` diagnostics (primary failures,
+fallback depth, resolved-by-other, all-elite failures). Means never silently drop
+people with non-finite test loglik
+(`mean_test_loglik_with_failure_policy`).
 
 ### Construction
 

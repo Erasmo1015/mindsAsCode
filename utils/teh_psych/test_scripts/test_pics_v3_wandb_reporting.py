@@ -215,6 +215,7 @@ def test_gated_reporter_strips_dynamic_keys_keeps_fixed_contract(tmp_path: Path)
     assert reporter._run.summary.get("final/is_complete") is True
     assert reporter._run.summary.get("final/mean_test_loglik") == pytest.approx(mean_te)
     assert reporter._run.summary.get("final/mean_train_val_loglik") == pytest.approx(mean_tv)
+    assert reporter._run.summary.get("final/n_inf_test_loglik") == 0
 
     table_payloads = [p for p in fake.logged if "final/participant_table" in p]
     assert len(table_payloads) == 1
@@ -275,6 +276,81 @@ def test_publish_final_withholds_mean_until_complete(tmp_path: Path):
     assert reporter.publish_final() is False
     assert reporter._run.summary.get("final/is_complete") is False
     assert "final/mean_test_loglik" not in reporter._run.summary
+    # Still report cumulative -inf count among people finished so far.
+    assert reporter._run.summary.get("final/n_inf_test_loglik") == 0
     _assert_no_dynamic_keys(reporter._run.summary.keys())
     for payload in fake.logged:
         _assert_no_dynamic_keys(payload.keys())
+
+
+def test_n_inf_test_loglik_updated_on_participant_sync_only(tmp_path: Path):
+    """final/n_inf_test_loglik counts finished people with -inf final test LL."""
+    from utils.teh.t_pics_gated_wandb import count_inf_test_loglik_participants
+
+    selected = tmp_path / "selected"
+    expected = [0, 1, 2]
+
+    def _write_person(pid: int, test_ll, *, complete: bool = True) -> None:
+        person = selected / f"participant_{pid}"
+        person.mkdir(parents=True, exist_ok=True)
+        (person / "best_program.py").write_text(
+            "def choose(problem, history):\n    return 0.5\n", encoding="utf-8"
+        )
+        (person / "results.json").write_text(
+            json.dumps(
+                {
+                    "overall_best_train": {
+                        "program_id": f"p{pid}",
+                        "selection_score": -0.5,
+                        "train_loglik": -0.4,
+                        "val_loglik": -0.6,
+                    },
+                    "overall_best_test": {
+                        "program_id": f"p{pid}",
+                        "test_loglik": test_ll,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        if complete:
+            explore = person / "explore_phase"
+            explore.mkdir()
+            (explore / "metrics.json").write_text(
+                json.dumps({"explore_candidates_requested": 50}),
+                encoding="utf-8",
+            )
+            for i in range(1, 11):
+                (person / f"iteration_{i}").mkdir()
+
+    _write_person(0, -0.7)
+    _write_person(1, float("-inf"))
+    _write_person(2, -0.8, complete=False)  # unfinished — must not count
+
+    fake = _FakeWandb()
+    reporter = GatedWandbReporter()
+    reporter._wandb = fake
+    reporter._run = _FakeRun()
+    reporter._enabled = True
+    reporter.attach_context(
+        expected_participant_ids=expected,
+        selected_dir=selected,
+        n_iterations=10,
+        explore_candidates=50,
+        output_root=tmp_path,
+    )
+    reporter.sync_progress_from_disk()
+    assert reporter._run.summary.get("final/n_inf_test_loglik") == 1
+    assert reporter._run.summary.get("progress/completed_participants") == 2
+
+    # Completing the third person with -inf bumps the count once (recomputed from disk).
+    _write_person(2, float("-inf"), complete=True)
+    reporter.sync_progress_from_disk()
+    assert reporter._run.summary.get("final/n_inf_test_loglik") == 2
+
+    rows = [
+        {"completion_status": "complete", "final_test_is_nonfinite": True},
+        {"completion_status": "complete", "final_test_is_nonfinite": False},
+        {"completion_status": "incomplete", "final_test_is_nonfinite": True},
+    ]
+    assert count_inf_test_loglik_participants(rows) == 1

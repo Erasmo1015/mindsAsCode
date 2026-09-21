@@ -687,6 +687,10 @@ def build_deterministic_runtime_contract(
             "- Do not compare integer actions with string key labels "
             "(no option_keys.index('E') against history[i]['action']).",
             "- Optional / stage-conditional / sometimes-present fields must use .get().",
+            "- History outcome fields such as feedback, reward, treasure, and other "
+            "realized outcomes may be ABSENT on some trials or stages (including "
+            "delayed-feedback steps that store only action). Never use history[-1]"
+            "['feedback'] / ['reward'] without a membership check or .get().",
             "- Guard every division. Wrap dict.keys() in list() before indexing.",
             f"- Allowed builtins: {names}. math is pre-imported. No I/O.",
             output_line,

@@ -29,6 +29,9 @@ ANNOTATION_PACKAGE_V5 = ANNOTATION_PACKAGE
 LIMITED_DATA_PROTOCOL = "structure_aware_v3"
 LIMITED_TRAIN_VAL = 40
 
+# Under structure_aware_v3, train∪val is one observed/training set
+# (utils/teh/pics_v3_observed.py + pics_v3_contract_preflight.py).
+
 # Qwen2.5-Coder-32B-Instruct production context (fully chat-templated).
 # 16k-class ceiling (preliminary-v2 pair): 14000 input + 1024 out ≤ 16384.
 MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"

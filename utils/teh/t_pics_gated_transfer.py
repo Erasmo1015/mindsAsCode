@@ -1194,36 +1194,16 @@ def participant_train_val_loglik(
     n_train: int,
     n_val: int,
 ) -> Optional[float]:
-    """Per-participant train_val score; identical to evolution_selection_score=train_val.
+    """Per-participant observed-union score (count-pooled train∪val mean loglik).
 
-    This is the trial-count-weighted mean of train and val avg_loglik, equal to
-    the mean log-likelihood on the union of observed (train+val) trials. Empty
-    val falls back to train (all remaining observed trials). Test is not an
-    input. Non-finite scores on a non-empty split return None.
+    Equal to the mean log-likelihood on the union of observed (train+val) trials.
+    Empty legacy val (``n_val==0``) means all observed trials live in train.
+    Non-finite scores on a non-empty legacy split return None (no train-only
+    fallback over a crashing val). Test is never an input.
     """
-    n_tr = max(0, int(n_train))
-    n_vl = max(0, int(n_val))
-    if n_tr + n_vl <= 0:
-        return None
-    train_ll = _finite_score(train_loglik) if n_tr > 0 else None
-    val_ll = _finite_score(val_loglik) if n_vl > 0 else None
-    if n_tr > 0 and train_ll is None:
-        return None
-    if n_vl > 0 and val_ll is None:
-        return None
-    if n_tr == 0:
-        return val_ll
-    from teh import _evolution_selection_score
+    from utils.teh.pics_v3_observed import count_pooled_observed_loglik
 
-    return float(
-        _evolution_selection_score(
-            float(train_ll),
-            val_ll,
-            n_tr,
-            n_vl,
-            evolution_selection_score=EVOLUTION_SELECTION_SCORE,
-        )
-    )
+    return count_pooled_observed_loglik(train_loglik, val_loglik, n_train, n_val)
 
 
 def evaluate_pooled_train_val_loglik(
@@ -1254,7 +1234,6 @@ def evaluate_pooled_train_val_loglik(
         _collect_pooled_split_trials_for_participants,
         _collect_pooled_train_trials_for_participants,
         _evaluate_loglik_for_dataset,
-        _evolution_selection_score,
         compile_program,
     )
 
@@ -1321,15 +1300,9 @@ def evaluate_pooled_train_val_loglik(
             return None
     if n_train == 0:
         return val_ll
-    return float(
-        _evolution_selection_score(
-            float(train_ll),
-            val_ll,
-            n_train,
-            n_val,
-            evolution_selection_score=EVOLUTION_SELECTION_SCORE,
-        )
-    )
+    from utils.teh.pics_v3_observed import count_pooled_observed_loglik
+
+    return count_pooled_observed_loglik(train_ll, val_ll, n_train, n_val)
 
 
 def evaluate_mean_train_val_loglik(

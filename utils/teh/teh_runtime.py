@@ -958,10 +958,18 @@ def setup_teh_run_prompts(
     (prompts_dir / RUNTIME_CONTRACT_FILENAME).write_text(
         contract + "\n", encoding="utf-8"
     )
+    from utils.teh.limited_data_registry import LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
+    from utils.teh.pics_v3_prompt_robustness import ensure_history_robustness_block
+
+    infer_body = infer_path.read_text(encoding="utf-8")
+    if (
+        normalize_limited_data_protocol(limited_data_protocol)
+        == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
+    ):
+        infer_body = ensure_history_robustness_block(infer_body)
+        print(f"[TEH] Appended immutable history robustness block -> {infer_path}")
     infer_path.write_text(
-        attach_runtime_contract_to_prompt(
-            infer_path.read_text(encoding="utf-8"), contract
-        ),
+        attach_runtime_contract_to_prompt(infer_body, contract),
         encoding="utf-8",
     )
     print(f"[TEH] Appended deterministic runtime contract -> {infer_path}")

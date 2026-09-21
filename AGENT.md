@@ -669,11 +669,33 @@ Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first
 - G.1 ledger: `pics_v3/g1_job_paths_g5e50p30.tsv` (jobs `265753`–`265767`)
 - Annot package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/`
 - Concise report+figs: `…/source_selection_schema_v5/report/`
-- Gated jobs: `271237`–`271251`; ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` (dependency = schema5)
+- Gated jobs (schema5 ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`): keep `271238`–`271247`; resubmits `277676` (Peterson), `277677` (guan), `277678` (steyvers), `277679` (Schulz), `277697` (Kool) replace cancelled `271237` / `271248`–`271251`
 - Schema-v4 50-person freezes kept historical; do not overwrite
 - OpenEvolve matched baseline: **350 / 14000 / 16384 / g5e50p30** (`run_openevolve.py` defaults); dry-run `DRY_RUN=1 bash cluster/v3/ours/baselines/submit_openevolve.sh`
 
 Submit gated: `DRY_RUN=0 CONFIRM_SUBMIT=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh` (defaults to schema5 YAML).
+
+### Gated status snapshot (2026-09-21 ~17:46 local)
+
+Mean test LL = mean of finite `overall_best_test.test_loglik`; `†k inf` = non-finite count excluded from mean.
+
+| Job | Dataset | State (runtime) | n | mean test LL | gate |
+| --- | --- | --- | --- | --- | --- |
+| 277676 | Peterson | PENDING (00:00:00) resubmit of cancelled 271237 | — | — | — |
+| 271238 | Plonsky | COMPLETED (04:32:13) | 30 | -0.615 | transfer (transfer_strictly_better) |
+| 271239 | CCT | COMPLETED (03:26:06) | 30 | -0.570 | transfer (transfer_strictly_better) |
+| 271240 | Wulff | COMPLETED (02:42:47) | 30 | -0.646 | control (exact_tie) |
+| 271241 | Speekenbrink | COMPLETED (02:21:37) | 23 | -0.793 †1 inf | control (control_better) |
+| 271242 | Hilbig | COMPLETED (01:46:32) | 30 | -0.303 | control (control_better) |
+| 271243 | Frey risk | RUNNING (03:17:04) | 20 | -0.211 | control (control_better) |
+| 271244 | Enkavi | COMPLETED (01:30:24) | 30 | -0.362 | control (exact_tie) |
+| 271245 | Badham | COMPLETED (00:55:05) | 10 | -0.800 | control (exact_tie) |
+| 271246 | mixed_gambles | RUNNING (01:39:24) | 17 | -0.527 | control (control_better) |
+| 271247 | bergert | RUNNING (01:14:26) | 10 | -0.061 | transfer (transfer_strictly_better) |
+| 277677 | guan | PENDING (00:00:00) resubmit of cancelled 271248 | — | — | — |
+| 277678 | steyvers | PENDING (00:00:00) resubmit of cancelled 271249 | — | — | — |
+| 277679 | Schulz | PENDING (00:00:00) resubmit of cancelled 271250 | — | — | — |
+| 277697 | Kool | PENDING (00:00:00) resubmit of cancelled 271251 | — | — | — |
 
 ---
 

@@ -105,6 +105,28 @@ def _finite(value: Any) -> Optional[float]:
     return number
 
 
+def _is_nonfinite_loglik(value: Any) -> bool:
+    """True when a reported loglik is present but not finite (e.g. -inf)."""
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return not (number == number) or number in (float("inf"), float("-inf"))
+
+
+def count_inf_test_loglik_participants(rows: Sequence[Mapping[str, Any]]) -> int:
+    """Completed people whose frozen best program has non-finite final test loglik."""
+    n = 0
+    for row in rows:
+        if str(row.get("completion_status")) != "complete":
+            continue
+        if bool(row.get("final_test_is_nonfinite")):
+            n += 1
+    return int(n)
+
+
 def deterministic_wandb_run_id(
     *,
     dataset: str,
@@ -288,6 +310,7 @@ def collect_final_participant_rows(
             program_has_valid_choose(program_path) if program_path.is_file() else (False, "")
         )
         status = "complete" if complete and program_ok else "incomplete"
+        raw_test_ll = test_block.get("test_loglik")
         rows.append(
             {
                 "participant_ordinal": int(ordinal),
@@ -295,7 +318,8 @@ def collect_final_participant_rows(
                 "final_program_id": best.get("program_id") or test_block.get("program_id"),
                 "final_program_sha256": _sha256_file(program_path) if program_path.is_file() else None,
                 "final_train_val_loglik": train_val,
-                "final_test_loglik": _finite(test_block.get("test_loglik")),
+                "final_test_loglik": _finite(raw_test_ll),
+                "final_test_is_nonfinite": _is_nonfinite_loglik(raw_test_ll),
                 "completion_status": status,
             }
         )
@@ -746,12 +770,16 @@ class GatedWandbReporter:
         )
         completed = sum(1 for row in rows if row["completion_status"] == "complete")
         failed = max(0, self._expected_n - completed)
+        n_inf_test = count_inf_test_loglik_participants(rows)
         self._safe_summary(
             {
                 "progress/completed_participants": completed,
                 "progress/expected_participants": self._expected_n,
                 "progress/failed_participants": failed,
                 "progress/stage": "person" if completed < self._expected_n else "aggregating",
+                # Cumulative count of finished people whose best program has -inf test LL.
+                # Recomputed from disk only here / in publish_final — not during eval loops.
+                "final/n_inf_test_loglik": n_inf_test,
             }
         )
         self._safe_log(
@@ -767,7 +795,8 @@ class GatedWandbReporter:
             or completed in {1, 5, 10, 25}
         ):
             self._milestone(
-                f"person progress {completed}/{self._expected_n} complete"
+                f"person progress {completed}/{self._expected_n} complete "
+                f"n_inf_test={n_inf_test}"
             )
 
     def publish_final(self) -> bool:
@@ -782,6 +811,7 @@ class GatedWandbReporter:
         )
         completed = sum(1 for row in rows if row["completion_status"] == "complete")
         is_complete = bool(rows) and completed == self._expected_n and self._expected_n > 0
+        n_inf_test = count_inf_test_loglik_participants(rows)
         self._upload_table(rows)
         self._safe_summary(
             {
@@ -791,6 +821,7 @@ class GatedWandbReporter:
                 "final/completed_participants": completed,
                 "final/expected_participants": self._expected_n,
                 "final/is_complete": bool(is_complete),
+                "final/n_inf_test_loglik": n_inf_test,
             }
         )
         if not is_complete:
@@ -813,6 +844,7 @@ class GatedWandbReporter:
             {
                 "final/mean_train_val_loglik": mean_tv,
                 "final/mean_test_loglik": mean_te,
+                "final/n_inf_test_loglik": n_inf_test,
                 "final/is_complete": True,
                 "status/state": "completed",
                 "status/failure_reason": None,
@@ -822,7 +854,9 @@ class GatedWandbReporter:
         )
         self._milestone(
             f"completed mean_test_loglik={mean_te} "
-            f"mean_train_val_loglik={mean_tv} persons={completed}/{self._expected_n}"
+            f"mean_train_val_loglik={mean_tv} "
+            f"n_inf_test_loglik={n_inf_test} "
+            f"persons={completed}/{self._expected_n}"
         )
         return True
 
