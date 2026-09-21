@@ -365,11 +365,11 @@ def test_openevolve_shares_v3_context_not_pics_kind():
     assert ICLR_DEFAULT_LIMITED_DATA_PROTOCOL == "structure_aware_v3"
     assert ICLR_V2_LIMITED_DATA_PROTOCOL == "structure_aware_v2"
     assert args.limited_data_protocol == "structure_aware_v3"
-    assert args.hard_prompt_token_cap == 30_000 == ICLR_FROZEN_INPUT_TOKEN_CEILING
+    assert args.hard_prompt_token_cap == 14_000 == ICLR_FROZEN_INPUT_TOKEN_CEILING
     assert args.llm_max_tokens == ICLR_FROZEN_LLM_MAX_TOKENS == 1024
     from run_openevolve import ICLR_FROZEN_VLLM_MAX_MODEL_LEN
 
-    assert args.max_model_len == 32_768 == ICLR_FROZEN_VLLM_MAX_MODEL_LEN
+    assert args.max_model_len == 16_384 == ICLR_FROZEN_VLLM_MAX_MODEL_LEN
     assert KIND == "pics_v3"
     src = inspect.getsource(build_arg_parser)
     assert "pics_v3" not in src

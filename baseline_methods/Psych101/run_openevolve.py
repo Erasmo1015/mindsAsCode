@@ -10,14 +10,16 @@ python baseline_methods/Psych101/run_openevolve.py \
   --psych_dataset_split train \
   --participant_scope range \
   --range_start_ordinal 0 \
-  --range_end_ordinal 49 \
+  --range_end_ordinal 29 \
   --api_base http://localhost:8000/v1 \
   --n_iterations 350 \
   --parallel_participants 1 \
-  --parallel_evaluations 4 \
+  --parallel_evaluations 10 \
   --limited_data_protocol structure_aware_v3 \
   --limited_train_val 40 \
-  --max_prompt_train_trials 60
+  --max_prompt_train_trials 60 \
+  --hard_prompt_token_cap 14000 \
+  --max_model_len 16384
 
 OpenEvolve baseline for Psych-101 / ICLR datasets (vanilla prompt, full OpenEvolve machinery).
 
@@ -26,7 +28,7 @@ Dataset description is the registry task text (Choice13k / mixed-gambles vanilla
 only for those two schemas). The choose() interface is a short mechanically generated
 Bernoulli or categorical contract. Official island inspirations are prompt-only
 contextual examples (not co-parents) and are dropped before observed examples if
-the 30000-token Qwen input ceiling is exceeded.
+the 14000-token Qwen input ceiling is exceeded.
 
 Evolution optimizes trial-pooled mean log-likelihood on the observed train+val union
 (combined_score). Per-split train_loglik and val_loglik are logged separately. Test
@@ -35,19 +37,19 @@ best-by-observed-union program.
 
 OpenEvolve still uses islands / MAP-Elites / archive for parent selection. The LLM
 sees one current mutable parent plus official optional contextual blocks when they
-fit the 30000-token Qwen input ceiling: previous-attempt history, artifacts when
+fit the 14000-token Qwen input ceiling: previous-attempt history, artifacts when
 include_artifacts is on, num_top_programs=3, leftover diverse programs via official
 random.sample, then num_diverse_programs=2 island inspirations (not co-parents).
 Observed train+val examples outrank optional context. Optional blocks are dropped
 before examples are reduced. The complete MAP-Elites database is never serialized.
 
-ICLR freeze: --n_iterations 350, --parallel_participants 1, --parallel_evaluations 4,
-SA40 (--limited_data_protocol structure_aware_v3 --limited_train_val 40;
-v1 `structure_aware` / preliminary-v2 remain available for replay),
---hard_prompt_token_cap 30000, --max_model_len 32768, --llm_max_tokens 1024,
---max_prompt_train_trials 60 (prompt display only; fitness uses the complete
-retained train+val union). Do not copy the obsolete 10×10 example or PICS
---max_workers 100.
+ICLR freeze (matched to PICS v3 g5e50p30): --n_iterations 350, --parallel_participants 1,
+--parallel_evaluations 10, SA40 (--limited_data_protocol structure_aware_v3
+--limited_train_val 40; v1 `structure_aware` / preliminary-v2 remain available for
+replay), first-30 ordinals from teh_datasets.yaml, --hard_prompt_token_cap 14000,
+--max_model_len 16384, --llm_max_tokens 1024, --max_prompt_train_trials 60 (prompt
+display only; fitness uses the complete retained train+val union). Do not copy the
+obsolete 10×10 people×eval concurrency, 32k/30k context, or PICS --max_workers 100.
 """
 
 from __future__ import annotations
@@ -170,11 +172,13 @@ _LEGACY_VANILLA_TASK_FILES = frozenset(
 )
 ICLR_FROZEN_N_ITERATIONS = 350
 ICLR_FROZEN_PARALLEL_PARTICIPANTS = 1
-ICLR_FROZEN_PARALLEL_EVALUATIONS = 4
+# Throughput only (does not change candidate count). Match historical H100 OE jobs
+# that used --parallel_evaluations 10; keep people=1 to avoid 10×10 request storms.
+ICLR_FROZEN_PARALLEL_EVALUATIONS = 10
 ICLR_FROZEN_LIMITED_DATA_PROTOCOL = LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE
 ICLR_V2_LIMITED_DATA_PROTOCOL = "structure_aware_v2"
 ICLR_V3_LIMITED_DATA_PROTOCOL = "structure_aware_v3"
-# Future ICLR OpenEvolve jobs share structure_aware_v3 + 32k/30k/1024 context.
+# Matched PICS v3 g5e50p30: structure_aware_v3 + 16k/14k/1024 + first-30 ordinals.
 ICLR_DEFAULT_LIMITED_DATA_PROTOCOL = ICLR_V3_LIMITED_DATA_PROTOCOL
 ICLR_FROZEN_LIMITED_TRAIN_VAL = 40
 ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS = 60  # T-PICS prompt-display cap on train+val union
@@ -184,15 +188,20 @@ ICLR_FROZEN_LLM_MAX_TOKENS = 1024
 ICLR_FROZEN_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 ICLR_FROZEN_NUM_DIVERSE_PROGRAMS = 2  # official OpenEvolve PromptConfig default
 ICLR_FROZEN_NUM_TOP_PROGRAMS = 3  # official PromptConfig default; worker injects via top_programs=
-ICLR_FROZEN_INPUT_TOKEN_CEILING = 30000
-ICLR_PRELIMINARY_V2_INPUT_TOKEN_CEILING = 14000
-ICLR_FROZEN_VLLM_MAX_MODEL_LEN = 32768
+# Active freeze = PICS v3 16k-class pair (14000 input + 1024 out ≤ 16384).
+ICLR_FROZEN_INPUT_TOKEN_CEILING = 14000
+ICLR_FROZEN_VLLM_MAX_MODEL_LEN = 16384
+# Historical unmatched OE context (pre-g5e50p30); do not launch as paper baseline.
+ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING = 30000
+ICLR_HISTORICAL_32K_VLLM_MAX_MODEL_LEN = 32768
+# Alias kept for older imports/tests that named the 14k cap "preliminary-v2".
+ICLR_PRELIMINARY_V2_INPUT_TOKEN_CEILING = ICLR_FROZEN_INPUT_TOKEN_CEILING
 ICLR_FROZEN_INCLUDE_ARTIFACTS = True  # official PromptConfig.include_artifacts default
 ICLR_FROZEN_MAX_PROGRAM_CHARS = 10000  # audited production bound for packing tests
 EXPECTED_OPENEVOLVE_GIT_SHA = "411fb59c886c18704caaffb611e17cf9e7d824d2"
 # Token-budget example ladder used only after all optional contextual blocks are omitted.
 ICLR_PROMPT_EXAMPLE_REDUCTION_CAPS = (60, 40, 30, 20, 10, 5)
-ICLR_RANGE_ORDINAL_CLI_DEFAULTS = (0, 49)
+ICLR_RANGE_ORDINAL_CLI_DEFAULTS = (0, 29)
 QWEN_TOKENIZER_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct"
 _ARTIFACTS_MARKER = "# Evaluation artifacts (official OpenEvolve; parent artifacts, not co-parents)"
 _PREVIOUS_MARKER = "# Previous attempts (official OpenEvolve; contextual examples, not co-parents)"
@@ -418,14 +427,15 @@ def vanilla_llm_user_prefix(dataset: str, *, base_prompt: Optional[str] = None) 
 
 
 def apply_iclr_frozen_range_ordinals(args: Any) -> None:
-    """Replace leftover 0–49 CLI defaults with teh_datasets.yaml ranges."""
+    """Replace leftover CLI placeholder ranges with teh_datasets.yaml ranges."""
     if getattr(args, "participant_scope", "range") != "range":
         return
     if getattr(args, "ordinals", None) is not None:
         return
     start = int(getattr(args, "range_start_ordinal", 0))
-    end = int(getattr(args, "range_end_ordinal", 49))
-    if (start, end) != ICLR_RANGE_ORDINAL_CLI_DEFAULTS:
+    end = int(getattr(args, "range_end_ordinal", 29))
+    # (0, 29) = current argparse default; (0, 49) = pre-g5e50p30 leftover.
+    if (start, end) not in {ICLR_RANGE_ORDINAL_CLI_DEFAULTS, (0, 49)}:
         return
     yaml_start, yaml_end = emnlp_ordinal_range(args.dataset)
     args.range_start_ordinal = yaml_start
@@ -2552,7 +2562,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--participant_scope", type=str, default="range", choices=["single", "range", "ordinals", "all"])
     p.add_argument("--single_participant_id", type=int, default=0)
     p.add_argument("--range_start_ordinal", type=int, default=0)
-    p.add_argument("--range_end_ordinal", type=int, default=49)
+    p.add_argument("--range_end_ordinal", type=int, default=29)
     p.add_argument("--ordinals", nargs="+", type=int, default=None)
     p.add_argument("--all_max_participants", type=int, default=None)
     p.add_argument("--filter_mixed_gambles", action="store_true")
@@ -2802,7 +2812,7 @@ def main() -> None:
         "OpenEvolve islands/MAP-Elites/archive still select one formal parent; official "
         "optional contextual blocks (artifacts, previous attempts, 3 island-best top, "
         "random.sample diverse leftover, 2 inspirations) are packed in 411fb59 template "
-        "order and dropped before reducing observed examples if the 30000-token Qwen "
+        "order and dropped before reducing observed examples if the 14000-token Qwen "
         "input ceiling is exceeded. The MAP-Elites database is not serialized into the prompt."
     )
 

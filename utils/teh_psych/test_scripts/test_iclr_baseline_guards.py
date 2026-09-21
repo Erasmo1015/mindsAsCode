@@ -51,6 +51,8 @@ from run_openevolve import (  # noqa: E402
     ICLR_FROZEN_NUM_TOP_PROGRAMS,
     ICLR_FROZEN_INPUT_TOKEN_CEILING,
     ICLR_FROZEN_VLLM_MAX_MODEL_LEN,
+    ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING,
+    ICLR_HISTORICAL_32K_VLLM_MAX_MODEL_LEN,
     ICLR_FROZEN_PARALLEL_EVALUATIONS,
     ICLR_FROZEN_PARALLEL_PARTICIPANTS,
     ICLR_FROZEN_SPLIT_RATIO,
@@ -909,7 +911,7 @@ def test_frozen_iclr_openevolve_cli_defaults():
     args = build_arg_parser().parse_args([])
     assert args.n_iterations == ICLR_FROZEN_N_ITERATIONS == 350
     assert args.parallel_participants == ICLR_FROZEN_PARALLEL_PARTICIPANTS == 1
-    assert args.parallel_evaluations == ICLR_FROZEN_PARALLEL_EVALUATIONS == 4
+    assert args.parallel_evaluations == ICLR_FROZEN_PARALLEL_EVALUATIONS == 10
     assert args.limited_data_protocol == ICLR_DEFAULT_LIMITED_DATA_PROTOCOL == "structure_aware_v3"
     assert ICLR_FROZEN_LIMITED_DATA_PROTOCOL == "structure_aware"
     assert args.limited_train_val == ICLR_FROZEN_LIMITED_TRAIN_VAL == 40
@@ -920,11 +922,13 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.num_diverse_programs == 2
     assert args.num_top_programs == ICLR_FROZEN_NUM_TOP_PROGRAMS == 3
     assert args.max_prompt_train_trials == ICLR_FROZEN_MAX_PROMPT_TRAIN_TRIALS == 60
-    assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 30000
-    assert args.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 32768
+    assert args.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
+    assert args.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 16384
     assert args.include_artifacts is True
     assert args.base_prompt is None
     assert args.n_iterations != 600
+    assert ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING == 30000
+    assert ICLR_HISTORICAL_32K_VLLM_MAX_MODEL_LEN == 32768
 
 
 def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():
@@ -939,17 +943,17 @@ def test_frozen_iclr_argv_and_yaml_ordinals_for_all_15():
         start, end = emnlp_ordinal_range(alias)
         assert parsed.n_iterations == 350
         assert parsed.parallel_participants == 1
-        assert parsed.parallel_evaluations == 4
+        assert parsed.parallel_evaluations == 10
         assert parsed.limited_data_protocol == "structure_aware_v3"
         assert parsed.limited_train_val == 40
         assert parsed.max_prompt_train_trials == 60
         assert parsed.num_diverse_programs == 2
         assert parsed.num_top_programs == 3
         assert argv[argv.index("--num_top_programs") + 1] == "3"
-        assert parsed.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 30000
-        assert argv[argv.index("--hard_prompt_token_cap") + 1] == "30000"
-        assert parsed.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 32768
-        assert argv[argv.index("--max_model_len") + 1] == "32768"
+        assert parsed.hard_prompt_token_cap == ICLR_FROZEN_INPUT_TOKEN_CEILING == 14000
+        assert argv[argv.index("--hard_prompt_token_cap") + 1] == "14000"
+        assert parsed.max_model_len == ICLR_FROZEN_VLLM_MAX_MODEL_LEN == 16384
+        assert argv[argv.index("--max_model_len") + 1] == "16384"
         assert "--max_prompt_train_trials" in argv
         assert argv[argv.index("--max_prompt_train_trials") + 1] == "60"
         assert parsed.range_start_ordinal == start

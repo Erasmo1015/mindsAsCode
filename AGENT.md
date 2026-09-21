@@ -646,7 +646,7 @@ New method version, not a v1 overwrite. Flag: `--limited_data_protocol structure
 
 ## Short update (Sep 20 2026 — PICS v3)
 
-Final ICLR method. Protocol flag: `structure_aware_v3` (same SA40/history semantics as v2; new flag). Kinds: `pics_v3_g1` (global-only G.1) / `pics_v3` (gated target). Context: **32768 / 30000 / 1024**, `max_parent_chars=5000`. G.1 is **not** gated/YAML (no transfer suffix); fail-closed auto-prompt when prefer_auto ∧ global ∧ `n_iterations=0` ∧ v3. Authoritative doc: `analysis/config/T-PICS/docs/Documentation_pics_v3.md`. Constants: `utils/teh/pics_v3.py`. Submit 15 G.1: `bash cluster/v2/ours/Qwen/submit_g1_pics_v3.sh` (`H100_DATASETS=…` splits H100NVL/L40S; `DRY_RUN=0 CONFIRM_SUBMIT=1` to submit). Planned after G.1: schema-v4 annotate → Occurrence-EB → `Transfer_source/pics_v3/…_pics_v3.yaml`. Baselines share the v3 data contract only (OE: 350 / 30000 / 32768; Centaur Mixed Gambles A/B).
+Final ICLR method. Protocol flag: `structure_aware_v3` (same SA40/history semantics as v2; new flag). Kinds: `pics_v3_g1` (global-only G.1) / `pics_v3` (gated target). Context: **16384 / 14000 / 1024**, `max_parent_chars=5000` (g5e50p30). G.1 is **not** gated/YAML (no transfer suffix); fail-closed auto-prompt when prefer_auto ∧ global ∧ `n_iterations=0` ∧ v3. Authoritative doc: `analysis/config/T-PICS/docs/Documentation_pics_v3.md`. Constants: `utils/teh/pics_v3.py`. Submit 15 G.1: `bash cluster/v2/ours/Qwen/submit_g1_pics_v3.sh` (`H100_DATASETS=…` splits H100NVL/L40S; `DRY_RUN=0 CONFIRM_SUBMIT=1` to submit). Active source map: schema5 Occurrence-EB. Baselines share the v3 data contract only (OE: 350 / 14000 / 16384 / g5e50p30; Centaur Mixed Gambles A/B).
 
 ---
 
@@ -671,6 +671,7 @@ Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first
 - Concise report+figs: `…/source_selection_schema_v5/report/`
 - Gated jobs: `271237`–`271251`; ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` (dependency = schema5)
 - Schema-v4 50-person freezes kept historical; do not overwrite
+- OpenEvolve matched baseline: **350 / 14000 / 16384 / g5e50p30** (`run_openevolve.py` defaults); dry-run `DRY_RUN=1 bash cluster/v3/ours/baselines/submit_openevolve.sh`
 
 Submit gated: `DRY_RUN=0 CONFIRM_SUBMIT=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh` (defaults to schema5 YAML).
 
