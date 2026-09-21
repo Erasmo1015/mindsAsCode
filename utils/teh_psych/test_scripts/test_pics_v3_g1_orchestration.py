@@ -215,12 +215,13 @@ def test_require_auto_llm_prompt_is_not_a_cli_flag():
 
 
 def _g1_require_auto_predicate(ns) -> bool:
-    """Mirror teh.py main() g1_require_auto (PICS v3 only)."""
+    """Mirror teh.py main() g1_require_auto (PICS v3 only; ablation flag clears it)."""
     return bool(
         getattr(ns, "prefer_auto_llm_prompt", False)
         and getattr(ns, "global_phase", False)
         and int(getattr(ns, "n_iterations", 0) or 0) == 0
         and str(getattr(ns, "limited_data_protocol", "") or "") == "structure_aware_v3"
+        and not bool(getattr(ns, "ablate_dataset_adaptive_prompt", False))
     )
 
 
@@ -229,9 +230,14 @@ def test_pics_v3_g1_fail_closed_auto_prompt_wiring(g1_commands):
     teh_src = (REPO / "teh.py").read_text(encoding="utf-8")
     assert "g1_require_auto" in teh_src
     assert '== "structure_aware_v3"' in teh_src
-    assert "require_auto_llm_prompt=bool(t_pics_gated or g1_require_auto)" in teh_src
+    assert "and not ablate_adaptive_prompt" in teh_src
+    assert "require_auto_llm_prompt=bool(" in teh_src
+    assert "(t_pics_gated or g1_require_auto) and not ablate_adaptive_prompt" in teh_src
     runtime_src = (REPO / "utils/teh/teh_runtime.py").read_text(encoding="utf-8")
-    assert "if prefer_auto_llm_prompt or used_dataset_prompt_file or require_auto_llm_prompt:" in runtime_src
+    assert "or ablate_dataset_adaptive_prompt" in runtime_src
+    assert "prefer_auto_llm_prompt" in runtime_src
+    assert "used_dataset_prompt_file" in runtime_src
+    assert "require_auto_llm_prompt" in runtime_src
     assert "reference_prompt = None" in runtime_src
     assert "refusing merge fallback" in runtime_src
     assert "Automatic target-prompt generation failed" in runtime_src

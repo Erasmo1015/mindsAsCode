@@ -22,6 +22,21 @@ KIND = "pics_v3"
 G1_KIND = "pics_v3_g1"
 INDEPENDENT_KIND = "pics_v3_independent"
 RUN_TAG = "g5e50p30_occurrence_eb_pics_v3"
+
+# Ablation KINDs (isolated OUT_DIR roots; never write under bare pics_v3/).
+ABLATION_KIND_NO_TRANSFER = "pics_v3_ablation_no_transfer"
+ABLATION_KIND_NO_POPULATION = "pics_v3_ablation_no_population"
+ABLATION_KIND_NO_EXPLORE = "pics_v3_ablation_no_explore"
+ABLATION_KIND_NO_FRESH = "pics_v3_ablation_no_fresh"
+ABLATION_KIND_NO_ADAPTIVE_PROMPT = "pics_v3_ablation_no_adaptive_prompt"
+ABLATION_KINDS = (
+    ABLATION_KIND_NO_TRANSFER,
+    ABLATION_KIND_NO_POPULATION,
+    ABLATION_KIND_NO_EXPLORE,
+    ABLATION_KIND_NO_FRESH,
+    ABLATION_KIND_NO_ADAPTIVE_PROMPT,
+)
+ABLATION_RUN_TAG = "g5e50p30_pics_v3_ablation"
 ANNOTATION_PACKAGE = "pics_v3_g1_schema_v5"
 ANNOTATION_PACKAGE_V4 = "pics_v3_g1_schema_v4"  # legacy completed package
 ANNOTATION_PACKAGE_V5 = ANNOTATION_PACKAGE

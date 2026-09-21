@@ -722,17 +722,22 @@ def apply_gated_cli_defaults(args: Any, argv: Optional[Sequence[str]] = None) ->
     argv = list(sys.argv[1:] if argv is None else argv)
     args.global_phase = True
     args.refinement_phase = False
-    args.explore_from_population_parents = True
-    args.explore_population_top_k = DEFAULT_EXPLORE_POPULATION_TOP_K
     if not cli_flag_was_passed("--n_iterations", argv):
         args.n_iterations = DEFAULT_N_ITERATIONS
     if not cli_flag_was_passed("--global_iters", argv):
         args.global_iters = DEFAULT_GLOBAL_ITERS
     if not cli_flag_was_passed("--explore_candidates", argv):
         args.explore_candidates = DEFAULT_EXPLORE_CANDIDATES
+    # Explore budget 0 (no-explore ablation): do not force population-parent explore.
+    if int(getattr(args, "explore_candidates", 0) or 0) > 0:
+        args.explore_from_population_parents = True
+        args.explore_population_top_k = DEFAULT_EXPLORE_POPULATION_TOP_K
+    else:
+        args.explore_from_population_parents = False
     if getattr(args, "t_pics_source_config", None) in (None, ""):
         # Final PICS v3 map only. Do not fall back to preliminary-v2 / v1 YAMLs.
         # Explicit --t_pics_gated_source (independent) does not need a map.
+        # Control-only ablation still loads the map for selected-source identity.
         if not str(getattr(args, "t_pics_gated_source", "") or "").strip():
             cfg_path = Path(FROZEN_T_PICS_TRANSFER_SOURCE_CONFIG)
             if not cfg_path.is_file():
@@ -756,6 +761,20 @@ def apply_gated_cli_defaults(args: Any, argv: Optional[Sequence[str]] = None) ->
     if not cli_flag_was_passed("--max_prompt_train_trials", argv):
         args.max_prompt_train_trials = MAX_PROMPT_TRAIN_TRIALS
     return args
+
+
+def gated_control_only_enabled(args: Any) -> bool:
+    return bool(getattr(args, "t_pics_gated_control_only", False))
+
+
+def gated_reuse_gate_pool_path(args: Any) -> Optional[Path]:
+    raw = str(getattr(args, "t_pics_reuse_gate_pool", "") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (_REPO_ROOT / path).resolve()
+    return path
 
 
 def plan_g3_explore_parents(

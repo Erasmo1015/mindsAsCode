@@ -446,6 +446,7 @@ def _merge_prompt_fallback(
     example_char_budget: int = DEFAULT_EXAMPLE_CHAR_BUDGET,
     history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
     max_examples: int = DEFAULT_MAX_EXAMPLES,
+    force_registered_task_description: bool = False,
 ) -> str:
     schema_summary = _runtime_schema_summary_for_prompt(sample_trials)
     base = _base_prompt_for_trials(
@@ -454,7 +455,12 @@ def _merge_prompt_fallback(
         dataset_alias=dataset_alias,
         base_prompt_path=base_prompt_path,
     )
-    if is_mixed_gambles_dataset(dataset_alias) or is_external_dataset(dataset_alias):
+    if force_registered_task_description:
+        from utils.teh.teh_datasets import dataset_task_description
+
+        display = dataset_display_name(dataset_alias)
+        task_desc = dataset_task_description(dataset_alias)
+    elif is_mixed_gambles_dataset(dataset_alias) or is_external_dataset(dataset_alias):
         display = dataset_display_name(dataset_alias)
         task_desc = instruction
     else:
@@ -796,6 +802,7 @@ def setup_teh_run_prompts(
     max_observed_trials_per_participant: Optional[int] = None,
     require_auto_llm_prompt: bool = False,
     llm_decoding_seed: Optional[int] = None,
+    ablate_dataset_adaptive_prompt: bool = False,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
@@ -808,10 +815,20 @@ def setup_teh_run_prompts(
     When dataset_prompt_file is set, copy that file as infer_single_choice.txt (skips
     reference / LLM / merge). Used for hand-designed comparison prompts.
 
+    When ablate_dataset_adaptive_prompt is True, skip LLM / reference strategy files
+    and build the infer body from the registered dataset description
+    (``dataset_task_description``; OE-parity source) plus the normal PICS merge
+    skeleton. HISTORY robustness and the runtime contract still attach under
+    structure_aware_v3.
+
     When limited_data_protocol is enabled, parsed behavioral prompt examples are
     taken only from the retained limited-data train+val subset (same manifest as
     scoring). Task descriptions and schema notes remain dataset-level metadata.
     """
+    if ablate_dataset_adaptive_prompt:
+        prefer_auto_llm_prompt = False
+        require_auto_llm_prompt = False
+        use_llm = False
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
     infer_path = prompts_dir / "infer_single_choice.txt"
@@ -895,7 +912,13 @@ def setup_teh_run_prompts(
         print(f"[TEH]   source: {forced_prompt}")
 
     reference_prompt = resolve_dataset_reference_prompt_path(dataset_alias)
-    if prefer_auto_llm_prompt or used_dataset_prompt_file or require_auto_llm_prompt:
+    if (
+        prefer_auto_llm_prompt
+        or used_dataset_prompt_file
+        or require_auto_llm_prompt
+        or ablate_dataset_adaptive_prompt
+    ):
+        # Ablation must not sneak in prompts/external strategy files.
         reference_prompt = None
     if not used_dataset_prompt_file and reference_prompt is not None:
         text = strip_embedded_choose_from_evolution_prompt(
@@ -946,12 +969,18 @@ def setup_teh_run_prompts(
             example_char_budget=example_char_budget,
             history_max_entries=history_max_entries,
             max_examples=max_examples,
+            force_registered_task_description=bool(ablate_dataset_adaptive_prompt),
         )
         if _is_gamble_ab_task(sample_trial_list):
             merged = _apply_gamble_neutral_wording(merged)
         merged = strip_embedded_choose_from_evolution_prompt(merged)
         infer_path.write_text(merged, encoding="utf-8")
-        print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
+        if ablate_dataset_adaptive_prompt:
+            print(
+                f"[TEH] Wrote registered-description ablation prompt -> {infer_path}"
+            )
+        else:
+            print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
 
     contract = build_deterministic_runtime_contract(sample_trial_list)
     assert_no_generation_oracle_leak(contract, context="runtime_contract")
@@ -1007,6 +1036,8 @@ def setup_teh_run_prompts(
         prompt_mode = "reference"
     elif used_dataset_prompt_file:
         prompt_mode = "dataset_prompt_file"
+    elif ablate_dataset_adaptive_prompt:
+        prompt_mode = "registered_description_ablation"
     else:
         prompt_mode = "merge_fallback"
     infer_sha256 = hashlib.sha256(infer_text_final.encode("utf-8")).hexdigest()
@@ -1031,6 +1062,7 @@ def setup_teh_run_prompts(
         "max_examples": int(max_examples),
         "prefer_auto_llm_prompt": bool(prefer_auto_llm_prompt),
         "require_auto_llm_prompt": bool(require_auto_llm_prompt),
+        "ablate_dataset_adaptive_prompt": bool(ablate_dataset_adaptive_prompt),
         "llm_decoding_seed": None if llm_decoding_seed is None else int(llm_decoding_seed),
         "n_prompt_example_trials": len(sample_trial_list),
         "prompt_examples_exclude_test": True,

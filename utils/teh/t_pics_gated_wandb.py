@@ -219,7 +219,14 @@ def build_gated_wandb_config(
     slurm_job_id: Optional[str],
 ) -> Dict[str, Any]:
     rank1 = Path(source_rank1)
-    return {
+
+    def _int_or_default(attr: str, default: int) -> int:
+        raw = getattr(args, attr, None)
+        if raw is None:
+            return int(default)
+        return int(raw)
+
+    cfg: Dict[str, Any] = {
         "method": KIND,
         "target_dataset": str(getattr(args, "dataset", "")),
         "limited_data_protocol": str(getattr(args, "limited_data_protocol", "")),
@@ -233,26 +240,24 @@ def build_gated_wandb_config(
         "selected_source_dataset": str(selected_source),
         "source_g1_job_id": str(source_job_id),
         "source_rank1_program": str(rank1),
-        "source_rank1_program_sha256": _sha256_file(rank1),
+        "source_rank1_program_sha256": _sha256_file(rank1) if rank1.is_file() else None,
         "independent_source_population": bool(
             getattr(args, "t_pics_gated_independent", False)
         ),
-        "target_control_iterations": int(
-            getattr(args, "global_iters", DEFAULT_GLOBAL_ITERS) or DEFAULT_GLOBAL_ITERS
+        "target_control_iterations": _int_or_default(
+            "global_iters", DEFAULT_GLOBAL_ITERS
         ),
-        "target_transfer_iterations": int(
-            getattr(args, "global_iters", DEFAULT_GLOBAL_ITERS) or DEFAULT_GLOBAL_ITERS
+        "target_transfer_iterations": _int_or_default(
+            "global_iters", DEFAULT_GLOBAL_ITERS
         ),
-        "exploration_candidates": int(
-            getattr(args, "explore_candidates", DEFAULT_EXPLORE_CANDIDATES)
-            or DEFAULT_EXPLORE_CANDIDATES
+        "exploration_candidates": _int_or_default(
+            "explore_candidates", DEFAULT_EXPLORE_CANDIDATES
         ),
-        "participant_iterations": int(
-            getattr(args, "n_iterations", DEFAULT_N_ITERATIONS) or DEFAULT_N_ITERATIONS
+        "participant_iterations": _int_or_default(
+            "n_iterations", DEFAULT_N_ITERATIONS
         ),
-        "n_candidates": int(
-            getattr(args, "n_candidates", DEFAULT_N_CANDIDATES_PER_ITER)
-            or DEFAULT_N_CANDIDATES_PER_ITER
+        "n_candidates": _int_or_default(
+            "n_candidates", DEFAULT_N_CANDIDATES_PER_ITER
         ),
         "fresh_n_candidates": getattr(args, "fresh_n_candidates", None),
         "sample_size": getattr(args, "sample_size", None),
@@ -268,6 +273,22 @@ def build_gated_wandb_config(
         "kind": KIND,
         "group": GROUP,
     }
+    try:
+        from utils.teh.pics_v3_ablation import (
+            ABLATION_WANDB_GROUP,
+            ablation_metadata_payload,
+        )
+
+        ablation_meta = ablation_metadata_payload(args)
+        if ablation_meta.get("ablation_id"):
+            cfg["group"] = ABLATION_WANDB_GROUP
+            cfg["ablation"] = ablation_meta
+            cfg["kind"] = ablation_meta.get("ablation_kind") or KIND
+            if bool(getattr(args, "t_pics_gated_control_only", False)):
+                cfg["target_transfer_iterations"] = 0
+    except Exception:
+        pass
+    return cfg
 
 
 def collect_final_participant_rows(

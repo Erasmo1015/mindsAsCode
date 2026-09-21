@@ -872,3 +872,31 @@ protocol / packing / W&B code.
 | Occurrence-EB | `analysis/mem/pop_v4_source_selection/run_source_selection_v4.py` |
 | W&B finals | `utils/teh/t_pics_gated_wandb.py` |
 | Ordinals | `utils/teh/teh_datasets.py` / `analysis/config/teh_datasets.yaml` |
+| Ablation flags / KINDs | `utils/teh/pics_v3_ablation.py`; CLI in `teh.py`; launchers `cluster/v3/ours/ablation/` |
+
+---
+
+## N. Ablations (ICLR; default off)
+
+Five settings on three targets (`1peterson2021using`, `bergert_nosofsky_2007`, `guan_2020_stopping`). Full `pics_v3` main is the **reference row** (not rerun). Every new flag defaults **off**; main `submit_gated.sh` / `t_pics_v3_fill_gated_args` unchanged.
+
+| ID | KIND | Nominal 35-round allocation | Key flags |
+| --- | --- | --- | --- |
+| A | `pics_v3_ablation_no_transfer` | ctrl 5 + explore 5 + person 25 | `--t_pics_gated_control_only` |
+| B | `pics_v3_ablation_no_population` | explore 5 + person 30 | `--t_pics_ablate_population` (no gated) |
+| C | `pics_v3_ablation_no_explore` | dual G.2 + person 15; explore 0 | `--explore_candidates 0`; optional `--t_pics_reuse_gate_pool` |
+| D | `pics_v3_ablation_no_fresh` | full phases; `fresh_n=0` | `--fresh_n_candidates 0` (+ live independent source) |
+| E | `pics_v3_ablation_no_adaptive_prompt` | full phases; registered desc | `--ablate_dataset_adaptive_prompt` |
+
+**Equal nominal rounds ≠ equal compute.** A/B move budget into participant-specific evolution (~1.9× / ~2.2× candidate generation vs main).
+
+E replaces only the LLM-generated dataset-adaptive **instruction** with `dataset_task_description` (same helper OE uses via `vanilla_dataset_description`). PICS contracts, HISTORY robustness, examples, parents, and packing remain. Main fail-closed auto prompt is unchanged when the flag is off.
+
+Submit (default dry-run):
+
+```bash
+DRY_RUN=1 bash cluster/v3/ours/ablation/submit_ablations.sh
+DRY_RUN=0 CONFIRM_SUBMIT=1 bash cluster/v3/ours/ablation/submit_ablations.sh
+```
+
+Investigation notes: `analysis_2026Sep/Sep20_V3/others/ablation_impl/`.

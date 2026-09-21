@@ -193,7 +193,9 @@ from utils.teh.t_pics_gated_transfer import (
     decide_gate,
     default_seed_path,
     evaluate_pooled_train_val_loglik,
+    gated_control_only_enabled,
     gated_independent_enabled,
+    gated_reuse_gate_pool_path,
     gated_run_metadata,
     gate_record_payload,
     load_frozen_transfer_config,
@@ -4477,8 +4479,24 @@ def _run_t_pics_gated_population_arms(
     filter_mixed_gambles: bool,
     run_prompts_dir: str,
 ) -> List[Tuple[Any, ...]]:
-    """Matched G.2 control vs transfer arms, train_val observed-data gate, retain winner elite pool."""
+    """Matched G.2 control vs transfer arms, train_val observed-data gate, retain winner elite pool.
+
+    Ablation branches (default off):
+    - ``--t_pics_reuse_gate_pool``: skip live G.2; load an existing elite pool.
+    - ``--t_pics_gated_control_only``: no source/transfer; live control G.2 only.
+    """
     independent = gated_independent_enabled(args)
+    control_only = gated_control_only_enabled(args)
+    reuse_pool = gated_reuse_gate_pool_path(args)
+    if control_only and independent:
+        raise RuntimeError(
+            "--t_pics_gated_control_only cannot be combined with "
+            "--t_pics_gated_independent (independent still runs transfer)."
+        )
+    if control_only and reuse_pool is not None:
+        raise RuntimeError(
+            "--t_pics_gated_control_only cannot be combined with --t_pics_reuse_gate_pool."
+        )
     explicit_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
     if explicit_source:
         if not independent:
@@ -4502,6 +4520,203 @@ def _run_t_pics_gated_population_arms(
     layout = run_layout(Path(run_root))
     for key in ("control", "transfer", "gate", "selected"):
         layout[key].mkdir(parents=True, exist_ok=True)
+
+    if reuse_pool is not None:
+        pool_dir = Path(reuse_pool)
+        if not pool_dir.is_dir():
+            raise FileNotFoundError(
+                f"--t_pics_reuse_gate_pool is not a directory: {pool_dir}"
+            )
+        print(
+            f"[T-PICS gated] ablation reuse gate pool -> {pool_dir} "
+            f"(skip live G.2; selected_source identity={entry.selected_source})"
+        )
+        retained_pool = pool_dir
+        record = {
+            "schema": "t_pics_gated_transfer_gate_v3_reuse",
+            "target": str(args.dataset),
+            "selected_source": entry.selected_source,
+            "selected_arm": "reused",
+            "reason": "reuse_gate_pool_ablation",
+            "retained_pool_path": str(retained_pool.resolve()),
+            "config_path": str(cfg_path),
+            "config_selector": selector_name,
+            "g3_explore_parent": "reused_pool_rank1",
+        }
+        write_gate_record(layout["gate_record"], record)
+        if hasattr(wandb_module, "publish_gate_record"):
+            wandb_module.publish_gate_record(layout["gate_record"])
+        selected_link = layout["selected_pool"]
+        if selected_link.exists() or selected_link.is_symlink():
+            if selected_link.is_symlink() or selected_link.is_file():
+                selected_link.unlink()
+            else:
+                shutil.rmtree(selected_link)
+        try:
+            selected_link.symlink_to(retained_pool.resolve())
+        except OSError:
+            shutil.copytree(retained_pool, selected_link)
+        (layout["selected"] / "SELECTED_ARM.txt").write_text(
+            "reused\n", encoding="utf-8"
+        )
+        _merge_run_metadata(
+            Path(run_root),
+            {
+                "gate_record_path": str(layout["gate_record"]),
+                "gate": record,
+                "selected_arm": "reused",
+                "retained_pool_path": str(retained_pool),
+                "ablation_reuse_gate_pool": str(retained_pool),
+            },
+        )
+        return _load_one_initial_pool_dir(str(retained_pool))
+
+    if control_only:
+        # No source consume, no transfer suffix, no transfer arm.
+        seed_path = str(args.seed_path or default_seed_path(str(args.dataset)))
+        control_argv = build_control_argv(
+            dataset=str(args.dataset),
+            output_dir=str(layout["control"]),
+            seed_path=seed_path,
+        )
+        _write_arm_intended_argv(layout["control"] / "INTENDED_ARGV.txt", control_argv)
+        print(
+            f"[T-PICS gated] control-only ablation target={args.dataset} "
+            f"selected_source_identity={entry.selected_source} (not consumed) "
+            f"config={cfg_path}"
+        )
+        freeze_path = Path(run_root) / G2_PAIRED_PACK_FILENAME
+        freeze_payload = _ensure_g2_paired_pack_freeze(
+            args=args,
+            participants=participants,
+            seed_program_path=seed_program_path,
+            run_prompts_dir=run_prompts_dir,
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            source_suffix="",
+            freeze_path=freeze_path,
+            source_dataset="",
+            source_rank1=Path(seed_program_path),
+        )
+        gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
+        if not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve():
+            write_paired_pack_freeze(gate_freeze, freeze_payload)
+        freeze_path_str = str(freeze_path)
+        expected_iters = int(args.global_iters)
+        if hasattr(wandb_module, "set_g2_arm"):
+            wandb_module.set_g2_arm("control")
+        control_ok = population_arm_is_complete(
+            layout["control"], expected_global_iters=expected_iters
+        )
+        if control_ok:
+            print(f"[T-PICS gated] skip complete control G.2 -> {layout['control']}")
+            control_pool = _load_gated_arm_pool(layout["control"])
+            if hasattr(wandb_module, "maybe_backfill_g2_arm"):
+                wandb_module.maybe_backfill_g2_arm("control", layout["control"])
+        else:
+            control_pool = run_global_evolution_phase(
+                **_gated_global_phase_kwargs(
+                    args,
+                    participants=participants,
+                    seed_program_path=seed_program_path,
+                    client=client,
+                    wandb_module=wandb_module,
+                    psych_dataset_split=psych_dataset_split,
+                    filter_mixed_gambles=filter_mixed_gambles,
+                    run_prompts_dir=run_prompts_dir,
+                    output_dir=layout["control"],
+                    prompt_suffix=None,
+                    g2_arm="control",
+                    g2_paired_pack_path=freeze_path_str,
+                )
+            )
+            control_ok = population_arm_is_complete(
+                layout["control"], expected_global_iters=expected_iters
+            )
+        if not control_ok or not control_pool:
+            raise RuntimeError(
+                f"T-PICS gated control-only arm failed: {layout['control']}"
+            )
+        control_score = evaluate_pooled_train_val_loglik(
+            layout["control_rank1"],
+            dataset=str(args.dataset),
+            participant_ids=participants,
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+            n_eval_seeds=int(args.n_eval_seeds),
+            limited_data_protocol=str(args.limited_data_protocol),
+            limited_train_val=args.limited_train_val,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        )
+        decision = decide_gate(
+            control_score=control_score,
+            transfer_score=None,
+            control_arm_ok=True,
+            transfer_arm_ok=False,
+            transfer_program_ok=False,
+            tie_tolerance=GATE_TIE_TOLERANCE,
+        )
+        # Force control selection for this ablation even if decide_gate ties oddly.
+        retained_pool = layout["control_pool"]
+        record = gate_record_payload(
+            target=str(args.dataset),
+            selected_source=entry.selected_source,
+            decision=decision,
+            control_rank1=layout["control_rank1"],
+            transfer_rank1=None,
+            retained_pool=retained_pool,
+            config_path=cfg_path,
+            selector_name=selector_name,
+            selected_source_rank1=Path("(none)"),
+        )
+        record["selected_arm"] = "control"
+        record["reason"] = "control_only_ablation"
+        record["never_ran_transfer_arm"] = True
+        record["never_consumed_source_population"] = True
+        write_gate_record(layout["gate_record"], record)
+        if hasattr(wandb_module, "publish_gate_record"):
+            wandb_module.publish_gate_record(layout["gate_record"])
+        _merge_run_metadata(
+            Path(run_root),
+            {
+                "gate_record_path": str(layout["gate_record"]),
+                "gate": record,
+                "pooled_train_val_loglik_control": control_score,
+                "pooled_train_val_loglik_transfer": None,
+                "gate_reason": "control_only_ablation",
+                "selected_arm": "control",
+                "retained_pool_path": str(retained_pool),
+                "g2_arms_shared_target_prompt": True,
+                "g2_paired_pack_path": str(freeze_path),
+                "g2_paired_pack_version": G2_PAIRED_PACK_VERSION,
+                "g2_paired_n_examples_included": freeze_payload.get("n_examples_included"),
+                "control_only_ablation": True,
+            },
+        )
+        print(
+            f"[T-PICS gated] control-only selected control "
+            f"control_{GATE_SCORE_FIELD}={control_score}"
+        )
+        selected_link = layout["selected_pool"]
+        if selected_link.exists() or selected_link.is_symlink():
+            if selected_link.is_symlink() or selected_link.is_file():
+                selected_link.unlink()
+            else:
+                shutil.rmtree(selected_link)
+        try:
+            selected_link.symlink_to(retained_pool.resolve())
+        except OSError:
+            shutil.copytree(retained_pool, selected_link)
+        (layout["selected"] / "SELECTED_ARM.txt").write_text(
+            "control\n", encoding="utf-8"
+        )
+        return _load_one_initial_pool_dir(str(retained_pool))
+
     if independent:
         layout["source_population"].mkdir(parents=True, exist_ok=True)
         live_best, live_ll = _ensure_gated_independent_source_population(
@@ -14412,6 +14627,50 @@ def main():
         ),
     )
     parser.add_argument(
+        "--t_pics_gated_control_only",
+        action="store_true",
+        default=False,
+        help=(
+            "PICS v3 ablation (default off): with --t_pics_gated_transfer, run only "
+            "the target control G.2 arm (no source population consume, no transfer "
+            "suffix, no transfer arm). Selected-source identity still comes from the "
+            "frozen map. Incompatible with --t_pics_gated_independent."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_ablate_population",
+        action="store_true",
+        default=False,
+        help=(
+            "PICS v3 ablation (default off): skip all population search (no source, "
+            "no G.2). Explore from the seed program then run person evolution. "
+            "Do not combine with --t_pics_gated_transfer."
+        ),
+    )
+    parser.add_argument(
+        "--t_pics_reuse_gate_pool",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help=(
+            "PICS v3 ablation helper (default off): with --t_pics_gated_transfer, "
+            "skip live G.2 and load this existing global_elite_pool directory as the "
+            "selected handoff (e.g. main-job retained pool for no-explore)."
+        ),
+    )
+    parser.add_argument(
+        "--ablate_dataset_adaptive_prompt",
+        action="store_true",
+        default=False,
+        help=(
+            "PICS v3 ablation (default off): replace the LLM-generated "
+            "dataset-adaptive instruction with the registered dataset description "
+            "(same source as OpenEvolve's vanilla_dataset_description). Keeps PICS "
+            "contracts, HISTORY robustness, examples, parents, and packing. "
+            "Does not weaken main fail-closed auto prompts when unset."
+        ),
+    )
+    parser.add_argument(
         "--t_pics_source",
         type=str,
         nargs="?",
@@ -14922,6 +15181,9 @@ def main():
     t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
     t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
+    t_pics_control_only = bool(getattr(args, "t_pics_gated_control_only", False))
+    t_pics_ablate_population = bool(getattr(args, "t_pics_ablate_population", False))
+    ablate_adaptive_prompt = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
     if t_pics_gated_independent and not t_pics_gated:
         print("Error: --t_pics_gated_independent requires --t_pics_gated_transfer.")
         return
@@ -14929,6 +15191,27 @@ def main():
         print(
             "Error: --t_pics_gated_source requires --t_pics_gated_independent "
             "(and --t_pics_gated_transfer)."
+        )
+        return
+    if t_pics_control_only and not t_pics_gated:
+        print("Error: --t_pics_gated_control_only requires --t_pics_gated_transfer.")
+        return
+    if t_pics_control_only and t_pics_gated_independent:
+        print(
+            "Error: --t_pics_gated_control_only cannot be combined with "
+            "--t_pics_gated_independent."
+        )
+        return
+    if t_pics_ablate_population and t_pics_gated:
+        print(
+            "Error: --t_pics_ablate_population cannot be combined with "
+            "--t_pics_gated_transfer (use the non-gated seed→explore→person path)."
+        )
+        return
+    if t_pics_ablate_population and t_pics_control_only:
+        print(
+            "Error: --t_pics_ablate_population cannot be combined with "
+            "--t_pics_gated_control_only."
         )
         return
     if t_pics_gated:
@@ -14941,6 +15224,15 @@ def main():
             )
             return
         apply_gated_cli_defaults(args)
+    if t_pics_ablate_population:
+        # Seed → explore → person under structure_aware_v3; no G.1/G.2.
+        args.global_phase = False
+        args.refinement_phase = False
+        args.explore_from_population_parents = False
+        if not str(getattr(args, "limited_data_protocol", "") or ""):
+            args.limited_data_protocol = "structure_aware_v3"
+        if getattr(args, "limited_train_val", None) is None:
+            args.limited_train_val = 40
     if args.ablation is not None:
         args.ablation = args.ablation.strip()
         if not args.ablation:
@@ -14966,15 +15258,22 @@ def main():
                 "--explore_prompt_source_program (discarded arm must not leak into explore)."
             )
             return
-        if int(args.explore_population_top_k) != 1:
+        if int(args.explore_candidates) > 0 and int(args.explore_population_top_k) != 1:
             print(
                 "Error: --t_pics_gated_transfer requires --explore_population_top_k 1 "
                 f"(sole retained target rank-1 parent; got {args.explore_population_top_k})."
             )
             return
-        if not args.explore_from_population_parents:
+        if int(args.explore_candidates) > 0 and not args.explore_from_population_parents:
             print(
-                "Error: --t_pics_gated_transfer requires --explore_from_population_parents."
+                "Error: --t_pics_gated_transfer requires --explore_from_population_parents "
+                "when --explore_candidates > 0."
+            )
+            return
+        if int(args.explore_candidates) <= 0 and args.explore_from_population_parents:
+            print(
+                "Error: --explore_from_population_parents requires --explore_candidates > 0 "
+                "(omit the flag for the no-explore ablation)."
             )
             return
         if args.refinement_phase:
@@ -14983,9 +15282,7 @@ def main():
         if not args.global_phase:
             print("Error: --t_pics_gated_transfer requires --global_phase.")
             return
-        if int(args.explore_candidates) <= 0:
-            print("Error: --t_pics_gated_transfer requires --explore_candidates > 0.")
-            return
+        # explore_candidates == 0 is allowed for the no-explore ablation.
         if t_pics_gated_source:
             try:
                 entry = make_explicit_independent_source_entry(
@@ -15007,7 +15304,7 @@ def main():
                     cfg_path = (_REPO_ROOT / cfg_path).resolve()
                 cfg = load_frozen_transfer_config(cfg_path)
                 errors = validate_frozen_transfer_config(
-                    cfg, require_files=not t_pics_gated_independent
+                    cfg, require_files=not t_pics_gated_independent and not t_pics_control_only
                 )
             except (OSError, ValueError, KeyError) as exc:
                 print(f"Error: T-PICS gated transfer config failed: {exc}")
@@ -15028,10 +15325,28 @@ def main():
                 + (
                     "; independent live G.1, YAML source-dataset lookup only"
                     if t_pics_gated_independent
-                    else "; rank-1 choose() validated; no GPU yet"
+                    else (
+                        "; control-only ablation (source identity only, rank-1 not required)"
+                        if t_pics_control_only
+                        else "; rank-1 choose() validated; no GPU yet"
+                    )
                 )
                 + ")"
             )
+    if t_pics_ablate_population:
+        if int(args.explore_candidates) <= 0:
+            print(
+                "Error: --t_pics_ablate_population requires --explore_candidates > 0 "
+                "(seed explore)."
+            )
+            return
+        if args.global_phase:
+            print("Error: --t_pics_ablate_population requires --no-global_phase.")
+            return
+        print(
+            f"[T-PICS ablation] no-population preflight OK "
+            f"(explore={args.explore_candidates} person_iters={args.n_iterations})"
+        )
     if args.fitness_metric == "loglik" and not is_binary_loglik_dataset(args.dataset) and not (
         args.dataset == "cpc18" and not args.cpc18_official_mse
     ):
@@ -15689,18 +16004,26 @@ def main():
         getattr(args, "llm_reasoning_effort", None),
     )
     evo_iters = int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0)
+    ablate_adaptive_prompt = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
     prefer_auto_llm_prompt = bool(
-        evo_iters > 0 or getattr(args, "prefer_auto_llm_prompt", False) or t_pics_gated
+        (
+            evo_iters > 0
+            or getattr(args, "prefer_auto_llm_prompt", False)
+            or t_pics_gated
+        )
+        and not ablate_adaptive_prompt
     )
     # PICS v3 global-only G.1 with --prefer_auto_llm_prompt must fail closed (no
     # reference / merge fallback). Scoped to structure_aware_v3 so historical v1 /
     # preliminary-v2 G.1 keep their previous soft-fallback behavior. There is no
     # --require_auto_llm_prompt CLI flag; this wires setup_teh_run_prompts(...).
+    # --ablate_dataset_adaptive_prompt clears fail-closed for that ablation only.
     g1_require_auto = bool(
         getattr(args, "prefer_auto_llm_prompt", False)
         and getattr(args, "global_phase", False)
         and int(getattr(args, "n_iterations", 0) or 0) == 0
         and str(getattr(args, "limited_data_protocol", "") or "") == "structure_aware_v3"
+        and not ablate_adaptive_prompt
     )
     run_prompts_dir = setup_teh_run_prompts(
         Path(base_run_dir),
@@ -15708,7 +16031,7 @@ def main():
         Path(seed_program_path),
         client=teh_client,
         model_name=args.model_name,
-        use_llm=not args.no_llm_prompt,
+        use_llm=not args.no_llm_prompt and not ablate_adaptive_prompt,
         base_prompt_path=args.base_prompt,
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
@@ -15730,8 +16053,11 @@ def main():
         limited_data_protocol=str(args.limited_data_protocol),
         limited_train_val=args.limited_train_val,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-        require_auto_llm_prompt=bool(t_pics_gated or g1_require_auto),
+        require_auto_llm_prompt=bool(
+            (t_pics_gated or g1_require_auto) and not ablate_adaptive_prompt
+        ),
         llm_decoding_seed=(int(args.split_seed) + 90_000) if t_pics_gated else None,
+        ablate_dataset_adaptive_prompt=ablate_adaptive_prompt,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")
