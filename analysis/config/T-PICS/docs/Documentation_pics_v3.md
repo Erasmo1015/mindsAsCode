@@ -187,26 +187,32 @@ entries, missing/null optional outcomes, and valid dataset/stage required proble
 fields. A candidate that raises on any required variant cannot enter the elite
 pool. Test scores never drive selection or replacement.
 
-### Deployment-time elite failover (not test-set model selection)
+### Deployment-time test fallback (not test-set model selection)
 
-After elite order is frozen from **observed-union** scores only, held-out test
-execution may use a **per-trial** failover (`utils/teh/pics_v3_elite_failover.py`):
+After the **single** selected program is frozen from **observed-union** scores
+only, held-out test execution under `structure_aware_v3` uses an
+OpenEvolve-matched **uniform failure fallback**
+(`utils/teh/pics_v3_elite_failover.py`):
 
-1. Try rank-1 on that test trial.
-2. On exception or invalid/non-finite returned probability only, try rank-2, then
-   rank-3, … in the frozen order.
-3. Never switch because another program’s prediction or likelihood looks better.
-4. Never use the test label to choose, reorder, or validate programs.
-5. If every frozen elite fails on that trial, emit the uniform prediction
-   (`0.5` binary or `1/K` categorical).
-6. Failover is local to the trial — a one-trial failure does not discard rank-1
-   for remaining trials.
+1. Evaluate **only rank-1** (the selected / best frozen program) on each test trial.
+2. On exception or invalid/non-finite returned probability only, emit the uniform
+   prediction for that trial: `0.5` (binary) or `1/K` over valid K-way actions.
+3. **Include** every uniform-fallback trial in the participant (and cohort) mean
+   log-likelihood; never omit the participant because of a test-time choose failure.
+4. Never switch programs because another program’s prediction or likelihood looks
+   better; never use the test label to choose, reorder, or validate programs.
+5. Artifacts record `test_time_fallback` / `elite_failover` diagnostics
+   (`mode=uniform_rank1`, `uniform_fallback_trials`, `uniform_fallback_rate`,
+   `rank1_failures`). Cohort summary still reports `final/n_inf_test_loglik` for
+   any remaining non-finite person-level test LL (should be rare under uniform
+   fallback).
 
-This is a predefined **deployment-time execution fallback**, not model selection
-on the test set. Artifacts record `elite_failover` diagnostics (primary failures,
-fallback depth, resolved-by-other, all-elite failures). Means never silently drop
-people with non-finite test loglik
-(`mean_test_loglik_with_failure_policy`).
+**Optional only (disabled by default):** `--pics_v3_elite_failover` retries frozen
+ranks 2 then 3 (`MAX_ELITE_FAILOVER_RANKS=3`) before uniform. This is **not** the
+official default method. Failover remains local to the trial.
+
+Strict observed-union invalidation (selection) and the test-independent interface
+preflight are unchanged and independent of this test-time policy.
 
 ### Construction
 

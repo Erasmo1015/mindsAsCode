@@ -19,8 +19,8 @@
 #     Hilbig, Enkavi, mixed A/B fix
 #   missing on 3090 → origami full-data (test membership unchanged vs SA40/v3):
 #     Peterson, Plonsky, CCT, Wulff, Frey Risk, Badham
-#   Speekenbrink / Kool: 3090 v3 reruns OOMed (chance); v1 Speekenbrink backup
-#     has the wrong test histories — leave empty
+#   Speekenbrink: H100 job_274576 structure_aware_v3 (replaces 3090 OOM chance)
+#   Kool: L40 job_274629 structure_aware_v3 (in progress at record time)
 #
 # Slice CSVs: analysis/config/T-PICS/baseline_methods/g5e50p30/<method>/<dataset>/
 # Provenance notes (not for git): generated_outputs/psych101_train/centaur/2026Sep/g5e50p30/
@@ -55,7 +55,7 @@ datasets:
   5speekenbrink2008learning:  # Speekenbrink  0-22
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/5speekenbrink2008learning
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/5speekenbrink2008learning
-    Centaur: ""  # 3090 v3 OOM chance; v1 backup is wrong histories
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/5speekenbrink2008learning
 
   7hilbig2014generalized:  # Hilbig  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/7hilbig2014generalized
@@ -105,4 +105,4 @@ datasets:
   14kool2016when:  # 0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/14kool2016when
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/14kool2016when
-    Centaur: ""  # 3090 v3 OOM chance
+    Centaur: generated_outputs/psych101_train/centaur/14kool2016when/sparse_data/structure_aware_v3/budget_40/g5e50p30/l40/job_274629

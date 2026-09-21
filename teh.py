@@ -10717,6 +10717,7 @@ def run_evolution(
     explore_prompt_suffix: Optional[str] = None,
     explore_seed_candidates: int = 0,
     t_pics_gated_transfer: bool = False,
+    pics_v3_elite_failover: bool = False,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -10736,6 +10737,9 @@ def run_evolution(
         output_dir: Optional output directory for saving results
         mem_trace: When True, append passive MEM JSONL under the participant output dir
             (iteration_context + candidate records). Does not affect search behavior.
+        pics_v3_elite_failover: When True under structure_aware_v3, optionally retry
+            frozen ranks 2–3 on test-time choose failures before uniform fallback.
+            Default False = rank-1 only + uniform (OpenEvolve-matched).
     """
     error_feedback_mode = _normalize_error_feedback_mode(error_feedback_mode)
     mem_trace_enabled = bool(mem_trace)
@@ -13213,10 +13217,17 @@ def run_evolution(
             from utils.teh.pics_v3_elite_failover import (
                 evaluate_trials_with_frozen_elite_failover,
                 freeze_elite_program_fns,
+                resolve_max_failover_ranks,
             )
 
+            # Default: rank-1 + uniform (OE-matched). Optional elite 1→2→3 retry.
+            failover_cap = resolve_max_failover_ranks(
+                elite_failover=bool(pics_v3_elite_failover)
+            )
             frozen_elite = freeze_elite_program_fns(
-                elite_parents, compile_program=compile_program
+                elite_parents,
+                compile_program=compile_program,
+                max_ranks=failover_cap,
             )
             if not frozen_elite:
                 frozen_elite = [
@@ -13231,6 +13242,8 @@ def run_evolution(
                 test_trials,
                 categorical=is_categorical_output_dataset(dataset),
                 n_seeds=n_eval_seeds,
+                elite_failover=bool(pics_v3_elite_failover),
+                max_failover_ranks=failover_cap,
             )
         else:
             final_test_eval = _evaluate_loglik_for_dataset(
@@ -13267,10 +13280,14 @@ def run_evolution(
                 strict_observed_union=strict_observed_union,
             )
             overall_best_train["evolution_selection_score"] = evolution_selection_score
-        if strict_observed_union and isinstance(
-            final_test_eval.get("elite_failover"), dict
-        ):
-            overall_best_train["elite_failover"] = final_test_eval["elite_failover"]
+        if strict_observed_union:
+            fallback_diag = final_test_eval.get("test_time_fallback")
+            if not isinstance(fallback_diag, dict):
+                fallback_diag = final_test_eval.get("elite_failover")
+            if isinstance(fallback_diag, dict):
+                overall_best_train["test_time_fallback"] = fallback_diag
+                # Back-compat alias for earlier artifacts / readers.
+                overall_best_train["elite_failover"] = fallback_diag
         overall_best_test = dict(overall_best_train)
     else:
         final_train_eval = evaluate_program(final_best_fn, train_trials, n_seeds=n_eval_seeds)
@@ -14637,6 +14654,17 @@ def main():
         ),
     )
     add_limited_data_cli_arguments(parser)
+    parser.add_argument(
+        "--pics_v3_elite_failover",
+        action="store_true",
+        default=False,
+        help=(
+            "Optional PICS v3 test-time policy: on choose() exception/invalid probs, "
+            "retry frozen elite ranks 2–3 before uniform 0.5/1/K. Default (flag off) "
+            "under structure_aware_v3 is rank-1 only + uniform fallback (OpenEvolve-matched). "
+            "Does not affect v1/v2 or selection/preflight."
+        ),
+    )
     parser.add_argument(
         "--max_prompt_train_trials",
         type=int,
@@ -16260,6 +16288,7 @@ def main():
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
                 t_pics_gated_transfer=bool(t_pics_gated),
+                pics_v3_elite_failover=bool(getattr(args, "pics_v3_elite_failover", False)),
             )
         finally:
             if wandb is not None:
@@ -16360,6 +16389,7 @@ def main():
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
                 t_pics_gated_transfer=bool(t_pics_gated),
+                pics_v3_elite_failover=bool(getattr(args, "pics_v3_elite_failover", False)),
             )
             runtime_sec = (datetime.now() - participant_start).total_seconds()
             details_row = {
@@ -16782,6 +16812,7 @@ def main():
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
                 t_pics_gated_transfer=bool(t_pics_gated),
+                pics_v3_elite_failover=bool(getattr(args, "pics_v3_elite_failover", False)),
                     )
                 
                 # Update summary (build row with only CSV columns; participant_summary uses 'participant_id' key)
@@ -17105,6 +17136,7 @@ def main():
                 explore_prompt_suffix=explore_prompt_suffix,
                 explore_seed_candidates=int(args.explore_seed_candidates),
                 t_pics_gated_transfer=bool(t_pics_gated),
+                pics_v3_elite_failover=bool(getattr(args, "pics_v3_elite_failover", False)),
             )
 
         try:
