@@ -80,22 +80,23 @@ for ds in "${DATASETS[@]}"; do
 done
 echo "# printed ${g1_count} G.1 commands (expected 15)"
 
-echo "# 3) schema-v4 annotate new G.1 programs -> pics_v3_g1_schema_v4"
-$prefix echo "annotate pics_v3_g1 programs into analysis_2026Sep/mem/pics_v3_g1_schema_v4/"
+echo "# 3) schema-v5 annotate g5e50p30 G.1 programs -> pics_v3_g1_schema_v5"
+$prefix echo "GPU=h100nvl bash cluster/v3/ours/main/submit_pop_annot_schema_v5.sh --submit"
 
 echo "# 4) Occurrence-EB refit (unchanged formulas) -> freeze YAML"
-$prefix echo "write analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml"
+$prefix echo "PYTHONPATH=. python analysis_2026Sep/mem/pics_v3_g1_schema_v5/run_occurrence_eb_compare.py"
+$prefix echo "active freeze: analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml"
 
 echo "# 5) validate source map (no transfer/test/G.2 peek)"
 $prefix python -m utils.teh.t_pics_gated_transfer validate \
-  --config analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml
+  --config analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml
 
 echo "# 6) regenerate G.2 paired-packing audit with selected pics_v3 sources"
 $prefix pytest -q utils/teh_psych/test_scripts/test_g2_paired_packing.py
 
-echo "# 7) 15 pics_v3 gated target jobs (only after steps 4-6; not G.1)"
-$prefix echo "DRY_RUN=1 bash cluster/v2/ours/Qwen/submit_gated_pics_v3.sh"
-$prefix echo "DRY_RUN=0 CONFIRM_SUBMIT=1 bash cluster/v2/ours/Qwen/submit_gated_pics_v3.sh"
+echo "# 7) 15 pics_v3 gated target jobs (schema5 / g5e50p30; not G.1)"
+$prefix echo "DRY_RUN=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh"
+$prefix echo "DRY_RUN=0 CONFIRM_SUBMIT=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh"
 
 echo "# 8) baselines share structure_aware_v3 context; OpenEvolve is not pics_v3"
 $prefix echo "Centaur/LM/PT/OE with --limited_data_protocol structure_aware_v3 (report, do not launch here)"

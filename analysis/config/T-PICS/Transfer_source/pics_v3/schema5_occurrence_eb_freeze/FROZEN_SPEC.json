@@ -1,0 +1,42 @@
+{
+  "created_utc": "2026-09-21T01:57:19.448011+00:00",
+  "yaml": "analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml",
+  "n_targets": 15,
+  "schema_version": 5,
+  "run_tag": "g5e50p30_occurrence_eb_pics_v3",
+  "sources": {
+    "10frey2017risk": "3frey2017cct",
+    "11enkavi2019recentprobes": "4wulff2018description",
+    "12badham2017deficits": "3frey2017cct",
+    "13schulz2020finding": "3frey2017cct",
+    "14kool2016when": "3frey2017cct",
+    "1peterson2021using": "mixed_gambles",
+    "2plonsky2018when": "1peterson2021using",
+    "3frey2017cct": "1peterson2021using",
+    "4wulff2018description": "11enkavi2019recentprobes",
+    "5speekenbrink2008learning": "3frey2017cct",
+    "7hilbig2014generalized": "11enkavi2019recentprobes",
+    "bergert_nosofsky_2007": "7hilbig2014generalized",
+    "guan_2020_stopping": "3frey2017cct",
+    "mixed_gambles": "1peterson2021using",
+    "steyvers_2009_bandit": "3frey2017cct"
+  },
+  "bootstrap": {
+    "created_utc": "2026-09-21T01:53:51.156415+00:00",
+    "motifs": [
+      "history",
+      "value",
+      "probability_used",
+      "feedback",
+      "learning"
+    ],
+    "seed": 20260920,
+    "B_occurrence": 1000,
+    "bootstrap_cluster": "within_dataset (iteration, parent_id)",
+    "n_loio_any_flip": 3,
+    "n_boot_lt_0.70": 3,
+    "min_boot_freq": 0.462,
+    "median_boot_freq": 0.989,
+    "min_margin": 0.0009778251340929467
+  }
+}

@@ -33,56 +33,56 @@ step1:
       best_program: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3_g1/job_265756/global_phase/best_program.py
     5speekenbrink2008learning:
       job_id: '265757'
-      phase: RUNNING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_265757
       best_program: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_g1/job_265757/global_phase/best_program.py
     7hilbig2014generalized:
       job_id: '265758'
-      phase: RUNNING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_265758
       best_program: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3_g1/job_265758/global_phase/best_program.py
     10frey2017risk:
       job_id: '265759'
-      phase: RUNNING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_265759
       best_program: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3_g1/job_265759/global_phase/best_program.py
     11enkavi2019recentprobes:
       job_id: '265760'
-      phase: RUNNING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_265760
       best_program: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3_g1/job_265760/global_phase/best_program.py
     12badham2017deficits:
       job_id: '265761'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_265761
       best_program: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_g1/job_265761/global_phase/best_program.py
     13schulz2020finding:
       job_id: '265766'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_265766
       best_program: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_g1/job_265766/global_phase/best_program.py
     14kool2016when:
       job_id: '265767'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_265767
       best_program: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_g1/job_265767/global_phase/best_program.py
     bergert_nosofsky_2007:
       job_id: '265763'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_265763
       best_program: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3_g1/job_265763/global_phase/best_program.py
     guan_2020_stopping:
       job_id: '265764'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_265764
       best_program: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_g1/job_265764/global_phase/best_program.py
     steyvers_2009_bandit:
       job_id: '265765'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_265765
       best_program: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_g1/job_265765/global_phase/best_program.py
     mixed_gambles:
       job_id: '265762'
-      phase: PENDING
+      phase: COMPLETE
       run_dir: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_265762
       best_program: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3_g1/job_265762/global_phase/best_program.py

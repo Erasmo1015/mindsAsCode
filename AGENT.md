@@ -660,8 +660,18 @@ Gated submit: `cluster/v3/ours/main/` (`submit_gated.sh`, exact pics_v3 YAML, re
 
 ---
 
-## Short update (Sep 21 2026 — Schema v5 five-construct taxonomy)
+## Short update (Sep 21 2026 — Schema v5 / g5e50p30 final freeze)
 
-Final annotation taxonomy: **schema v5** / prompt `population_transition_v5` — constructs `history`, `value`, `probability_used`, `feedback`, `learning` only (explicit risk removed). Module: `utils/mem/schema_population_motif_v5.py`. Package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/` (does not overwrite `pics_v3_g1_schema_v4`). Config: `analysis/config/T-PICS/pics_v3/config_pics_v3_schema5.yaml`. Freeze dir: `Transfer_source/pics_v3/schema5_occurrence_eb_freeze/`. Submit annot: `bash cluster/v3/ours/main/submit_pop_annot_schema_v5.sh --submit`. After annot: `python analysis_2026Sep/mem/pics_v3_g1_schema_v5/run_occurrence_eb_compare.py` — write `occurrence_eb_schema5_iter10_pics_v3.yaml` only if winners match frozen map. Active G.2 runtime YAML left unchanged mid-flight.
+Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first) + **schema v5** annotation (`population_transition_v5`; constructs `history`, `value`, `probability_used`, `feedback`, `learning`) + Occurrence-EB freeze.
+
+- Active runtime YAML: `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml`
+- Freeze dir: `Transfer_source/pics_v3/schema5_occurrence_eb_freeze/`
+- G.1 ledger: `pics_v3/g1_job_paths_g5e50p30.tsv` (jobs `265753`–`265767`)
+- Annot package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/`
+- Concise report+figs: `…/source_selection_schema_v5/report/`
+- Gated jobs: `271237`–`271251`; ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` (dependency = schema5)
+- Schema-v4 50-person freezes kept historical; do not overwrite
+
+Submit gated: `DRY_RUN=0 CONFIRM_SUBMIT=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh` (defaults to schema5 YAML).
 
 

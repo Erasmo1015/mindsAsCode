@@ -17,8 +17,8 @@ Tracked constants: `utils/teh/pics_v3.py`. Gated pipeline:
 | 1 | Data prep / `structure_aware_v3` | Build per-person observed TV ≤40; reserve test | Psych-101 train / local / external valid lists + EMNLP ordinals | train+val capped; test reserved | n/a | n/a | n/a | SA40 splits + histories | no | no (test membership/order/actions fixed; not used for fitting) |
 | 2 | Automatic dataset prompt | Write fail-closed LLM instruction for this dataset | sample person’s retained TV + task metadata | train+val only | n/a (one LLM prompt gen) | 1 generation | n/a | `prompts/infer_single_choice.txt`, `prompt_meta.json`, seed copy | no | no |
 | 3 | G.1 source population (`pics_v3_g1`) | Evolve each dataset’s own pooled population | that dataset’s EMNLP people, SA40 TV | train+val fitness | dataset seed; sample parents from elite | **10 × 10** (`n_iterations=0`, no people) | `train_val` (pooled) | `global_phase/best_program.py` + elite ≤50 | **no** | no |
-| 4 | Schema-v4 annotation | Motif presence on G.1 population programs | G.1 programs + lineage | G.1 code only | n/a | n/a (annotator LLM) | n/a | `pics_v3_g1_schema_v4` annotations (**planned** after G.1) | no | no |
-| 5 | Occurrence-EB + map freeze | Nominate one source per target | schema-v4 presence counts | annotations only | n/a | n/a | cosine on 6-source allowlist | `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` (**planned**) | no | no |
+| 4 | Schema-v5 annotation | Construct presence on G.1 population programs | G.1 programs + lineage | G.1 code only | n/a | n/a (annotator LLM) | n/a | `pics_v3_g1_schema_v5` annotations | no | no |
+| 5 | Occurrence-EB + map freeze | Nominate one source per target | schema-v5 presence counts | annotations only | n/a | n/a | cosine on 6-source allowlist | `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` | no | no |
 | 6 | G.2 control arm | Target population **without** source context | target people, shared auto prompt, seed | train+val | target seed; elite parents | **5 × 10** | pooled `train_val` | control `best_program.py` + pool | no | no |
 | 7 | G.2 transfer arm | Matched target population **with** source suffix | same target data + selected source rank-1 + 1 source TV example | train+val (+ source TV in prompt only) | target seed; elite parents | **5 × 10** | pooled `train_val` | transfer `best_program.py` + pool | **yes** (suffix only) | no |
 | 8 | G.2 gate | Pick control vs transfer on observed data | both arm rank-1s | train+val (**count-pooled**, same as G.2 ranking) | n/a | n/a | strict `S_tr > S_ctl` beyond \(10^{-12}\) | `gate/gate_record.json`, `selected/` | decision only | **no** |
@@ -63,9 +63,10 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Independent-source kind | `pics_v3_independent` | Optional live source-pop under gated independent mode |
 | Explicit independent source | `--t_pics_gated_source DATASET` | With `--t_pics_gated_independent`: name the live G.1 source dataset **without** a transfer map / `--t_pics_source_config`. Default map lookup unchanged when this flag is omitted. |
 | Data protocol | `structure_aware_v3` | Training-only SA40 revision (same data path as v2; new flag) |
-| Annotation taxonomy | `schema_v4` | Unchanged six-motif population schema |
-| Runtime source YAML (**planned**) | `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` | Written after v3 G.1 → annotate → Occurrence-EB |
-| Annotation package (**planned**) | `pics_v3_g1_schema_v4` | Schema-v4 annotations of v3 G.1 programs |
+| Annotation taxonomy | `schema_v5` | Final five-construct vocabulary (`population_transition_v5`) |
+| Runtime source YAML | `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` | Frozen after g5e50p30 G.1 → schema-v5 annotate → Occurrence-EB |
+| Annotation package | `pics_v3_g1_schema_v5` | Schema-v5 annotations of g5e50p30 G.1 programs |
+| G.1 path ledger | `pics_v3/g1_job_paths_g5e50p30.tsv` | Jobs `265753`–`265767` |
 | W&B project (G.1) | `teh_pics_v3` | G.1 submitter default |
 | `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` | Gated run tag constant |
 
@@ -100,10 +101,11 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | Artifact | Status |
 | --- | --- |
 | Code / protocol / G.1 orchestration / docs | **final method definition** |
-| 15× `pics_v3_g1` G.1 jobs | **not yet run** (ready to submit) |
-| `pics_v3_g1_schema_v4` annotations | **planned** (absent until annotate) |
-| `occurrence_eb_schema4_iter10_pics_v3.yaml` | **planned** (directory exists; YAML absent) |
-| 15× `pics_v3` gated targets | **not yet run** (after map freeze) |
+| 15× `pics_v3_g1` G.1 jobs (g5e50p30) | **complete** (`265753`–`265767`) |
+| `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
+| `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
+| 15× `pics_v3` gated targets (schema5) | **submitted** (`271237`–`271251`; ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`) |
+| schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
 | preliminary-v2 G.1 (incl. 258518), v2 YAML | **frozen non-final** |
 
@@ -382,14 +384,18 @@ selectors from retrospective transfer diagnostics).
 | Peek policy | no transfer / test / G.2 peek at freeze |
 
 **Runtime YAML:**  
-`analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml`  
+`analysis/config/T-PICS/Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml`  
 (frozen; `peeked_transfer_at_freeze: false`). Freeze companions:
-`Transfer_source/pics_v3/schema4_occurrence_eb_freeze/`.
+`Transfer_source/pics_v3/schema5_occurrence_eb_freeze/`.
+
+Historical schema-v4 freezes (50-person G.1; not active):
+`occurrence_eb_schema4_iter10_pics_v3.yaml`,
+`occurrence_eb_schema4_5construct_iter10_pics_v3.yaml`.
 
 Fitting the map ≠ evaluating it retrospectively. Do **not** retune source
 identities from transfer outcomes.
 
-Gated defaults and submitters **require** this pics_v3 path. There is **no**
+Gated defaults and submitters **require** a pics_v3 path (default schema5). There is **no**
 preliminary-v2/v1 fallback for production PICS v3 targets.
 
 ---
@@ -505,16 +511,17 @@ authoritative gated results require complete participant set.
 
 ## L. Reproducibility and execution order
 
-1. **15 G.1** (`KIND=pics_v3_g1`, GPU) — submitter
+1. **15 G.1** (`KIND=pics_v3_g1`, GPU, g5e50p30) — submitter
    `cluster/v2/ours/Qwen/submit_g1_pics_v3.sh` (default `DRY_RUN=1`).
-2. **Schema-v4 annotate** → `pics_v3_g1_schema_v4` (GPU/CPU annotator stack;
-   new paths only).
-3. **Occurrence-EB fit** (CPU) → planned YAML under `Transfer_source/pics_v3/`.
+2. **Schema-v5 annotate** → `pics_v3_g1_schema_v5`
+   (`cluster/v3/ours/main/submit_pop_annot_schema_v5.sh`).
+3. **Occurrence-EB fit** (CPU) →
+   `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml`.
 4. **Validate** YAML paths/hashes/identities; `peeked_transfer_at_freeze: false`.
 5. **Final G.2 paired-packing audit** with selected v3 sources (CPU).
 6. **15 gated targets** (`KIND=pics_v3`, `--t_pics_gated_transfer`, GPU) —
    `cluster/v3/ours/main/submit_gated.sh` (default `DRY_RUN=1`;
-   explicit `--t_pics_source_config` → pics_v3 YAML only).
+   default `--t_pics_source_config` → schema5 YAML).
 7. **Completeness / result checks** (CPU + W&B).
 
 | If G.1 changes | Must regenerate |
@@ -593,8 +600,8 @@ protocol / packing / W&B code.
 | v2 §7–9 prompt / packing / auto prompt | **Updated** into §C–D (14k/5k; trial-first truncate; fail-closed G.1) |
 | v2 §11–12 OpenEvolve / versioning | **Baselines only** / frozen non-final list |
 | v2 G.2 14k pack | **Superseded** by `g2_paired_pack_pics_v3` |
-| v1 target→source identity table | **Superseded** — use `Transfer_source/pics_v3/occurrence_eb_schema4_iter10_pics_v3.yaml` |
-| v1 annotated program counts (1385) | **Historical only** — v3 counts TBD after annotate |
+| v1 target→source identity table | **Superseded** — use `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` |
+| v1 annotated program counts (1385) | **Historical only** — g5e50p30 schema-v5 count is 1414 |
 
 ---
 
@@ -609,7 +616,7 @@ protocol / packing / W&B code.
 | Paired packing | `utils/teh/g2_paired_packing.py` |
 | Snapshots / sanitize | `utils/teh/prompt_snapshots.py` |
 | Parent 70/30 truncate | `teh.py` `_truncate_parent_program_for_prompt` |
-| Motifs | `utils/mem/schema_population_motif_v4.py` |
+| Motifs | `utils/mem/schema_population_motif_v5.py` (final); `…_v4.py` historical |
 | Occurrence-EB | `analysis/mem/pop_v4_source_selection/run_source_selection_v4.py` |
 | W&B finals | `utils/teh/t_pics_gated_wandb.py` |
 | Ordinals | `utils/teh/teh_datasets.py` / `analysis/config/teh_datasets.yaml` |

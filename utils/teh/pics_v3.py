@@ -6,8 +6,10 @@ Does not overwrite v1 or preliminary-v2 artifacts.
 Concepts (do not conflate):
 - Method / output kind: ``pics_v3`` / ``pics_v3_g1`` / ``pics_v3_independent``
 - Shared data protocol: ``structure_aware_v3``
+- Population lineage: ``g5e50p30`` (first-30 ordinals, 16k context, trial-first)
 - Annotation taxonomy: ``schema_v5`` (five constructs; final). Schema-v4 artifacts
-  remain frozen and must not be overwritten.
+  remain frozen historical and must not be overwritten.
+- Active runtime source map: ``occurrence_eb_schema5_iter10_pics_v3.yaml``
 """
 from __future__ import annotations
 
@@ -20,8 +22,9 @@ KIND = "pics_v3"
 G1_KIND = "pics_v3_g1"
 INDEPENDENT_KIND = "pics_v3_independent"
 RUN_TAG = "g5e50p30_occurrence_eb_pics_v3"
-ANNOTATION_PACKAGE = "pics_v3_g1_schema_v4"  # legacy completed package
-ANNOTATION_PACKAGE_V5 = "pics_v3_g1_schema_v5"
+ANNOTATION_PACKAGE = "pics_v3_g1_schema_v5"
+ANNOTATION_PACKAGE_V4 = "pics_v3_g1_schema_v4"  # legacy completed package
+ANNOTATION_PACKAGE_V5 = ANNOTATION_PACKAGE
 
 LIMITED_DATA_PROTOCOL = "structure_aware_v3"
 LIMITED_TRAIN_VAL = 40
@@ -41,20 +44,22 @@ G2_PAIRED_PACK_VERSION = "g2_paired_pack_pics_v3"
 G2_PAIRED_PACK_FILENAME = "g2_paired_packing.json"
 
 SOURCE_DIR = _REPO_ROOT / "analysis/config/T-PICS/Transfer_source/pics_v3"
-# Active runtime map for currently submitted G.2 jobs (do not change mid-flight).
-SOURCE_YAML = SOURCE_DIR / "occurrence_eb_schema4_iter10_pics_v3.yaml"
-# Five-construct selector freeze (schema-v4 annotations, construct subset).
+# Active runtime map for future gated jobs: schema-v5 / g5e50p30 Occurrence-EB.
+SOURCE_YAML = SOURCE_DIR / "occurrence_eb_schema5_iter10_pics_v3.yaml"
+# Legacy schema-v4 freezes (50-person G.1; do not overwrite).
+SOURCE_YAML_SCHEMA4 = SOURCE_DIR / "occurrence_eb_schema4_iter10_pics_v3.yaml"
 SOURCE_YAML_5CONSTRUCT = SOURCE_DIR / "occurrence_eb_schema4_5construct_iter10_pics_v3.yaml"
-# Schema-v5 freeze (written only after v5 reannotation + identical-map check).
-SOURCE_YAML_SCHEMA5 = SOURCE_DIR / "occurrence_eb_schema5_iter10_pics_v3.yaml"
-FREEZE_DIR = SOURCE_DIR / "schema4_occurrence_eb_freeze"
-FREEZE_DIR_SCHEMA5 = SOURCE_DIR / "schema5_occurrence_eb_freeze"
+SOURCE_YAML_SCHEMA5 = SOURCE_YAML
+FREEZE_DIR = SOURCE_DIR / "schema5_occurrence_eb_freeze"
+FREEZE_DIR_SCHEMA4 = SOURCE_DIR / "schema4_occurrence_eb_freeze"
+FREEZE_DIR_SCHEMA5 = FREEZE_DIR
 ANNOTATIONS_ROOT = (
-    _REPO_ROOT / "analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations"
-)
-ANNOTATIONS_ROOT_V5 = (
     _REPO_ROOT / "analysis_2026Sep/mem/pics_v3_g1_schema_v5/annotations"
 )
+ANNOTATIONS_ROOT_V4 = (
+    _REPO_ROOT / "analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations"
+)
+ANNOTATIONS_ROOT_V5 = ANNOTATIONS_ROOT
 DOCS = _REPO_ROOT / "analysis/config/T-PICS/docs/Documentation_pics_v3.md"
 
 # --- Frozen non-final predecessors (do not overwrite) ---
