@@ -988,15 +988,25 @@ def setup_teh_run_prompts(
         contract + "\n", encoding="utf-8"
     )
     from utils.teh.limited_data_registry import LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
-    from utils.teh.pics_v3_prompt_robustness import ensure_history_robustness_block
+    from utils.teh.pics_v3_prompt_robustness import (
+        ensure_history_robustness_block,
+        resolve_history_robustness_policy_id,
+    )
 
     infer_body = infer_path.read_text(encoding="utf-8")
+    reminder_policy_id = None
     if (
         normalize_limited_data_protocol(limited_data_protocol)
         == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
     ):
-        infer_body = ensure_history_robustness_block(infer_body)
-        print(f"[TEH] Appended immutable history robustness block -> {infer_path}")
+        infer_body = ensure_history_robustness_block(
+            infer_body, dataset=dataset_alias
+        )
+        reminder_policy_id = resolve_history_robustness_policy_id(dataset_alias)
+        print(
+            f"[TEH] Appended history reminder block "
+            f"(policy={reminder_policy_id}) -> {infer_path}"
+        )
     infer_path.write_text(
         attach_runtime_contract_to_prompt(infer_body, contract),
         encoding="utf-8",
@@ -1067,6 +1077,7 @@ def setup_teh_run_prompts(
         "n_prompt_example_trials": len(sample_trial_list),
         "prompt_examples_exclude_test": True,
         "runtime_contract_appended": True,
+        "pics_v3_reminder_policy": reminder_policy_id,
         "limited_data_protocol": normalize_limited_data_protocol(limited_data_protocol),
         "limited_train_val": None if limited_train_val is None else int(limited_train_val),
         "prompt_examples_from_retained_observed": (

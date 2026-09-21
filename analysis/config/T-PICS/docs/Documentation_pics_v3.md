@@ -168,19 +168,40 @@ selection (no train-only fallback; interface preflight) applies only to
 
 ### Interface robustness (separate from observed-union scoring)
 
-History outcome fields (`feedback`, `reward`, and related keys) **may be
-absent** depending on trial/stage. Runtime contracts document this; programs
-must use `.get()` / membership checks.
+History outcome fields may be absent depending on trial/stage. The immutable
+TARGET RUNTIME CONTRACT documents `.get()` / membership checks. Separately,
+every `structure_aware_v3` candidate-generation prompt inserts a short
+**post-adaptive reminder** immediately after the dataset-adaptive task
+description (not into trial JSON; genuine field absence is preserved).
 
-Every PICS v3 candidate-generation prompt inserts this **immutable** block
-immediately after the dataset-adaptive task description (not into trial JSON;
-genuine field absence is preserved):
+**Policy id (prospective default):** `dataset_keyed_post_adaptive_v1`
+
+The already-frozen G.1 populations and Occurrence-EB source-selection map
+predate this keyed reminder policy and are intentionally reused for the
+deadline `pics_v3_reminder_v1` gated reruns (no G.1 / annotation / source-map
+recomputation).
+
+- **Six datasets** receive a dataset-keyed reminder body that encodes known
+  task/interface structure (Speekenbrink, Kool, Steyvers, Schulz, Guan,
+  Badham). Exact wording lives in
+  `utils/teh/pics_v3_prompt_robustness.py` and is mirrored under
+  `analysis_2026Sep/Sep20_V3/others/prompt_reminder_fix/REMINDER_TEXTS.md`.
+- **All other datasets** keep the byte-identical legacy generic block
+  (`generic_history_robustness_v0`):
 
 > `history` may be empty, and different history entries may contain different
 > fields. Never assume optional fields such as `feedback`, `reward`, or outcome
 > fields exist or are non-null. Check for a key or use `.get(...)` before reading
 > it. Only fields explicitly required by the current task/API contract may be
 > accessed directly.
+
+Reproduction: `--pics_v3_legacy_generic_reminder` forces the legacy generic
+block for every dataset (including the six). Prompt metadata records
+`pics_v3_reminder_policy`. Reminders never invent trial fields and must not
+expose current-trial answers/outcomes; past realized outcomes in `history`
+remain legitimate. Token packing (hard 14k / vLLM 16k) is unchanged in policy;
+keyed blocks are slightly longer than legacy for some of the six—see the
+token audit CSV. Test isolation and uniform failure fallback are unchanged.
 
 Before elite admission, PICS v3 runs a **test-independent** interface preflight
 (`utils/teh/pics_v3_contract_preflight.py`) on synthetic admissible

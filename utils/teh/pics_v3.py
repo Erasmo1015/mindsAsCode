@@ -21,7 +21,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 KIND = "pics_v3"
 G1_KIND = "pics_v3_g1"
 INDEPENDENT_KIND = "pics_v3_independent"
+# Gated target reruns with dataset_keyed_post_adaptive_v1 (new OUT_DIR root;
+# never overwrite bare pics_v3/ jobs). Reuses frozen G.1 + source YAML.
+REMINDER_RERUN_KIND = "pics_v3_reminder_v1"
 RUN_TAG = "g5e50p30_occurrence_eb_pics_v3"
+REMINDER_RERUN_TAG = "g5e50p30_occurrence_eb_pics_v3_reminder_v1"
 
 # Ablation KINDs (isolated OUT_DIR roots; never write under bare pics_v3/).
 ABLATION_KIND_NO_TRANSFER = "pics_v3_ablation_no_transfer"

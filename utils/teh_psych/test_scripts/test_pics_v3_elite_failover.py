@@ -58,7 +58,14 @@ def test_history_robustness_block_injected_after_task_description_only_under_v3_
     assert "`history` may be empty" in out
     assert ".get(...)" in out
     assert ensure_history_robustness_block(out) == out
+    # Unaffected / unspecified datasets keep the legacy generic block verbatim.
     assert HISTORY_ROBUSTNESS_BLOCK in out
+    with pics_v3_prompt_robustness_scope(True, dataset="1peterson2021using"):
+        out_p = maybe_attach_history_robustness_after_task_description(
+            task, dataset="1peterson2021using"
+        )
+    assert HISTORY_ROBUSTNESS_BLOCK in out_p
+    assert out_p == out
 
 
 def test_preflight_covers_empty_action_only_hetero_null_and_required_fields():

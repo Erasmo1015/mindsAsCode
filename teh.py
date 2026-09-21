@@ -3198,7 +3198,9 @@ def run_global_evolution_phase(
     prompt_contract_scope(
         uses_training_only_sa40(limited_data_protocol)
     ).__enter__()
-    pics_v3_prompt_robustness_scope(strict_observed_union).__enter__()
+    pics_v3_prompt_robustness_scope(
+        strict_observed_union, dataset=dataset
+    ).__enter__()
     participant_ids = [int(p) for p in participants]
     sparse_audits: List[SparseObservationAudit] = []
     pooled_train = _collect_pooled_train_trials_for_participants(
@@ -4397,7 +4399,8 @@ def _ensure_g2_paired_pack_freeze(
     with prompt_contract_scope(
         uses_training_only_sa40(str(args.limited_data_protocol))
     ), pics_v3_prompt_robustness_scope(
-        uses_pics_v3_observed_union(str(args.limited_data_protocol))
+        uses_pics_v3_observed_union(str(args.limited_data_protocol)),
+        dataset=str(args.dataset),
     ):
         pooled_train = _collect_pooled_train_trials_for_participants(
             str(args.dataset),
@@ -5649,13 +5652,16 @@ def _build_psych_prompt_text(
     code_template_suffix: str,
     candidate_output_rules: str,
     runtime_contract: str = "",
+    dataset: str = "",
 ) -> str:
     from utils.teh.pics_v3_prompt_robustness import (
         maybe_attach_history_robustness_after_task_description,
     )
 
-    # PICS v3: immutable robustness block immediately after dataset-adaptive task text.
-    task_text = maybe_attach_history_robustness_after_task_description(base_prompt)
+    # PICS v3: reminder block immediately after dataset-adaptive task text.
+    task_text = maybe_attach_history_robustness_after_task_description(
+        base_prompt, dataset=dataset or None
+    )
     text = (
         f"{task_text}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{code_template_suffix}\n{candidate_output_rules}\n"
@@ -5778,6 +5784,7 @@ def _truncate_psych_prompt_to_budget(
             code_template_suffix=code_template_suffix,
             candidate_output_rules=candidate_output_rules,
             runtime_contract=runtime_contract,
+            dataset=dataset,
         )
         return prompt, state_text, extra_state_text, len(tr), n_val, len(parents)
 
@@ -10980,7 +10987,9 @@ def run_evolution(
     from utils.teh.pics_v3_prompt_robustness import pics_v3_prompt_robustness_scope
 
     strict_observed_union = uses_pics_v3_observed_union(limited_data_protocol)
-    pics_v3_prompt_robustness_scope(strict_observed_union).__enter__()
+    pics_v3_prompt_robustness_scope(
+        strict_observed_union, dataset=dataset
+    ).__enter__()
     selection_warn_key = f"p{participant_id}"
     invalid_candidate_errors: List[Dict[str, Any]] = _ErrorFeedbackStore(
         error_feedback_mode
@@ -14925,6 +14934,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_v3_legacy_generic_reminder",
+        action="store_true",
+        default=False,
+        help=(
+            "Reproduction only: force the legacy generic HISTORY_ROBUSTNESS_BLOCK_V3 "
+            "for all datasets, disabling dataset_keyed_post_adaptive_v1 overrides. "
+            "Default (flag off) under structure_aware_v3 uses keyed reminders for "
+            "Speekenbrink/Kool/Steyvers/Schulz/Guan/Badham and legacy text elsewhere."
+        ),
+    )
+    parser.add_argument(
         "--max_prompt_train_trials",
         type=int,
         default=60,
@@ -15178,6 +15198,13 @@ def main():
     )
 
     args = parser.parse_args()
+    from utils.teh.pics_v3_prompt_robustness import (
+        configure_pics_v3_legacy_generic_reminder,
+    )
+
+    configure_pics_v3_legacy_generic_reminder(
+        bool(getattr(args, "pics_v3_legacy_generic_reminder", False))
+    )
     t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
     t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
@@ -15706,7 +15733,8 @@ def main():
     pics_v3_prompt_robustness_scope(
         uses_pics_v3_observed_union(
             getattr(args, "limited_data_protocol", "structure_aware_v3")
-        )
+        ),
+        dataset=str(args.dataset),
     ).__enter__()
     if args.phase == "evolution" and args.refinement_phase:
         print("Note: --refinement_phase is ignored when --phase evolution.")
