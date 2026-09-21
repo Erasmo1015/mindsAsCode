@@ -137,7 +137,7 @@ class TestDirectionsAndEligibility(unittest.TestCase):
         self.assertTrue(ok, err)
         self.assertTrue(rows[0]["no_meaningful_change"])
 
-    def test_reject_risk_and_inconsistent_modified(self) -> None:
+    def test_reject_risk_and_normalize_modified(self) -> None:
         bad_risk = [
             {
                 "candidate_id": "c0",
@@ -154,21 +154,65 @@ class TestDirectionsAndEligibility(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("banned", err.lower())
 
+        # Added-as-modified: deterministically drop non-intersection entries.
         bad_mod = [
             {
                 "candidate_id": "c0",
-                "reference_motif_state": ["history"],
-                "candidate_motif_state": ["value"],
-                "modified_motifs": ["history"],
+                "reference_motif_state": ["history", "value"],
+                "candidate_motif_state": ["history", "value", "feedback", "learning"],
+                "modified_motifs": ["feedback", "learning"],
                 "structural_operations": [],
                 "no_meaningful_change": False,
                 "evidence": ["x"],
                 "confidence": 0.5,
             }
         ]
-        ok, err, _ = validate_annotation_response_v5(bad_mod, expected_ids=["c0"])
+        norms: list = []
+        ok, err, rows = validate_annotation_response_v5(
+            bad_mod,
+            expected_ids=["c0"],
+            normalizations_out=norms,
+        )
+        self.assertTrue(ok, err)
+        self.assertEqual(rows[0]["added_motifs"], ["feedback", "learning"])
+        self.assertEqual(rows[0]["modified_motifs"], [])
+        self.assertEqual(norms[0]["dropped_modified_motifs"], ["feedback", "learning"])
+
+        ok, err, _ = validate_annotation_response_v5(
+            bad_mod,
+            expected_ids=["c0"],
+            normalize_modified_outside_intersection=False,
+        )
         self.assertFalse(ok)
         self.assertIn("intersection", err)
+
+    def test_empty_array_rejected_for_nonempty_batch(self) -> None:
+        ok, err, _ = validate_annotation_response_v5([], expected_ids=["c0", "c1"])
+        self.assertFalse(ok)
+        self.assertIn("empty annotation array", err)
+
+    def test_guided_schema_minmax_items(self) -> None:
+        from utils.mem.schema_participant_transition_v5 import (
+            guided_json_schema_for_batch_v5,
+        )
+
+        schema = guided_json_schema_for_batch_v5(["a", "b"])
+        self.assertEqual(schema["minItems"], 2)
+        self.assertEqual(schema["maxItems"], 2)
+
+    def test_resume_key_includes_phase(self) -> None:
+        k_evo = annotation_resume_key(
+            "ds", "job", 0, 2, "cand",
+            reference_id="p", reference_type="best_prompted_parent", phase="evolution",
+        )
+        k_exp = annotation_resume_key(
+            "ds", "job", 0, 2, "cand",
+            reference_id="p", reference_type="population_program", phase="explore",
+        )
+        self.assertNotEqual(k_evo, k_exp)
+        self.assertEqual(k_evo[3], "evolution")
+        g = global_candidate_id("ds", "job", 0, 2, "cand", phase="explore")
+        self.assertIn("|explore|", g)
 
 
 class TestUniqueIdsAndResume(unittest.TestCase):

@@ -7,6 +7,12 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from utils.mem.annotation_context import (
+    ANNOTATION_SAFETY_MARGIN_TOKENS,
+    ANNOTATION_VLLM_MAX_MODEL_LEN,
+    PARTICIPANT_DEFAULT_MAX_TOKENS,
+)
+
 # Schema v1 flat taxonomy (legacy annotations only). Prefer utils.mem.schema_v2.
 MOTIF_TAXONOMY = (
     "value_or_expected_value",
@@ -335,23 +341,141 @@ def estimate_tokens_char4(text: str) -> int:
     return max(0, (len(text) + 3) // 4)
 
 
+def allowed_annotation_input_tokens(
+    *,
+    max_model_len: int,
+    reserved_output_tokens: int,
+    safety_margin_tokens: int,
+    max_input_tokens: Optional[int] = None,
+) -> int:
+    """Return the max chat-input tokens under the canonical packing inequality."""
+    if int(max_model_len) <= 0:
+        raise ValueError("max_model_len must be positive")
+    if int(reserved_output_tokens) < 0 or int(safety_margin_tokens) < 0:
+        raise ValueError("reserved_output_tokens / safety_margin_tokens must be >= 0")
+    allowed = int(max_model_len) - int(reserved_output_tokens) - int(safety_margin_tokens)
+    if allowed <= 0:
+        raise ValueError(
+            f"no room for input tokens: max_model_len={max_model_len} "
+            f"reserved_output={reserved_output_tokens} margin={safety_margin_tokens}"
+        )
+    if max_input_tokens is not None and int(max_input_tokens) > 0:
+        allowed = min(allowed, int(max_input_tokens))
+    return allowed
+
+
+def pack_items_under_chat_budget(
+    items: Sequence[Any],
+    *,
+    estimate_chat_tokens: Any,
+    max_items_per_batch: int,
+    max_model_len: int,
+    reserved_output_tokens: int,
+    safety_margin_tokens: int,
+    max_input_tokens: Optional[int] = None,
+) -> Tuple[List[List[Any]], List[Tuple[Any, int]]]:
+    """Greedy pack items so chat_input + reserved + margin ≤ max_model_len.
+
+    ``estimate_chat_tokens(batch)`` must return the full system+user token count
+    for that batch (exact tokenizer preferred). Never truncates item payloads.
+
+    Returns ``(batches, oversized_singletons)`` where each oversized entry is
+    ``(item, solo_chat_tokens)``. Callers must log/fail those; do not silently drop.
+    """
+    if max_items_per_batch <= 0:
+        raise ValueError("max_items_per_batch must be positive")
+    allowed = allowed_annotation_input_tokens(
+        max_model_len=max_model_len,
+        reserved_output_tokens=reserved_output_tokens,
+        safety_margin_tokens=safety_margin_tokens,
+        max_input_tokens=max_input_tokens,
+    )
+    batches: List[List[Any]] = []
+    current: List[Any] = []
+    oversized: List[Tuple[Any, int]] = []
+
+    for item in items:
+        solo = [item]
+        solo_tokens = int(estimate_chat_tokens(solo))
+        if solo_tokens > allowed:
+            oversized.append((item, solo_tokens))
+            continue
+        trial = current + [item]
+        if len(trial) > max_items_per_batch or int(estimate_chat_tokens(trial)) > allowed:
+            if current:
+                batches.append(current)
+            current = [item]
+        else:
+            current = list(trial)
+    if current:
+        batches.append(current)
+    return batches, oversized
+
+
 def split_annotation_batches(
     candidates: Sequence[Dict[str, Any]],
     *,
     reference_code: str,
-    base_prompt_chars: int,
-    max_input_tokens: int = 12000,
+    base_prompt_chars: int = 0,
+    max_input_tokens: Optional[int] = None,
     max_candidates_per_batch: int = 10,
+    system_prompt: str = "",
+    build_user_prompt: Optional[Any] = None,
+    token_counter: Optional[Any] = None,
+    max_model_len: int = ANNOTATION_VLLM_MAX_MODEL_LEN,
+    reserved_output_tokens: int = PARTICIPANT_DEFAULT_MAX_TOKENS,
+    safety_margin_tokens: int = ANNOTATION_SAFETY_MARGIN_TOKENS,
 ) -> List[List[Dict[str, Any]]]:
     """
     Split candidates into batches that fit the token budget without truncating code.
 
+    Preferred budget (when ``token_counter`` + ``build_user_prompt`` are set):
+
+      count(system + user) + reserved_output_tokens + safety_margin_tokens
+          <= max_model_len
+
+    Legacy mode (tests / callers without a tokenizer): char/4 on
+    ``("x" * base_prompt_chars) + payload_json`` vs ``max_input_tokens``.
+
     Raises ValueError if a single candidate cannot fit even alone.
     """
-    if max_input_tokens <= 0:
-        raise ValueError("max_input_tokens must be positive")
     if max_candidates_per_batch <= 0:
         raise ValueError("max_candidates_per_batch must be positive")
+
+    use_exact = token_counter is not None and build_user_prompt is not None
+    if use_exact:
+
+        def _est(cands: Sequence[Dict[str, Any]]) -> int:
+            user = build_user_prompt(reference_code, cands)  # type: ignore[misc]
+            return int(token_counter(str(system_prompt) + str(user)))  # type: ignore[misc]
+
+        batches, oversized = pack_items_under_chat_budget(
+            list(candidates),
+            estimate_chat_tokens=_est,
+            max_items_per_batch=max_candidates_per_batch,
+            max_model_len=max_model_len,
+            reserved_output_tokens=reserved_output_tokens,
+            safety_margin_tokens=safety_margin_tokens,
+            max_input_tokens=max_input_tokens,
+        )
+        if oversized:
+            item, solo_tokens = oversized[0]
+            allowed = allowed_annotation_input_tokens(
+                max_model_len=max_model_len,
+                reserved_output_tokens=reserved_output_tokens,
+                safety_margin_tokens=safety_margin_tokens,
+                max_input_tokens=max_input_tokens,
+            )
+            raise ValueError(
+                f"Candidate {item.get('candidate_id')!r} alone exceeds "
+                f"allowed_input_tokens={allowed} (est={solo_tokens}); "
+                "refusing to truncate code."
+            )
+        return batches
+
+    if max_input_tokens is None or int(max_input_tokens) <= 0:
+        raise ValueError("max_input_tokens must be positive in legacy char/4 mode")
+    allowed_input = int(max_input_tokens)
 
     batches: List[List[Dict[str, Any]]] = []
     current: List[Dict[str, Any]] = []
@@ -369,14 +493,14 @@ def split_annotation_batches(
     for cand in candidates:
         solo = [cand]
         solo_tokens = _batch_tokens(solo)
-        if solo_tokens > max_input_tokens:
+        if solo_tokens > allowed_input:
             raise ValueError(
                 f"Candidate {cand.get('candidate_id')!r} alone exceeds "
-                f"max_input_tokens={max_input_tokens} (est={solo_tokens}); "
+                f"allowed_input_tokens={allowed_input} (est={solo_tokens}); "
                 "refusing to truncate code."
             )
         trial = current + [cand]
-        if len(trial) > max_candidates_per_batch or _batch_tokens(trial) > max_input_tokens:
+        if len(trial) > max_candidates_per_batch or _batch_tokens(trial) > allowed_input:
             if current:
                 batches.append(current)
             current = [cand]

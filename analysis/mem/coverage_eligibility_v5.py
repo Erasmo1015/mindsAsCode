@@ -104,57 +104,85 @@ def main() -> None:
     parser.add_argument("--output_json", required=True)
     parser.add_argument("--min_positive_rows", type=int, default=5)
     parser.add_argument("--min_participants_with_both", type=int, default=2)
+    parser.add_argument(
+        "--phase",
+        type=str,
+        default="",
+        help="If set, filter rows to this phase before counting (never silently pool).",
+    )
+    parser.add_argument(
+        "--by_phase",
+        action="store_true",
+        help="Write one coverage object per phase under key phase_reports "
+        "(in addition to overall on the filtered/full frame).",
+    )
     args = parser.parse_args()
 
     df = pd.read_csv(args.input_csv)
-    effects: List[Dict[str, Any]] = []
-    for motif in BEHAVIORAL_MOTIFS:
-        for direction in DIRECTIONAL_SUFFIXES:
-            col = f"{motif}_{direction}"
-            elig = eligible_column(motif, direction)
-            effects.append(
-                _counts_for_column(
-                    df,
-                    col,
-                    elig_col=elig,
-                    min_positive_rows=args.min_positive_rows,
-                    min_parts_both=args.min_participants_with_both,
+    if args.phase:
+        if "phase" not in df.columns:
+            raise SystemExit("--phase set but CSV has no phase column")
+        df = df[df["phase"] == args.phase].copy()
+
+    def _report(frame: pd.DataFrame) -> Dict[str, Any]:
+        effects: List[Dict[str, Any]] = []
+        for motif in BEHAVIORAL_MOTIFS:
+            for direction in DIRECTIONAL_SUFFIXES:
+                col = f"{motif}_{direction}"
+                elig = eligible_column(motif, direction)
+                effects.append(
+                    _counts_for_column(
+                        frame,
+                        col,
+                        elig_col=elig,
+                        min_positive_rows=args.min_positive_rows,
+                        min_parts_both=args.min_participants_with_both,
+                    )
                 )
+        primary = []
+        for name in PRIMARY_FOCAL_CANDIDATES:
+            match = next((e for e in effects if e.get("column") == name), None)
+            primary.append(
+                {
+                    "column": name,
+                    "supported_for_focal_consideration": bool(
+                        match and match.get("supported_for_focal_consideration")
+                    ),
+                    "detail": match,
+                }
             )
+        return {
+            "schema_hint": 5 if "probability_used_added" in frame.columns else "unknown",
+            "n_rows": int(len(frame)),
+            "n_participants": int(frame["participant_id"].nunique())
+            if "participant_id" in frame.columns
+            else None,
+            "phase_filter": args.phase or None,
+            "phases_present": sorted(frame["phase"].dropna().unique().tolist())
+            if "phase" in frame.columns
+            else None,
+            "constructs": list(BEHAVIORAL_MOTIFS),
+            "directional_columns_expected": all_directional_behavioral_columns(),
+            "effects": effects,
+            "primary_focal_candidates": primary,
+            "supported_effects": [
+                e["column"]
+                for e in effects
+                if e.get("supported_for_focal_consideration")
+            ],
+            "note": (
+                "Do not hard-code a joint/focal model to every construct-operation. "
+                "Choose focals from supported_effects after inspecting this report. "
+                "Never silently pool explore and evolution."
+            ),
+        }
 
-    primary = []
-    for name in PRIMARY_FOCAL_CANDIDATES:
-        match = next((e for e in effects if e.get("column") == name), None)
-        primary.append(
-            {
-                "column": name,
-                "supported_for_focal_consideration": bool(
-                    match and match.get("supported_for_focal_consideration")
-                ),
-                "detail": match,
-            }
-        )
-
-    out = {
-        "schema_hint": 5 if "probability_used_added" in df.columns else "unknown",
-        "n_rows": int(len(df)),
-        "n_participants": int(df["participant_id"].nunique())
-        if "participant_id" in df.columns
-        else None,
-        "constructs": list(BEHAVIORAL_MOTIFS),
-        "directional_columns_expected": all_directional_behavioral_columns(),
-        "effects": effects,
-        "primary_focal_candidates": primary,
-        "supported_effects": [
-            e["column"]
-            for e in effects
-            if e.get("supported_for_focal_consideration")
-        ],
-        "note": (
-            "Do not hard-code a joint/focal model to every construct-operation. "
-            "Choose focals from supported_effects after inspecting this report."
-        ),
-    }
+    out = _report(df)
+    if args.by_phase and "phase" in df.columns and not args.phase:
+        out["phase_reports"] = {
+            str(ph): _report(df[df["phase"] == ph].copy())
+            for ph in sorted(df["phase"].dropna().unique().tolist())
+        }
     out_path = Path(args.output_json)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")

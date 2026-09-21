@@ -132,13 +132,40 @@ def annotation_resume_key(
     candidate_id: str,
     reference_id: Optional[str] = None,
     reference_type: Optional[str] = None,
+    phase: Optional[str] = None,
 ) -> Tuple[Any, ...]:
     """Globally unique resume identity for participant Schema v5.
 
-    Includes dataset + run + participant + iteration + candidate + reference
-    so the same local candidate_id string cannot collide across jobs or
-    pairings (the previous resume bug).
+    Includes dataset + run + participant + **phase** + iteration + candidate +
+    reference so evolution and exploration never collide and the same local
+    candidate_id cannot collide across jobs or pairings.
     """
+    try:
+        iter_norm: Any = int(iteration) if iteration is not None else ""
+    except (TypeError, ValueError):
+        iter_norm = str(iteration) if iteration is not None else ""
+    return (
+        str(dataset) if dataset is not None else "",
+        str(run_id) if run_id is not None else "",
+        str(participant_id) if participant_id is not None else "",
+        str(phase) if phase is not None else "",
+        iter_norm,
+        str(candidate_id),
+        str(reference_id) if reference_id is not None else "",
+        str(reference_type) if reference_type is not None else "",
+    )
+
+
+def annotation_resume_key_legacy_no_phase(
+    dataset: Any,
+    run_id: Any,
+    participant_id: Any,
+    iteration: Any,
+    candidate_id: str,
+    reference_id: Optional[str] = None,
+    reference_type: Optional[str] = None,
+) -> Tuple[Any, ...]:
+    """Pre-phase resume key (pilot rows). Used only for backward-compatible skip."""
     try:
         iter_norm: Any = int(iteration) if iteration is not None else ""
     except (TypeError, ValueError):
@@ -160,15 +187,36 @@ def global_candidate_id(
     participant_id: Any,
     iteration: Any,
     candidate_id: str,
+    phase: Optional[str] = None,
 ) -> str:
-    """Stable string ID spanning dataset/run/participant/iteration/candidate."""
+    """Stable string ID spanning dataset/run/participant/phase/iteration/candidate."""
     try:
         it = int(iteration)
     except (TypeError, ValueError):
         it = iteration
-    return (
-        f"{dataset}|{run_id}|{participant_id}|{it}|{candidate_id}"
-    )
+    ph = str(phase) if phase is not None else ""
+    return f"{dataset}|{run_id}|{participant_id}|{ph}|{it}|{candidate_id}"
+
+
+def normalize_modified_motifs_to_intersection(
+    reference_state: Sequence[str],
+    candidate_state: Sequence[str],
+    modified_motifs: Sequence[str],
+) -> Tuple[List[str], List[str]]:
+    """Keep only modified ∩ (reference ∩ candidate); return (kept, dropped)."""
+    inter = set(reference_state) & set(candidate_state)
+    kept: List[str] = []
+    dropped: List[str] = []
+    seen: Set[str] = set()
+    for m in modified_motifs:
+        if m in seen:
+            continue
+        seen.add(str(m))
+        if m in inter:
+            kept.append(str(m))
+        else:
+            dropped.append(str(m))
+    return kept, dropped
 
 
 def motif_definitions_block() -> str:
@@ -237,7 +285,12 @@ def transition_type_for_construct(
 
 
 def guided_json_schema_for_batch_v5(expected_ids: Sequence[str]) -> Dict[str, Any]:
-    """JSON Schema for schema-v5 LLM responses (no added/removed fields)."""
+    """JSON Schema for schema-v5 LLM responses (no added/removed fields).
+
+    ``minItems`` / ``maxItems`` equal ``len(expected_ids)`` so an empty array
+    cannot validate for a nonempty batch under guided decoding.
+    """
+    n = len(list(expected_ids))
     motif_items = {"type": "string", "enum": list(BEHAVIORAL_MOTIFS)}
     struct_items = {"type": "string", "enum": list(STRUCTURAL_OPERATIONS)}
     item = {
@@ -255,7 +308,12 @@ def guided_json_schema_for_batch_v5(expected_ids: Sequence[str]) -> Dict[str, An
         "required": list(REQUIRED_LLM_FIELDS),
         "additionalProperties": False,
     }
-    return {"type": "array", "items": item}
+    return {
+        "type": "array",
+        "items": item,
+        "minItems": n,
+        "maxItems": n,
+    }
 
 
 def validate_annotation_response_v5(
@@ -263,8 +321,15 @@ def validate_annotation_response_v5(
     *,
     expected_ids: Sequence[str],
     prompt_version: str = PROMPT_VERSION,
+    normalize_modified_outside_intersection: bool = True,
+    normalizations_out: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
-    """Validate schema-v5 JSON; derive added/removed; reject illegal modified."""
+    """Validate schema-v5 JSON; derive added/removed.
+
+    By default, ``modified_motifs`` entries outside reference∩candidate are
+    **deterministically dropped** (adds remain derived from presence sets) and
+    each drop is recorded in ``normalizations_out`` when provided.
+    """
     expected = list(expected_ids)
     expected_set = set(expected)
     if len(expected) != len(expected_set):
@@ -276,6 +341,14 @@ def validate_annotation_response_v5(
         rows = payload
     if not isinstance(rows, list):
         return False, "response must be a JSON list (or object with 'annotations' list)", []
+
+    if len(expected) > 0 and len(rows) == 0:
+        return (
+            False,
+            f"empty annotation array for nonempty batch (expected {len(expected)} "
+            f"candidate_id(s): {expected})",
+            [],
+        )
 
     seen: Set[str] = set()
     cleaned: List[Dict[str, Any]] = []
@@ -352,14 +425,29 @@ def validate_annotation_response_v5(
         assert structural is not None
 
         inter = set(ref_state) & set(cand_state)
-        outside = [m for m in modified_raw if m not in inter]
-        if outside:
-            return (
-                False,
-                f"{cid}: modified_motifs {outside} not in reference∩candidate "
-                f"(intersection={sorted(inter)})",
-                [],
-            )
+        kept_mod, dropped_mod = normalize_modified_motifs_to_intersection(
+            ref_state, cand_state, modified_raw
+        )
+        if dropped_mod:
+            if not normalize_modified_outside_intersection:
+                return (
+                    False,
+                    f"{cid}: modified_motifs {dropped_mod} not in reference∩candidate "
+                    f"(intersection={sorted(inter)})",
+                    [],
+                )
+            note = {
+                "candidate_id": cid,
+                "action": "drop_modified_outside_intersection",
+                "dropped_modified_motifs": list(dropped_mod),
+                "kept_modified_motifs": list(kept_mod),
+                "intersection": sorted(inter),
+                "reference_motif_state": list(ref_state),
+                "candidate_motif_state": list(cand_state),
+            }
+            if normalizations_out is not None:
+                normalizations_out.append(note)
+            modified_raw = kept_mod
 
         added, removed, modified = derive_directional_motifs(
             ref_state, cand_state, modified_raw
@@ -392,24 +480,28 @@ def validate_annotation_response_v5(
                 no_meaningful_change=nmc,
             )
 
-        cleaned.append(
-            {
-                "schema_version": SCHEMA_VERSION,
-                "prompt_version": prompt_version,
-                "annotation_kind": ANNOTATION_KIND,
-                "candidate_id": cid,
-                "reference_motif_state": list(ref_state),
-                "candidate_motif_state": list(cand_state),
-                "added_motifs": list(added),
-                "removed_motifs": list(removed),
-                "modified_motifs": list(modified),
-                "structural_operations": list(structural),
-                "transition_by_construct": transition_by_construct,
-                "no_meaningful_change": nmc,
-                "evidence": list(evidence),
-                "confidence": conf_f,
+        out_row: Dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "prompt_version": prompt_version,
+            "annotation_kind": ANNOTATION_KIND,
+            "candidate_id": cid,
+            "reference_motif_state": list(ref_state),
+            "candidate_motif_state": list(cand_state),
+            "added_motifs": list(added),
+            "removed_motifs": list(removed),
+            "modified_motifs": list(modified),
+            "structural_operations": list(structural),
+            "transition_by_construct": transition_by_construct,
+            "no_meaningful_change": nmc,
+            "evidence": list(evidence),
+            "confidence": conf_f,
+        }
+        if dropped_mod and normalize_modified_outside_intersection:
+            out_row["modified_motifs_normalization"] = {
+                "dropped": list(dropped_mod),
+                "kept": list(modified),
             }
-        )
+        cleaned.append(out_row)
 
     missing = [cid for cid in expected if cid not in seen]
     if missing:

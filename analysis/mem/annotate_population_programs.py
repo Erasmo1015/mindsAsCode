@@ -38,6 +38,14 @@ except Exception:  # noqa: BLE001 — login-node site-packages can be broken
 from utils.mem import schema_population_motif as schema_v3
 from utils.mem import schema_population_motif_v4 as schema_v4
 from utils.mem import schema_population_motif_v5 as schema_v5
+from utils.mem.annotation_context import (
+    ANNOTATION_SAFETY_MARGIN_TOKENS,
+    ANNOTATION_VLLM_MAX_MODEL_LEN,
+    POPULATION_DEFAULT_BATCH_SIZE,
+    POPULATION_DEFAULT_MAX_TOKENS,
+)
+from utils.mem.qwen_tokenizer import make_qwen_token_counter
+from utils.mem.trace import pack_items_under_chat_budget
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = (
@@ -53,8 +61,8 @@ _IO_LOCK = threading.Lock()
 # Job script treats this exit code as "restart vLLM and resume".
 EXIT_VLLM_DEAD = 75
 
-DEFAULT_MAX_TOKENS_V4 = 8192
-DEFAULT_MAX_TOKENS_V5 = 8192
+DEFAULT_MAX_TOKENS_V4 = POPULATION_DEFAULT_MAX_TOKENS
+DEFAULT_MAX_TOKENS_V5 = POPULATION_DEFAULT_MAX_TOKENS
 DEFAULT_MAX_TOKENS_V3 = 2048
 DEFAULT_SERVER_RETRIES = 5
 DEFAULT_SERVER_RETRY_SLEEP_SEC = 15.0
@@ -465,6 +473,9 @@ def annotate_programs(
     max_tokens: Optional[int] = None,
     server_retries: int = DEFAULT_SERVER_RETRIES,
     server_retry_sleep_sec: float = DEFAULT_SERVER_RETRY_SLEEP_SEC,
+    max_model_len: int = ANNOTATION_VLLM_MAX_MODEL_LEN,
+    reserved_output_tokens: Optional[int] = None,
+    safety_margin_tokens: int = ANNOTATION_SAFETY_MARGIN_TOKENS,
 ) -> Dict[str, Any]:
     schema_mod = _schema_mod(schema_version)
     if max_tokens is None:
@@ -474,35 +485,100 @@ def annotate_programs(
             max_tokens = DEFAULT_MAX_TOKENS_V4
         else:
             max_tokens = DEFAULT_MAX_TOKENS_V3
+    if reserved_output_tokens is None:
+        reserved_output_tokens = int(max_tokens)
     raw_dir.mkdir(parents=True, exist_ok=True)
     done = _load_completed(out_jsonl, schema_version=schema_mod.SCHEMA_VERSION)
     todo = [p for p in programs if p["resume_key"] not in done]
     print(
         f"[pop-annotate] schema={schema_mod.SCHEMA_VERSION}/{schema_mod.PROMPT_VERSION} "
         f"total={len(programs)} done={len(done)} todo={len(todo)} "
-        f"max_tokens={max_tokens}",
+        f"max_tokens={max_tokens} max_model_len={max_model_len} "
+        f"reserved_output={reserved_output_tokens} margin={safety_margin_tokens}",
         flush=True,
     )
-    batches: List[List[Dict[str, Any]]] = []
-    for i in range(0, len(todo), batch_size):
-        chunk = todo[i : i + batch_size]
-        loaded = []
-        for p in chunk:
-            code = (REPO / p["code_path"]).read_text(encoding="utf-8")
-            item = {**p, "code": code}
-            if _is_transition_schema(schema_mod.SCHEMA_VERSION):
-                parent_rel = p.get("parent_code_path")
-                if not parent_rel:
-                    raise FileNotFoundError(
-                        f"missing parent_code_path for {p.get('resume_key')}"
+
+    # Load codes first, then pack under exact tokenizer budget.
+    loaded_all: List[Dict[str, Any]] = []
+    for p in todo:
+        code = (REPO / p["code_path"]).read_text(encoding="utf-8")
+        item = {**p, "code": code}
+        if _is_transition_schema(schema_mod.SCHEMA_VERSION):
+            parent_rel = p.get("parent_code_path")
+            if not parent_rel:
+                raise FileNotFoundError(
+                    f"missing parent_code_path for {p.get('resume_key')}"
+                )
+            item["parent_code"] = (REPO / parent_rel).read_text(encoding="utf-8")
+            item["candidate_id"] = p.get("candidate_id") or p["program_id"]
+        loaded_all.append(item)
+
+    token_counter = None
+    try:
+        token_counter = make_qwen_token_counter()
+    except FileNotFoundError as exc:
+        print(f"[pop-annotate] WARN: {exc}; using char/4 fallback for packing", flush=True)
+
+    system = (
+        _SYSTEM_V5
+        if schema_mod.SCHEMA_VERSION == 5
+        else (_SYSTEM_V4 if schema_mod.SCHEMA_VERSION == 4 else _SYSTEM_V3)
+    )
+
+    def _estimate(batch: List[Dict[str, Any]]) -> int:
+        if _is_transition_schema(schema_mod.SCHEMA_VERSION):
+            user = _build_user_prompt_v4(batch, schema_mod=schema_mod)
+        else:
+            user = _build_user_prompt_v3(batch, schema_mod=schema_mod)
+        text = system + user
+        if token_counter is not None:
+            return int(token_counter(text))
+        # char/4 fallback
+        return max(0, (len(text) + 3) // 4)
+
+    batches, oversized = pack_items_under_chat_budget(
+        loaded_all,
+        estimate_chat_tokens=_estimate,
+        max_items_per_batch=max(1, int(batch_size)),
+        max_model_len=int(max_model_len),
+        reserved_output_tokens=int(reserved_output_tokens),
+        safety_margin_tokens=int(safety_margin_tokens),
+    )
+    for item, solo_tok in oversized:
+        cid = item.get("candidate_id") or item.get("program_id")
+        msg = (
+            f"singleton exceeds annotation budget: chat_tokens={solo_tok} "
+            f"(max_model_len={max_model_len}, reserved_output={reserved_output_tokens}, "
+            f"margin={safety_margin_tokens}); refusing to truncate code"
+        )
+        print(f"[pop-annotate] FAIL oversized singleton id={cid}: {msg}", flush=True)
+        with _IO_LOCK:
+            with failures_path.open("a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "resume_key": item.get("resume_key"),
+                            "candidate_id": cid,
+                            "error": msg,
+                            "solo_chat_tokens": solo_tok,
+                            "max_model_len": int(max_model_len),
+                            "reserved_output_tokens": int(reserved_output_tokens),
+                            "safety_margin_tokens": int(safety_margin_tokens),
+                        },
+                        ensure_ascii=False,
                     )
-                item["parent_code"] = (REPO / parent_rel).read_text(encoding="utf-8")
-                item["candidate_id"] = p.get("candidate_id") or p["program_id"]
-            loaded.append(item)
-        batches.append(loaded)
+                    + "\n"
+                )
+
+    print(
+        f"[pop-annotate] packed {len(loaded_all)} items into {len(batches)} batch(es); "
+        f"oversized_singletons={len(oversized)} "
+        f"token_counter={'qwen' if token_counter else 'char4'}",
+        flush=True,
+    )
 
     n_ok = 0
-    n_fail = 0
+    n_fail = len(oversized)
 
     def _one(bi: int, batch: List[Dict[str, Any]]) -> Tuple[int, int]:
         return _annotate_one_unit(
@@ -562,11 +638,17 @@ def annotate_programs(
         "n_todo": len(todo),
         "n_ok_this_run": n_ok,
         "n_fail_this_run": n_fail,
+        "n_oversized_singletons": len(oversized),
+        "n_batches": len(batches),
         "schema_version": schema_mod.SCHEMA_VERSION,
         "prompt_version": schema_mod.PROMPT_VERSION,
         "annotation_kind": getattr(schema_mod, "ANNOTATION_KIND", None),
         "out_jsonl": str(out_jsonl),
         "max_tokens": int(max_tokens),
+        "max_model_len": int(max_model_len),
+        "reserved_output_tokens": int(reserved_output_tokens),
+        "safety_margin_tokens": int(safety_margin_tokens),
+        "batch_size": int(batch_size),
         "server_retries": int(server_retries),
     }
     return summary
@@ -629,10 +711,33 @@ def main() -> None:
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-32B-Instruct")
     parser.add_argument("--llm_server_url", type=str, default="http://localhost:8000/v1")
     parser.add_argument("--llm_api_key", type=str, default="EMPTY")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=POPULATION_DEFAULT_BATCH_SIZE,
+        help="Soft max pairs per LLM call (further reduced by tokenizer budget).",
+    )
     parser.add_argument("--n_workers", type=int, default=4)
     parser.add_argument("--max_attempts", type=int, default=3)
     parser.add_argument("--max_tokens", type=int, default=None)
+    parser.add_argument(
+        "--max_model_len",
+        type=int,
+        default=ANNOTATION_VLLM_MAX_MODEL_LEN,
+        help="vLLM context length used for packing (canonical default 16384).",
+    )
+    parser.add_argument(
+        "--reserved_output_tokens",
+        type=int,
+        default=None,
+        help="Tokens reserved for completion in packing (default: --max_tokens).",
+    )
+    parser.add_argument(
+        "--safety_margin_tokens",
+        type=int,
+        default=ANNOTATION_SAFETY_MARGIN_TOKENS,
+        help="Extra margin in input+reserved+margin <= max_model_len.",
+    )
     parser.add_argument("--server_retries", type=int, default=DEFAULT_SERVER_RETRIES)
     parser.add_argument(
         "--server_retry_sleep_sec",
@@ -752,6 +857,9 @@ def main() -> None:
             "out_jsonl": str(out_jsonl),
             "schema_ok": True,
             "default_max_tokens_v4": DEFAULT_MAX_TOKENS_V4,
+            "default_max_tokens_v5": DEFAULT_MAX_TOKENS_V5,
+            "max_model_len": ANNOTATION_VLLM_MAX_MODEL_LEN,
+            "default_batch_size": POPULATION_DEFAULT_BATCH_SIZE,
             "resume_key_sample": (
                 programs[0]["resume_key"] if programs else None
             ),
@@ -783,6 +891,9 @@ def main() -> None:
             max_tokens=args.max_tokens,
             server_retries=args.server_retries,
             server_retry_sleep_sec=args.server_retry_sleep_sec,
+            max_model_len=int(args.max_model_len),
+            reserved_output_tokens=args.reserved_output_tokens,
+            safety_margin_tokens=int(args.safety_margin_tokens),
         )
     except VLLMServerDeadError as exc:
         print(f"[pop-annotate] FATAL vLLM dead: {exc}", flush=True)

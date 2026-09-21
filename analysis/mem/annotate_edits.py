@@ -62,6 +62,7 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     PROMPT_VERSION as PROMPT_VERSION_V5,
     SCHEMA_VERSION as SCHEMA_VERSION_V5,
     annotation_resume_key as annotation_resume_key_v5,
+    annotation_resume_key_legacy_no_phase,
     global_candidate_id,
     guided_json_schema_for_batch_v5,
     is_schema_v5_row,
@@ -69,6 +70,15 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     validate_annotation_response_v5,
     verify_delta_f_consistency,
     BEHAVIORAL_MOTIFS as BEHAVIORAL_MOTIFS_V5,
+)
+from utils.mem.explore_reference import resolve_explore_shared_reference  # noqa: E402
+from utils.mem.qwen_tokenizer import make_qwen_token_counter  # noqa: E402
+from utils.mem.reference_types import REF_POPULATION_PROGRAM  # noqa: E402
+from utils.mem.annotation_context import (  # noqa: E402
+    ANNOTATION_SAFETY_MARGIN_TOKENS,
+    ANNOTATION_VLLM_MAX_MODEL_LEN,
+    PARTICIPANT_DEFAULT_MAX_CANDIDATES_PER_BATCH,
+    PARTICIPANT_DEFAULT_MAX_TOKENS,
 )
 from utils.mem.trace import (  # noqa: E402
     estimate_tokens_char4,
@@ -84,6 +94,7 @@ ANNOTATIONS_V5_NAME = "annotations_v5.jsonl"
 FAILURES_NAME = "annotation_failures.jsonl"
 EXCLUSIONS_NAME = "annotation_exclusions.jsonl"
 SUMMARY_NAME = "annotation_summary.json"
+NORMALIZATIONS_NAME = "annotation_normalizations.jsonl"
 
 # Serializes appends to shared jsonl outputs when --n_workers > 1.
 _IO_LOCK = threading.Lock()
@@ -195,16 +206,24 @@ def _eligibility_reason(
     delta_f_atol: float = 1e-6,
     delta_f_rtol: float = 1e-6,
 ) -> Optional[str]:
-    """Return exclusion reason or None if eligible."""
+    """Return exclusion reason or None if eligible for transition annotation."""
     phase = rec.get("phase")
     source = rec.get("source")
     if phase == "explore":
         if not include_explore:
             return "excl_phase_explore"
+        if source not in ("explore", "normal", None, ""):
+            # Explore-phase rows are normally source=explore.
+            if source == "fresh":
+                return "excl_source_fresh_in_explore"
     elif phase != "evolution":
         return "excl_phase"
     else:
-        if include_fresh:
+        if source == "fresh":
+            if not include_fresh:
+                return "excl_source_fresh"
+            # Fresh enters transition MEM only with explicit ref + finite ΔF below.
+        elif include_fresh:
             if source not in ("normal", "fresh"):
                 return f"excl_source_{source}"
         else:
@@ -218,6 +237,11 @@ def _eligibility_reason(
         float(rec["delta_f"])
     except (TypeError, ValueError):
         return "excl_delta_f_nonfinite"
+    # Fresh: require a genuine explicit reference id (not blank).
+    if source == "fresh":
+        ref_id = rec.get("reference_id") or rec.get("reference_parent_id")
+        if ref_id is None or str(ref_id).strip() == "":
+            return "excl_fresh_missing_explicit_reference"
     if require_delta_f_consistency:
         cand_score = rec.get("selection_score")
         ref_score = rec.get("reference_score")
@@ -240,16 +264,29 @@ def _resolve_reference_for_candidate(
     ctx: Optional[Dict[str, Any]],
     *,
     strict_reference: bool = False,
+    run_dir: Optional[Path] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
     """Pick reference parent dict + id from the candidate's own pairing.
 
     Returns (parent_dict, ref_id, resolution_mode) where resolution_mode is:
-      official_reference_id | best_selected_parent_fallback | max_score_fallback | unresolved
+      official_reference_id | gate_winning_rank1_* | best_selected_parent_fallback |
+      max_score_fallback | unresolved*
 
-    Prefer the candidate's official reference_id / reference_parent_id.
-    When ``strict_reference=True`` (Schema v5 final), never use legacy fallbacks:
-    only official_reference_id is accepted; otherwise unresolved.
+    Explore (Schema v5): always use the gate-winning target-population rank-1
+    as the **shared** strict reference (not a per-candidate evolution parent).
+
+    Evolution: Prefer the candidate's official reference_id / reference_parent_id.
+    When ``strict_reference=True``, never use legacy fallbacks.
     """
+    phase = rec.get("phase")
+    if phase == "explore":
+        participant_dir = Path(str(rec.get("_participant_dir") or (ctx or {}).get("_participant_dir") or "."))
+        return resolve_explore_shared_reference(
+            participant_dir=participant_dir,
+            ctx=ctx,
+            run_dir=run_dir,
+        )
+
     ref_id = rec.get("reference_id") or rec.get("reference_parent_id")
     parents = (ctx or {}).get("selected_parents") or []
     if ref_id is not None:
@@ -281,27 +318,44 @@ def _resolve_reference_for_candidate(
 
 
 def _nmc_repair_hint(validation_error: str, *, schema_version: int = 3) -> str:
-    """Strengthen repair instructions for contradictory no_meaningful_change rows."""
+    """Strengthen repair instructions for contradictory / incomplete rows."""
     base = validation_error
-    if "no_meaningful_change" not in validation_error:
-        return base
-    if schema_version >= 3:
-        return (
-            f"{base}\n"
-            "CONTRADICTION FIX (required): If no_meaningful_change=true, you MUST return "
-            "empty modified_motifs and structural_operations, and the implied added/removed "
-            "from the two presence sets must also be empty (identical presence inventories "
-            "with no modifications). Alternatively set no_meaningful_change=false and keep "
-            "non-empty modified and/or structural lists that justify a real functional change."
+    hints: List[str] = [base]
+    if schema_version >= 5 and (
+        "intersection" in validation_error
+        or "modified_motifs" in validation_error
+        or "missing candidate_id" in validation_error
+        or "empty annotation array" in validation_error
+        or "duplicate candidate_id" in validation_error
+        or "unknown candidate_id" in validation_error
+    ):
+        hints.append(
+            "MODIFIED⊆INTERSECTION FIX (required): modified_motifs MUST be a subset of "
+            "(reference_motif_state ∩ candidate_motif_state). Constructs present only in "
+            "the candidate are ADDED (derived by the pipeline) — do NOT list them in "
+            "modified_motifs. Constructs present only in the reference are REMOVED "
+            "(derived) — do NOT list them in modified_motifs. "
+            "COMPLETENESS FIX: return exactly one object per requested candidate_id; "
+            "no missing, duplicate, or unexpected ids; never return an empty array."
         )
-    return (
-        f"{base}\n"
-        "CONTRADICTION FIX (required): If no_meaningful_change=true, you MUST return "
-        "empty lists for added_motifs, removed_motifs, modified_motifs, and "
-        "structural_operations. Alternatively set no_meaningful_change=false and keep "
-        "the non-empty motif/structural lists that justify a real functional change. "
-        "Do not leave both a true flag and non-empty lists."
-    )
+    if "no_meaningful_change" in validation_error:
+        if schema_version >= 3:
+            hints.append(
+                "CONTRADICTION FIX (required): If no_meaningful_change=true, you MUST return "
+                "empty modified_motifs and structural_operations, and the implied added/removed "
+                "from the two presence sets must also be empty (identical presence inventories "
+                "with no modifications). Alternatively set no_meaningful_change=false and keep "
+                "non-empty modified and/or structural lists that justify a real functional change."
+            )
+        else:
+            hints.append(
+                "CONTRADICTION FIX (required): If no_meaningful_change=true, you MUST return "
+                "empty lists for added_motifs, removed_motifs, modified_motifs, and "
+                "structural_operations. Alternatively set no_meaningful_change=false and keep "
+                "the non-empty motif/structural lists that justify a real functional change. "
+                "Do not leave both a true flag and non-empty lists."
+            )
+    return "\n".join(hints)
 
 
 def _build_user_prompt_v2(reference_code: str, batch: Sequence[Dict[str, Any]]) -> str:
@@ -387,7 +441,7 @@ Examples (Schema v5 five constructs only):
    (retained unmodified / unchanged).
 3) Construct absent in reference, introduced in candidate:
    reference lacks "feedback"; candidate includes "feedback"; modified must not list it
-   (added is derived).
+   (added is derived). NEVER put a newly introduced construct in modified_motifs.
 4) Construct present in reference, absent in candidate:
    reference has "learning"; candidate lacks "learning"; modified must not include it
    (removed is derived).
@@ -397,7 +451,9 @@ Examples (Schema v5 five constructs only):
    constructs. If only structural ops change without construct presence/mod changes,
    keep identical states, empty modified_motifs, list structural_operations, and
    set no_meaningful_change=false.
+HARD RULE: modified_motifs ⊆ (reference_motif_state ∩ candidate_motif_state).
 Do NOT emit risk, other_behavioral, or explicit_risk.
+Return exactly one object per requested candidate_id (no empty array).
 """
     payload = {
         "reference_program": reference_code,
@@ -412,8 +468,9 @@ Do NOT emit risk, other_behavioral, or explicit_risk.
         "(reference_motif_state).\n"
         "2) For each candidate, list constructs PRESENT in that candidate "
         "(candidate_motif_state).\n"
-        "3) For constructs in the intersection, list those that were meaningfully "
-        "modified in implementation (modified_motifs). Do not list pure add/remove.\n"
+        "3) For constructs in the INTERSECTION only, list those that were meaningfully "
+        "modified in implementation (modified_motifs). Do not list pure add/remove. "
+        "modified_motifs MUST be a subset of reference_motif_state ∩ candidate_motif_state.\n"
         "4) Optionally list structural_operations when control-flow / aggregation / "
         "nonlinear / simplification / parameter changes are the main edit.\n"
         "5) Cosmetic or no-construct-change edits are allowed: set "
@@ -540,6 +597,7 @@ def _resume_key_from_parts(
     candidate_id: str,
     reference_id: Any,
     reference_type: Any,
+    phase: Any = None,
 ) -> Tuple[Any, ...]:
     if schema_version == 5:
         return annotation_resume_key_v5(
@@ -550,6 +608,7 @@ def _resume_key_from_parts(
             str(candidate_id),
             reference_id=reference_id,
             reference_type=reference_type,
+            phase=phase,
         )
     return annotation_resume_key(
         participant_id,
@@ -593,6 +652,7 @@ def _load_completed_keys(out_jsonl: Path, *, schema_version: int) -> Set[Tuple[A
             ref_type = obj.get("reference_type") or obj.get("reference_kind") or ""
             if not ref_type and ref_id:
                 ref_type = "pool_best_proxy"
+            phase = obj.get("phase")
             done.add(
                 _resume_key_from_parts(
                     schema_version=schema_version,
@@ -603,8 +663,34 @@ def _load_completed_keys(out_jsonl: Path, *, schema_version: int) -> Set[Tuple[A
                     candidate_id=cid,
                     reference_id=ref_id,
                     reference_type=ref_type,
+                    phase=phase,
                 )
             )
+            # Pilot rows lacked phase in the resume key; still skip them.
+            if schema_version == 5 and (phase is None or str(phase) == ""):
+                done.add(
+                    annotation_resume_key_legacy_no_phase(
+                        obj.get("dataset"),
+                        obj.get("run_id"),
+                        obj.get("participant_id"),
+                        obj.get("iteration"),
+                        cid,
+                        reference_id=ref_id,
+                        reference_type=ref_type,
+                    )
+                )
+            elif schema_version == 5:
+                done.add(
+                    annotation_resume_key_legacy_no_phase(
+                        obj.get("dataset"),
+                        obj.get("run_id"),
+                        obj.get("participant_id"),
+                        obj.get("iteration"),
+                        cid,
+                        reference_id=ref_id,
+                        reference_type=ref_type,
+                    )
+                )
     return done
 
 
@@ -630,7 +716,7 @@ def _annotate_batch(
     schema_version: int = 3,
     prompt_version: str = PROMPT_VERSION_V3,
     temperature: float = 0.0,
-    max_tokens: int = 2048,
+    max_tokens: int = PARTICIPANT_DEFAULT_MAX_TOKENS,
     repair_hint: str = "",
 ) -> Tuple[List[Dict[str, Any]], str, str]:
     expected_ids = [str(c["candidate_id"]) for c in batch]
@@ -681,9 +767,18 @@ def _annotate_batch(
     except json.JSONDecodeError as exc:
         return [], raw, f"JSON parse error: {exc}"
     if schema_version == 5:
+        norms: List[Dict[str, Any]] = []
         ok, err, rows = validate_annotation_response_v5(
-            payload, expected_ids=expected_ids, prompt_version=prompt_version
+            payload,
+            expected_ids=expected_ids,
+            prompt_version=prompt_version,
+            normalize_modified_outside_intersection=True,
+            normalizations_out=norms,
         )
+        if norms:
+            # Stash on rows for the caller to persist.
+            for row in rows:
+                row.setdefault("_batch_normalizations", norms)
     elif schema_version >= 3:
         ok, err, rows = validate_annotation_response_v3(
             payload, expected_ids=expected_ids, prompt_version=prompt_version
@@ -714,6 +809,14 @@ def annotate_with_splits(
     max_attempts: int = 3,
     schema_version: int = 3,
     prompt_version: str = PROMPT_VERSION_V3,
+    normalizations_path: Optional[Path] = None,
+    system_prompt: str = "",
+    build_user_prompt_fn: Optional[Any] = None,
+    token_counter: Optional[Any] = None,
+    max_model_len: int = ANNOTATION_VLLM_MAX_MODEL_LEN,
+    reserved_output_tokens: int = PARTICIPANT_DEFAULT_MAX_TOKENS,
+    safety_margin_tokens: int = ANNOTATION_SAFETY_MARGIN_TOKENS,
+    max_tokens: int = PARTICIPANT_DEFAULT_MAX_TOKENS,
 ) -> List[Dict[str, Any]]:
     """Annotate a batch; retry with validation error; soft-fail singletons."""
     if not batch:
@@ -724,6 +827,12 @@ def annotate_with_splits(
         base_prompt_chars=base_prompt_chars,
         max_input_tokens=max_input_tokens,
         max_candidates_per_batch=max_candidates_per_batch,
+        system_prompt=system_prompt,
+        build_user_prompt=build_user_prompt_fn,
+        token_counter=token_counter,
+        max_model_len=max_model_len,
+        reserved_output_tokens=reserved_output_tokens,
+        safety_margin_tokens=safety_margin_tokens,
     )
     out: List[Dict[str, Any]] = []
     for bi, sub in enumerate(sub_batches):
@@ -745,11 +854,35 @@ def annotate_with_splits(
                 schema_version=schema_version,
                 prompt_version=prompt_version,
                 repair_hint=hint,
+                max_tokens=max_tokens,
             )
             raw_path = raw_dir / f"{tag}_try{attempt}.txt"
             raw_path.write_text(raw, encoding="utf-8")
             raws.append(raw)
             if not err:
+                if normalizations_path is not None and rows:
+                    seen_norm = False
+                    for row in rows:
+                        norms = row.pop("_batch_normalizations", None)
+                        if norms and not seen_norm:
+                            for note in norms:
+                                _append_jsonl(
+                                    normalizations_path,
+                                    {
+                                        **note,
+                                        "participant_id": participant_id,
+                                        "batch_tag": tag,
+                                        "attempt": attempt,
+                                    },
+                                )
+                                print(
+                                    f"[annotate] NORMALIZE modified∉∩ "
+                                    f"candidate={note.get('candidate_id')} "
+                                    f"dropped={note.get('dropped_modified_motifs')}",
+                                    flush=True,
+                                )
+                            seen_norm = True
+                        row.pop("_batch_normalizations", None)
                 out.extend(rows)
                 break
             last_err = err
@@ -789,6 +922,14 @@ def annotate_with_splits(
                 max_attempts=max_attempts,
                 schema_version=schema_version,
                 prompt_version=prompt_version,
+                normalizations_path=normalizations_path,
+                system_prompt=system_prompt,
+                build_user_prompt_fn=build_user_prompt_fn,
+                token_counter=token_counter,
+                max_model_len=max_model_len,
+                reserved_output_tokens=reserved_output_tokens,
+                safety_margin_tokens=safety_margin_tokens,
+                max_tokens=max_tokens,
             )
             out.extend(
                 annotate_with_splits(
@@ -842,10 +983,18 @@ def _enrich_annotation_row(
     )
     if schema_version == 5:
         enriched["global_candidate_id"] = global_candidate_id(
-            dataset, run_id, pid, iteration, str(row.get("candidate_id"))
+            dataset, run_id, pid, iteration, str(row.get("candidate_id")), phase=phase
         )
         if reference_resolution:
             enriched["reference_resolution"] = reference_resolution
+        # Explore transitions are vs the gate-winning population program.
+        if str(phase) == "explore" and (
+            str(reference_resolution).startswith("gate_winning")
+            or ref_type in ("", "seed_baseline")
+        ):
+            enriched["reference_type"] = REF_POPULATION_PROGRAM
+            enriched["reference_kind"] = REF_POPULATION_PROGRAM
+            ref_type = REF_POPULATION_PROGRAM
     src = next(
         (c for c in batch if c.get("candidate_id") == row["candidate_id"]),
         None,
@@ -920,8 +1069,9 @@ def _write_annotation_rows(
                         participant_id=pid,
                         iteration=iteration,
                         candidate_id=str(row["candidate_id"]),
-                        reference_id=ref_id,
-                        reference_type=ref_type,
+                        reference_id=enriched.get("reference_id", ref_id),
+                        reference_type=enriched.get("reference_type", ref_type),
+                        phase=phase,
                     )
                 )
                 n += 1
@@ -956,17 +1106,58 @@ def main() -> None:
     parser.add_argument("--mode", type=str, default="local", choices=["local", "default"])
     parser.add_argument("--llm_server_url", type=str, default="http://localhost:8000/v1")
     parser.add_argument("--llm_api_key", type=str, default="EMPTY")
-    parser.add_argument("--max_candidates_per_batch", type=int, default=5)
+    parser.add_argument(
+        "--max_candidates_per_batch",
+        type=int,
+        default=PARTICIPANT_DEFAULT_MAX_CANDIDATES_PER_BATCH,
+    )
     parser.add_argument("--max_input_tokens", type=int, default=12000)
     parser.add_argument(
+        "--max_model_len",
+        type=int,
+        default=ANNOTATION_VLLM_MAX_MODEL_LEN,
+        help="vLLM context length for packing (canonical default 16384).",
+    )
+    parser.add_argument(
+        "--reserved_output_tokens",
+        type=int,
+        default=PARTICIPANT_DEFAULT_MAX_TOKENS,
+    )
+    parser.add_argument(
+        "--safety_margin_tokens",
+        type=int,
+        default=ANNOTATION_SAFETY_MARGIN_TOKENS,
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=PARTICIPANT_DEFAULT_MAX_TOKENS,
+    )
+    parser.add_argument(
         "--include_fresh",
-        action="store_true",
-        help="Also annotate fresh candidates (default: normal only).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include evolution source=fresh when explicit ref + finite ΔF exist "
+        "(schema v5 default: on).",
     )
     parser.add_argument(
         "--include_explore",
-        action="store_true",
-        help="Also annotate explore-phase candidates (default: evolution only).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Annotate explore-phase candidates vs gate-winning rank-1 "
+        "(schema v5 default: on).",
+    )
+    parser.add_argument(
+        "--candidate_ids",
+        type=str,
+        default="",
+        help="Optional comma-separated candidate_id allowlist (repair / pilot).",
+    )
+    parser.add_argument(
+        "--phases",
+        type=str,
+        default="",
+        help="Optional comma-separated phase allowlist (evolution,explore).",
     )
     parser.add_argument(
         "--no_guided_json",
@@ -1045,6 +1236,28 @@ def main() -> None:
         require_delta_f_consistency = True
     else:
         require_delta_f_consistency = schema_version == 5
+
+    include_fresh = (
+        bool(args.include_fresh)
+        if args.include_fresh is not None
+        else (schema_version == 5)
+    )
+    include_explore = (
+        bool(args.include_explore)
+        if args.include_explore is not None
+        else (schema_version == 5)
+    )
+    candidate_id_filter: Optional[Set[str]] = None
+    if str(args.candidate_ids).strip():
+        candidate_id_filter = {
+            x.strip() for x in str(args.candidate_ids).split(",") if x.strip()
+        }
+    phase_filter: Optional[Set[str]] = None
+    if str(args.phases).strip():
+        phase_filter = {
+            x.strip() for x in str(args.phases).split(",") if x.strip()
+        }
+
     run_dir = Path(args.run_dir)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1060,7 +1273,23 @@ def main() -> None:
     failures_path = out_dir / FAILURES_NAME
     exclusions_path = out_dir / EXCLUSIONS_NAME
     summary_path = out_dir / SUMMARY_NAME
+    normalizations_path = out_dir / NORMALIZATIONS_NAME
     participant_filter = _parse_participants(args.participants)
+
+    token_counter = None
+    build_user_prompt_fn = None
+    system_for_budget = ""
+    if schema_version == 5:
+        try:
+            token_counter = make_qwen_token_counter()
+            system_for_budget = _SYSTEM_PROMPT_V5
+            build_user_prompt_fn = _build_user_prompt_v5
+            print("[annotate] token budget: Qwen tokenizer + reserved output", flush=True)
+        except FileNotFoundError as exc:
+            print(
+                f"[annotate] WARN: {exc}; falling back to char/4 input-only budget",
+                flush=True,
+            )
 
     trace_files = _discover_trace_files(run_dir)
     if not trace_files:
@@ -1110,6 +1339,18 @@ def main() -> None:
     system = _system_prompt_for_schema(schema_version)
     base_prompt_chars = len(system) + 1200
     exclusion_counts: Counter = Counter()
+    exclusion_counts_by_phase: Dict[str, Counter] = defaultdict(Counter)
+    ref_resolution_counts: Counter = Counter()
+    ref_resolution_by_phase: Dict[str, Counter] = defaultdict(Counter)
+    eligible_by_phase: Counter = Counter()
+    pending_by_phase: Counter = Counter()
+    delta_f_excl_by_phase: Counter = Counter()
+    token_budget_maxima: Dict[str, Any] = {
+        "max_chat_input_tokens": 0,
+        "max_batch_size": 0,
+        "max_chat_plus_reserved_plus_margin": 0,
+        "by_phase": {},
+    }
     n_written = 0
     n_resumed = len(completed)
     n_failed = 0
@@ -1144,10 +1385,16 @@ def main() -> None:
         by_ref: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for rec in cand_list:
             cid = str(rec.get("candidate_id"))
+            if phase_filter is not None and str(phase) not in phase_filter:
+                exclusion_counts["excl_phase_filter"] += 1
+                exclusion_counts_by_phase[str(phase)]["excl_phase_filter"] += 1
+                continue
+            if candidate_id_filter is not None and cid not in candidate_id_filter:
+                continue
             reason = _eligibility_reason(
                 rec,
-                include_fresh=bool(args.include_fresh),
-                include_explore=bool(args.include_explore),
+                include_fresh=include_fresh,
+                include_explore=include_explore,
                 require_delta_f_consistency=require_delta_f_consistency,
             )
             if reason is not None:
@@ -1163,22 +1410,30 @@ def main() -> None:
                     },
                 )
                 exclusion_counts[reason] += 1
+                exclusion_counts_by_phase[str(phase)][reason] += 1
+                if "delta_f" in reason:
+                    delta_f_excl_by_phase[str(phase)] += 1
                 continue
 
             ref, ref_id, ref_resolution = _resolve_reference_for_candidate(
-                rec, ctx, strict_reference=strict_reference
+                rec, ctx, strict_reference=strict_reference, run_dir=run_dir
             )
+            ref_resolution_counts[str(ref_resolution)] += 1
+            ref_resolution_by_phase[str(phase)][str(ref_resolution)] += 1
             # If parent still lacks code (slim + unresolved), try again with participant dir.
             if ref is not None and not str(ref.get("code") or "").strip():
                 pdir = rec.get("_participant_dir") or (ctx or {}).get("_participant_dir")
                 if pdir:
                     ref = hydrate_parent_record(ref, pdir)
-            ref_type = str(
-                rec.get("reference_type")
-                or rec.get("reference_kind")
-                or (ctx.get("reference_type") if ctx else None)
-                or ""
-            )
+            if str(phase) == "explore" and str(ref_resolution).startswith("gate_winning"):
+                ref_type = REF_POPULATION_PROGRAM
+            else:
+                ref_type = str(
+                    rec.get("reference_type")
+                    or rec.get("reference_kind")
+                    or (ctx.get("reference_type") if ctx else None)
+                    or ""
+                )
             run_id, dataset, pid, phase, iteration = key
             rkey = _resume_key_from_parts(
                 schema_version=schema_version,
@@ -1189,8 +1444,18 @@ def main() -> None:
                 candidate_id=cid,
                 reference_id=ref_id,
                 reference_type=ref_type,
+                phase=phase,
             )
-            if rkey in completed:
+            legacy_key = annotation_resume_key_legacy_no_phase(
+                dataset,
+                run_id,
+                pid,
+                iteration,
+                cid,
+                reference_id=ref_id,
+                reference_type=ref_type,
+            )
+            if rkey in completed or legacy_key in completed:
                 continue
 
             if ref is None:
@@ -1205,12 +1470,18 @@ def main() -> None:
                         "participant_id": pid,
                         "candidate_id": cid,
                         "iteration": iteration,
+                        "phase": phase,
                         "reference_id": ref_id,
                         "reference_resolution": ref_resolution,
                         "strict_reference": strict_reference,
                     },
                 )
                 exclusion_counts[
+                    "unresolved_reference_strict"
+                    if strict_reference
+                    else "missing_reference_parent"
+                ] += 1
+                exclusion_counts_by_phase[str(phase)][
                     "unresolved_reference_strict"
                     if strict_reference
                     else "missing_reference_parent"
@@ -1226,11 +1497,13 @@ def main() -> None:
                         "participant_id": pid,
                         "candidate_id": cid,
                         "iteration": iteration,
+                        "phase": phase,
                         "reference_id": ref_id,
                         "reference_resolution": ref_resolution,
                     },
                 )
                 exclusion_counts["empty_reference_code"] += 1
+                exclusion_counts_by_phase[str(phase)]["empty_reference_code"] += 1
                 continue
 
             code = rec.get("code") or ""
@@ -1242,12 +1515,15 @@ def main() -> None:
                         "participant_id": pid,
                         "candidate_id": cid,
                         "iteration": iteration,
+                        "phase": phase,
                     },
                 )
                 exclusion_counts["empty_candidate_code"] += 1
+                exclusion_counts_by_phase[str(phase)]["empty_candidate_code"] += 1
                 continue
 
             n_eligible += 1
+            eligible_by_phase[str(phase)] += 1
             bucket = by_ref.setdefault((str(ref_id), ref_type), [])
             # Attach resolved reference code for batching.
             enriched_rec = dict(rec)
@@ -1265,8 +1541,57 @@ def main() -> None:
                 base_prompt_chars=base_prompt_chars,
                 max_input_tokens=int(args.max_input_tokens),
                 max_candidates_per_batch=int(args.max_candidates_per_batch),
+                system_prompt=system_for_budget or system,
+                build_user_prompt=build_user_prompt_fn,
+                token_counter=token_counter,
+                max_model_len=int(args.max_model_len),
+                reserved_output_tokens=int(args.reserved_output_tokens),
+                safety_margin_tokens=int(args.safety_margin_tokens),
             )
             pending_total += len(todo)
+            pending_by_phase[str(phase)] += len(todo)
+            # Track tokenizer budget maxima (exact path when counter available).
+            if token_counter is not None and build_user_prompt_fn is not None:
+                for batch in batches:
+                    chat_tok = int(
+                        token_counter(
+                            str(system_for_budget or system)
+                            + str(build_user_prompt_fn(reference_code, batch))
+                        )
+                    )
+                    total = (
+                        chat_tok
+                        + int(args.reserved_output_tokens)
+                        + int(args.safety_margin_tokens)
+                    )
+                    token_budget_maxima["max_chat_input_tokens"] = max(
+                        int(token_budget_maxima["max_chat_input_tokens"]), chat_tok
+                    )
+                    token_budget_maxima["max_batch_size"] = max(
+                        int(token_budget_maxima["max_batch_size"]), len(batch)
+                    )
+                    token_budget_maxima["max_chat_plus_reserved_plus_margin"] = max(
+                        int(token_budget_maxima["max_chat_plus_reserved_plus_margin"]),
+                        total,
+                    )
+                    ph = str(phase)
+                    ph_stats = token_budget_maxima["by_phase"].setdefault(
+                        ph,
+                        {
+                            "max_chat_input_tokens": 0,
+                            "max_batch_size": 0,
+                            "max_chat_plus_reserved_plus_margin": 0,
+                        },
+                    )
+                    ph_stats["max_chat_input_tokens"] = max(
+                        int(ph_stats["max_chat_input_tokens"]), chat_tok
+                    )
+                    ph_stats["max_batch_size"] = max(
+                        int(ph_stats["max_batch_size"]), len(batch)
+                    )
+                    ph_stats["max_chat_plus_reserved_plus_margin"] = max(
+                        int(ph_stats["max_chat_plus_reserved_plus_margin"]), total
+                    )
             planned.append((key, todo, reference_code, ref_id, ref_type, batches))
 
     print(
@@ -1321,6 +1646,14 @@ def main() -> None:
             max_attempts=int(args.max_attempts),
             schema_version=schema_version,
             prompt_version=prompt_version,
+            normalizations_path=normalizations_path if schema_version == 5 else None,
+            system_prompt=system_for_budget or system,
+            build_user_prompt_fn=build_user_prompt_fn,
+            token_counter=token_counter,
+            max_model_len=int(args.max_model_len),
+            reserved_output_tokens=int(args.reserved_output_tokens),
+            safety_margin_tokens=int(args.safety_margin_tokens),
+            max_tokens=int(args.max_tokens),
         )
         return item, rows
 
@@ -1392,6 +1725,73 @@ def main() -> None:
     n_failed_new = max(0, n_failed - failures_before)
 
     n_completed_total = len(completed)
+    # Post-run artifact tallies by phase (coverage / norms / failures).
+    completed_by_phase: Counter = Counter()
+    norms_by_phase: Counter = Counter()
+    failures_by_phase: Counter = Counter()
+    if out_jsonl.is_file():
+        for line in out_jsonl.open(encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            completed_by_phase[str(obj.get("phase") or "unknown")] += 1
+    if normalizations_path.is_file():
+        for line in normalizations_path.open(encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            norms_by_phase[str(obj.get("phase") or "unknown")] += 1
+    if failures_path.is_file():
+        for line in failures_path.open(encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            failures_by_phase[str(obj.get("phase") or "unknown")] += 1
+
+    phases_seen = sorted(
+        set(eligible_by_phase)
+        | set(pending_by_phase)
+        | set(completed_by_phase)
+        | set(exclusion_counts_by_phase)
+        | set(ref_resolution_by_phase)
+        | set(norms_by_phase)
+        | set(failures_by_phase)
+        | set(token_budget_maxima.get("by_phase") or {})
+    )
+    by_phase: Dict[str, Any] = {}
+    for ph in phases_seen:
+        elig = int(eligible_by_phase.get(ph, 0))
+        done = int(completed_by_phase.get(ph, 0))
+        by_phase[ph] = {
+            "n_eligible_this_run": elig,
+            "n_pending_planned": int(pending_by_phase.get(ph, 0)),
+            "n_completed_total": done,
+            "n_normalizations": int(norms_by_phase.get(ph, 0)),
+            "n_failures": int(failures_by_phase.get(ph, 0)),
+            "n_exclusions": int(sum(exclusion_counts_by_phase.get(ph, Counter()).values())),
+            "exclusions_by_reason": dict(sorted(exclusion_counts_by_phase.get(ph, Counter()).items())),
+            "n_delta_f_inconsistent_exclusions": int(delta_f_excl_by_phase.get(ph, 0)),
+            "strict_reference_resolutions": dict(
+                sorted(ref_resolution_by_phase.get(ph, Counter()).items())
+            ),
+            "coverage_completed_over_eligible": (
+                float(done) / float(max(1, elig)) if elig else None
+            ),
+            "token_budget_maxima": (token_budget_maxima.get("by_phase") or {}).get(ph),
+        }
+
     summary = {
         "schema_version": schema_version,
         "prompt_version": prompt_version if schema_version >= 3 else None,
@@ -1400,8 +1800,14 @@ def main() -> None:
         "annotations_file": ann_name,
         "run_dir": str(run_dir),
         "output_dir": str(out_dir),
-        "include_fresh": bool(args.include_fresh),
-        "include_explore": bool(args.include_explore),
+        "include_fresh": include_fresh,
+        "include_explore": include_explore,
+        "phases_filter": sorted(phase_filter) if phase_filter else None,
+        "candidate_ids_filter": sorted(candidate_id_filter) if candidate_id_filter else None,
+        "max_model_len": int(args.max_model_len),
+        "reserved_output_tokens": int(args.reserved_output_tokens),
+        "safety_margin_tokens": int(args.safety_margin_tokens),
+        "token_counter": "qwen" if token_counter is not None else "char4_legacy",
         "guided_json": use_guided,
         "n_workers": n_workers,
         "n_trace_files": len(trace_files),
@@ -1419,8 +1825,38 @@ def main() -> None:
         "coverage_completed_over_eligible_plus_prior": (
             float(n_completed_total) / float(max(1, n_eligible + n_resumed))
         ),
+        "strict_reference_resolutions": dict(sorted(ref_resolution_counts.items())),
+        "n_normalizations_total": int(sum(norms_by_phase.values())),
+        "token_budget_maxima": {
+            "max_chat_input_tokens": token_budget_maxima["max_chat_input_tokens"],
+            "max_batch_size": token_budget_maxima["max_batch_size"],
+            "max_chat_plus_reserved_plus_margin": token_budget_maxima[
+                "max_chat_plus_reserved_plus_margin"
+            ],
+            "max_model_len": int(args.max_model_len),
+            "fits_max_model_len": int(
+                token_budget_maxima["max_chat_plus_reserved_plus_margin"]
+            )
+            <= int(args.max_model_len),
+        },
+        "by_phase": by_phase,
+        "raw_responses_dir": str(raw_dir),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    # Also write a phase-only companion for easy aggregation across datasets.
+    (out_dir / "annotation_summary_by_phase.json").write_text(
+        json.dumps(
+            {
+                "dataset": Path(run_dir).name,
+                "run_dir": str(run_dir),
+                "output_dir": str(out_dir),
+                "by_phase": by_phase,
+                "token_budget_maxima": summary["token_budget_maxima"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     print(f"[annotate] Done. summary={summary_path}", flush=True)
     print(json.dumps(summary, indent=2), flush=True)
 

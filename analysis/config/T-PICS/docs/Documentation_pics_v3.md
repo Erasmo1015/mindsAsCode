@@ -104,7 +104,7 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | 15× `pics_v3_g1` G.1 jobs (g5e50p30) | **complete** (`265753`–`265767`) |
 | `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
 | `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
-| 15× `pics_v3` gated targets (schema5) | **in flight** (ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`; active IDs: completed/running `271238`–`271247`; resubmitted pending `277676` Peterson, `277677` guan, `277678` steyvers, `277679` Schulz, `277697` Kool — replaces cancelled `271237`/`271248`–`271251`) |
+| 15× `pics_v3` gated targets (schema5) | **in flight / resubmits** (ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; active IDs: `271238`–`271240`, `271242`–`271247`; resubmits `277676` Peterson, `277944` Speekenbrink, `277677` guan, `277678` steyvers, `277679` Schulz, `277697` Kool — replace `271237`/`271241`/`271248`–`271251`) |
 | schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
 | preliminary-v2 G.1 (incl. 258518), v2 YAML | **frozen non-final** |
@@ -416,7 +416,7 @@ programs into a **new package path** (do not overwrite v1 annotations).
 | Kind | `population_program_motif_transition` |
 | Annotator | `analysis/mem/annotate_population_programs.py` |
 | Model | `Qwen/Qwen2.5-Coder-32B-Instruct` (same as G.1) |
-| vLLM `--max-model-len` | **16384** (aligned with PICS v3 production) |
+| vLLM `--max-model-len` | **16384** (aligned with PICS v3 production; Schema-v5 pop+person share this ceiling via `utils/mem/annotation_context.py`) |
 | Planned outputs | `analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations/` |
 | Cluster template | `cluster/v2/ours/Qwen/job_pop_annot_dataset.sh` (`VLLM_MAX_MODEL_LEN`, default 16384) |
 

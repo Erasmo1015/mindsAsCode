@@ -61,6 +61,7 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     all_structural_columns as all_structural_columns_v5,
     all_transition_type_columns as all_transition_type_columns_v5,
     annotation_resume_key as annotation_resume_key_v5,
+    annotation_resume_key_legacy_no_phase,
     assert_transition_identities as assert_transition_identities_v5,
     global_candidate_id,
     is_schema_v5_row,
@@ -127,7 +128,19 @@ def _load_annotations(
                 cid,
                 reference_id=ref_id,
                 reference_type=ref_type,
+                phase=rec.get("phase"),
             )
+            # Also index legacy pilot keys (no phase) for evolution rows.
+            legacy = annotation_resume_key_legacy_no_phase(
+                rec.get("dataset"),
+                rec.get("run_id"),
+                rec.get("participant_id"),
+                rec.get("iteration"),
+                cid,
+                reference_id=ref_id,
+                reference_type=ref_type,
+            )
+            by_key[legacy] = rec
         else:
             key = annotation_resume_key(
                 rec.get("participant_id"),
@@ -456,6 +469,7 @@ def build_rows_v5(
             cid,
             reference_id=ref_id,
             reference_type=ref_type,
+            phase=rec.get("phase"),
         )
         base_excl = {
             "dataset": rec.get("dataset"),
@@ -473,6 +487,7 @@ def build_rows_v5(
                 pid,
                 rec.get("iteration"),
                 cid,
+                phase=rec.get("phase"),
             ),
         }
 
@@ -512,6 +527,19 @@ def build_rows_v5(
             _exclude(f"excl_{err_df.split(':')[0]}")
             continue
         ann = annotations.get(key)
+        if ann is None:
+            legacy = annotation_resume_key_legacy_no_phase(
+                rec.get("dataset"),
+                rec.get("run_id"),
+                pid,
+                rec.get("iteration"),
+                cid,
+                reference_id=ref_id,
+                reference_type=ref_type,
+            )
+            ann = annotations.get(legacy)
+            if ann is not None:
+                key = legacy
         if require_annotation and ann is None:
             _exclude("excl_missing_annotation_v5")
             continue
@@ -567,6 +595,7 @@ def build_rows_v5(
                 row[c] = None
         rows.append(row)
     return rows, excl
+
 
 
 def _descriptive_counts(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

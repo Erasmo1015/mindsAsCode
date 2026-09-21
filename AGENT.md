@@ -669,7 +669,7 @@ Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first
 - G.1 ledger: `pics_v3/g1_job_paths_g5e50p30.tsv` (jobs `265753`–`265767`)
 - Annot package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/`
 - Concise report+figs: `…/source_selection_schema_v5/report/`
-- Gated jobs (schema5 ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`): keep `271238`–`271247`; resubmits `277676` (Peterson), `277677` (guan), `277678` (steyvers), `277679` (Schulz), `277697` (Kool) replace cancelled `271237` / `271248`–`271251`
+- Gated jobs (schema5 ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`): keep `271238`–`271240`, `271242`–`271247`; resubmits `277676` (Peterson), `277944` (Speekenbrink), `277677` (guan), `277678` (steyvers), `277679` (Schulz), `277697` (Kool) replace cancelled/superseded `271237` / `271241` / `271248`–`271251`
 - Schema-v4 50-person freezes kept historical; do not overwrite
 - OpenEvolve matched baseline: **350 / 14000 / 16384 / g5e50p30** (`run_openevolve.py` defaults); dry-run `DRY_RUN=1 bash cluster/v3/ours/baselines/submit_openevolve.sh`
 
@@ -685,7 +685,7 @@ Mean test LL = mean of finite `overall_best_test.test_loglik`; `†k inf` = non-
 | 271238 | Plonsky | COMPLETED (04:32:13) | 30 | -0.615 | transfer (transfer_strictly_better) |
 | 271239 | CCT | COMPLETED (03:26:06) | 30 | -0.570 | transfer (transfer_strictly_better) |
 | 271240 | Wulff | COMPLETED (02:42:47) | 30 | -0.646 | control (exact_tie) |
-| 271241 | Speekenbrink | COMPLETED (02:21:37) | 23 | -0.793 †1 inf | control (control_better) |
+| 277944 | Speekenbrink | resubmit of 271241 | — | — | — |
 | 271242 | Hilbig | COMPLETED (01:46:32) | 30 | -0.303 | control (control_better) |
 | 271243 | Frey risk | RUNNING (03:17:04) | 20 | -0.211 | control (control_better) |
 | 271244 | Enkavi | COMPLETED (01:30:24) | 30 | -0.362 | control (exact_tie) |
@@ -697,9 +697,11 @@ Mean test LL = mean of finite `overall_best_test.test_loglik`; `†k inf` = non-
 | 277679 | Schulz | PENDING (00:00:00) resubmit of cancelled 271250 | — | — | — |
 | 277697 | Kool | PENDING (00:00:00) resubmit of cancelled 271251 | — | — | — |
 
+Active canonical IDs (match notes): `277676, 271238–271240, 277944, 271242–271247, 277677–277679, 277697`.
+
 ---
 
 ## Short update (Sep 21 2026 — participant transition Schema v5)
 
-Population schema5 does **not** cover person MEM. Legacy annotate is still v3 (`risk`/`other_behavioral`). Added versioned `participant_transition_v5` (`utils/mem/schema_participant_transition_v5.py`; `--schema_version 5` → `annotations_v5.jsonl`): five constructs, global resume keys, strict official reference (no silent parent fallback), ΔF consistency, retained-construct `eligible_*_modified`, joint `--eligibility_mode restrict`. Audit: `…/source_selection_schema_v5/report/PARTICIPANT_TRANSITION_SCHEMA_V5_AUDIT.md`. Full person annot **not** started (pilot after main experiments).
+Population schema5 does **not** cover person MEM. Legacy annotate is still v3 (`risk`/`other_behavioral`). Added versioned `participant_transition_v5` (`utils/mem/schema_participant_transition_v5.py`; `--schema_version 5` → `annotations_v5.jsonl`): five constructs, global resume keys, strict official reference (no silent parent fallback), ΔF consistency, retained-construct `eligible_*_modified`, joint `--eligibility_mode restrict`. Audit: `…/source_selection_schema_v5/report/PARTICIPANT_TRANSITION_SCHEMA_V5_AUDIT.md`. Full person annot **not** started (pilot after main experiments). Canonical Schema-v5 annotation vLLM context (pop+person): **16384** (`utils/mem/annotation_context.py`); completed pop jobs historically used 32768 but reconstructed calls were all ≪16k — see `analysis_2026Sep/Sep20_V3/mem/annnotation/ANNOTATION_CONTEXT_16K.md`.
 

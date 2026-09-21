@@ -1,4 +1,4 @@
-# PICS v3 g5e50p30 baseline paths (LM / PT / Centaur).
+# PICS v3 g5e50p30 paths (LM / PT / Centaur / Ours).
 #
 # Participant table = analysis/config/teh_datasets.yaml (first 30 of the
 # historical 50-person table). Exceptions: Speekenbrink 0-22, Badham 0-9,
@@ -20,7 +20,14 @@
 #   missing on 3090 → origami full-data (test membership unchanged vs SA40/v3):
 #     Peterson, Plonsky, CCT, Wulff, Frey Risk, Badham
 #   Speekenbrink: H100 job_274576 structure_aware_v3 (replaces 3090 OOM chance)
-#   Kool: L40 job_274629 structure_aware_v3 (in progress at record time)
+#   Kool: L40 job_274629 structure_aware_v3 (in progress at first record)
+#
+# Ours (pics_v3 gated): active run dirs from
+#   analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv
+# Do not copy cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv blindly —
+# that ledger keeps superseded submits. Resubmits: 277676 Peterson (was
+# 271237), 277944 Speekenbrink (271241), 277677 guan (271248), 277678
+# steyvers (271249), 277679 Schulz (271250), 277697 Kool (271251).
 #
 # Slice CSVs: analysis/config/T-PICS/baseline_methods/g5e50p30/<method>/<dataset>/
 # Provenance notes (not for git): generated_outputs/psych101_train/centaur/2026Sep/g5e50p30/
@@ -36,73 +43,88 @@ datasets:
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/1peterson2021using
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/1peterson2021using
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/1peterson2021using
+    Ours: generated_outputs/psych101_train/teh/1peterson2021using/pics_v3/job_277676
 
   2plonsky2018when:  # CPC18  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/2plonsky2018when
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/2plonsky2018when
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/2plonsky2018when
+    Ours: generated_outputs/psych101_train/teh/2plonsky2018when/pics_v3/job_271238
 
   3frey2017cct:  # Frey CCT  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/3frey2017cct
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/3frey2017cct
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/3frey2017cct
+    Ours: generated_outputs/psych101_train/teh/3frey2017cct/pics_v3/job_271239
 
   4wulff2018description:  # Wulff  1290-1319 (ids 1550-1579)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/4wulff2018description
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/4wulff2018description
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/4wulff2018description
+    Ours: generated_outputs/psych101_train/teh/4wulff2018description/pics_v3/job_271240
 
   5speekenbrink2008learning:  # Speekenbrink  0-22
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/5speekenbrink2008learning
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/5speekenbrink2008learning
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/5speekenbrink2008learning
+    Ours: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3/job_277944
 
   7hilbig2014generalized:  # Hilbig  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/7hilbig2014generalized
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/7hilbig2014generalized
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/7hilbig2014generalized
+    Ours: generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v3/job_271242
 
   10frey2017risk:  # Frey Risk  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/10frey2017risk
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/10frey2017risk
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/10frey2017risk
+    Ours: generated_outputs/psych101_train/teh/10frey2017risk/pics_v3/job_271243
 
   11enkavi2019recentprobes:  # Enkavi  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/11enkavi2019recentprobes
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/11enkavi2019recentprobes
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/11enkavi2019recentprobes
+    Ours: generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v3/job_271244
 
   12badham2017deficits:  # Badham  0-9
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/12badham2017deficits
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/12badham2017deficits
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/12badham2017deficits
+    Ours: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3/job_271245
 
   mixed_gambles:  # 0-29 (ids 101-130)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/mixed_gambles
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/mixed_gambles
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/mixed_gambles
+    Ours: generated_outputs/psych101_train/teh/mixed_gambles/pics_v3/job_271246
 
   bergert_nosofsky_2007:  # 0-29 (ids 1-30)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/bergert_nosofsky_2007
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/bergert_nosofsky_2007
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/bergert_nosofsky_2007
+    Ours: generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v3/job_271247
 
   guan_2020_stopping:  # 0-29 (ids 1-30)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/guan_2020_stopping
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/guan_2020_stopping
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/guan_2020_stopping
+    Ours: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3/job_277677
 
   steyvers_2009_bandit:  # 0-29 (ids 1-30)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/steyvers_2009_bandit
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/steyvers_2009_bandit
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/steyvers_2009_bandit
+    Ours: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3/job_277678
 
   13schulz2020finding:  # 0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/13schulz2020finding
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/13schulz2020finding
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/13schulz2020finding
+    Ours: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3/job_277679
 
   14kool2016when:  # 0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/14kool2016when
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/14kool2016when
     Centaur: generated_outputs/psych101_train/centaur/14kool2016when/sparse_data/structure_aware_v3/budget_40/g5e50p30/l40/job_274629
+    Ours: generated_outputs/psych101_train/teh/14kool2016when/pics_v3/job_277697
