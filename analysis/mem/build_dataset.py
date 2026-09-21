@@ -12,6 +12,10 @@ Schema v3 (default): same directional columns plus:
 
 Schema v5: five ICLR constructs (history, value, probability_used, feedback,
   learning); global resume keys; transition_* string columns; eligibility as v3.
+  Builds from **corrected** annotation fields (post semantic postprocess).
+  Propagates semantic_resolution_status / nmc_adjudication_status /
+  exclude_from_construct_effect_fitting so unresolved NMC rows stay in the CSV
+  for audit/coverage but are excluded from construct-transition effect fitting.
 
 Writes:
   --output_csv
@@ -579,6 +583,22 @@ def build_rows_v5(
                 or {c.replace("transition_", ""): flags.get(c) for c in transition_cols},
                 ensure_ascii=False,
             )
+            row["semantic_postprocess_version"] = ann.get("semantic_postprocess_version")
+            row["semantic_resolution_status"] = ann.get(
+                "semantic_resolution_status", "resolved"
+            )
+            row["nmc_adjudication_status"] = ann.get(
+                "nmc_adjudication_status", "not_applicable"
+            )
+            row["exclude_from_construct_effect_fitting"] = int(
+                bool(ann.get("exclude_from_construct_effect_fitting"))
+            )
+            raw_llm = ann.get("raw_llm_annotation")
+            row["raw_llm_annotation"] = (
+                json.dumps(raw_llm, ensure_ascii=False)
+                if isinstance(raw_llm, dict)
+                else None
+            )
             for c in state_cols + dir_cols + elig_cols + struct_cols:
                 row[c] = int(flags.get(c, 0))
             for c in transition_cols:
@@ -589,6 +609,11 @@ def build_rows_v5(
             row["reference_motif_state"] = None
             row["candidate_motif_state"] = None
             row["transition_by_construct"] = None
+            row["semantic_postprocess_version"] = None
+            row["semantic_resolution_status"] = None
+            row["nmc_adjudication_status"] = None
+            row["exclude_from_construct_effect_fitting"] = None
+            row["raw_llm_annotation"] = None
             for c in state_cols + dir_cols + elig_cols + struct_cols:
                 row[c] = None
             for c in transition_cols:
@@ -718,6 +743,11 @@ def _fieldnames_for_schema(schema_version: int) -> List[str]:
             "reference_motif_state",
             "candidate_motif_state",
             "transition_by_construct",
+            "semantic_postprocess_version",
+            "semantic_resolution_status",
+            "nmc_adjudication_status",
+            "exclude_from_construct_effect_fitting",
+            "raw_llm_annotation",
             *state_cols,
             *dir_cols,
             *elig_cols,
@@ -820,6 +850,25 @@ def main() -> None:
             None
             if schema_version >= 3
             else "Legacy v2 X=0 is not eligibility; eligibility columns are absent."
+        ),
+        "n_unresolved_nmc_adjudication": (
+            sum(
+                1
+                for r in rows
+                if str(r.get("semantic_resolution_status") or "")
+                == "nmc_needs_adjudication"
+                or str(r.get("nmc_adjudication_status") or "") == "unresolved"
+                or int(r.get("exclude_from_construct_effect_fitting") or 0) == 1
+            )
+            if schema_version == 5
+            else 0
+        ),
+        "semantic_fields_note": (
+            "CSV uses corrected annotation fields; raw_llm_annotation retained "
+            "for audit. Unresolved NMC rows stay in coverage but "
+            "exclude_from_construct_effect_fitting=1."
+            if schema_version == 5
+            else None
         ),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

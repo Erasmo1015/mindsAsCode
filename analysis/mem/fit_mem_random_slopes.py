@@ -53,6 +53,9 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     all_directional_behavioral_columns as all_directional_behavioral_columns_v5,
     risk_set_definition,
 )
+from utils.mem.participant_semantic_postprocess_v5 import (  # noqa: E402
+    filter_frame_for_construct_effect_fitting,
+)
 
 
 def all_directional_behavioral_columns() -> List[str]:
@@ -347,6 +350,14 @@ def main() -> None:
     if not args.combine_phases and args.phase and "phase" in df.columns:
         df = df[df["phase"] == args.phase].copy()
 
+    df, n_excl_unresolved = filter_frame_for_construct_effect_fitting(df)
+    if n_excl_unresolved:
+        print(
+            f"[fit_rs] excluded {n_excl_unresolved} unresolved NMC adjudication "
+            "row(s) from construct-transition effect fitting",
+            flush=True,
+        )
+
     eligibility_mode = str(args.eligibility_mode)
     if eligibility_mode == "restrict":
         # Pre-check that at least one eligible_* column exists; per-focal checked below.
@@ -475,6 +486,7 @@ def main() -> None:
         "eligibility_mode": eligibility_mode,
         "phase_filter": None if args.combine_phases else args.phase,
         "combine_phases": bool(args.combine_phases),
+        "n_excluded_unresolved_nmc_adjudication": int(n_excl_unresolved),
         "supported_controls_universe": supported,
         "exclusions_from_support": support["excluded_columns"],
         "models": [

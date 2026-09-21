@@ -85,8 +85,59 @@ def structural_column(op: str) -> str:
     return f"structural_{op}"
 
 SCHEMA_VERSION = 5
-PROMPT_VERSION = "participant_transition_v5"
+# Calibrated 2026-09-22: frozen generic presence/NMC/mod rules + optional
+# compact dataset field glossaries (no task narrative / trials / fitness).
+PROMPT_VERSION = "participant_transition_v5_calibrated_2026Sep22"
 ANNOTATION_KIND = "participant_program_motif_transition"
+
+# Compact authoritative field semantics for datasets whose code field names are
+# ambiguous. Injected into the participant prompt only — never task narrative,
+# trial examples, participant outcomes, or fitness information.
+_DATASET_FIELD_GLOSSARIES: Dict[str, str] = {
+    "bergert_nosofsky_2007": (
+        "Bergert field glossary (authoritative data schema only):\n"
+        "- option_A / option_B (+ cues): alternative cue feature vectors; scoring/"
+        "comparing them is Value.\n"
+        "- has_feedback: always false in this dataset (no trial feedback channel).\n"
+        "- history: raw trials supply an empty history list; an unused history "
+        "argument does not establish History.\n"
+        "- action_means_option_A_when_1: boolean schema/action-coding flag "
+        "(action=1 selects option_A). It is NOT Value, NOT Probability use, and "
+        "NOT Feedback. Reading or branching on this flag alone does not establish "
+        "any of the five constructs."
+    ),
+}
+
+
+def frozen_calibration_rules_block() -> str:
+    """Frozen generic construct rules for the participant Schema-v5 prompt."""
+    return (
+        "FROZEN RULES (apply always):\n"
+        "1) Unused formal arguments do NOT establish construct presence "
+        "(e.g. an unused `history` parameter is not History).\n"
+        "2) no_meaningful_change=true ONLY for renaming, formatting, comments, or "
+        "behaviorally/algebraically equivalent rewrites. Do NOT use NMC when a "
+        "numerical parameter, weight, functional form, or update rule of an "
+        "implemented construct changes.\n"
+        "3) If a construct remains present and its numerical parameter, weight, "
+        "functional form, or update rule changes, mark it modified "
+        "(not NMC; not unchanged).\n"
+        "4) Feedback requires use of realized past feedback/outcomes (reward, "
+        "correctness, observed results). A static current-trial problem field is "
+        "not Feedback.\n"
+        "5) Probability use requires actual probability-related information "
+        "(probability/likelihood/odds/uncertainty, including linear p*x). An "
+        "arbitrary field whose name contains 'mean' is not Probability use.\n"
+        "6) Schema / action-coding flags alone are none of the five constructs."
+    )
+
+
+def field_glossary_block_for_dataset(dataset: Optional[str]) -> str:
+    """Return compact field glossary text for ``dataset``, or empty string."""
+    if dataset is None:
+        return ""
+    key = str(dataset).strip()
+    return _DATASET_FIELD_GLOSSARIES.get(key, "")
 
 # Primary focal candidates from earlier person-MEM work; reassess support on
 # final Schema-v5 runs before locking a model.
@@ -510,7 +561,14 @@ def validate_annotation_response_v5(
 
 
 def state_and_eligibility_flags(ann: Dict[str, Any]) -> Dict[str, int]:
-    """Binary has_*, direction, eligible_*, retained_unmodified_* for a v5 row."""
+    """Binary has_*, direction, eligible_*, retained_unmodified_* for a v5 row.
+
+    When ``semantic_resolution_status == nmc_needs_adjudication`` (or
+    ``nmc_adjudication_status == unresolved``), retained constructs without an
+    attributed modification receive transition ``unresolved`` — not unchanged.
+    Directional modified flags stay 0; fitters must also honor
+    ``exclude_from_construct_effect_fitting``.
+    """
     if not is_schema_v5_row(ann) and int(ann.get("schema_version", -1) or -1) != 5:
         raise ValueError("state_and_eligibility_flags requires schema_version=5")
 
@@ -521,6 +579,11 @@ def state_and_eligibility_flags(ann: Dict[str, Any]) -> Dict[str, int]:
     modified = set(ann.get("modified_motifs") or [])
     structural = set(ann.get("structural_operations") or [])
     nmc = bool(ann.get("no_meaningful_change"))
+    unresolved_nmc = (
+        str(ann.get("semantic_resolution_status") or "") == "nmc_needs_adjudication"
+        or str(ann.get("nmc_adjudication_status") or "") == "unresolved"
+        or bool(ann.get("exclude_from_construct_effect_fitting"))
+    )
 
     out: Dict[str, Any] = {}
     for m in BEHAVIORAL_MOTIFS:
@@ -543,15 +606,21 @@ def state_and_eligibility_flags(ann: Dict[str, Any]) -> Dict[str, int]:
         # Broader pre-transition opportunity (modify or remove).
         out[f"modification_opportunity_{m}"] = rh
         out[f"retained_unmodified_{m}"] = (
-            1 if (rh == 1 and ch == 1 and mod == 0) else 0
+            1 if (rh == 1 and ch == 1 and mod == 0 and not unresolved_nmc) else 0
         )
-        out[f"transition_{m}"] = transition_type_for_construct(
-            m,
-            reference_has=bool(rh),
-            candidate_has=bool(ch),
-            modified=bool(mod),
-            no_meaningful_change=nmc,
-        )
+        stored = (ann.get("transition_by_construct") or {}).get(m)
+        if unresolved_nmc and rh == 1 and ch == 1 and mod == 0:
+            out[f"transition_{m}"] = "unresolved"
+        elif isinstance(stored, str) and stored:
+            out[f"transition_{m}"] = stored
+        else:
+            out[f"transition_{m}"] = transition_type_for_construct(
+                m,
+                reference_has=bool(rh),
+                candidate_has=bool(ch),
+                modified=bool(mod),
+                no_meaningful_change=nmc,
+            )
 
     for op in STRUCTURAL_OPERATIONS:
         out[structural_column(op)] = 0 if nmc else (1 if op in structural else 0)

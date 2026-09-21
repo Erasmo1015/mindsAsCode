@@ -50,6 +50,9 @@ from analysis.mem.bh_fdr import bh_fdr  # noqa: E402
 from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     risk_set_definition,
 )
+from utils.mem.participant_semantic_postprocess_v5 import (  # noqa: E402
+    filter_frame_for_construct_effect_fitting,
+)
 
 
 DEFAULT_FIXED_EFFECTS = [
@@ -831,6 +834,14 @@ def main() -> None:
     if args.phase and "phase" in df.columns:
         df = df[df["phase"] == args.phase].copy()
 
+    df, n_excl_unresolved = filter_frame_for_construct_effect_fitting(df)
+    if n_excl_unresolved:
+        print(
+            f"[fit_joint] excluded {n_excl_unresolved} unresolved NMC adjudication "
+            "row(s) from construct-transition effect fitting",
+            flush=True,
+        )
+
     if eligibility_mode == "restrict":
         motif_fes = _motif_effects(fixed_effects, random_slopes)
         try:
@@ -949,6 +960,7 @@ def main() -> None:
     )
     fit["eligibility_mode"] = eligibility_mode
     fit["eligibility_report"] = eligibility_report
+    fit["n_excluded_unresolved_nmc_adjudication"] = int(n_excl_unresolved)
     if args.assert_n_rows and fit.get("prep", {}).get("n_rows") != args.assert_n_rows:
         raise SystemExit(
             f"n_rows={fit.get('prep', {}).get('n_rows')} != assert {args.assert_n_rows}"
@@ -962,6 +974,7 @@ def main() -> None:
                 "status": fit.get("status"),
                 "eligibility_mode": eligibility_mode,
                 "n_rows": fit.get("prep", {}).get("n_rows"),
+                "n_excluded_unresolved_nmc_adjudication": int(n_excl_unresolved),
                 "fingerprint": fit.get("prep", {}).get("fingerprint_sha256"),
                 "llf": fit.get("llf"),
                 "min_eig": fit.get("min_eig"),

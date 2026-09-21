@@ -17,7 +17,7 @@ Tracked constants: `utils/teh/pics_v3.py`. Gated pipeline:
 | 1 | Data prep / `structure_aware_v3` | Build per-person observed TV ≤40; reserve test | Psych-101 train / local / external valid lists + EMNLP ordinals | train+val capped; test reserved | n/a | n/a | n/a | SA40 splits + histories | no | no (test membership/order/actions fixed; not used for fitting) |
 | 2 | Automatic dataset prompt | Write fail-closed LLM instruction for this dataset | sample person’s retained TV + task metadata | train+val only | n/a (one LLM prompt gen) | 1 generation | n/a | `prompts/infer_single_choice.txt`, `prompt_meta.json`, seed copy | no | no |
 | 3 | G.1 source population (`pics_v3_g1`) | Evolve each dataset’s own pooled population | that dataset’s EMNLP people, SA40 TV | train+val fitness | dataset seed; sample parents from elite | **10 × 10** (`n_iterations=0`, no people) | `train_val` (pooled) | `global_phase/best_program.py` + elite ≤50 | **no** | no |
-| 4 | Schema-v5 annotation | Construct presence on G.1 population programs | G.1 programs + lineage | G.1 code only | n/a | n/a (annotator LLM) | n/a | `pics_v3_g1_schema_v5` annotations | no | no |
+| 4 | **Population** Schema-v5 annotation | Construct presence on G.1 population programs | G.1 programs + lineage | G.1 code only | n/a | n/a (annotator LLM) | n/a | `pics_v3_g1_schema_v5` annotations | no | no |
 | 5 | Occurrence-EB + map freeze | Nominate one source per target | schema-v5 presence counts | annotations only | n/a | n/a | cosine on 6-source allowlist | `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` | no | no |
 | 6 | G.2 control arm | Target population **without** source context | target people, shared auto prompt, seed | train+val | target seed; elite parents | **5 × 10** | pooled `train_val` | control `best_program.py` + pool | no | no |
 | 7 | G.2 transfer arm | Matched target population **with** source suffix | same target data + selected source rank-1 + 1 source TV example | train+val (+ source TV in prompt only) | target seed; elite parents | **5 × 10** | pooled `train_val` | transfer `best_program.py` + pool | **yes** (suffix only) | no |
@@ -63,9 +63,10 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Independent-source kind | `pics_v3_independent` | Optional live source-pop under gated independent mode |
 | Explicit independent source | `--t_pics_gated_source DATASET` | With `--t_pics_gated_independent`: name the live G.1 source dataset **without** a transfer map / `--t_pics_source_config`. Default map lookup unchanged when this flag is omitted. |
 | Data protocol | `structure_aware_v3` | Training-only SA40 revision (same data path as v2; new flag) |
-| Annotation taxonomy | `schema_v5` | Final five-construct vocabulary (`population_transition_v5`) |
-| Runtime source YAML | `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` | Frozen after g5e50p30 G.1 → schema-v5 annotate → Occurrence-EB |
-| Annotation package | `pics_v3_g1_schema_v5` | Schema-v5 annotations of g5e50p30 G.1 programs |
+| Annotation taxonomy | `schema_v5` | Final five-construct vocabulary (population: `population_transition_v5`; offline person MEM: `participant_transition_v5`) |
+| Runtime source YAML | `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` | Frozen after g5e50p30 G.1 → **population** schema-v5 annotate → Occurrence-EB |
+| Annotation package (method) | `pics_v3_g1_schema_v5` | Schema-v5 annotations of g5e50p30 G.1 programs (feeds Occurrence-EB) |
+| Annotation package (offline MEM) | `pics_v3_participant_schema_v5` | Person-trace transitions; **not** a method stage; currently NONFINAL/cancelled |
 | G.1 path ledger | `pics_v3/g1_job_paths_g5e50p30.tsv` | Jobs `265753`–`265767` |
 | W&B project (G.1) | `teh_pics_v3` | G.1 submitter default |
 | `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` | Gated run tag constant |
@@ -104,6 +105,7 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | 15× `pics_v3_g1` G.1 jobs (g5e50p30) | **complete** (`265753`–`265767`) |
 | `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
 | `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
+| Participant Schema-v5 annotations (`pics_v3_participant_schema_v5`) | **NONFINAL / cancelled mid-run (2026-09-22)** — offline MEM/interpretability only; not a method stage; do not resume until final gated paths are approved |
 | 15× `pics_v3` gated targets (schema5) | **in flight / resubmits** (ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; active IDs: `271238`–`271240`, `271242`–`271247`; resubmits `277676` Peterson, `277944` Speekenbrink, `277677` guan, `277678` steyvers, `277679` Schulz, `277697` Kool — replace `271237`/`271241`/`271248`–`271251`) |
 | schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
@@ -442,6 +444,167 @@ Required LLM fields: `candidate_id`, `reference_motif_state`, `modified_motifs`,
 
 ---
 
+## F2. Offline participant Schema-v5 annotation (MEM / interpretability)
+
+**Not a main ICLR Method stage.** Stages 1–11 above induce and select programs.
+This section documents the **post-hoc** person-program motif-transition pipeline
+used for MEM / construct-effect interpretability on gated `pics_v3` person
+traces. It does **not** feed Occurrence-EB, the frozen source map, G.2/G.3, or
+program selection. Population annotations (`pics_v3_g1_schema_v5`), Occurrence-EB
+artifacts, and completed main results are unchanged by this pipeline.
+
+**Fleet status (2026-09-22):** participant annot shards `pannot5_*`
+(`283950–283953`, `283955–283957`; earlier `283954`) were **cancelled**. Partial
+outputs under `analysis_2026Sep/mem/pics_v3_participant_schema_v5/` are preserved
+and marked `NONFINAL_CANCELLED_2026Sep22.txt`. Do **not** resume, resubmit, or
+attach `afterok` annotation dependencies until final main-run gated paths are
+explicitly approved.
+
+### Five constructs; lean code-based labels
+
+Shared closed vocabulary with population Schema-v5 (no `risk` /
+`explicit_risk_mechanism` on the person side):
+
+`history`, `value`, `probability_used`, `feedback`, `learning`
+
+Annotation is **lean and code-based**: the LLM sees reference + candidate
+program text (and dataset-gated field glossaries), not task narrative, trial
+outcomes, fitness, or transfer context. Presence is about what the code
+implements; transitions are relative to the resolved reference parent.
+
+| Module | Role |
+| --- | --- |
+| `utils/mem/schema_participant_transition_v5.py` | Schema, prompt rules, validation, eligibility |
+| `analysis/mem/annotate_edits.py` | Person-trace annotator (schema_version=5) |
+| `utils/mem/participant_semantic_postprocess_v5.py` | Deterministic semantic postprocess |
+| `analysis/mem/build_dataset.py` | MEM CSV from **corrected** fields |
+| `analysis/mem/fit_mem_random_slopes.py` / `fit_mem_joint_random_slopes.py` | Construct-effect fits (exclude unresolved NMC) |
+| `analysis/mem/coverage_eligibility_v5.py` | Coverage / risk-set audit (retains unresolved) |
+
+Prompt stamp: `participant_transition_v5_calibrated_2026Sep22` (frozen calibration
+rules + optional dataset glossary).
+
+### Exploration vs evolution references
+
+| Phase | Reference | Notes |
+| --- | --- | --- |
+| `evolution` | Prior person parent (`reference_id` / parent in pool) | Normal / fresh person edits vs that parent |
+| `explore` | Gate-winning **population** program (shared explore reference) | Not the seed baseline unless unresolved; stamped `reference_type=population_program` when resolved via gate-winning / explore helpers |
+
+Resume identity is global:
+`dataset|run_id|participant|phase|iteration|candidate|reference_id|reference_type`
+so explore and evolution never collide.
+
+### Eligible baseline-fresh transitions
+
+`source=fresh` candidates are annotated only when an **explicit** reference
+resolves (including official seed-baseline artifact resolution when the parent
+is the constant seed program) and ΔF is finite and consistent with
+candidate/reference scores. Unresolved strict references and ΔF inconsistencies
+are recorded in `annotation_exclusions.jsonl` — not silently coerced.
+
+Exact seed-baseline constant programs (`return 0.5` body) force **all five**
+reference constructs absent under deterministic postprocess
+(`SEED_BASELINE_REF_ABSENT`).
+
+### Raw LLM labels vs corrected production labels
+
+Automatic production write path (`annotate_edits._write_annotation_rows` for
+schema v5):
+
+1. Preserve raw LLM response text under `raw_responses/`.
+2. Schema-validate the JSON batch.
+3. Snapshot validated fields into `raw_llm_annotation` on the row.
+4. Run deterministic semantic postprocess + transition rederivation.
+5. Append **corrected** row to `annotations_v5.jsonl`.
+6. Append rule hits to `semantic_corrections.jsonl`; queue unresolved NMC to
+   `nmc_adjudication_queue.jsonl`.
+
+`build_dataset.py --schema_version 5` reads **corrected** top-level fields and
+also propagates `raw_llm_annotation`, `semantic_resolution_status`,
+`nmc_adjudication_status`, and `exclude_from_construct_effect_fitting` into the
+MEM CSV for audit.
+
+### Deterministic semantic validation / postprocessing
+
+Generic (all datasets): unused-history absence; seed-baseline ref absence; clear
+false `no_meaningful_change` when normalized ASTs differ in parameters /
+operators / control / update shape (**without** auto-mapping every numeric change
+to `value_modified`); modified∩intersection; rederive added/removed/modified/
+unchanged + `transition_by_construct`; correction logging.
+
+**Bergert-only** (strict `dataset == bergert_nosofsky_2007` gate):
+`action_means_option_A_when_1` sole-evidence strips; unsupported P/F/L absence;
+cue-weight/scoring param|op → `value_modified`. These rules cannot fire on other
+datasets.
+
+### Dataset-gated semantic glossaries
+
+Optional field glossaries are injected into the person prompt only for datasets
+that need disambiguation of code field names (currently Bergert:
+`action_means_option_A_when_1` is a Boolean action-coding flag — not Value,
+Probability, or Feedback). No task narrative or outcomes.
+
+### Transition and eligibility rederivation
+
+After presence/NMC fixes, directions are re-derived from reference/candidate
+states and `modified_motifs`. Eligibility columns follow Schema-v5 risk sets
+(addition / removal / retained-construct modification). MEM builders never
+coerce missing state to empty sets.
+
+### Unresolved NMC adjudication
+
+When NMC is cleared by AST evidence but construct attribution remains ambiguous
+(generic path): **no automatic focused LLM adjudication pass**. Rows stay
+explicitly unresolved:
+
+- `semantic_resolution_status = nmc_needs_adjudication`
+- `nmc_adjudication_status = unresolved`
+- `exclude_from_construct_effect_fitting = true`
+- retained constructs without attributed modification → transition `unresolved`
+  (not silently NMC, modified, or unchanged)
+
+Focal/joint construct-effect fitters **drop** these rows. Coverage / audit
+reports **retain** them and count status. Offline queue:
+`nmc_adjudication_queue.jsonl`.
+
+### Exact 16k token-budget enforcement; no program-code truncation
+
+Person annot shares the production ceiling via
+`utils/mem/annotation_context.py`:
+
+| Knob | Value |
+| --- | ---: |
+| vLLM / `max_model_len` | **16384** |
+| Reserved output tokens | **2048** (person default) |
+| Safety margin | **512** |
+| Max candidates / batch | **5** |
+
+Packing uses the Qwen tokenizer when available: chat input + reserved output +
+margin ≤ `max_model_len`. Batches split before overflow. **Program code is never
+truncated** to fit the budget — only batching / splitting.
+
+### Output files and reproducibility paths
+
+| Path | Contents |
+| --- | --- |
+| `analysis_2026Sep/mem/pics_v3_participant_schema_v5/annotations/by_dataset/<ds>/<gated_job>/` | Per main-run package |
+| `annotations_v5.jsonl` | Corrected rows (+ `raw_llm_annotation`, resolution stamps) |
+| `raw_responses/` | Per-attempt LLM text |
+| `semantic_corrections.jsonl` | Deterministic rule log |
+| `nmc_adjudication_queue.jsonl` | Unresolved NMC payloads |
+| `annotation_failures.jsonl` / `annotation_exclusions.jsonl` / `annotation_normalizations.jsonl` | Soft-fail / eligibility / modified∉∩ |
+| `annotation_summary.json` (+ `_by_phase`) | Coverage / budget / resolution tallies |
+| Cluster submit | `cluster/v3/ours/main/submit_participant_annot_schema_v5.sh` |
+| Shard table | `cluster/v3/ours/main/participant_annot_schema_v5_shards.tsv` |
+| Path ledger | `analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv` only |
+| Calibration notes | `analysis_2026Sep/Sep20_V3/mem/annnotation/` |
+
+Downstream MEM CSV: `analysis/mem/build_dataset.py --schema_version 5
+--annotations <annotations_v5.jsonl> --run_dir <gated run> --output_csv …`.
+
+---
+
 ## G. Occurrence-EB source selection
 
 **Precommitted selector family** (do not switch to combined/fitness-effect
@@ -588,7 +751,7 @@ authoritative gated results require complete participant set.
 
 1. **15 G.1** (`KIND=pics_v3_g1`, GPU, g5e50p30) — submitter
    `cluster/v2/ours/Qwen/submit_g1_pics_v3.sh` (default `DRY_RUN=1`).
-2. **Schema-v5 annotate** → `pics_v3_g1_schema_v5`
+2. **Population Schema-v5 annotate** → `pics_v3_g1_schema_v5`
    (`cluster/v3/ours/main/submit_pop_annot_schema_v5.sh`).
 3. **Occurrence-EB fit** (CPU) →
    `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml`.
@@ -598,6 +761,12 @@ authoritative gated results require complete participant set.
    `cluster/v3/ours/main/submit_gated.sh` (default `DRY_RUN=1`;
    default `--t_pics_source_config` → schema5 YAML).
 7. **Completeness / result checks** (CPU + W&B).
+
+**Offline (not in the method critical path):** after approved final gated
+person traces exist, optional participant Schema-v5 MEM annotation
+(`submit_participant_annot_schema_v5.sh` → `pics_v3_participant_schema_v5`)
+followed by `build_dataset.py` / coverage / focal–joint fits. See **§F2**.
+Does not regenerate Occurrence-EB or gated programs.
 
 | If G.1 changes | Must regenerate |
 | --- | --- |
@@ -677,6 +846,10 @@ protocol / packing / W&B code.
 | v2 G.2 14k pack | **Superseded** by `g2_paired_pack_pics_v3` |
 | v1 target→source identity table | **Superseded** — use `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` |
 | v1 annotated program counts (1385) | **Historical only** — g5e50p30 schema-v5 count is 1414 |
+| *(new)* Offline participant Schema-v5 MEM | **Added §F2** — lean person transitions, postprocess, unresolved NMC, 16k budget; distinct from method stages 1–11 |
+| Phase table stage 4 | **Clarified** — population Schema-v5 only (feeds Occurrence-EB) |
+| §L execution order | **Clarified** — step 2 is population annotate; person MEM is offline after approved gated traces |
+| Artifact status / §A packages | **Updated** — person package NONFINAL/cancelled; dual pop vs person packages |
 
 ---
 
@@ -691,7 +864,11 @@ protocol / packing / W&B code.
 | Paired packing | `utils/teh/g2_paired_packing.py` |
 | Snapshots / sanitize | `utils/teh/prompt_snapshots.py` |
 | Parent 70/30 truncate | `teh.py` `_truncate_parent_program_for_prompt` |
-| Motifs | `utils/mem/schema_population_motif_v5.py` (final); `…_v4.py` historical |
+| Motifs (population / method) | `utils/mem/schema_population_motif_v5.py` (final); `…_v4.py` historical |
+| Motifs (offline person MEM) | `utils/mem/schema_participant_transition_v5.py` |
+| Person annotator + postprocess | `analysis/mem/annotate_edits.py`; `utils/mem/participant_semantic_postprocess_v5.py` |
+| Annot context / 16k ceiling | `utils/mem/annotation_context.py` |
+| MEM CSV / fits | `analysis/mem/build_dataset.py`; `fit_mem_random_slopes.py`; `fit_mem_joint_random_slopes.py` |
 | Occurrence-EB | `analysis/mem/pop_v4_source_selection/run_source_selection_v4.py` |
 | W&B finals | `utils/teh/t_pics_gated_wandb.py` |
 | Ordinals | `utils/teh/teh_datasets.py` / `analysis/config/teh_datasets.yaml` |

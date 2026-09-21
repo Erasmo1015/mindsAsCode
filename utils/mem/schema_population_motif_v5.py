@@ -33,24 +33,27 @@ BEHAVIORAL_MOTIF_DEFINITIONS_V5: Dict[str, str] = {
     "history": (
         "Program explicitly uses earlier choices, outcomes, trials, streaks, "
         "recency, counts, or a supplied history/trial buffer to change the "
-        "current decision. Unused history parameters do not count."
+        "current decision. Unused formal history arguments/parameters do not count."
     ),
     "value": (
         "Program computes or compares option attractiveness, utility, expected "
         "payoff, benefits/costs, or a general option score that drives choice. "
-        "Constant/random choice without option scoring does not count."
+        "Constant/random choice without option scoring does not count. Schema/"
+        "action-coding flags alone are not Value."
     ),
     "probability_used": (
-        "Program explicitly reads or uses probability/likelihood/odds/uncertainty "
-        "fields from the problem, including ordinary linear EV terms such as p*x. "
-        "Empirical success rates built only from feedback history are feedback/"
-        "learning, not probability_used. Unused probability fields do not count."
+        "Program explicitly reads or uses actual probability/likelihood/odds/"
+        "uncertainty fields from the problem, including ordinary linear EV terms "
+        "such as p*x. Empirical success rates built only from feedback history "
+        "are feedback/learning, not probability_used. Unused probability fields "
+        "do not count. An arbitrary field whose name contains 'mean', or a "
+        "schema/action-coding flag, is not probability_used."
     ),
     "feedback": (
-        "Program directly uses observed reward, correctness, success/failure, or "
-        "outcome feedback to influence a later choice. Static current-trial "
-        "payoffs are value, not feedback. Feedback without an update rule is "
-        "NOT learning."
+        "Program directly uses realized past reward, correctness, success/failure, "
+        "or outcome feedback to influence a later choice. Static current-trial "
+        "payoffs or schema/action-coding flags are not feedback. Feedback without "
+        "an update rule is NOT learning."
     ),
     "learning": (
         "Program updates or reconstructs an internal belief, preference, option "

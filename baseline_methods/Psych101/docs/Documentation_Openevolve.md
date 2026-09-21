@@ -395,7 +395,9 @@ OE is slow relative to PICS-at-width-10 because each iteration is a full-program
 
 Important files: `run_config.json`, `log/` SA40 manifests, `participant_details_loglik.csv`, `summary_loglik.csv`, `final_participant_summary.csv`, per-person trees above.
 
-**Resume.** No first-class `--resume`. A new timestamped directory starts fresh. Official `OpenEvolve.run` can continue from `database.last_iteration` if the **same** `openevolve_output` tree is reused via `--output_dir`; that is library behavior, not an ICLR workflow.
+**Resume (person-level, adapter only).** Default ``--skip_completed_participants``: if the same ``--output_dir`` is reused (Slurm ``--requeue`` or manual restart) and ``participant_*/results.json`` is already complete (``status=ok``, finite ``test_loglik``, ``n_iterations_completed >= n_iterations``, loadable ``best_program.py``), that person is **skipped** and the existing row is reused. Failed/partial people are re-run. This does **not** resume mid-person OE iterations and does **not** modify the OpenEvolve library. Force a full re-evolve with ``--no-skip_completed_participants``. A brand-new timestamped directory (no ``--output_dir``) still starts fresh.
+
+Official `OpenEvolve.run(checkpoint_path=...)` mid-person continue exists in the library but is **not** wired here.
 
 **W&B.** Project `openevolve` (`WANDB_PROJECT`). Run name `{dataset}_{timestamp}`. Disable with `--no_log` (`WANDB_DISABLED=true`). **Diagnostic/reporting only** while running: `avg_test_loglik` and other `avg_*` over completed rows. **Paper-safe** `final/mean_test_loglik` is written only when `wandb_completion_fields` sees every expected person with a finite test loglik and zero failures (`final/is_complete=true`). Dataset mean is the equal-person mean of person-level test log-likelihoods.
 
@@ -511,7 +513,8 @@ These two modules currently define **43 tests** (34 + 9). `test_all_15_use_regis
 - Production depends on a gitignored pinned checkout the runner will not create.  
 - Final ICLR launches must use `--limited_data_protocol structure_aware_v3` (Kool exact-40) with **16384 / 14000 / 1024** and g5e50p30 ordinals. Historical `structure_aware` / 32k / 30000 / 50-person / 600-iteration runs are **non-final** for the matched baseline.  
 
-- No first-class resume CLI.  
+- No mid-person OpenEvolve checkpoint resume (library supports it; we do not wire it).
+- Person-level skip-resume is on by default when reusing ``--output_dir``.  
 - Optional previous-attempt section is official island-best programs, not a true parent-lineage trace.
 
 **Future OpenEvolve experiments must use new files/configs** (new runner, new freeze constants, or a new docs revision) rather than silently editing this frozen ICLR implementation.

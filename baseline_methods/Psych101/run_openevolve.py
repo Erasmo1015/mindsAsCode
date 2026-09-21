@@ -2485,6 +2485,72 @@ def _mean_loglik_rows(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
     return float(np.mean(vals)) if vals else None
 
 
+def participant_oe_run_is_complete(
+    participant_dir: Path,
+    *,
+    expected_n_iterations: int,
+) -> bool:
+    """True when this person already finished OE and can be skipped on resume.
+
+    Adapter-only (does not touch the OpenEvolve library). Requires:
+    ``best_program.py`` with a loadable ``choose``, and ``results.json`` with
+    ``status=="ok"``, finite ``test_loglik``, and
+    ``n_iterations_completed >= expected_n_iterations``. Failed / partial /
+    corrupt people are **not** skipped so a requeue can retry them.
+    """
+    path = Path(participant_dir)
+    best = path / "best_program.py"
+    results_path = path / "results.json"
+    if not (best.is_file() and results_path.is_file()):
+        return False
+    try:
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("status") or "") != "ok":
+        return False
+    if _safe_float(payload.get("test_loglik")) is None:
+        return False
+    try:
+        n_done = int(payload.get("n_iterations_completed"))
+    except (TypeError, ValueError):
+        return False
+    if n_done < int(expected_n_iterations):
+        return False
+    try:
+        code = best.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if compile_program(code) is None:
+        return False
+    return True
+
+
+def try_load_completed_oe_participant_row(
+    participant_dir: Path,
+    *,
+    expected_n_iterations: int,
+) -> Optional[Dict[str, Any]]:
+    """Return existing ``results.json`` if complete; else ``None`` (do not mutate disk)."""
+    if not participant_oe_run_is_complete(
+        participant_dir, expected_n_iterations=expected_n_iterations
+    ):
+        return None
+    results_path = Path(participant_dir) / "results.json"
+    try:
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    # Soft marker for logs/CSV consumers; do not rewrite results.json.
+    out = dict(payload)
+    out["resumed_from_disk"] = True
+    return out
+
+
 def _wandb_log_loglik_summary(
     wandb_module: Any,
     rows: List[Dict[str, Any]],
@@ -2525,6 +2591,21 @@ def run_participant(
     wandb_module: Any = None,
 ) -> Dict[str, Any]:
     participant_dir = run_dir / f"participant_{participant_id}"
+    # Person-level resume (adapter only): skip OE evolution when this person already
+    # finished under the same --output_dir (Slurm requeue / manual restart). Does not
+    # call into OpenEvolve and does not rewrite results.json.
+    if bool(getattr(args, "skip_completed_participants", True)):
+        resumed = try_load_completed_oe_participant_row(
+            participant_dir,
+            expected_n_iterations=int(args.n_iterations),
+        )
+        if resumed is not None:
+            print(
+                f"[OE resume] skip complete participant {participant_id} "
+                f"(ordinal={participant_ordinal}) -> {participant_dir}"
+            )
+            return resumed
+
     exp_dir = participant_dir / "openevolve_experiment"
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2909,6 +2990,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "After each person, keep best_program.py + evolution_summary.json + "
             "evolution_iteration_scores.csv, keep openevolve_output/best/, and delete "
             "bulky checkpoints/ plus replace logs/ with a stub (default: on)."
+        ),
+    )
+    p.add_argument(
+        "--skip_completed_participants",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Person-level resume: if participant_*/results.json is already complete "
+            "(status=ok, finite test_loglik, n_iterations_completed>=n_iterations, "
+            "best_program.py loads), skip OpenEvolve for that person and reuse the "
+            "row (default: on). Same --output_dir required. Does not resume mid-person "
+            "OE iterations. Use --no-skip_completed_participants to force re-evolve."
         ),
     )
     p.add_argument("--output_dir", type=str, default=None)

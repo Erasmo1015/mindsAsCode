@@ -78,12 +78,14 @@ from run_openevolve import (  # noqa: E402
     format_trial_compact,
     iclr_frozen_argv,
     openevolve_checkout_sha,
+    participant_oe_run_is_complete,
     require_openevolve_checkout,
     resolve_openevolve_seed_and_prompt,
     run_participant,
     sanitize_trial_for_program,
     split_official_optional_programs,
     trials_for_participant,
+    try_load_completed_oe_participant_row,
     vanilla_dataset_description,
     vanilla_llm_user_prefix,
     write_evolution_records,
@@ -941,11 +943,54 @@ def test_frozen_iclr_openevolve_cli_defaults():
     assert args.log_level == ICLR_FROZEN_LOG_LEVEL == "WARNING"
     assert args.checkpoint_interval == ICLR_FROZEN_CHECKPOINT_INTERVAL == 0
     assert args.compact_oe_artifacts is True
+    assert args.skip_completed_participants is True
     assert _resolve_checkpoint_interval(0, 350) == 350
     assert _resolve_checkpoint_interval(50, 350) == 50
     assert args.n_iterations != 600
     assert ICLR_HISTORICAL_32K_INPUT_TOKEN_CEILING == 30000
     assert ICLR_HISTORICAL_32K_VLLM_MAX_MODEL_LEN == 32768
+
+
+def test_oe_person_level_resume_skip_complete_only(tmp_path: Path):
+    """Skip only finished people; failed/partial must re-run. Disk unchanged on skip."""
+    person = tmp_path / "participant_0"
+    person.mkdir()
+    best = person / "best_program.py"
+    best.write_text("def choose(problem, history):\n    return 0.5\n", encoding="utf-8")
+    results = {
+        "participant_id": 0,
+        "status": "ok",
+        "test_loglik": -0.6931,
+        "n_iterations_completed": 350,
+        "n_iterations_requested": 350,
+    }
+    (person / "results.json").write_text(json.dumps(results), encoding="utf-8")
+    assert participant_oe_run_is_complete(person, expected_n_iterations=350)
+    loaded = try_load_completed_oe_participant_row(person, expected_n_iterations=350)
+    assert loaded is not None
+    assert loaded["resumed_from_disk"] is True
+    assert loaded["test_loglik"] == pytest.approx(-0.6931)
+    # results.json on disk must not gain the soft marker
+    disk = json.loads((person / "results.json").read_text(encoding="utf-8"))
+    assert "resumed_from_disk" not in disk
+
+    # partial iterations -> do not skip
+    results["n_iterations_completed"] = 100
+    (person / "results.json").write_text(json.dumps(results), encoding="utf-8")
+    assert not participant_oe_run_is_complete(person, expected_n_iterations=350)
+    assert try_load_completed_oe_participant_row(person, expected_n_iterations=350) is None
+
+    # failed status -> do not skip
+    results["n_iterations_completed"] = 350
+    results["status"] = "failed"
+    (person / "results.json").write_text(json.dumps(results), encoding="utf-8")
+    assert not participant_oe_run_is_complete(person, expected_n_iterations=350)
+
+    # missing best_program -> do not skip
+    results["status"] = "ok"
+    (person / "results.json").write_text(json.dumps(results), encoding="utf-8")
+    best.unlink()
+    assert not participant_oe_run_is_complete(person, expected_n_iterations=350)
 
 
 def test_oe_compact_evolution_records_and_artifact_prune(tmp_path: Path):

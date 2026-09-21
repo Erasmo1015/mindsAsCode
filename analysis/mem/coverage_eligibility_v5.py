@@ -124,6 +124,47 @@ def main() -> None:
             raise SystemExit("--phase set but CSV has no phase column")
         df = df[df["phase"] == args.phase].copy()
 
+    def _unresolved_audit(frame: pd.DataFrame) -> Dict[str, Any]:
+        """Retain unresolved NMC rows in coverage; report how many / status breakdown."""
+        n = int(len(frame))
+        if "exclude_from_construct_effect_fitting" in frame.columns:
+            excl = (
+                pd.to_numeric(
+                    frame["exclude_from_construct_effect_fitting"], errors="coerce"
+                )
+                .fillna(0)
+                .astype(int)
+            )
+            n_excl = int((excl == 1).sum())
+        elif "semantic_resolution_status" in frame.columns:
+            n_excl = int(
+                (
+                    frame["semantic_resolution_status"].fillna("resolved").astype(str)
+                    == "nmc_needs_adjudication"
+                ).sum()
+            )
+        else:
+            n_excl = 0
+        by_status: Dict[str, int] = {}
+        if "semantic_resolution_status" in frame.columns:
+            by_status = {
+                str(k): int(v)
+                for k, v in frame["semantic_resolution_status"]
+                .fillna("missing")
+                .astype(str)
+                .value_counts()
+                .items()
+            }
+        return {
+            "n_rows_in_coverage": n,
+            "n_unresolved_nmc_adjudication": n_excl,
+            "semantic_resolution_status_counts": by_status,
+            "note": (
+                "Unresolved NMC rows are retained in coverage/audit counts; "
+                "focal/joint construct-transition fitters exclude them."
+            ),
+        }
+
     def _report(frame: pd.DataFrame) -> Dict[str, Any]:
         effects: List[Dict[str, Any]] = []
         for motif in BEHAVIORAL_MOTIFS:
@@ -161,6 +202,7 @@ def main() -> None:
             "phases_present": sorted(frame["phase"].dropna().unique().tolist())
             if "phase" in frame.columns
             else None,
+            "unresolved_nmc_audit": _unresolved_audit(frame),
             "constructs": list(BEHAVIORAL_MOTIFS),
             "directional_columns_expected": all_directional_behavioral_columns(),
             "effects": effects,
@@ -173,7 +215,8 @@ def main() -> None:
             "note": (
                 "Do not hard-code a joint/focal model to every construct-operation. "
                 "Choose focals from supported_effects after inspecting this report. "
-                "Never silently pool explore and evolution."
+                "Never silently pool explore and evolution. "
+                "Unresolved NMC rows remain in this coverage report."
             ),
         }
 
