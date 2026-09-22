@@ -8,10 +8,11 @@ Evaluates held-out test trials with explicit trial log-likelihood (PICS-fair Opt
 
 Supports Psych-101 binaries, Kool/Schulz, and external Bergert/Guan/Steyvers.
 Sparse / limited-data protocol matches TEH/MLE (caps train+val; test untouched).
-SA40 / sequential tasks: prefixes are built on the concatenated train+val+test
-timeline; only test indices are scored. Do not pass a test-only list when
-history is longer than the test index (Python negative wrap leaks later test
-problems).
+SA40 / sequential tasks: prefixes use each trial's ``history`` mapped onto
+earlier rows of a category-fair train+val+test timeline (retained SA40 for
+independent/resetting; full chronological pretest for continuous). Only test
+indices are scored. Do not pass a test-only list when history is longer than
+the test index (Python negative wrap leaks later test problems).
 
 Model loading / suffix scoring follows reference_repos/Llama-3.1-Centaur-70B/test_adapter.py
 (Unsloth FastLanguageModel, teacher-forcing loss on suffix tokens only — not trainer.evaluate()).
@@ -76,8 +77,11 @@ from utils.teh.limited_data_protocol import (  # noqa: E402
     should_persist_limited_data_manifest,
 )
 from utils.teh.limited_data_registry import (  # noqa: E402
+    CONTINUOUS_SESSION,
+    INDEPENDENT_TRIAL,
+    RESETTING_UNIT,
     limited_data_protocol_revision,
-    uses_training_only_sa40,
+    limited_data_spec,
 )
 from utils.teh.participant_ids import load_valid_participant_ids  # noqa: E402
 from utils.teh.teh_datasets import (  # noqa: E402
@@ -296,14 +300,60 @@ def _centaur_prompt_timeline_v2(
     raw_val: Sequence[Dict[str, Any]],
     test_trials: Sequence[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], List[int]]:
-    """Original pre-test rows as unscored context, then original test.
+    """Legacy: all raw train∪val as unscored context, then test.
 
-    Omitted SA40 train+val trials are included here so original test histories
-    map onto earlier rows. They are never scored and do not count toward SA40.
+    Kept for preliminary ``structure_aware_v2`` and older tests / callers.
+    Production ``structure_aware_v3`` uses
+    :func:`_centaur_prompt_timeline_sa40_fair` instead (no omitted unrelated TV).
     """
     prompt = list(raw_train) + list(raw_val) + list(test_trials)
     test_start = len(raw_train) + len(raw_val)
     score_indices = list(range(test_start, test_start + len(test_trials)))
+    return prompt, score_indices
+
+
+def _centaur_uses_sa40_fair_timeline(limited_data_protocol: object) -> bool:
+    """Fair timeline is structure_aware_v3 only (not v1 structure_aware or off)."""
+    return limited_data_protocol_revision(limited_data_protocol) == "v3"
+
+
+def _centaur_prompt_timeline_sa40_fair(
+    retained_train: Sequence[Dict[str, Any]],
+    retained_val: Sequence[Dict[str, Any]],
+    test_trials: Sequence[Dict[str, Any]],
+    *,
+    category: str,
+    raw_train: Optional[Sequence[Dict[str, Any]]] = None,
+    raw_val: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], List[int]]:
+    """PICS-fair Centaur timeline under structure_aware_v3 only.
+
+    Visible pretest behavioral rows:
+
+    * **independent** — retained SA40 train∪val only (histories are empty).
+    * **resetting** — retained SA40 only; within-unit test history maps onto
+      prior held-out test rows (units are sampled whole under SA40).
+    * **continuous** — full chronological raw train∪val (contains retained;
+      omitted earlier session rows are exactly the PICS ``history`` priors),
+      then test. Retained is not appended again (no duplication).
+
+    Only test indices are scored. Prefix builders still use each trial's
+    ``history`` span onto earlier timeline rows.
+    """
+    retained = list(retained_train) + list(retained_val)
+    test = list(test_trials)
+    if category == CONTINUOUS_SESSION:
+        raw_tv = list(raw_train or []) + list(raw_val or [])
+        # raw_tv already includes the retained SA40 subset in chronological order.
+        prompt = raw_tv + test
+    elif category in (INDEPENDENT_TRIAL, RESETTING_UNIT):
+        prompt = retained + test
+    else:
+        raise ValueError(f"Unknown limited-data category for Centaur timeline: {category!r}")
+    if not test:
+        return prompt, []
+    test_start = len(prompt) - len(test)
+    score_indices = list(range(test_start, test_start + len(test)))
     return prompt, score_indices
 
 
@@ -1231,9 +1281,31 @@ def run_smoke_prompt_check(
         limited_train_val=limited_train_val,
         speekenbrink_split=speekenbrink_split,
     )
-    # Match production `_evaluate_participant`: under training-only SA40 (v2/v3),
-    # continuous test histories must map onto the original pre-test timeline.
-    if uses_training_only_sa40(limited_data_protocol):
+    # Fair timeline is structure_aware_v3 only. Legacy v2 keeps raw-TV v2
+    # timeline; structure_aware / off keep the retained (or full-off) path.
+    if _centaur_uses_sa40_fair_timeline(limited_data_protocol):
+        raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
+            dataset,
+            int(participant_row_index),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            speekenbrink_split=speekenbrink_split,
+        )
+        raw_train = _ensure_mixed_gambles_centaur_contract(dataset, raw_train)
+        raw_val = _ensure_mixed_gambles_centaur_contract(dataset, raw_val)
+        category = limited_data_spec(dataset).category
+        prompt_trials, score_indices = _centaur_prompt_timeline_sa40_fair(
+            train,
+            val,
+            test,
+            category=category,
+            raw_train=raw_train,
+            raw_val=raw_val,
+        )
+        timeline_mode = f"sa40_fair:{category}"
+    elif limited_data_protocol_revision(limited_data_protocol) == "v2":
         raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
             dataset,
             int(participant_row_index),
@@ -1248,7 +1320,7 @@ def run_smoke_prompt_check(
         prompt_trials, score_indices = _centaur_prompt_timeline_v2(
             raw_train, raw_val, test
         )
-        timeline_mode = "v2_raw_pretest"
+        timeline_mode = "v2_raw"
     else:
         prompt_trials, score_indices = _centaur_prompt_timeline(train, val, test)
         timeline_mode = "v1_retained"
@@ -1333,7 +1405,34 @@ def _evaluate_participant(
     if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
         append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
     chooser.task_instruction = instruction
-    if uses_training_only_sa40(limited_data_protocol):
+    if _centaur_uses_sa40_fair_timeline(limited_data_protocol):
+        raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
+            dataset,
+            int(participant_row_index),
+            split_ratio=split_ratio,
+            split_seed=split_seed,
+            psych_dataset_split=psych_dataset_split,
+            local_dataset=local_dataset,
+            speekenbrink_split=speekenbrink_split,
+        )
+        raw_train = _ensure_mixed_gambles_centaur_contract(dataset, raw_train)
+        raw_val = _ensure_mixed_gambles_centaur_contract(dataset, raw_val)
+        category = limited_data_spec(dataset).category
+        prompt_trials, score_indices = _centaur_prompt_timeline_sa40_fair(
+            train_trials,
+            val_trials,
+            test_trials,
+            category=category,
+            raw_train=raw_train,
+            raw_val=raw_val,
+        )
+        n_pre = len(prompt_trials) - len(test_trials)
+        timeline_note = (
+            f"v3 sa40_fair:{category} pretest_n={n_pre} "
+            f"(retained={len(train_trials)+len(val_trials)}; "
+            f"no omitted unrelated TV; test scored only)"
+        )
+    elif limited_data_protocol_revision(limited_data_protocol) == "v2":
         raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
             dataset,
             int(participant_row_index),
@@ -1348,10 +1447,8 @@ def _evaluate_participant(
         prompt_trials, score_indices = _centaur_prompt_timeline_v2(
             raw_train, raw_val, test_trials
         )
-        rev = limited_data_protocol_revision(limited_data_protocol)
         timeline_note = (
-            f"{rev} unscored pre-test context n={len(raw_train)+len(raw_val)} "
-            f"(omitted SA40 rows included, never scored)"
+            f"v2 raw-TV prefix n={len(prompt_trials)} (legacy; not sa40_fair)"
         )
     else:
         prompt_trials, score_indices = _centaur_prompt_timeline(

@@ -212,8 +212,8 @@ def test_mixed_gambles_v2_raw_prefix_is_remapped_to_ab():
     assert "<<0>>" not in prefix
 
 
-def test_speekenbrink_smoke_uses_v2_raw_timeline_under_structure_aware_v3():
-    """Continuous Speekenbrink test histories exceed retained SA40 TV length."""
+def test_speekenbrink_smoke_uses_sa40_fair_continuous_timeline():
+    """Continuous Speekenbrink: full chrono pretest (for PICS history), not retained-only."""
     info = run_smoke_prompt_check(
         "5speekenbrink2008learning",
         0,
@@ -226,7 +226,7 @@ def test_speekenbrink_smoke_uses_v2_raw_timeline_under_structure_aware_v3():
         speekenbrink_split="chronological",
     )
     assert info["limited_data_protocol"] == "structure_aware_v3"
-    assert info["timeline_mode"] == "v2_raw_pretest"
+    assert info["timeline_mode"] == "sa40_fair:continuous_session"
     retained_tv = int(info["retained_n_train"]) + int(info["retained_n_val"])
     assert retained_tv <= 40
     assert int(info["prompt_timeline_n"]) > retained_tv + int(info["n_test"])

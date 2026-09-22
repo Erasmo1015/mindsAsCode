@@ -44,7 +44,7 @@ python baseline_methods/Psych101/Centaur.py \
   explicitly (unlike OpenEvolve’s `apply_iclr_frozen_range_ordinals`).
 - Smoke (CPU): `--smoke_prompt_only`, `--smoke_all_datasets`, `--check_deps`
 
-Helpers: `load_participant_limited_splits`, `_centaur_prompt_timeline_v2`,
+Helpers: `load_participant_limited_splits`, `_centaur_prompt_timeline_sa40_fair`,
 `CentaurChooser.action_probs_from_suffixes`, `wandb_completion_fields`.
 
 ---
@@ -76,10 +76,15 @@ Helpers: `load_participant_limited_splits`, `_centaur_prompt_timeline_v2`,
 | Enkavi `probe_in_set` | stripped from program/prompt inputs (oracle) |
 | Fitness / selection | **none** on Centaur; only test scoring for reporting |
 
-v2/v3 timeline (`_centaur_prompt_timeline_v2`): unscored raw pre-test TV context
-may appear in the transcript for sequential continuity, but **only test indices
-are scored**. `run_smoke_prompt_check` uses the same v2 raw timeline under
-`structure_aware_v3` (required for continuous Speekenbrink histories).
+`structure_aware_v3` timeline (`_centaur_prompt_timeline_sa40_fair`):
+**independent** and **resetting** put only retained SA40 train∪val before
+test (within-unit test history maps onto prior held-out test rows).
+**Continuous** keeps the full chronological raw pretest so omitted earlier
+session rows that appear in PICS `history` can map; retained is not
+duplicated. Unrelated omitted TV never appears for independent/resetting.
+Legacy `structure_aware` keeps the retained-only path; protocol `off` keeps
+full unrestricted TV; preliminary `structure_aware_v2` keeps the raw-TV
+`_centaur_prompt_timeline_v2` path. Fair activation is v3-only.
 
 ---
 
