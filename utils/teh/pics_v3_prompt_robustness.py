@@ -2,9 +2,12 @@
 
 Default / legacy: a single generic HISTORY_ROBUSTNESS_BLOCK_V3 for all datasets.
 
-Prospective policy ``dataset_keyed_post_adaptive_v1``: for six named datasets only,
+Prospective policy ``dataset_keyed_post_adaptive_v2``: for named datasets only,
 replace that block body with a concise dataset-keyed reminder. All other datasets
 keep the byte-identical legacy block.
+
+v2 revises Steyvers / Badham / Speekenbrink guidance and adds CPC18
+(``2plonsky2018when``). Kool / Schulz / Guan bodies stay byte-identical to v1.
 """
 from __future__ import annotations
 
@@ -14,7 +17,9 @@ from typing import Dict, Mapping, Optional
 HISTORY_ROBUSTNESS_MARKER = "HISTORY_ROBUSTNESS_BLOCK_V3"
 
 # Official prospective policy id for new structure_aware_v3 main jobs.
-DATASET_KEYED_POST_ADAPTIVE_POLICY_ID = "dataset_keyed_post_adaptive_v1"
+DATASET_KEYED_POST_ADAPTIVE_POLICY_ID = "dataset_keyed_post_adaptive_v2"
+# Historical policy id (reminder_v1 jobs); bodies for kool/schulz/guan unchanged.
+DATASET_KEYED_POST_ADAPTIVE_POLICY_ID_V1 = "dataset_keyed_post_adaptive_v1"
 LEGACY_GENERIC_REMINDER_POLICY_ID = "generic_history_robustness_v0"
 
 # Immutable legacy body (byte-stable for unaffected datasets and reproduction).
@@ -28,9 +33,10 @@ HISTORY_ROBUSTNESS_BLOCK = (
     f"[/{HISTORY_ROBUSTNESS_MARKER}]"
 )
 
-# Datasets that receive a keyed override under dataset_keyed_post_adaptive_v1.
+# Datasets that receive a keyed override under dataset_keyed_post_adaptive_v2.
 DATASET_KEYED_REMINDER_ALIASES = frozenset(
     {
+        "2plonsky2018when",
         "5speekenbrink2008learning",
         "14kool2016when",
         "steyvers_2009_bandit",
@@ -42,15 +48,28 @@ DATASET_KEYED_REMINDER_ALIASES = frozenset(
 
 # Bodies only (no markers). Kept factual from loaders / frozen contracts.
 _DATASET_KEYED_REMINDER_BODIES: Dict[str, str] = {
+    "2plonsky2018when": (
+        "`history` may be empty; use `.get` for optional fields. "
+        "Within each problem, history is chronological over up to 25 repeats.\n"
+        "Structured history exposes `action` and, when present, a scalar "
+        "`feedback` = the realized payoff of the **chosen** option only. "
+        "Do not assume a forgone/unchosen outcome is available in `history` "
+        "(it is not represented). Early trials often have `feedback is None`; "
+        "later trials may include chosen-option feedback. "
+        "`problem['has_feedback']` is block-level metadata—prefer checking "
+        "`history[i].get('feedback')` for the actual regime. "
+        "Combine description (`gamble_*` probs/rewards) with experiential "
+        "chosen feedback when present. Return calibrated P(action=1)."
+    ),
     "5speekenbrink2008learning": (
         "`history` may be empty; use `.get` for optional history fields. "
         "Do not read current-trial weather/correctness from `problem`.\n"
-        "Primary current cue: `problem['cards']`. Past entries may include "
-        "`cards`, `was_correct`, `weather_outcome`, and sometimes `feedback`. "
-        "Prefer card-pattern learning via `was_correct`/`weather_outcome`; "
-        "do not treat `feedback` as the only primary signal. Avoid averaging "
-        "many weak factors. Return calibrated P(action=1); if history is "
-        "uninformative, use ~0.5."
+        "Primary current cue: `problem['cards']`. Learn participant-specific "
+        "cue→weather associations from past `cards` with `weather_outcome` / "
+        "`was_correct` (and optional `feedback`). Prefer empirical association "
+        "counts over fixed hard-coded card-set lookup tables when history "
+        "supplies evidence. Smooth/bound probabilities; if evidence is sparse "
+        "or uninformative, stay near ~0.5. Do not invent unavailable fields."
     ),
     "14kool2016when": (
         "`history` may be empty; use `.get` for stage-conditional fields. "
@@ -64,12 +83,17 @@ _DATASET_KEYED_REMINDER_BODIES: Dict[str, str] = {
         "from raw counts."
     ),
     "steyvers_2009_bandit": (
-        "`history` may be empty; when present it has `action` and `reward`. "
-        "Use `.get` for safety—do not assume reward is usually missing.\n"
-        "`reward` is the primary learning signal. Return a full K-way dict "
-        "over every `option['action']` in `problem['options']` (K=4). Empty "
-        "history → neutral prior; non-empty history must not collapse to "
-        "uniform. Smooth sparse counts; renormalize finite non-negative probs."
+        "`history` may be empty; when present it has `action` and `reward` "
+        "(use `.get`—reward may be absent in defensive edge cases).\n"
+        "`reward` is the primary learning signal. Map actions through the "
+        "current valid option keys/`problem['options']`—do not treat action "
+        "ids as raw list indices into a fixed array. Initialize every legal "
+        "arm explicitly. Use positive smoothing so denominators cannot be "
+        "zero. Return a finite probability for every legal arm (full K-way "
+        "dict over `option['action']`, K=4). Normalize safely; use a uniform "
+        "fallback only when history is empty or yields no usable reward "
+        "signal—non-empty usable history must not collapse to uniform. "
+        "Avoid undefined helper variables and fragile manual renormalization."
     ),
     "13schulz2020finding": (
         "`history` may be empty; when present it has `action` and `reward`. "
@@ -89,10 +113,15 @@ _DATASET_KEYED_REMINDER_BODIES: Dict[str, str] = {
     ),
     "12badham2017deficits": (
         "`history` may be empty; use `.get` for nested feedback.\n"
-        "Use current `stimulus_features` and learn within `rule_block_id`. "
-        "Past `feedback.is_correct` / `feedback.correct_category` only—never "
-        "read a current-trial correct category from `problem`. Separate "
-        "learning across rule blocks. Return calibrated P(action=1)."
+        "Use current `stimulus_features`; learn within the current "
+        "`rule_block_id` (reset/separate learning across blocks). "
+        "Binary feedback: when `feedback.is_correct` is True the chosen "
+        "action is the correct category; when False the other binary "
+        "category is correct—both correct and incorrect past trials provide "
+        "learning information. Past `feedback.correct_category` may appear "
+        "in history only—never read a current-trial correct category from "
+        "`problem`. Use smoothed/bounded scores; do not accumulate unbounded "
+        "feature-count logits. Return calibrated P(action=1)."
     ),
 }
 
@@ -226,7 +255,7 @@ def ensure_history_robustness_block(
     """Insert or replace the robustness/reminder block; do not invent trial fields.
 
     If a block is already present, replace it with the policy-resolved block so
-    new ``structure_aware_v3`` writes always match ``dataset_keyed_post_adaptive_v1``
+    new ``structure_aware_v3`` writes always match the active keyed policy
     (or legacy when forced / for non-override datasets). Unaffected datasets
     resolve to the byte-identical legacy string.
     """

@@ -58,7 +58,7 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 
 | Concept | Name | Meaning |
 | --- | --- | --- |
-| Method / gated target kind | `pics_v3` | Output folder KIND for gated dual-arm target jobs |
+| Method / gated target kind | `pics_v3` (plus `pics_v3_reminder_v1` for six keyed-reminder actives) | Output folder KIND for gated dual-arm target jobs |
 | G.1 kind | `pics_v3_g1` | Output folder KIND for global-only source populations |
 | Independent-source kind | `pics_v3_independent` | Optional live source-pop under gated independent mode |
 | Explicit independent source | `--t_pics_gated_source DATASET` | With `--t_pics_gated_independent`: name the live G.1 source dataset **without** a transfer map / `--t_pics_source_config`. Default map lookup unchanged when this flag is omitted. |
@@ -68,8 +68,10 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Annotation package (method) | `pics_v3_g1_schema_v5` | Schema-v5 annotations of g5e50p30 G.1 programs (feeds Occurrence-EB) |
 | Annotation package (offline MEM) | `pics_v3_participant_schema_v5` | Person-trace transitions; **not** a method stage; currently NONFINAL/cancelled |
 | G.1 path ledger | `pics_v3/g1_job_paths_g5e50p30.tsv` | Jobs `265753`–`265767` |
+| Gated active path ledger | `pics_v3/gated_job_paths_g5e50p30.tsv` | 15 canonical run dirs (`pics_v3/` + six `pics_v3_reminder_v1/`) |
+| Baseline method paths | `baseline_methods/config_baselines.yaml` | LM / PT / Centaur / **Ours** dirs; Ours must match gated active ledger |
 | W&B project (G.1) | `teh_pics_v3` | G.1 submitter default |
-| `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` | Gated run tag constant |
+| `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` | Gated run tag constant (`…_pics_v3_reminder_v1` for the six) |
 
 These axes are separate: method KIND ≠ data protocol ≠ annotation taxonomy.
 
@@ -105,8 +107,8 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | 15× `pics_v3_g1` G.1 jobs (g5e50p30) | **complete** (`265753`–`265767`) |
 | `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
 | `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
-| Participant Schema-v5 annotations (`pics_v3_participant_schema_v5`) | **NONFINAL / cancelled mid-run (2026-09-22)** — offline MEM/interpretability only; not a method stage; do not resume until final gated paths are approved |
-| 15× `pics_v3` gated targets (schema5) | **in flight / resubmits** (ledger `2026Sep21_PICS_v3_gated_g5e50p30.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; active IDs: `271238`–`271240`, `271242`–`271247`; resubmits `277676` Peterson, `277944` Speekenbrink, `277677` guan, `277678` steyvers, `277679` Schulz, `277697` Kool — replace `271237`/`271241`/`271248`–`271251`) |
+| Participant Schema-v5 annotations (`pics_v3_participant_schema_v5`) | **NONFINAL / cancelled mid-run (2026-09-22)** — offline MEM/interpretability only; not a method stage; gated paths are now approved — resume only with a fresh package keyed to `gated_job_paths_g5e50p30.tsv` |
+| 15× gated targets (schema5; active KIND mix `pics_v3` + `pics_v3_reminder_v1`) | **complete** (active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; submit ledgers `2026Sep21_PICS_v3_gated_g5e50p30.tsv` + `2026Sep22_PICS_v3_gated_reminder_v1.tsv`; active IDs: `277676`, `271238`–`271240`, `287666`, `271242`–`271244`, `287667`, `271246`–`271247`, `287668`–`287671`. Reminder-v1 replaces Speekenbrink/`277944`, Badham/`271245`, guan/`277677`, steyvers/`277678`, Schulz/`277679`, Kool/`277697`) |
 | schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
 | preliminary-v2 G.1 (incl. 258518), v2 YAML | **frozen non-final** |
@@ -174,18 +176,19 @@ every `structure_aware_v3` candidate-generation prompt inserts a short
 **post-adaptive reminder** immediately after the dataset-adaptive task
 description (not into trial JSON; genuine field absence is preserved).
 
-**Policy id (prospective default):** `dataset_keyed_post_adaptive_v1`
+**Policy id (prospective default):** `dataset_keyed_post_adaptive_v2`
 
 The already-frozen G.1 populations and Occurrence-EB source-selection map
-predate this keyed reminder policy and are intentionally reused for the
-deadline `pics_v3_reminder_v1` gated reruns (no G.1 / annotation / source-map
-recomputation).
+predate keyed reminders and are intentionally reused for gated reruns (no G.1 /
+annotation / source-map recomputation). Historical reminder-v1 jobs used
+`dataset_keyed_post_adaptive_v1`; v2 revises Steyvers / Badham / Speekenbrink
+and adds CPC18 (`2plonsky2018when`). Kool / Schulz / Guan reminder bodies stay
+byte-identical to v1.
 
-- **Six datasets** receive a dataset-keyed reminder body that encodes known
-  task/interface structure (Speekenbrink, Kool, Steyvers, Schulz, Guan,
-  Badham). Exact wording lives in
+- **Seven datasets** receive a dataset-keyed reminder body (Speekenbrink, Kool,
+  Steyvers, Schulz, Guan, Badham, CPC18). Exact wording lives in
   `utils/teh/pics_v3_prompt_robustness.py` and is mirrored under
-  `analysis_2026Sep/Sep20_V3/others/prompt_reminder_fix/REMINDER_TEXTS.md`.
+  `analysis_2026Sep/Sep20_V3/others/prompt_reminder_fix/`.
 - **All other datasets** keep the byte-identical legacy generic block
   (`generic_history_robustness_v0`):
 
@@ -196,12 +199,23 @@ recomputation).
 > accessed directly.
 
 Reproduction: `--pics_v3_legacy_generic_reminder` forces the legacy generic
-block for every dataset (including the six). Prompt metadata records
+block for every dataset (including keyed ones). Prompt metadata records
 `pics_v3_reminder_policy`. Reminders never invent trial fields and must not
 expose current-trial answers/outcomes; past realized outcomes in `history`
 remain legitimate. Token packing (hard 14k / vLLM 16k) is unchanged in policy;
-keyed blocks are slightly longer than legacy for some of the six—see the
+keyed blocks are slightly longer than legacy for some datasets—see the
 token audit CSV. Test isolation and uniform failure fallback are unchanged.
+
+**CPC18 note:** structured history exposes chosen-option `feedback` only (no
+forgone field). PICS prompt-example selection ensures both early/`feedback is
+None` and later/chosen-feedback examples when both exist. Block-level
+`problem["has_feedback"]` is **not** rewritten in shared loaders (baseline-
+visible data unchanged); see the centaur-gap implementation report for blast
+radius if a future trial-level flag is desired.
+
+**Centaur-gap reruns:** KIND `pics_v3_centaur_gap_v1` (isolated OUT_DIR);
+prepare with
+`analysis_2026Sep/Sep20_V3/others/prompt_reminder_fix/proposed_centaur_gap_reruns.sh`.
 
 Before elite admission, PICS v3 runs a **test-independent** interface preflight
 (`utils/teh/pics_v3_contract_preflight.py`) on synthetic admissible
@@ -618,7 +632,7 @@ truncated** to fit the budget — only batching / splitting.
 | `annotation_summary.json` (+ `_by_phase`) | Coverage / budget / resolution tallies |
 | Cluster submit | `cluster/v3/ours/main/submit_participant_annot_schema_v5.sh` |
 | Shard table | `cluster/v3/ours/main/participant_annot_schema_v5_shards.tsv` |
-| Path ledger | `analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv` only |
+| Path ledger | `analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv` (Ours dirs also in `baseline_methods/config_baselines.yaml`) |
 | Calibration notes | `analysis_2026Sep/Sep20_V3/mem/annnotation/` |
 
 Downstream MEM CSV: `analysis/mem/build_dataset.py --schema_version 5

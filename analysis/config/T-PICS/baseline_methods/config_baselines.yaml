@@ -20,14 +20,19 @@
 #   missing on 3090 → origami full-data (test membership unchanged vs SA40/v3):
 #     Peterson, Plonsky, CCT, Wulff, Frey Risk, Badham
 #   Speekenbrink: H100 job_274576 structure_aware_v3 (replaces 3090 OOM chance)
-#   Kool: L40 job_274629 structure_aware_v3 (in progress at first record)
+#   Kool: L40 job_274629 structure_aware_v3 complete (replaces 3090 OOM chance)
 #
 # Ours (pics_v3 gated): active run dirs from
 #   analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv
-# Do not copy cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv blindly —
-# that ledger keeps superseded submits. Resubmits: 277676 Peterson (was
-# 271237), 277944 Speekenbrink (271241), 277677 guan (271248), 277678
-# steyvers (271249), 277679 Schulz (271250), 277697 Kool (271251).
+# Do not copy cluster/record/*gated*.tsv blindly — those ledgers keep
+# superseded submits. Active canonical IDs: 277676, 271238–271240,
+# 287666, 271242–271244, 287667, 271246–271247, 287668–287671.
+# Reminder-v1 supersessions (KIND pics_v3_reminder_v1): 287666 Speekenbrink
+# (was 277944), 287667 Badham (271245), 287668 guan (277677), 287669
+# steyvers (277678), 287670 Schulz (277679), 287671 Kool (277697).
+# Earlier schema5 resubmits kept as active where not remapped: 277676
+# Peterson (was 271237). Cluster ledger for the six:
+#   cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv
 #
 # Slice CSVs: analysis/config/T-PICS/baseline_methods/g5e50p30/<method>/<dataset>/
 # Provenance notes (not for git): generated_outputs/psych101_train/centaur/2026Sep/g5e50p30/
@@ -67,7 +72,7 @@ datasets:
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/5speekenbrink2008learning
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/5speekenbrink2008learning
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/5speekenbrink2008learning
-    Ours: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3/job_277944
+    Ours: generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v3_reminder_v1/job_287666
 
   7hilbig2014generalized:  # Hilbig  0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/7hilbig2014generalized
@@ -91,7 +96,7 @@ datasets:
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/12badham2017deficits
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/12badham2017deficits
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/12badham2017deficits
-    Ours: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3/job_271245
+    Ours: generated_outputs/psych101_train/teh/12badham2017deficits/pics_v3_reminder_v1/job_287667
 
   mixed_gambles:  # 0-29 (ids 101-130)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/mixed_gambles
@@ -109,22 +114,22 @@ datasets:
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/guan_2020_stopping
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/guan_2020_stopping
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/guan_2020_stopping
-    Ours: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3/job_277677
+    Ours: generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v3_reminder_v1/job_287668
 
   steyvers_2009_bandit:  # 0-29 (ids 1-30)
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/steyvers_2009_bandit
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/steyvers_2009_bandit
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/steyvers_2009_bandit
-    Ours: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3/job_277678
+    Ours: generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v3_reminder_v1/job_287669
 
   13schulz2020finding:  # 0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/13schulz2020finding
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/13schulz2020finding
     Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/13schulz2020finding
-    Ours: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3/job_277679
+    Ours: generated_outputs/psych101_train/teh/13schulz2020finding/pics_v3_reminder_v1/job_287670
 
   14kool2016when:  # 0-29
     MLE: analysis/config/T-PICS/baseline_methods/g5e50p30/MLE/14kool2016when
     prospect_theory: analysis/config/T-PICS/baseline_methods/g5e50p30/prospect_theory/14kool2016when
-    Centaur: generated_outputs/psych101_train/centaur/14kool2016when/sparse_data/structure_aware_v3/budget_40/g5e50p30/l40/job_274629
-    Ours: generated_outputs/psych101_train/teh/14kool2016when/pics_v3/job_277697
+    Centaur: analysis/config/T-PICS/baseline_methods/g5e50p30/Centaur/14kool2016when
+    Ours: generated_outputs/psych101_train/teh/14kool2016when/pics_v3_reminder_v1/job_287671

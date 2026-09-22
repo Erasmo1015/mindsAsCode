@@ -1,4 +1,4 @@
-"""CPU regressions for dataset_keyed_post_adaptive_v1 (six datasets only)."""
+"""CPU regressions for dataset_keyed_post_adaptive_v2."""
 from __future__ import annotations
 
 import re
@@ -18,9 +18,37 @@ from utils.teh.pics_v3_prompt_robustness import (
     resolve_history_robustness_policy_id,
 )
 
+# Byte-frozen bodies for datasets not revised by the centaur-gap audit.
+_FROZEN_KOOL = (
+    "`history` may be empty; use `.get` for stage-conditional fields. "
+    "Never read current-trial `reward`/`treasure` from `problem`.\n"
+    "Stage 1 (`stage==1`): integer action 0/1 over spaceship "
+    "`option_keys`/`spaceship_options`; learn from `stage==1` history only.\n"
+    "Stage 2 (`stage==2`): condition on `planet`, `alien_options`/"
+    "`option_keys`, and available `spaceship`/`stage1_action`; learn from "
+    "`stage==2` history using `feedback`/`reward` when present. Never "
+    "`option_keys.index(letter)` for actions. Clip probs; avoid extremes "
+    "from raw counts."
+)
+_FROZEN_SCHULZ = (
+    "`history` may be empty; when present it has `action` and `reward`. "
+    "Use `.get` for safety—do not assume reward is usually missing.\n"
+    "`reward` is the primary learning signal. Return a full K-way dict "
+    "over every `option['action']` in `problem['options']` (K=8). Empty "
+    "history → neutral prior; non-empty history must not collapse to "
+    "uniform. Smooth sparse counts; renormalize finite non-negative probs."
+)
+_FROZEN_GUAN = (
+    "`history` may be empty. No `feedback`/`reward` interface.\n"
+    "Use `position`, `values_observed` (prefix through current position), "
+    "`sequence_length`, `environment`. Actions: 0=continue, 1=stop; "
+    "return P(stop). At the final position, stop is the only remaining "
+    "decision. Optional history: prior continues as "
+    "`{action,position,value}`. Do not invent outcome fields."
+)
+
 UNAFFECTED_ALIASES = (
     "1peterson2021using",
-    "2plonsky2018when",
     "3frey2017cct",
     "4wulff2018description",
     "7hilbig2014generalized",
@@ -49,8 +77,9 @@ def teardown_function() -> None:
     configure_pics_v3_legacy_generic_reminder(False)
 
 
-def test_keyed_aliases_are_exactly_the_six() -> None:
+def test_keyed_aliases_include_cpc18_and_six_prior() -> None:
     assert DATASET_KEYED_REMINDER_ALIASES == {
+        "2plonsky2018when",
         "5speekenbrink2008learning",
         "14kool2016when",
         "steyvers_2009_bandit",
@@ -59,6 +88,13 @@ def test_keyed_aliases_are_exactly_the_six() -> None:
         "12badham2017deficits",
     }
     assert set(all_dataset_keyed_reminder_bodies()) == DATASET_KEYED_REMINDER_ALIASES
+
+
+def test_kool_schulz_guan_bodies_byte_identical_to_frozen_v1() -> None:
+    bodies = all_dataset_keyed_reminder_bodies()
+    assert bodies["14kool2016when"] == _FROZEN_KOOL
+    assert bodies["13schulz2020finding"] == _FROZEN_SCHULZ
+    assert bodies["guan_2020_stopping"] == _FROZEN_GUAN
 
 
 def test_unaffected_datasets_byte_identical_to_legacy_block() -> None:
@@ -84,7 +120,6 @@ def test_keyed_datasets_resolve_deterministically_and_differ_from_legacy() -> No
         assert resolve_history_robustness_policy_id(alias) == (
             DATASET_KEYED_POST_ADAPTIVE_POLICY_ID
         )
-        # Idempotent / deterministic.
         assert resolve_history_robustness_block(alias) == block
 
 
@@ -95,10 +130,8 @@ def test_placement_immediately_after_adaptive_task_description() -> None:
             task, dataset="5speekenbrink2008learning"
         )
     assert out.startswith(task)
-    assert out.index(task) == 0
     assert out.index(HISTORY_ROBUSTNESS_MARKER) > len(task) - 1
-    # Marker appears once, before any later contract-like section would.
-    assert out.count(HISTORY_ROBUSTNESS_MARKER) == 2  # open + close tags share prefix
+    assert out.count(HISTORY_ROBUSTNESS_MARKER) == 2
     assert "[/" + HISTORY_ROBUSTNESS_MARKER + "]" in out
 
 
@@ -131,7 +164,7 @@ def test_speekenbrink_reminder_content_and_no_oracle() -> None:
     assert "problem['cards']" in body
     assert "was_correct" in body
     assert "weather_outcome" in body
-    assert "feedback" in body
+    assert "hard-coded" in body or "lookup" in body
     assert "~0.5" in body
     for pat in ORACLE_LEAK_PATTERNS:
         assert not pat.search(body), pat.pattern
@@ -151,18 +184,33 @@ def test_kool_stage_and_action_contract() -> None:
         assert not pat.search(body), pat.pattern
 
 
-def test_bandit_reminders_require_kway_and_reward_primary() -> None:
-    for alias, k in (
-        ("steyvers_2009_bandit", "K=4"),
-        ("13schulz2020finding", "K=8"),
-    ):
-        body = all_dataset_keyed_reminder_bodies()[alias]
-        assert "reward" in body
-        assert "primary" in body
-        assert "K-way" in body or k in body
-        assert "uniform" in body
-        assert "problem['options']" in body
-        assert "usually missing" in body
+def test_steyvers_safe_indexing_and_smoothing_guidance() -> None:
+    body = all_dataset_keyed_reminder_bodies()["steyvers_2009_bandit"]
+    assert "reward" in body
+    assert "primary" in body
+    assert "K=4" in body or "K-way" in body
+    assert "list indices" in body or "list index" in body
+    assert "smoothing" in body
+    assert "uniform" in body
+    assert "undefined" in body or "fragile" in body
+    assert "problem['options']" in body
+
+
+def test_schulz_unchanged_bandit_guidance() -> None:
+    body = all_dataset_keyed_reminder_bodies()["13schulz2020finding"]
+    assert "usually missing" in body
+    assert "K=8" in body
+    assert "primary" in body
+
+
+def test_cpc18_chosen_feedback_only_no_forgone_field() -> None:
+    body = all_dataset_keyed_reminder_bodies()["2plonsky2018when"]
+    assert "chosen" in body
+    assert "forgone" in body or "unchosen" in body
+    assert "feedback is None" in body
+    assert "has_feedback" in body
+    assert "forgone_feedback" not in body
+    assert "unchosen_reward" not in body
 
 
 def test_guan_has_no_feedback_reward_coaching() -> None:
@@ -175,11 +223,14 @@ def test_guan_has_no_feedback_reward_coaching() -> None:
     assert "primary learning signal" not in body
 
 
-def test_badham_never_exposes_current_correct_category() -> None:
+def test_badham_binary_feedback_and_bounds() -> None:
     body = all_dataset_keyed_reminder_bodies()["12badham2017deficits"]
     assert "stimulus_features" in body
     assert "rule_block_id" in body
-    assert "feedback.is_correct" in body or "feedback.correct_category" in body
+    assert "is_correct" in body
+    assert "other binary category" in body or "other binary" in body
+    assert "both correct and incorrect" in body
+    assert "unbounded" in body
     assert "never read a current-trial correct category from `problem`" in body
     assert "problem['correct_category']" not in body
     for pat in ORACLE_LEAK_PATTERNS:
@@ -192,7 +243,6 @@ def test_ensure_idempotent_and_unaffected_path_stable() -> None:
     out2 = ensure_history_robustness_block(out1, dataset="3frey2017cct")
     assert out1 == out2
     assert HISTORY_ROBUSTNESS_BLOCK in out1
-    # Keyed dataset upgrades a legacy-embedded prompt to the keyed body.
     out3 = ensure_history_robustness_block(out1, dataset="5speekenbrink2008learning")
     assert "problem['cards']" in out3
     assert HISTORY_ROBUSTNESS_BLOCK not in out3
@@ -207,6 +257,7 @@ def test_independent_unaffected_do_not_get_keyed_bandit_or_stopping_text() -> No
         "0=continue, 1=stop",
         "rule_block_id",
         "was_correct` / `weather_outcome",
+        "forgone",
     )
     for alias in UNAFFECTED_ALIASES:
         block = resolve_history_robustness_block(alias)

@@ -5,7 +5,7 @@ claims beyond what that file states.
 
 ## Audit date
 
-2026-09-21 (updated for schema-v5 / g5e50p30 final freeze)
+2026-09-22 (updated: active gated paths → reminder-v1 for six datasets)
 
 ## Authority
 
@@ -23,9 +23,11 @@ disposition only.
 | `Transfer_source/pics_v3/schema5_occurrence_eb_freeze/` | **yes** |
 | `analysis_2026Sep/mem/pics_v3_g1_schema_v5/` | **yes** (1414 programs) |
 | `pics_v3/g1_job_paths_g5e50p30.tsv` | **yes** (jobs 265753–265767) |
-| `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` | **yes** (orig `271237`–`271251` + resubmits `277676`/`277944`/`277677`/`277678`/`277679`/`277697`; dependency schema5) |
-| `pics_v3/gated_job_paths_g5e50p30.tsv` | **yes** (15 active gated run dirs) |
-| `pics_v3_g1` / `pics_v3` job outputs | **yes** (g5e50p30 + gated in flight) |
+| `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` | **yes** (historical submit ledger; superseded actives kept) |
+| `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv` | **yes** (six keyed-reminder gated submits `287666`–`287671`) |
+| `pics_v3/gated_job_paths_g5e50p30.tsv` | **yes** (15 active gated run dirs; six under `pics_v3_reminder_v1/`) |
+| `baseline_methods/config_baselines.yaml` Ours paths | **yes** (aligned to `gated_job_paths_g5e50p30.tsv`) |
+| `pics_v3_g1` / `pics_v3` / `pics_v3_reminder_v1` job outputs | **yes** (g5e50p30 gated complete) |
 
 ## Historical (kept; not active runtime)
 

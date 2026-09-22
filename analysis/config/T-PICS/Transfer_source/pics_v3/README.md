@@ -14,7 +14,9 @@ Reports:
 G.1 path ledger: `analysis/config/T-PICS/pics_v3/g1_job_paths_g5e50p30.tsv`  
 Annotation package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/`  
 Gated job ledger: `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`  
-Gated **active** paths (15 canonical jobs): `analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv`
+Reminder-v1 submit ledger (six keyed datasets): `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv`  
+Gated **active** paths (15 canonical jobs): `analysis/config/T-PICS/pics_v3/gated_job_paths_g5e50p30.tsv`  
+Baseline Ours dirs: `analysis/config/T-PICS/baseline_methods/config_baselines.yaml` (must match active path ledger)
 
 ## Historical (do not overwrite; not the active runtime default)
 
