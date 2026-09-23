@@ -5,7 +5,8 @@ claims beyond what that file states.
 
 ## Audit date
 
-2026-09-22 (updated: active gated paths → reminder-v1 for six datasets)
+2026-09-23 (updated: active gated paths → reminder-v1 for guan/Schulz/Kool +
+centaur-gap-v1 for Speekenbrink/Badham/Steyvers; CPC18 remains `pics_v3/271238`)
 
 ## Authority
 
@@ -24,10 +25,11 @@ disposition only.
 | `analysis_2026Sep/mem/pics_v3_g1_schema_v5/` | **yes** (1414 programs) |
 | `pics_v3/g1_job_paths_g5e50p30.tsv` | **yes** (jobs 265753–265767) |
 | `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv` | **yes** (historical submit ledger; superseded actives kept) |
-| `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv` | **yes** (six keyed-reminder gated submits `287666`–`287671`) |
-| `pics_v3/gated_job_paths_g5e50p30.tsv` | **yes** (15 active gated run dirs; six under `pics_v3_reminder_v1/`) |
+| `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv` | **yes** (historical; six keyed-reminder submits `287666`–`287671`) |
+| `pics_v3/gated_job_paths_g5e50p30.tsv` | **yes** (15 active: 9×`pics_v3` + 3×`pics_v3_reminder_v1` + 3×`pics_v3_centaur_gap_v1`) |
 | `baseline_methods/config_baselines.yaml` Ours paths | **yes** (aligned to `gated_job_paths_g5e50p30.tsv`) |
-| `pics_v3_g1` / `pics_v3` / `pics_v3_reminder_v1` job outputs | **yes** (g5e50p30 gated complete) |
+| `analysis_2026Sep/Sep20_V3/others/gated_g5e50p30/STATUS.md` | **yes** (arm / reason / map source / mean LL) |
+| `pics_v3` / `pics_v3_reminder_v1` / `pics_v3_centaur_gap_v1` job outputs | **yes** (g5e50p30 gated complete) |
 
 ## Historical (kept; not active runtime)
 

@@ -58,7 +58,7 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 
 | Concept | Name | Meaning |
 | --- | --- | --- |
-| Method / gated target kind | `pics_v3` (plus `pics_v3_reminder_v1` for six keyed-reminder actives) | Output folder KIND for gated dual-arm target jobs |
+| Method / gated target kind | `pics_v3` + `pics_v3_reminder_v1` + `pics_v3_centaur_gap_v1` | Output folder KIND for gated dual-arm target jobs (see active ledger) |
 | G.1 kind | `pics_v3_g1` | Output folder KIND for global-only source populations |
 | Independent-source kind | `pics_v3_independent` | Optional live source-pop under gated independent mode |
 | Explicit independent source | `--t_pics_gated_source DATASET` | With `--t_pics_gated_independent`: name the live G.1 source dataset **without** a transfer map / `--t_pics_source_config`. Default map lookup unchanged when this flag is omitted. |
@@ -68,10 +68,11 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Annotation package (method) | `pics_v3_g1_schema_v5` | Schema-v5 annotations of g5e50p30 G.1 programs (feeds Occurrence-EB) |
 | Annotation package (offline MEM) | `pics_v3_participant_schema_v5` | Person-trace transitions; **not** a method stage; currently NONFINAL/cancelled |
 | G.1 path ledger | `pics_v3/g1_job_paths_g5e50p30.tsv` | Jobs `265753`–`265767` |
-| Gated active path ledger | `pics_v3/gated_job_paths_g5e50p30.tsv` | 15 canonical run dirs (`pics_v3/` + six `pics_v3_reminder_v1/`) |
+| Gated active path ledger | `pics_v3/gated_job_paths_g5e50p30.tsv` | 15 canonical run dirs (9×`pics_v3` + 3×`pics_v3_reminder_v1` + 3×`pics_v3_centaur_gap_v1`) |
 | Baseline method paths | `baseline_methods/config_baselines.yaml` | LM / PT / Centaur / **Ours** dirs; Ours must match gated active ledger |
+| Gated status table (arm / source) | `analysis_2026Sep/Sep20_V3/others/gated_g5e50p30/STATUS.md` | Per-dataset mean LL, gate arm/reason, map source |
 | W&B project (G.1) | `teh_pics_v3` | G.1 submitter default |
-| `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` | Gated run tag constant (`…_pics_v3_reminder_v1` for the six) |
+| `RUN_TAG` | `g5e50p30_occurrence_eb_pics_v3` (+ `_reminder_v1` / `_centaur_gap_v1` suffixes) | Gated run tag constants by KIND |
 
 These axes are separate: method KIND ≠ data protocol ≠ annotation taxonomy.
 
@@ -662,6 +663,26 @@ selectors from retrospective transfer diagnostics).
 (frozen; `peeked_transfer_at_freeze: false`). Freeze companions:
 `Transfer_source/pics_v3/schema5_occurrence_eb_freeze/`.
 
+**Official map winners (15 targets → selected source):**
+
+| Target | Selected source | Source G.1 | Cosine |
+| --- | --- | ---: | ---: |
+| Peterson | `mixed_gambles` | 265762 | 0.996 |
+| CPC18 | `1peterson2021using` | 265753 | 0.939 |
+| CCT | `1peterson2021using` | 265753 | 0.936 |
+| Wulff | `11enkavi2019recentprobes` | 265760 | 0.981 |
+| Speekenbrink | `3frey2017cct` | 265755 | 0.795 |
+| Hilbig | `11enkavi2019recentprobes` | 265760 | 0.979 |
+| Frey risk | `3frey2017cct` | 265755 | 0.939 |
+| Enkavi | `4wulff2018description` | 265756 | 0.981 |
+| Badham | `3frey2017cct` | 265755 | 0.845 |
+| mixed_gambles | `1peterson2021using` | 265753 | 0.996 |
+| bergert | `7hilbig2014generalized` | 265758 | 0.929 |
+| guan | `3frey2017cct` | 265755 | 0.953 |
+| Steyvers | `3frey2017cct` | 265755 | 0.663 |
+| Schulz | `3frey2017cct` | 265755 | 0.671 |
+| Kool | `3frey2017cct` | 265755 | 0.758 |
+
 Historical schema-v4 freezes (50-person G.1; not active):
 `occurrence_eb_schema4_iter10_pics_v3.yaml`,
 `occurrence_eb_schema4_5construct_iter10_pics_v3.yaml`.
@@ -733,6 +754,36 @@ Retained for G.3 / person: winner arm’s **full elite pool**; G.3 explore paren
 that arm’s pooled-TV rank-1 only (`explore_population_top_k=1`). No re-rank by
 participant-mean; personalization starts in G.3 (per-person TV). Raw source
 programs are never scored on the target.
+
+### Official active results (g5e50p30)
+
+Authoritative path list: `pics_v3/gated_job_paths_g5e50p30.tsv` (mirrored in
+`baseline_methods/config_baselines.yaml`). Living status table with the same
+columns: `analysis_2026Sep/Sep20_V3/others/gated_g5e50p30/STATUS.md`.
+
+Map source = `occurrence_eb_schema5_iter10_pics_v3.yaml` `targets.<alias>.selected_source`
+(G.1 job under `selected_source_job_id`). That source seeds the **transfer** arm
+only; the gate may still keep **control**.
+
+| Job | Dataset | KIND | n | mean test LL | gate arm | reason | map source | source G.1 | cosine |
+| ---: | --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: |
+| 277676 | Peterson | `pics_v3` | 30 | −0.438 | control | `control_better` | `mixed_gambles` | 265762 | 0.996 |
+| 271238 | CPC18 | `pics_v3` | 30 | −0.615 | **transfer** | `transfer_strictly_better` | `1peterson2021using` | 265753 | 0.939 |
+| 271239 | CCT | `pics_v3` | 30 | −0.570 | **transfer** | `transfer_strictly_better` | `1peterson2021using` | 265753 | 0.936 |
+| 271240 | Wulff | `pics_v3` | 30 | −0.646 | control | `exact_tie` | `11enkavi2019recentprobes` | 265760 | 0.981 |
+| 294983 | Speekenbrink | `pics_v3_centaur_gap_v1` | 23 | −0.732 | control | `control_better` | `3frey2017cct` | 265755 | 0.795 |
+| 271242 | Hilbig | `pics_v3` | 30 | −0.303 | control | `control_better` | `11enkavi2019recentprobes` | 265760 | 0.979 |
+| 271243 | Frey risk | `pics_v3` | 30 | −0.412 | control | `control_better` | `3frey2017cct` | 265755 | 0.939 |
+| 271244 | Enkavi | `pics_v3` | 30 | −0.362 | control | `exact_tie` | `4wulff2018description` | 265756 | 0.981 |
+| 294984 | Badham | `pics_v3_centaur_gap_v1` | 10 | −1.124 | control | `exact_tie` | `3frey2017cct` | 265755 | 0.845 |
+| 271246 | mixed_gambles | `pics_v3` | 30 | −0.490 | control | `control_better` | `1peterson2021using` | 265753 | 0.996 |
+| 271247 | bergert | `pics_v3` | 30 | −0.278 | **transfer** | `transfer_strictly_better` | `7hilbig2014generalized` | 265758 | 0.929 |
+| 287668 | guan | `pics_v3_reminder_v1` | 30 | −0.570 | control | `control_better` | `3frey2017cct` | 265755 | 0.953 |
+| 294985 | Steyvers | `pics_v3_centaur_gap_v1` | 30 | −1.386 | control | `exact_tie` | `3frey2017cct` | 265755 | 0.663 |
+| 287670 | Schulz | `pics_v3_reminder_v1` | 30 | −1.456 | control | `control_better` | `3frey2017cct` | 265755 | 0.671 |
+| 287671 | Kool | `pics_v3_reminder_v1` | 30 | −0.628 | control | `control_better` | `3frey2017cct` | 265755 | 0.758 |
+
+Transfer kept on **3/15** (CPC18, CCT, bergert). Exact ties keep control by design.
 
 ---
 
