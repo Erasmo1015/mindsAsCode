@@ -66,7 +66,7 @@ Total LLM candidates across \(M\) people in a gated job ≈ \(100 + 50M + 100M\)
 | Annotation taxonomy | `schema_v5` | Final five-construct vocabulary (population: `population_transition_v5`; offline person MEM: `participant_transition_v5`) |
 | Runtime source YAML | `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` | Frozen after g5e50p30 G.1 → **population** schema-v5 annotate → Occurrence-EB |
 | Annotation package (method) | `pics_v3_g1_schema_v5` | Schema-v5 annotations of g5e50p30 G.1 programs (feeds Occurrence-EB) |
-| Annotation package (offline MEM) | `pics_v3_participant_schema_v5` | Person-trace transitions; **not** a method stage; currently NONFINAL/cancelled |
+| Annotation package (offline MEM) | `pics_v3_participant_schema_v5` | Person-trace transitions; **not** a method stage; same five constructs as population schema-v5 |
 | G.1 path ledger | `pics_v3/g1_job_paths_g5e50p30.tsv` | Jobs `265753`–`265767` |
 | Gated active path ledger | `pics_v3/gated_job_paths_g5e50p30.tsv` | 15 canonical run dirs (9×`pics_v3` + 3×`pics_v3_reminder_v1` + 3×`pics_v3_centaur_gap_v1`) |
 | Baseline method paths | `baseline_methods/config_baselines.yaml` | LM / PT / Centaur / **Ours** dirs; Ours must match gated active ledger |
@@ -108,7 +108,7 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | 15× `pics_v3_g1` G.1 jobs (g5e50p30) | **complete** (`265753`–`265767`) |
 | `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
 | `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
-| Participant Schema-v5 annotations (`pics_v3_participant_schema_v5`) | **NONFINAL / cancelled mid-run (2026-09-22)** — offline MEM/interpretability only; not a method stage; gated paths are now approved — resume only with a fresh package keyed to `gated_job_paths_g5e50p30.tsv` |
+| Participant Schema-v5 annotations (`pics_v3_participant_schema_v5`) | **in progress / resume-safe** — offline MEM only; keyed to `gated_job_paths_g5e50p30.tsv`; same five definitions as population schema-v5 (§F) |
 | 15× gated targets (schema5; KIND mix `pics_v3` + `pics_v3_reminder_v1` + `pics_v3_centaur_gap_v1`) | **complete** (active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; active IDs: `277676`, `271238`–`271240`, `294983`, `271242`–`271244`, `294984`, `271246`–`271247`, `287668`, `294985`, `287670`–`287671`. Gap-v1 replaces Speekenbrink/`287666`, Badham/`287667`, steyvers/`287669`; reminder-v1 still active for guan/Schulz/Kool) |
 | schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
@@ -442,42 +442,59 @@ W&B: project `teh_pics_v3`. Resume/skip: worker may skip if
 
 ---
 
-## F. Schema-v4 annotation
+## F. Schema-v5 annotation (normative; population + person)
 
-**Taxonomy unchanged** from the v1 freeze; PICS v3 **re-annotates** new G.1
-programs into a **new package path** (do not overwrite v1 annotations).
+**Final ICLR taxonomy.** Both (1) G.1 **population** annotations that feed
+Occurrence-EB source selection and (2) offline **participant** MEM annotations
+use the **same** five-construct vocabulary. Code/notes often say **motif**;
+paper-facing term is **construct** (`ICLR_PAPER_TERMINOLOGY.md`).
 
-| Item | Value |
+Authoritative strings live in
+`utils/mem/schema_population_motif_v5.py` → `BEHAVIORAL_MOTIF_DEFINITIONS_V5`.
+Person schema `utils/mem/schema_participant_transition_v5.py` **imports** that
+dict (do not fork definitions).
+
+| Item | Population (method stage 4) | Participant (offline MEM; §F2) |
+| --- | --- | --- |
+| Module | `utils/mem/schema_population_motif_v5.py` | `utils/mem/schema_participant_transition_v5.py` |
+| `SCHEMA_VERSION` | 5 | 5 |
+| Prompt id | `population_transition_v5` | `participant_transition_v5` (+ calibrated stamp in §F2) |
+| Kind | `population_program_motif_transition` | person transition (`annotate_edits.py`) |
+| Annotator | `analysis/mem/annotate_population_programs.py` | `analysis/mem/annotate_edits.py` |
+| Model | `Qwen/Qwen2.5-Coder-32B-Instruct` | same |
+| vLLM `--max-model-len` | **16384** (`utils/mem/annotation_context.py`) | **16384** (same ceiling) |
+| Outputs | `analysis_2026Sep/mem/pics_v3_g1_schema_v5/` | `analysis_2026Sep/mem/pics_v3_participant_schema_v5/` |
+| Cluster | `cluster/v3/ours/main/submit_pop_annot_schema_v5.sh` | `cluster/v3/ours/main/submit_participant_annot_schema_v5.sh` |
+
+Dropped vs Schema-v4: `explicit_risk_mechanism` (and person-side `risk`). Linear
+EV \(p\cdot x\) remains under `probability_used` only.
+
+### Five motifs / constructs (verbatim from `BEHAVIORAL_MOTIF_DEFINITIONS_V5`)
+
+| Motif (code) / construct (paper) | Official definition |
 | --- | --- |
-| Module | `utils/mem/schema_population_motif_v4.py` |
-| `SCHEMA_VERSION` | 4 |
-| Prompt id | `population_transition_v4_2` |
-| Kind | `population_program_motif_transition` |
-| Annotator | `analysis/mem/annotate_population_programs.py` |
-| Model | `Qwen/Qwen2.5-Coder-32B-Instruct` (same as G.1) |
-| vLLM `--max-model-len` | **16384** (aligned with PICS v3 production; Schema-v5 pop+person share this ceiling via `utils/mem/annotation_context.py`) |
-| Planned outputs | `analysis_2026Sep/mem/pics_v3_g1_schema_v4/annotations/` |
-| Cluster template | `cluster/v2/ours/Qwen/job_pop_annot_dataset.sh` (`VLLM_MAX_MODEL_LEN`, default 16384) |
+| `history` | Program explicitly uses earlier choices, outcomes, trials, streaks, recency, counts, or a supplied history/trial buffer to change the current decision. Unused formal history arguments/parameters do not count. |
+| `value` | Program computes or compares option attractiveness, utility, expected payoff, benefits/costs, or a general option score that drives choice. Constant/random choice without option scoring does not count. Schema/action-coding flags alone are not Value. |
+| `probability_used` | Program explicitly reads or uses actual probability/likelihood/odds/uncertainty fields from the problem, including ordinary linear EV terms such as p*x. Empirical success rates built only from feedback history are feedback/learning, not probability_used. Unused probability fields do not count. An arbitrary field whose name contains 'mean', or a schema/action-coding flag, is not probability_used. |
+| `feedback` | Program directly uses realized past reward, correctness, success/failure, or outcome feedback to influence a later choice. Static current-trial payoffs or schema/action-coding flags are not feedback. Feedback without an update rule is NOT learning. |
+| `learning` | Program updates or reconstructs an internal belief, preference, option estimate, or decision rule across trials from experience (running means, Bayesian update, Q-like counts, parameter adaptation). Merely re-reading the last choice/reward without an update rule is history/feedback, not learning. |
 
-### Six motifs (verbatim definitions)
+**Population unit:** one G.1 population program (candidate) vs reference parent.
+Resume key: `dataset|run_id|iteration|candidate|parent`. Annotations never use
+transfer outcomes or held-out test performance.
 
-| Motif | Definition |
-| --- | --- |
-| `history` | Explicit use of earlier choices/outcomes/trials/streaks/recency/counts or a history buffer to change the current decision. Unused history parameters do not count. |
-| `value` | Computes/compares attractiveness, utility, expected payoff, benefits/costs, or option score. Constant/random choice without scoring does not count. |
-| `probability_used` | Explicitly reads probability/likelihood/odds/uncertainty from the problem, including linear EV \(p\cdot x\). Empirical rates from feedback alone are feedback/learning. |
-| `feedback` | Uses observed reward/correctness/success/failure/outcome to influence a later choice. Static current-trial payoffs are value. Feedback without an update rule is not learning. |
-| `learning` | Updates/reconstructs an internal belief/preference/estimate/rule across trials from experience. Re-reading last choice/reward without update is not learning. |
-| `explicit_risk_mechanism` | Beyond reading probability: nonlinear weighting, variance/downside, loss-aversion multipliers, risk penalty/bonus, etc. Linear EV alone is `probability_used` only. |
-
-**Unit:** one G.1 population program (candidate) vs reference parent under the
-population-transition contract. Resume key:
-`dataset|run_id|iteration|candidate|parent`. Annotations never use transfer
-outcomes or held-out test performance.
-
-Required LLM fields: `candidate_id`, `reference_motif_state`, `modified_motifs`,
-`motif_details`, `confidence`. Applicability:
+Required LLM fields (population): `candidate_id`, `reference_motif_state`,
+`modified_motifs`, `motif_details`, `confidence`. Applicability:
 `applicable` | `structural_na` | `not_applicable`.
+
+### Historical Schema-v4 (not active runtime)
+
+Six-motif package `pics_v3_g1_schema_v4` /
+`utils/mem/schema_population_motif_v4.py` (`population_transition_v4_2`) remains
+on disk for provenance. Active Occurrence-EB freeze is
+`occurrence_eb_schema5_iter10_pics_v3.yaml` on **schema-v5** presence counts.
+Do not treat v4 motif tables or `explicit_risk_mechanism` as the final ICLR
+vocabulary.
 
 ---
 
@@ -485,22 +502,22 @@ Required LLM fields: `candidate_id`, `reference_motif_state`, `modified_motifs`,
 
 **Not a main ICLR Method stage.** Stages 1–11 above induce and select programs.
 This section documents the **post-hoc** person-program motif-transition pipeline
-used for MEM / construct-effect interpretability on gated `pics_v3` person
-traces. It does **not** feed Occurrence-EB, the frozen source map, G.2/G.3, or
-program selection. Population annotations (`pics_v3_g1_schema_v5`), Occurrence-EB
-artifacts, and completed main results are unchanged by this pipeline.
+used for MEM / construct-effect interpretability on gated person traces
+(`pics_v3` / `pics_v3_reminder_v1` / `pics_v3_centaur_gap_v1` per
+`gated_job_paths_g5e50p30.tsv`). It does **not** feed Occurrence-EB, the frozen
+source map, G.2/G.3, or program selection. Population annotations
+(`pics_v3_g1_schema_v5`), Occurrence-EB freeze, and completed main results are
+unchanged by this pipeline.
 
-**Fleet status (2026-09-22):** participant annot shards `pannot5_*`
-(`283950–283953`, `283955–283957`; earlier `283954`) were **cancelled**. Partial
-outputs under `analysis_2026Sep/mem/pics_v3_participant_schema_v5/` are preserved
-and marked `NONFINAL_CANCELLED_2026Sep22.txt`. Do **not** resume, resubmit, or
-attach `afterok` annotation dependencies until final main-run gated paths are
-explicitly approved.
+**Fleet:** resume-safe jobs write under
+`by_dataset/<ds>/job_<ledger_id>/` keyed to the gated path ledger. Stale
+`NONFINAL_CANCELLED_2026Sep22.txt` markers from the cancelled first wave do not
+change which directory is official; clean them up after packages complete.
 
-### Five constructs; lean code-based labels
+### Shared five constructs; lean code-based labels
 
-Shared closed vocabulary with population Schema-v5 (no `risk` /
-`explicit_risk_mechanism` on the person side):
+**Same official definitions as §F** (imported
+`BEHAVIORAL_MOTIF_DEFINITIONS_V5`). Closed set:
 
 `history`, `value`, `probability_used`, `feedback`, `learning`
 
@@ -860,7 +877,7 @@ Does not regenerate Occurrence-EB or gated programs.
 | Any G.1 program set | annotations, Occurrence-EB YAML, G.2 audits, gated targets |
 | Protocol/prompt ceilings | G.1 and all downstream |
 
-| May stay frozen | v1/v2 artifacts, schema-v4 **definitions**, EB formulas/allowlist/tie policy |
+| May stay frozen | v1/v2 artifacts, historical schema-v4 **packages**, EB formulas/allowlist/tie policy (active taxonomy is schema-v5) |
 
 **Hardware templates** (docs / dry-run): H100 NVL TP=1; 2×L40S TP=2; 4×RTX3090
 TP=4; dtype BF16 (L40S/H100). Seeds: `split_seed=0`; phase decoding seeds as in
@@ -914,7 +931,7 @@ protocol / packing / W&B code.
 | v1 §1 phase overview | **Updated** — table rewritten for v3 kinds, ceilings, separate G.1 jobs |
 | v1 §2 terminology | **Updated** — retained meanings; paths/kinds v3 |
 | v1 §3 default vs independent | **Updated** — independent remains optional; default after v3 map reuses **v3** G.1 rank-1 |
-| v1 §4 / freeze Occurrence-EB + motifs | **Retained unchanged** scientifically; **updated** paths to planned `pics_v3` package; v1 numbers labeled historical |
+| v1 §4 / freeze Occurrence-EB + motifs | **Updated** — final taxonomy is **schema-v5 five motifs/constructs** (§F verbatim from `BEHAVIORAL_MOTIF_DEFINITIONS_V5`); v4 six-motif + risk is historical only |
 | v1 §5 G.1 | **Updated** — final G.1 is `pics_v3_g1` global-only; not YAML-bootstrap |
 | v1 §6 G.2 arms | **Updated** — protocol v3, 14k/5k, `g2_paired_pack_pics_v3` |
 | v1 §7 gate | **Changed in v3** — count-pooled TV (same as G.2 ranking); equal-person mean removed from the gate; tie rule unchanged |
@@ -933,10 +950,11 @@ protocol / packing / W&B code.
 | v2 G.2 14k pack | **Superseded** by `g2_paired_pack_pics_v3` |
 | v1 target→source identity table | **Superseded** — use `Transfer_source/pics_v3/occurrence_eb_schema5_iter10_pics_v3.yaml` |
 | v1 annotated program counts (1385) | **Historical only** — g5e50p30 schema-v5 count is 1414 |
-| *(new)* Offline participant Schema-v5 MEM | **Added §F2** — lean person transitions, postprocess, unresolved NMC, 16k budget; distinct from method stages 1–11 |
+| *(new)* Offline participant Schema-v5 MEM | **§F2** — lean person transitions, postprocess, unresolved NMC, 16k budget; **same five definitions as §F**; distinct from method stages 1–11 |
 | Phase table stage 4 | **Clarified** — population Schema-v5 only (feeds Occurrence-EB) |
 | §L execution order | **Clarified** — step 2 is population annotate; person MEM is offline after approved gated traces |
-| Artifact status / §A packages | **Updated** — person package NONFINAL/cancelled; dual pop vs person packages |
+| Artifact status / §A packages | **Updated** — dual pop vs person packages; person outs keyed to gated ledger job ids |
+| §F taxonomy | **Updated 2026-09-23** — replaced outdated schema-v4 six-motif table with schema-v5 official definitions |
 
 ---
 

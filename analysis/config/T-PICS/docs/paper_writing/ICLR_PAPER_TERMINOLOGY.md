@@ -1,112 +1,95 @@
-# ICLR paper terminology
+# ICLR paper terminology: implementation to manuscript
 
-## Finalized naming rules
+This guide follows the current Method section edited on 23 September 2026. Use the manuscript's wording in the paper and figures; use G.1/G.2 and code names only to locate implementation artifacts. Older EMNLP and PICS v3 notes do not override the current Method text.
 
-These rules supersede older wording in historical notes and implementation documentation.
+## Current paper vocabulary
 
-1. In the manuscript, call the complete method **Population-to-Individual Cognitive Synthesis (PICS)**. In professor-facing progress reports, **ICLR Method** is also acceptable. Do not write “PICS v3” unless distinguishing implementation versions in an internal note.
-2. Describe the data protocol as an **8:2 train--test split** with at most **40 training observations per participant** and at most **30 participants per dataset**. The test set remains untouched until final evaluation.
-3. Treat `train_val` only as a legacy implementation field name. In the paper, write **training data**, **training score**, or **training behavioral log-likelihood**. Do not introduce a validation set or a refinement stage. Paper **training data** \(D^{\mathrm{train}}\) ≡ implementation **`train_val`** (retained `train∪val` after the loader’s 60/20/20 split). The manuscript presents this as the 80% training half of an **8:2 train--test** protocol; the internal `val` slice is not a validation set for model selection. The budget \(B=40\) (`limited_train_val`) caps that paper-training / `train_val` set. Implementation-only per-split `train` / `val` diagnostics are not paper-facing sets.
-4. Call the paired target-population component **dual-track target-population evolution**. Its two tracks are the **target-only track** and the **transfer-conditioned track**. “Dual-track” describes the two matched search pathways; it does not assert simultaneous hardware execution.
-5. Call the gate the **training-based transfer gate**. It selects the winning target-population track using trial-pooled training log-likelihood.
-6. The gate retains the **complete winning elite program pool**. Its highest-scoring program is the sole population parent for participant-level exploration, while the complete retained pool initializes participant-level evolution.
-7. Programs return a **predictive probability distribution over the available actions**. For each available action, \(p_P(a\mid x_t,h_t)\in[0,1]\), and the probabilities sum to one. For binary tasks, this reduces to the scalar \(p_P(x_t,h_t)\in[0,1]\) for action 1.
-8. Reuse EMNLP terminology whenever the scientific concept is unchanged. Hide implementation labels such as G.1/G.2/G.3, TV, `rank-1`, `suffix`, `KIND`, and schema filenames from main-paper prose.
+| Implementation or older wording | Current manuscript wording | Meaning |
+| --- | --- | --- |
+| `pics_v3`, T-PICS | **Population-to-Individual Cognitive Synthesis (PICS)** | Name of the complete method. |
+| Dataset-adaptive or dataset-specific prompt | **Dataset-adapted prompt** or **dataset-adapted prompt construction** | An LLM constructs the prompt from the task description and representative training trials. |
+| Source population / population, when referring to code | **Dataset-focused population program**, **population program**, or **population program pool** | Say “program” when the object is executable code; use “pool” for the set of candidate programs. |
+| G.1 source population job | **Single dataset-focused population program evolution** | Constructs candidate population programs independently from each dataset's pooled training observations. These programs supply the source library and cognitive-construct annotations. |
+| Motif labels | **Cognitive constructs** | The five paper labels are **history, value, probability, feedback, and learning**. The code label `probability_used` becomes **probability** in prose and figures. |
+| Occurrence-EB source map | **Cognitive construct profile** and **similar dataset selection** | A five-dimensional empirical-Bayes profile represents each dataset; cosine similarity selects another dataset as a source. |
+| G.2 control arm; older “target-only track” | **Separately evolved dataset-focused population programs** | A fresh dataset-focused search on target training observations supplies the choice gate's comparison. It is distinct from the G.1 library-building run. |
+| G.2 transfer arm; older “transfer-conditioned track” | **Transfer-based population program evolution** | A separate search on target training observations, with the selected similar dataset's program, task schema, and one training demonstration in the generation prompt. The source program is context, not a seed or a target-pool parent. |
+| Transfer gate / training-based transfer gate | **Choice gate** | Retains the transfer-based program pool only if its highest-ranked program has strictly higher trial-pooled training log-likelihood than the separately evolved dataset-focused comparison; otherwise retains the dataset-focused pool. |
+| G.3 exploration | **Participant-level exploration** | Generates participant-level candidates from the retained highest-ranked population program. |
+| G.4 participant evolution | **Participant-level multi-parent program evolution** | Starts from the retained elite pool merged with participant-level candidates and evolves individual cognitive programs. |
+| `rank-1`, `selected/` | **Highest-ranked population program**, **retained population program pool** | The highest-ranked retained program is the sole population parent for participant-level exploration; the complete retained elite pool initializes participant-level evolution. |
 
-## 1. Existing concepts: reuse the EMNLP terminology
+The conceptual paper narrative is **dataset-adapted prompt → dataset-focused population programs → similar dataset selection → transfer-based population programs and choice gate → participant-level exploration → participant-level multi-parent program evolution**. This narrative does not say the two target searches run simultaneously. In the implementation, G.1 library construction precedes the two fresh G.2 target searches; the G.2 searches are executed sequentially.
 
-| Impl Name | Paper Name | Meaning | Source of Paper Name |
-| --- | --- | --- | --- |
-| `pics_v3` | **Population-to-Individual Cognitive Synthesis (PICS)**; **ICLR Method** in professor-facing reports | The complete finalized ICLR approach. | PICS/EMNLP paper + finalized ICLR naming |
-| `choose(problem, history)` | **individual cognitive program** \(P_i\) | An executable program mapping the current decision context and behavioral history to a predictive choice distribution. | PICS/EMNLP paper |
-| `problem`, `history`, `action` | **decision context** \(x_t\), **behavioral history** \(h_t\), **observed action** \(a_t\) | The information available before trial \(t\), the preceding behavioral record, and the participant’s observed choice. | PICS/EMNLP paper |
-| Returned scalar/vector/dictionary | **predictive probability distribution** \(p_P(\cdot\mid x_t,h_t)\) | A distribution over the available action set \(\mathcal A_t\), with \(p_P(a\mid x_t,h_t)\in[0,1]\) and \(\sum_{a\in\mathcal A_t}p_P(a\mid x_t,h_t)=1\). For binary tasks, \(p_P(x_t,h_t)\) denotes the probability of action 1. | Generalized PICS representation for binary and multi-action datasets |
-| `seed_program.py` | **seed program** \(P_0\) | The neutral initial program, which returns a uniform probability distribution over the available actions. | PICS/EMNLP paper + finalized notation |
-| `candidate`, `parent`, `child` | **candidate program**, **parent program**, **child program** | Programs evaluated during evolutionary search and their generation relationships. | PICS/EMNLP paper; standard evolutionary-computation terminology |
-| `global_phase`, G.1 | **source-population synthesis** | Evolutionary search over training observations pooled within a dataset to construct reusable source population programs. | PICS population phase, specialized for the ICLR transfer pipeline |
-| `global_phase/best_program.py`, `rank-1` | **highest-scoring source population program** \(P_d^{\mathrm{pop}}\) | The source population candidate with the highest trial-pooled training log-likelihood for dataset \(d\). | PICS/EMNLP paper; `rank-1` remains implementation language |
-| `global_elite_pool`, `elite_pool_size` | **elite program pool** \(\mathcal E\) | The retained set of high-scoring candidate programs available for parent selection or downstream initialization. | PICS/EMNLP paper |
-| `sample_parents`, `sample_size` | **multi-parent evolutionary search** | The LLM generates child programs conditioned jointly on multiple selected parent programs. | PICS/EMNLP paper |
-| `fresh_n_candidates` and its decay | **seed-based exploration** within an **exploration-to-exploitation schedule** | Early iterations generate more candidates from \(P_0\); later iterations increasingly use high-scoring programs from the evolving pool. | PICS/EMNLP paper |
-| Automatic dataset prompt | **dataset-specific program-generation prompt** | An automatically constructed instruction specifying the dataset interface, action convention, available information, and executable-program requirements. | PICS/EMNLP paper |
-| `prefer_auto_llm_prompt` | **dataset-adaptive prompting** | Automatic adaptation of the program-generation prompt to each dataset using task metadata and representative training trials. | PICS/EMNLP paper |
-| `runtime_valid`, invalid candidate | **executability filtering** | Compilation, runtime, and probability-distribution checks applied before candidate selection. | PICS/EMNLP paper |
-| G.3, `explore_candidates=50`, `rank-1 only` | **best-program-conditioned participant exploration** | Generates diverse participant-conditioned candidates from the gate-winning highest-scoring target-population program before iterative participant evolution. | PICS participant-level exploration + finalized ICLR conditioning rule |
-| Participant TEH, `n_iterations=10` | **participant-level multi-parent evolution** | Iteratively adapts the retained target-population candidates to one participant using that participant’s training observations. | PICS/EMNLP paper |
-| `selection_score`, internal `train_val` score | **training behavioral log-likelihood** or **training fitness** \(S_{\mathrm{train}}(P)\) | The score used to rank and select programs during synthesis. The internal field name is not paper terminology. | Finalized 8:2 train--test protocol |
-| Internal `TV` data | **training data** \(D_i^{\mathrm{train}}\) | All participant observations permitted to influence prompt construction, synthesis, gating, and selection. Do not write “TV” in the paper. | Finalized 8:2 train--test protocol |
-| Internal `pooled TV` | **pooled training observations** \(D_d^{\mathrm{train}}=\bigcup_iD_{di}^{\mathrm{train}}\) | The union of training trials across participants in dataset \(d\). | PICS pooled population evaluation + finalized protocol |
-| `final/mean_test_loglik` | **average held-out per-trial log-likelihood** | Final predictive performance averaged across participants. | PICS/EMNLP paper |
-| Final participant `best_program.py` | **selected individual cognitive program** \(P_{di}^{\star}\) | The final program selected for participant \(i\) in dataset \(d\) using training fitness. | PICS/EMNLP paper + finalized protocol |
-| `test reporting only` | **held-out test evaluation** | Test observations evaluate an already selected program and never affect synthesis, source selection, gating, or program selection. | PICS/EMNLP paper |
+### Two uses of “dataset-focused”
 
-## 2. New ICLR concepts: paper-facing terminology
+The current manuscript uses **dataset-focused population programs** both for the G.1 source library and for the separately evolved G.2 comparison at the choice gate. These use the same broad approach—search using one dataset's own training observations—but are **different runs**. G.1 uses 10 iterations per dataset; the two G.2 searches each use 5 iterations on the target dataset. Keep this distinction explicit in implementation-facing notes and appendix budgets. In the main paper, the phrase **“separately evolved dataset-focused population programs”** distinguishes the gate comparison without introducing G.1/G.2 labels.
 
-| Impl Name | Paper Name | Meaning | Source of Paper Name |
-| --- | --- | --- | --- |
-| `structure_aware_v3` | **structure-aware sparse-observation protocol** | Preserves each dataset’s problem, block, episode, or temporal organization when constructing train--test splits and behavioral histories. | New descriptive PICS term |
-| `SA40`, `limited_train_val=40` | **40-observation training setting** or **training-observation budget \(B=40\)** | Retains at most 40 training observations per participant after the grouped 8:2 train--test split; the test set remains unchanged. “SA40” may be used only as a compact appendix or table label after definition. | Finalized sparse-observation protocol |
-| Participant cap | **up to 30 participants per dataset** | The finalized ICLR evaluation includes at most 30 eligible participants from each dataset. | Finalized experimental protocol |
-| Independent / Resetting / Continuous families | **independent-trial**, **episodic**, and **continuous sequential** task structures | Distinguishes history-free trials, units with history resets, and uninterrupted temporal sequences. | Standard sequential-decision terminology adapted to the data organizations |
-| `sanitize_problem_for_choose` | **pre-decision information set** | Program input restricted to information available before the current choice. | Standard decision-modeling terminology |
-| Removed current/future outcome fields | **information-leakage control** | Excludes labels, future outcomes, correctness, and oracle variables from program inputs and prompts. | Standard evaluation terminology |
-| `prompt_snapshots`, JSON snapshots | **structured behavioral context** or **structured training examples** | Serialized decision contexts, bounded behavioral histories, and observed actions supplied to the LLM. | New descriptive PICS term |
-| `schema_v4`, historical six-construct artifacts | **historical cognitive-construct annotation schema** | Earlier annotations include explicit risk. Preserve their provenance; do not relabel them as the final schema. | Historical PICS artifact terminology |
-| `schema_v5`, five constructs | **five-construct cognitive vocabulary** \(\mathcal C\) | The finalized source-selection vocabulary: history, value, probability use, feedback, and learning. | Finalized ICLR taxonomy |
-| Motif presence fields | **program-level construct indicators** \(X_{dkc}\in\{0,1\}\) | Indicates whether source-population program \(k\) from dataset \(d\) explicitly instantiates construct \(c\). | Finalized source-selection formulation |
-| Candidate/reference annotation | **evolutionary program-transition annotation** | Identifies cognitive constructs introduced, removed, or modified by a structural program edit. Use for participant-evolution analysis when applicable. | New descriptive PICS term; related to structural transfer analysis in genetic programming ([ScienceDirect][2]) |
-| Construct counts \(k/n\) | **construct occurrence rate** | Dataset-level frequency with which a construct appears among annotated candidate population programs. | New descriptive term |
-| \(\widetilde p=(k+0.5)/(n+1)\) | **Jeffreys-smoothed construct occurrence rate** | Stabilized Bernoulli occurrence estimate before cross-dataset comparison. | Standard Jeffreys-prior terminology |
-| MoM \(\tau^2\), shrinkage toward \(\alpha\) | **empirical-Bayes shrinkage** or **partial pooling of construct occurrence rates** | Dataset-specific occurrence estimates borrow strength from the cross-dataset distribution while preserving reliable dataset-specific variation. | Standard empirical-Bayes terminology ([arXiv][3]); hierarchical cognitive modeling uses related logic ([Lee][4]) |
-| `Occurrence-EB` | **empirical-Bayes construct-profile source selection** | Represents each dataset using a five-dimensional shrinkage-adjusted construct-occurrence profile and selects a source by profile similarity. It is not the participant mixed-effects model. | New PICS name combining empirical-Bayes shrinkage with source selection |
-| 1,445 annotations across 15 datasets | **1,445 annotated candidate population programs across 15 datasets** | The evidence used to estimate the finalized five-dimensional task representations. | Finalized ICLR source-selection analysis |
-| Six-source allowlist | **candidate source-task set** \(\mathcal S\) | The predefined datasets eligible to provide cross-task knowledge. | Standard transfer-learning terminology |
-| Self-exclusion | **leave-target-out source selection** | Excludes the target dataset itself from its candidate source-task set. | New descriptive term |
-| `argmax cosine` | **construct-profile similarity** | Cosine similarity between empirical-Bayes construct profiles determines the selected source task. | Task-similarity-based source selection in transfer learning ([ScienceDirect][5]) |
-| Frozen source YAML, no transfer peek | **transfer-outcome-independent source selection** | The source map is selected and frozen without observing target-transfer or test performance. | New descriptive PICS term; related source-selection framing ([ACL Anthology][6]) |
-| G.2 overall | **dual-track target-population evolution** | Evolves target-population programs along two matched search tracks and applies a training-based transfer gate. | Finalized ICLR component name |
-| G.2 control arm/branch | **target-only track** \(P_t^{\mathrm{target},\star}\) | Evolves target-population programs from \(P_0\) using target training data, the target prompt, and the common search budget. | Finalized dual-track terminology |
-| G.2 transfer arm/branch | **transfer-conditioned track** \(P_t^{\mathrm{transfer},\star}\) | Uses the same target training data, initialization, and search budget while additionally conditioning generation on the selected source-task context. | Finalized dual-track terminology |
-| `source suffix` | **source-task context** | The selected source population program, source-task schema, transfer instruction, and one source training demonstration included in the generation prompt. | New descriptive PICS term |
-| One source `TV` example | **one-shot source-task training demonstration** | A single labeled source training example included in the LLM context. | Standard in-context-learning terminology ([Brown et al.][7]) |
-| Source is context, not seed/parent | **prompt-mediated cross-task transfer** | Source knowledge conditions target program generation without inserting the source program into the target candidate pool. | New PICS term distinguishing the method from parameter, instance, and direct program transfer |
-| `g2_paired_pack_pics_v3` | **context-budget-matched dual-track search** | Both tracks use the same target training examples, initialization, parent-context cardinality, and search budget; source-task context is the designed difference. | Finalized matched dual-track design |
-| `paired_parent_count` | **matched parent-context cardinality** | Holds the number of target parent programs constant across the two tracks while allowing their identities to differ. | New descriptive term |
-| Internal `count-pooled train_val` | **trial-pooled training log-likelihood** \(S_{\mathrm{train}}(P;D_t^{\mathrm{train}})\) | Mean log-likelihood over the pooled target training trials, weighting participants in proportion to their numbers of retained trials. | Standard pooled-likelihood description + finalized protocol |
-| Equal-person mean | **participant-averaged held-out log-likelihood** | Computes each participant’s held-out mean first and then averages participants equally; used for final reporting, not gating. | Standard participant-level aggregation description |
-| G.2 `gate` | **training-based transfer gate** | Retains the transfer-conditioned track only when its highest-scoring program has strictly higher trial-pooled training log-likelihood than the target-only track; otherwise retains the target-only track. | Finalized PICS term; selective-transfer safeguard against negative transfer ([Wang et al.][8]) |
-| `S_tr`, `S_ctl` | **transfer-conditioned training score** \(S_t^{\mathrm{transfer}}\) and **target-only training score** \(S_t^{\mathrm{target}}\) | Scores compared by the training-based transfer gate. Avoid abbreviated `tr`, which can be confused with “training.” | Finalized PICS notation |
-| Tie/failure → control | **conservative target-only fallback** | Retains the target-only track unless the transfer-conditioned track is valid and strictly better by training log-likelihood. | Negative-transfer prevention terminology ([Wang et al.][8]) |
-| Winner track’s rank-1 program | **gate-winning highest-scoring target-population program** \(P_t^\star\) | The highest-scoring program in the retained track. It is the sole population parent for participant-level exploration. | Finalized PICS search design |
-| Winner track’s full elite pool | **retained target-population elite pool** \(\mathcal E_t^\star\) | The complete elite pool from the gate-winning track. It initializes participant-level multi-parent evolution. | Finalized PICS search design |
-| G.3 `rank-1 only` | **best-program-conditioned participant exploration** | Participant exploration is conditioned only on \(P_t^\star\). | Extension of the PICS participant-exploration terminology |
-| No source suffix after G.2 | **target-only participant specialization** | Cross-task context is converted into target-population programs before participant search; participant synthesis subsequently uses target programs and target training observations only. | New descriptive PICS term |
-| Paper “350” schedule | **nominal candidate-generation budget of 350 programs** | Counts 100 source-population candidates, 100 candidates across both target-population tracks, 50 participant-exploration candidates, and 100 participant-evolution candidates. Never call this “350 iterations.” | Finalized search-budget description |
-| `max_model_len=16384` | **maximum context length of 16,384 tokens** | Context limit used by the finalized experiments. | Finalized implementation setting |
-| Overflow packing order | **training-trial-first context truncation** | When the prompt exceeds the context budget, PICS truncates training-trial examples before truncating parent-program context. | Finalized prompt-packing policy |
-| “co-evolutionary search” | **Do not use; write dual-track target-population evolution** | The tracks do not coadapt or define one another’s fitness, so cooperative-coevolution terminology is incorrect. | Standard cooperative-coevolution definition ([Potter and De Jong][9]) |
+The G.1 target program is not an input to the reported choice gate. That gate compares the two G.2 highest-ranked programs on target training observations. Do not describe it as selecting the best program across G.1 and G.2.
 
-## Core ICLR component names
+## Cognitive constructs and source selection
 
-The three central new component names are:
+| Paper construct | Implementation label | Presence means the program... |
+| --- | --- | --- |
+| History | `history` | Uses prior choices or trial records to affect a current decision. |
+| Value | `value` | Scores or compares options by attractiveness, utility, or payoff. |
+| Probability | `probability_used` | Uses task probability, likelihood, or odds information. |
+| Feedback | `feedback` | Uses realized past outcomes to affect a later choice. |
+| Learning | `learning` | Updates or reconstructs an internal estimate or decision rule from experience. |
 
-1. **Empirical-Bayes construct-profile source selection**
-2. **Dual-track target-population evolution**
-3. **Training-based transfer gate**
+The paper says that an LLM annotates **1,445 candidate dataset-focused population programs across 15 datasets**. Their construct occurrence estimates, with empirical-Bayes shrinkage, form the five-dimensional profile \(\mathbf v_d\). The paper uses \(s^\star(t)\) for the non-target dataset with the highest profile cosine similarity. In the current Method, \(\mathcal S\) is defined as the 15 evaluated datasets and \(s\ne t\) leaves 14 possible sources. Treat that as the **current manuscript statement**; verify it against the final frozen source configuration before making a stronger implementation claim.
 
-The participant stages retain the PICS terminology **best-program-conditioned participant exploration** and **participant-level multi-parent evolution**.
+Do not call source selection a participant mixed-effects model. The empirical-Bayes construct profiles summarize candidate population programs; the separate joint analysis of participant candidate edits uses different observations and notation.
 
-## Terms to avoid in the manuscript
+## Data, scores, and program notation
 
-- PICS v3, T-PICS, G.1, G.2, or G.3, except in internal implementation notes.
-- Training-validation, observed training-validation, TV, or `train_val` as paper-facing data terminology.
-- Validation set, validation-guided selection, or refinement stage.
-- Control arm, transfer arm, control branch, or transfer branch.
-- Observed-data transfer gate; use **training-based transfer gate**.
-- Gated target-population synthesis, when referring to the full component; use **dual-track target-population evolution**.
-- Co-evolutionary search.
-- Rank-1, suffix, paired pack, allowlist, or implementation filenames in main-paper prose.
-- Uniform choice probability when multiple actions are possible; use **uniform probability distribution over the available actions**.
+| Implementation | Paper term or symbol | Interpretation |
+| --- | --- | --- |
+| `structure_aware_v3`, grouped splitter | **Training and held-out test sets in an 8:2 ratio** | Repeated trials from the same problem or block are grouped before splitting. The paper's Experiment Setup explains the grouping. |
+| `limited_train_val=40`, SA40 | **At most 40 training observations per participant** | The held-out test set is reserved for evaluation. |
+| Participant range | **Up to 30 participants per dataset** | Dataset-specific exceptions can be stated in Experiment Setup. |
+| `train_val`, pooled train∪val | **Training data**, **training score**, **training behavioral log-likelihood** | `train_val` is an internal field name; do not describe a validation set or refinement stage in this paper. |
+| `pool_best_selection_score`, gate `pooled_train_val_loglik` | **Trial-pooled training log-likelihood** | Mean log-likelihood across pooled target training trials; used for population program ranking and the choice gate. |
+| Per-person final test score | **Held-out per-trial log-likelihood** | Final performance is averaged over participants as stated in the Experiments section. Test observations do not decide source selection, the choice gate, or program selection. |
+| `seed_program.py` | **Uniform seed program** \(P_0\) | Returns a uniform probability distribution over the available actions, including multi-action tasks. |
+| `problem`, `history`, `action` | **Decision context** \(x_t\), **behavioral history** \(h_t\), **observed action** \(a_t\) | Inputs and observed response for a trial. |
+| `choose(problem, history)` | **Individual cognitive program** | An executable program mapping \((x_t,h_t)\) to \(p_P(\cdot\mid x_t,h_t)\), a predictive distribution over available actions. |
+| Returned scalar/vector/dict | \(p_P(a\mid x_t,h_t)\in[0,1]\), \(\sum_{a\in\mathcal A_t}p_P(a\mid x_t,h_t)=1\) | Paper representation of a valid choice distribution. |
+| `sample_parents`, `fresh_n_candidates` | **Multiple parent programs**; **seed-based exploratory candidates**; **exploration-to-exploitation schedule** | Early iterations generate more candidates from \(P_0\), while later iterations use high-performing programs in the pool. |
+| `runtime_valid` | **Executability filtering** | Invalid programs are excluded before selection. LLM token likelihood is not the behavioral fitness. |
+
+## Search budgets: appendix-facing facts
+
+| Implementation stage | Candidate generations | Scope |
+| --- | ---: | --- |
+| G.1 dataset-focused library construction | \(10\times10=100\) | Per dataset; built separately from the target comparison. |
+| G.2 separately evolved dataset-focused target search | \(5\times10=50\) | Per target dataset. |
+| G.2 transfer-based target search | \(5\times10=50\) | Per target dataset; matched to the G.2 dataset-focused search. |
+| Participant-level exploration | 50 | Per participant. |
+| Participant-level multi-parent program evolution | \(10\times10=100\) | Per participant. |
+
+The commonly cited \(100+50+50+50+100=350\) counts one G.1 block, both G.2 searches, and one participant's stages **once each**. It is a candidate-generation accounting convention, not 350 iterations or the full job cost over all participants. Population program searches are shared across participants; participant searches repeat for each person. The final runs use a maximum model context length of 16,384 tokens. Under prompt overflow, training-trial examples are truncated before parent-program context.
+
+## Exact paper wording for an implementation-sensitive distinction
+
+The current Method uses this wording for the choice gate:
+
+> A \emph{choice gate} retains the transfer-based population program pool produced by the transfer-based approach only when its highest-ranked program achieves strictly higher training log-likelihood than \zc{that of the separately evolved dataset-focused population programs}; otherwise, it retains the dataset-focused population pool.
+
+This wording identifies the G.2 dataset-focused comparison. The earlier dataset-focused source-library search is a distinct run, even though the paper applies the same name to its population programs.
+
+## Terms to avoid in manuscript prose
+
+- PICS v3, T-PICS, G.1/G.2/G.3/G.4, `train_val`, TV, `rank-1`, suffix, paired pack, schema filenames, or job paths, except where implementation detail is explicitly needed in an appendix.
+- Dataset-adaptive or dataset-specific **prompt**; use **dataset-adapted prompt**.
+- Probability use as the paper construct label; use **probability**. Keep `probability_used` as the code label.
+- Dual-track target-population evolution, target-only track, transfer-conditioned track, or control/transfer arm as component headings. Use the current Method's dataset-focused, transfer-based, and choice-gate language.
+- Training-based transfer gate as the official gate name; use **choice gate**.
+- Validation-based selection or refinement stage. The paper presents an 8:2 train–test split.
+- Uniform *binary* choice probability when the method covers multiple actions; use **uniform probability distribution over the available actions**.
+
+The current Method draft still contains one old phrase, **“dual-track target-population evolution,”** immediately after the source-selection equation. Replace it in the manuscript before treating that paragraph as finalized. Keep Arunesh's source-selection heading and his intended contrast between dataset-focused and transfer-based population program evolution.
+
 
 [1]: https://nlp.cs.berkeley.edu/pubs/Liang-Jordan-Klein_2010_Programs_paper.pdf "Learning Programs: A Hierarchical Bayesian Approach"
 [2]: https://www.sciencedirect.com/science/article/pii/S0031320324010409 "Semantics-guided multi-task genetic programming for multi-output regression"
