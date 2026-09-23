@@ -26,7 +26,8 @@ INDEPENDENT_KIND = "pics_v3_independent"
 REMINDER_RERUN_KIND = "pics_v3_reminder_v1"
 RUN_TAG = "g5e50p30_occurrence_eb_pics_v3"
 REMINDER_RERUN_TAG = "g5e50p30_occurrence_eb_pics_v3_reminder_v1"
-# Centaur-gap audit fixes (Steyvers/CPC18/Badham/Speeken); new OUT_DIR root.
+# Centaur-gap audit fixes (Steyvers/Badham/Speeken); new OUT_DIR root.
+# CPC18 prompt/example coverage from that audit was reverted after job_294982.
 # Policy dataset_keyed_post_adaptive_v2; reuses frozen G.1 + source YAML.
 CENTAUR_GAP_RERUN_KIND = "pics_v3_centaur_gap_v1"
 CENTAUR_GAP_RERUN_TAG = "g5e50p30_occurrence_eb_pics_v3_centaur_gap_v1"

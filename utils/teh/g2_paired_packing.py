@@ -239,13 +239,6 @@ def freeze_g2_target_examples(
         subsample_seed=int(prompt_train_trials_seed),
         pooled=len(pids) > 1,
     )
-    from utils.teh.pics_v3_cpc18_prompt import ensure_cpc18_feedback_regime_examples
-
-    selected, cpc18_diag = ensure_cpc18_feedback_regime_examples(
-        selected, union, dataset=alias
-    )
-    sel_diag = dict(sel_diag)
-    sel_diag["cpc18_feedback_regime"] = cpc18_diag
     reservation_parent = pad_parent_to_max_chars(seed_code, int(max_parent_chars))
     transfer_instruction = _instruction_with_suffix(infer_text, source_suffix)
     n_reserve = max(1, min(int(sample_size), 8))

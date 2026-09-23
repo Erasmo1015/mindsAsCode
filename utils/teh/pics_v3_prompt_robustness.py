@@ -6,8 +6,10 @@ Prospective policy ``dataset_keyed_post_adaptive_v2``: for named datasets only,
 replace that block body with a concise dataset-keyed reminder. All other datasets
 keep the byte-identical legacy block.
 
-v2 revises Steyvers / Badham / Speekenbrink guidance and adds CPC18
-(``2plonsky2018when``). Kool / Schulz / Guan bodies stay byte-identical to v1.
+v2 revises Steyvers / Badham / Speekenbrink guidance. CPC18
+(``2plonsky2018when``) stays on the legacy generic block (centaur-gap CPC18
+prompt/example changes reverted after ``job_294982`` did not improve).
+Kool / Schulz / Guan bodies stay byte-identical to v1.
 """
 from __future__ import annotations
 
@@ -36,7 +38,6 @@ HISTORY_ROBUSTNESS_BLOCK = (
 # Datasets that receive a keyed override under dataset_keyed_post_adaptive_v2.
 DATASET_KEYED_REMINDER_ALIASES = frozenset(
     {
-        "2plonsky2018when",
         "5speekenbrink2008learning",
         "14kool2016when",
         "steyvers_2009_bandit",
@@ -48,19 +49,6 @@ DATASET_KEYED_REMINDER_ALIASES = frozenset(
 
 # Bodies only (no markers). Kept factual from loaders / frozen contracts.
 _DATASET_KEYED_REMINDER_BODIES: Dict[str, str] = {
-    "2plonsky2018when": (
-        "`history` may be empty; use `.get` for optional fields. "
-        "Within each problem, history is chronological over up to 25 repeats.\n"
-        "Structured history exposes `action` and, when present, a scalar "
-        "`feedback` = the realized payoff of the **chosen** option only. "
-        "Do not assume a forgone/unchosen outcome is available in `history` "
-        "(it is not represented). Early trials often have `feedback is None`; "
-        "later trials may include chosen-option feedback. "
-        "`problem['has_feedback']` is block-level metadata—prefer checking "
-        "`history[i].get('feedback')` for the actual regime. "
-        "Combine description (`gamble_*` probs/rewards) with experiential "
-        "chosen feedback when present. Return calibrated P(action=1)."
-    ),
     "5speekenbrink2008learning": (
         "`history` may be empty; use `.get` for optional history fields. "
         "Do not read current-trial weather/correctness from `problem`.\n"

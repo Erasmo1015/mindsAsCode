@@ -5246,18 +5246,6 @@ def _cap_and_subsample_prompt_trials(
             subsample_seed=subsample_seed,
             pooled=len(pids) > 1,
         )
-        from utils.teh.pics_v3_cpc18_prompt import ensure_cpc18_feedback_regime_examples
-
-        selected, cpc18_diag = ensure_cpc18_feedback_regime_examples(
-            selected, trials, dataset=alias
-        )
-        if cpc18_diag.get("applied"):
-            print(
-                f"[LLM prompt v2] CPC18 feedback-regime coverage: "
-                f"action={cpc18_diag.get('action')} "
-                f"no_fb={cpc18_diag.get('selected_no_feedback')} "
-                f"fb={cpc18_diag.get('selected_feedback')}"
-            )
         print(
             f"[LLM prompt v2] Using {len(selected)} of {len(trials)} {label} trials "
             f"(structure-aware, max={max_trials}, seed={subsample_seed}, "

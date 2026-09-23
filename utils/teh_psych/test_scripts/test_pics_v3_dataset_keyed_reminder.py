@@ -49,6 +49,7 @@ _FROZEN_GUAN = (
 
 UNAFFECTED_ALIASES = (
     "1peterson2021using",
+    "2plonsky2018when",
     "3frey2017cct",
     "4wulff2018description",
     "7hilbig2014generalized",
@@ -77,9 +78,8 @@ def teardown_function() -> None:
     configure_pics_v3_legacy_generic_reminder(False)
 
 
-def test_keyed_aliases_include_cpc18_and_six_prior() -> None:
+def test_keyed_aliases_are_exactly_the_six() -> None:
     assert DATASET_KEYED_REMINDER_ALIASES == {
-        "2plonsky2018when",
         "5speekenbrink2008learning",
         "14kool2016when",
         "steyvers_2009_bandit",
@@ -203,16 +203,6 @@ def test_schulz_unchanged_bandit_guidance() -> None:
     assert "primary" in body
 
 
-def test_cpc18_chosen_feedback_only_no_forgone_field() -> None:
-    body = all_dataset_keyed_reminder_bodies()["2plonsky2018when"]
-    assert "chosen" in body
-    assert "forgone" in body or "unchosen" in body
-    assert "feedback is None" in body
-    assert "has_feedback" in body
-    assert "forgone_feedback" not in body
-    assert "unchosen_reward" not in body
-
-
 def test_guan_has_no_feedback_reward_coaching() -> None:
     body = all_dataset_keyed_reminder_bodies()["guan_2020_stopping"]
     assert "No `feedback`/`reward` interface" in body
@@ -257,7 +247,6 @@ def test_independent_unaffected_do_not_get_keyed_bandit_or_stopping_text() -> No
         "0=continue, 1=stop",
         "rule_block_id",
         "was_correct` / `weather_outcome",
-        "forgone",
     )
     for alias in UNAFFECTED_ALIASES:
         block = resolve_history_robustness_block(alias)

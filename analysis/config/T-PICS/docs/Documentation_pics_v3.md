@@ -108,7 +108,7 @@ Ordinals are list indices, not necessarily raw HF subject ids (e.g. Wulff
 | `pics_v3_g1_schema_v5` annotations | **complete** (1414 / 1414) |
 | `occurrence_eb_schema5_iter10_pics_v3.yaml` | **frozen** (active runtime) |
 | Participant Schema-v5 annotations (`pics_v3_participant_schema_v5`) | **NONFINAL / cancelled mid-run (2026-09-22)** — offline MEM/interpretability only; not a method stage; gated paths are now approved — resume only with a fresh package keyed to `gated_job_paths_g5e50p30.tsv` |
-| 15× gated targets (schema5; active KIND mix `pics_v3` + `pics_v3_reminder_v1`) | **complete** (active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; submit ledgers `2026Sep21_PICS_v3_gated_g5e50p30.tsv` + `2026Sep22_PICS_v3_gated_reminder_v1.tsv`; active IDs: `277676`, `271238`–`271240`, `287666`, `271242`–`271244`, `287667`, `271246`–`271247`, `287668`–`287671`. Reminder-v1 replaces Speekenbrink/`277944`, Badham/`271245`, guan/`277677`, steyvers/`277678`, Schulz/`277679`, Kool/`277697`) |
+| 15× gated targets (schema5; KIND mix `pics_v3` + `pics_v3_reminder_v1` + `pics_v3_centaur_gap_v1`) | **complete** (active paths `pics_v3/gated_job_paths_g5e50p30.tsv`; active IDs: `277676`, `271238`–`271240`, `294983`, `271242`–`271244`, `294984`, `271246`–`271247`, `287668`, `294985`, `287670`–`287671`. Gap-v1 replaces Speekenbrink/`287666`, Badham/`287667`, steyvers/`287669`; reminder-v1 still active for guan/Schulz/Kool) |
 | schema-v4 50-person G.1 / YAML freezes | **historical** (not active runtime) |
 | v1 jobs 257174–257188 / 257756, v1 YAML | **frozen historical** |
 | preliminary-v2 G.1 (incl. 258518), v2 YAML | **frozen non-final** |
@@ -181,15 +181,17 @@ description (not into trial JSON; genuine field absence is preserved).
 The already-frozen G.1 populations and Occurrence-EB source-selection map
 predate keyed reminders and are intentionally reused for gated reruns (no G.1 /
 annotation / source-map recomputation). Historical reminder-v1 jobs used
-`dataset_keyed_post_adaptive_v1`; v2 revises Steyvers / Badham / Speekenbrink
-and adds CPC18 (`2plonsky2018when`). Kool / Schulz / Guan reminder bodies stay
+`dataset_keyed_post_adaptive_v1`; v2 revises Steyvers / Badham / Speekenbrink.
+CPC18 (`2plonsky2018when`) stays on the legacy generic block (centaur-gap CPC18
+keyed reminder + example-coverage helpers were reverted after `job_294982`
+did not improve test LL). Kool / Schulz / Guan reminder bodies stay
 byte-identical to v1.
 
-- **Seven datasets** receive a dataset-keyed reminder body (Speekenbrink, Kool,
-  Steyvers, Schulz, Guan, Badham, CPC18). Exact wording lives in
+- **Six datasets** receive a dataset-keyed reminder body (Speekenbrink, Kool,
+  Steyvers, Schulz, Guan, Badham). Exact wording lives in
   `utils/teh/pics_v3_prompt_robustness.py` and is mirrored under
   `analysis_2026Sep/Sep20_V3/others/prompt_reminder_fix/`.
-- **All other datasets** keep the byte-identical legacy generic block
+- **All other datasets** (including CPC18) keep the byte-identical legacy generic block
   (`generic_history_robustness_v0`):
 
 > `history` may be empty, and different history entries may contain different
@@ -206,12 +208,11 @@ remain legitimate. Token packing (hard 14k / vLLM 16k) is unchanged in policy;
 keyed blocks are slightly longer than legacy for some datasets—see the
 token audit CSV. Test isolation and uniform failure fallback are unchanged.
 
-**CPC18 note:** structured history exposes chosen-option `feedback` only (no
-forgone field). PICS prompt-example selection ensures both early/`feedback is
-None` and later/chosen-feedback examples when both exist. Block-level
-`problem["has_feedback"]` is **not** rewritten in shared loaders (baseline-
-visible data unchanged); see the centaur-gap implementation report for blast
-radius if a future trial-level flag is desired.
+**CPC18 note:** official path remains `pics_v3/job_271238`. Centaur-gap CPC18
+prompt/example changes (`pics_v3_cpc18_prompt.py`, keyed reminder) were
+**reverted** after completed `pics_v3_centaur_gap_v1/job_294982` (mean −0.629)
+did not beat official (−0.615). No forgone-feedback field was ever added;
+shared-loader `has_feedback` was never changed.
 
 **Centaur-gap reruns:** KIND `pics_v3_centaur_gap_v1` (isolated OUT_DIR);
 prepare with
