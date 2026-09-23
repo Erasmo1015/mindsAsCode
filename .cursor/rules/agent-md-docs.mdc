@@ -1,0 +1,10 @@
+---
+description: AGENT.md stays ultra-short; detailed reports go under Sep20_V3/others
+alwaysApply: true
+---
+
+# Documentation placement (AGENT.md vs others/)
+
+- **`AGENT.md`**: super-short concise **implementation** updates only (IDs, KINDs, path/config pointers, one-line what changed). **No** detailed result tables, runtimes, gate/map matrices, or long narrative reports.
+- **Official records/config** (paths, baselines, transfer YAML, `Documentation_pics_v3.md` when it is the method source of truth): update those as required.
+- **Any other detailed report** (status tables, audits, failure analyses, snapshots): put under `analysis_2026Sep/Sep20_V3/others/` in the matching folder (e.g. `gated_g5e50p30/STATUS.md`) or a **new** subfolder there. Point to it from `AGENT.md` in one line if needed.

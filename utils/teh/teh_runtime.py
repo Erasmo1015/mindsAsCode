@@ -818,8 +818,9 @@ def setup_teh_run_prompts(
     When ablate_dataset_adaptive_prompt is True, skip LLM / reference strategy files
     and build the infer body from the registered dataset description
     (``dataset_task_description``; OE-parity source) plus the normal PICS merge
-    skeleton. HISTORY robustness and the runtime contract still attach under
-    structure_aware_v3.
+    skeleton / runtime contract. Also **disables** HISTORY robustness reminder
+    injection (no legacy generic, no dataset-keyed v1/v2). Main / non-ablation
+    SA40 runs remain unchanged.
 
     When limited_data_protocol is enabled, parsed behavioral prompt examples are
     taken only from the retained limited-data train+val subset (same manifest as
@@ -995,7 +996,14 @@ def setup_teh_run_prompts(
 
     infer_body = infer_path.read_text(encoding="utf-8")
     reminder_policy_id = None
-    if (
+    if ablate_dataset_adaptive_prompt:
+        # Ablation E: registered description + runtime contract only; no reminder.
+        reminder_policy_id = "ablated_no_history_reminder"
+        print(
+            f"[TEH] Skipping history reminder injection "
+            f"(ablate_dataset_adaptive_prompt) -> {infer_path}"
+        )
+    elif (
         normalize_limited_data_protocol(limited_data_protocol)
         == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
     ):

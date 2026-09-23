@@ -4074,11 +4074,23 @@ def _run_t_pics_source_population(
     """G.1: live source-dataset population under the same knobs/obs protocol as the target.
 
     No cross-task prompt. No person evolution. Writes ``output_dir/global_phase/best_program.py``.
+    Honors ``ablate_dataset_adaptive_prompt`` (registered description + no reminder;
+    never forces require_auto when that ablation is set).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     source_iters = (
         int(n_iterations) if n_iterations is not None else int(args.global_iters)
+    )
+    ablate_adaptive = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
+    require_auto = bool(require_auto_llm_prompt) and not ablate_adaptive
+    prefer_auto = (
+        (
+            bool(getattr(args, "prefer_auto_llm_prompt", False))
+            or int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0) > 0
+            or require_auto
+        )
+        and not ablate_adaptive
     )
     source_prompts_dir = setup_teh_run_prompts(
         output_dir,
@@ -4086,7 +4098,7 @@ def _run_t_pics_source_population(
         Path(seed_program_path),
         client=client,
         model_name=args.model_name,
-        use_llm=not args.no_llm_prompt,
+        use_llm=not args.no_llm_prompt and not ablate_adaptive,
         base_prompt_path=args.base_prompt,
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
@@ -4099,9 +4111,7 @@ def _run_t_pics_source_population(
             getattr(args, "dataset_prompt_history_max_entries", DEFAULT_HISTORY_MAX_ENTRIES)
         ),
         max_examples=int(getattr(args, "dataset_prompt_max_examples", DEFAULT_MAX_EXAMPLES)),
-        prefer_auto_llm_prompt=bool(getattr(args, "prefer_auto_llm_prompt", False))
-        or int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0) > 0
-        or bool(require_auto_llm_prompt),
+        prefer_auto_llm_prompt=prefer_auto,
         dataset_prompt_file=None,
         split_ratio=float(args.split_ratio),
         split_seed=int(args.split_seed),
@@ -4110,8 +4120,9 @@ def _run_t_pics_source_population(
         limited_data_protocol=str(args.limited_data_protocol),
         limited_train_val=args.limited_train_val,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
-        require_auto_llm_prompt=bool(require_auto_llm_prompt),
+        require_auto_llm_prompt=require_auto,
         llm_decoding_seed=llm_decoding_seed,
+        ablate_dataset_adaptive_prompt=ablate_adaptive,
     )
     source_seed = str(source_prompts_dir / "seed_program.py")
     print(
@@ -4322,6 +4333,8 @@ def _ensure_gated_independent_source_population(
         f"source_emnlp_range={source_start}-{source_end} iters={expected_iters} "
         f"(not reusing frozen G.1 programs)"
     )
+    # Ablation E must not force fail-closed auto prompts on live G.1.
+    ablate_adaptive = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
     return _run_t_pics_source_population(
         source_dataset=str(source_dataset),
         source_participants=source_pids,
@@ -4333,7 +4346,7 @@ def _ensure_gated_independent_source_population(
         psych_dataset_split=psych_dataset_split,
         filter_mixed_gambles=source_filter,
         n_iterations=expected_iters,
-        require_auto_llm_prompt=True,
+        require_auto_llm_prompt=not ablate_adaptive,
         llm_decoding_seed=int(args.split_seed) + 90_000,
     )
 
@@ -14662,9 +14675,10 @@ def main():
         default=None,
         metavar="DIR",
         help=(
-            "PICS v3 ablation helper (default off): with --t_pics_gated_transfer, "
-            "skip live G.2 and load this existing global_elite_pool directory as the "
-            "selected handoff (e.g. main-job retained pool for no-explore)."
+            "Legacy helper (default off; not used by final packed ablations): "
+            "with --t_pics_gated_transfer, skip live G.2 and load this existing "
+            "global_elite_pool directory. Final ablations C–E always run live "
+            "independent G.1 + live G.2 and must not pass this flag."
         ),
     )
     parser.add_argument(
@@ -14672,11 +14686,14 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "PICS v3 ablation (default off): replace the LLM-generated "
+            "PICS v3 ablation E (default off): replace the LLM-generated "
             "dataset-adaptive instruction with the registered dataset description "
-            "(same source as OpenEvolve's vanilla_dataset_description). Keeps PICS "
-            "contracts, HISTORY robustness, examples, parents, and packing. "
-            "Does not weaken main fail-closed auto prompts when unset."
+            "(same source as OpenEvolve's vanilla_dataset_description) on source "
+            "G.1, target G.2, explore, and person phases. Also disables HISTORY "
+            "robustness reminder injection (no legacy generic / keyed v1/v2). "
+            "Keeps the common PICS program API, code/output requirements, and "
+            "runtime execution contract. Does not weaken main fail-closed auto "
+            "prompts or reminder-v2 when unset."
         ),
     )
     parser.add_argument(

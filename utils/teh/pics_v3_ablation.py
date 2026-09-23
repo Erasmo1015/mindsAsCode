@@ -52,7 +52,8 @@ ABLATION_PHASE_BUDGETS = {
         "control_only": False,
         "ablate_population": False,
         "ablate_adaptive_prompt": False,
-        "live_independent_source": False,
+        # Live independent G.1 + live dual G.2; no explore; no main-pool reuse.
+        "live_independent_source": True,
     },
     "no_fresh": {
         "kind": ABLATION_KIND_NO_FRESH,
@@ -76,6 +77,8 @@ ABLATION_PHASE_BUDGETS = {
         "control_only": False,
         "ablate_population": False,
         "ablate_adaptive_prompt": True,
+        # Also disables HISTORY reminder injection (see setup_teh_run_prompts).
+        "ablate_history_reminder": True,
         "live_independent_source": True,
     },
 }
@@ -92,15 +95,14 @@ def ablation_id_from_args(args: Any) -> Optional[str]:
     explore = int(getattr(args, "explore_candidates", 0) or 0)
     fresh = int(getattr(args, "fresh_n_candidates", 0) or 0)
     n_iters = int(getattr(args, "n_iterations", 0) or 0)
-    if bool(getattr(args, "t_pics_gated_transfer", False)) and explore == 0 and n_iters == 15:
+    independent = bool(getattr(args, "t_pics_gated_independent", False))
+    gated = bool(getattr(args, "t_pics_gated_transfer", False))
+    # Live no-explore: independent G.1 + dual G.2, explore=0, person=15.
+    if gated and independent and explore == 0 and n_iters == 15:
         return "no_explore"
-    if bool(getattr(args, "t_pics_gated_transfer", False)) and fresh == 0 and n_iters == 10 and explore == 50:
-        # Prefer explicit KIND when launcher sets it; else infer no_fresh.
-        kind = str(getattr(args, "output_kind", "") or "")
-        if kind == ABLATION_KIND_NO_FRESH or kind.endswith("no_fresh"):
-            return "no_fresh"
-        if "no_fresh" in kind:
-            return "no_fresh"
+    # Live no-fresh: independent + fresh_n=0 + person=10 + explore>0.
+    if gated and independent and fresh == 0 and n_iters == 10 and explore == 50:
+        return "no_fresh"
     kind = str(getattr(args, "kind", "") or getattr(args, "output_kind", "") or "")
     for ablation_id, spec in ABLATION_PHASE_BUDGETS.items():
         if kind == spec["kind"]:
@@ -121,7 +123,14 @@ def ablation_metadata_payload(args: Any) -> dict:
         "ablate_dataset_adaptive_prompt": bool(
             getattr(args, "ablate_dataset_adaptive_prompt", False)
         ),
-        "reuse_gate_pool": str(getattr(args, "t_pics_reuse_gate_pool", "") or "") or None,
+        "ablate_history_reminder": bool(
+            getattr(args, "ablate_dataset_adaptive_prompt", False)
+        ),
+        "live_independent_source": bool(
+            getattr(args, "t_pics_gated_independent", False)
+        ),
+        # Reuse of main/prior gate pools is forbidden for final ablations.
+        "reuse_gate_pool": None,
         "global_iters": int(getattr(args, "global_iters", 0) or 0),
         "explore_candidates": int(getattr(args, "explore_candidates", 0) or 0),
         "n_iterations": int(getattr(args, "n_iterations", 0) or 0),

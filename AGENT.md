@@ -669,61 +669,25 @@ Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first
 - G.1 ledger: `pics_v3/g1_job_paths_g5e50p30.tsv` (jobs `265753`–`265767`)
 - Annot package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/`
 - Concise report+figs: `…/source_selection_schema_v5/report/`
-- Gated jobs (schema5 ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`; reminder ledger `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`): keep `271238`–`271240`, `271242`–`271244`, `271246`–`271247`, `277676` (Peterson); reminder-v1 actives `287666`–`287671` replace Speekenbrink/`277944`, Badham/`271245`, guan/`277677`, steyvers/`277678`, Schulz/`277679`, Kool/`277697`
+- Gated jobs (schema5 ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`; reminder ledger `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`): keep `271238`–`271240`, `271242`–`271244`, `271246`–`271247`, `277676` (Peterson); reminder-v1 actives `287668`/`287670`/`287671` (guan/Schulz/Kool); centaur-gap-v1 actives `294983`/`294984`/`294985` (Speekenbrink/Badham/Steyvers) supersede reminder `287666`/`287667`/`287669`
 - Schema-v4 50-person freezes kept historical; do not overwrite
 - OpenEvolve matched baseline: **350 / 14000 / 16384 / g5e50p30** (`run_openevolve.py` defaults); dry-run `DRY_RUN=1 bash cluster/v3/ours/baselines/submit_openevolve.sh`
 
 Submit gated: `DRY_RUN=0 CONFIRM_SUBMIT=1 GPU=h100nvl bash cluster/v3/ours/main/submit_gated.sh` (defaults to schema5 YAML).
 
-### Gated status snapshot (2026-09-21 ~17:46 local)
-
-Mean test LL = mean of finite `overall_best_test.test_loglik`; `†k inf` = non-finite count excluded from mean.
-
-| Job | Dataset | State (runtime) | n | mean test LL | gate |
-| --- | --- | --- | --- | --- | --- |
-| 277676 | Peterson | PENDING (00:00:00) resubmit of cancelled 271237 | — | — | — |
-| 271238 | Plonsky | COMPLETED (04:32:13) | 30 | -0.615 | transfer (transfer_strictly_better) |
-| 271239 | CCT | COMPLETED (03:26:06) | 30 | -0.570 | transfer (transfer_strictly_better) |
-| 271240 | Wulff | COMPLETED (02:42:47) | 30 | -0.646 | control (exact_tie) |
-| 277944 | Speekenbrink | resubmit of 271241 | — | — | — |
-| 271242 | Hilbig | COMPLETED (01:46:32) | 30 | -0.303 | control (control_better) |
-| 271243 | Frey risk | RUNNING (03:17:04) | 20 | -0.211 | control (control_better) |
-| 271244 | Enkavi | COMPLETED (01:30:24) | 30 | -0.362 | control (exact_tie) |
-| 271245 | Badham | COMPLETED (00:55:05) | 10 | -0.800 | control (exact_tie) |
-| 271246 | mixed_gambles | RUNNING (01:39:24) | 17 | -0.527 | control (control_better) |
-| 271247 | bergert | RUNNING (01:14:26) | 10 | -0.061 | transfer (transfer_strictly_better) |
-| 277677 | guan | PENDING (00:00:00) resubmit of cancelled 271248 | — | — | — |
-| 277678 | steyvers | PENDING (00:00:00) resubmit of cancelled 271249 | — | — | — |
-| 277679 | Schulz | PENDING (00:00:00) resubmit of cancelled 271250 | — | — | — |
-| 277697 | Kool | PENDING (00:00:00) resubmit of cancelled 271251 | — | — | — |
-
-Active canonical IDs at snapshot time: `277676, 271238–271240, 277944, 271242–271247, 277677–277679, 277697` (superseded 2026-09-22 by reminder-v1 for six datasets — see next short update).
+Gated result tables live under `analysis_2026Sep/Sep20_V3/others/gated_g5e50p30/STATUS.md` (not here).
 
 ---
 
 ## Short update (Sep 22 2026 — keyed reminder gated complete)
 
-Six `pics_v3_reminder_v1` H100NVL gated jobs finished (`287666`–`287671`; Exit `0:0`; KIND isolated under `pics_v3_reminder_v1/`; frozen G.1 + schema5 Occurrence-EB reused). Active Ours paths updated in `pics_v3/gated_job_paths_g5e50p30.tsv` and `baseline_methods/config_baselines.yaml`. Submit ledger: `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv`.
+Six `pics_v3_reminder_v1` jobs `287666`–`287671` finished; paths updated in `gated_job_paths_g5e50p30.tsv` + `config_baselines.yaml`. Ledger: `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv`. Tables: `…/others/gated_g5e50p30/STATUS.md`.
 
-| Job | Dataset | Runtime | n | mean test LL | gate |
-| --- | --- | --- | --- | --- | --- |
-| 277676 | Peterson | 1.5 hrs | 30 | -0.438 | control (control_better) |
-| 271238 | Plonsky | 4.5 hrs | 30 | -0.615 | transfer (transfer_strictly_better) |
-| 271239 | CCT | 3.4 hrs | 30 | -0.570 | transfer (transfer_strictly_better) |
-| 271240 | Wulff | 2.7 hrs | 30 | -0.646 | control (exact_tie) |
-| 287666 | Speekenbrink | 2.1 hrs | 23 | -0.740 | control (control_better) |
-| 271242 | Hilbig | 1.8 hrs | 30 | -0.303 | control (control_better) |
-| 271243 | Frey risk | 3.5 hrs | 30 | -0.412 | control (control_better) |
-| 271244 | Enkavi | 1.5 hrs | 30 | -0.362 | control (exact_tie) |
-| 287667 | Badham | 1.1 hrs | 10 | -1.137 | control (control_better) |
-| 271246 | mixed_gambles | 2.4 hrs | 30 | -0.490 | control (control_better) |
-| 271247 | bergert | 2.7 hrs | 30 | -0.278 | transfer (transfer_strictly_better) |
-| 287668 | guan | 1.9 hrs | 30 | -0.570 | control (control_better) |
-| 287669 | steyvers | 1.7 hrs | 30 | -1.386 | control (exact_tie) |
-| 287670 | Schulz | 2.4 hrs | 30 | -1.456 | control (control_better) |
-| 287671 | Kool | 3.4 hrs | 30 | -0.628 | control (control_better) |
+---
 
-Active canonical IDs: `277676, 271238–271240, 287666, 271242–271244, 287667, 271246–271247, 287668–287671`.
+## Short update (Sep 23 2026 — centaur-gap official)
+
+Promoted Speekenbrink/Badham/Steyvers → `294983`/`294984`/`294985` (`pics_v3_centaur_gap_v1`). guan/Schulz/Kool stay `287668`/`287670`/`287671`. Tables + map sources: `…/others/gated_g5e50p30/STATUS.md`.
 
 ---
 
