@@ -46,6 +46,18 @@ ABLATION_KINDS = (
     ABLATION_KIND_NO_ADAPTIVE_PROMPT,
 )
 ABLATION_RUN_TAG = "g5e50p30_pics_v3_ablation"
+
+# Family-prompt v3 experiment (optional reminder augmentation; default off).
+# Live-independent matched A/B; never write under bare pics_v3/ or reminder/gap KINDs.
+FAMILY_PROMPT_V3_CONTROL_KIND = "pics_v3_family_prompt_v3_control"
+FAMILY_PROMPT_V3_TREATMENT_KIND = "pics_v3_family_prompt_v3_treatment"
+FAMILY_PROMPT_V3_KINDS = (
+    FAMILY_PROMPT_V3_CONTROL_KIND,
+    FAMILY_PROMPT_V3_TREATMENT_KIND,
+)
+FAMILY_PROMPT_V3_RUN_TAG = "g5e50p30_pics_v3_family_prompt_v3"
+FAMILY_PROMPT_V3_WANDB_GROUP = "t_pics_gated_family_prompt_v3"
+
 ANNOTATION_PACKAGE = "pics_v3_g1_schema_v5"
 ANNOTATION_PACKAGE_V4 = "pics_v3_g1_schema_v4"  # legacy completed package
 ANNOTATION_PACKAGE_V5 = ANNOTATION_PACKAGE

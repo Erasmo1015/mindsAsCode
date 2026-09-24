@@ -277,3 +277,221 @@ def maybe_attach_history_robustness_after_task_description(
     return ensure_history_robustness_block(
         base_prompt, dataset=dataset, force_legacy=force_legacy
     )
+
+
+# ---------------------------------------------------------------------------
+# Optional family reminder v3 (default OFF). When the sequential-RL flag is set
+# for a routed dataset, this block REPLACES the keyed/generic
+# HISTORY_ROBUSTNESS_BLOCK_V3 (preserving necessary v2 interface rules inside
+# the v3 text). Not activated by structure_aware_v3 alone. Reminder-v2 source
+# bodies in _DATASET_KEYED_REMINDER_BODIES are unchanged for default/main runs.
+# ---------------------------------------------------------------------------
+
+SEQUENTIAL_RL_REMINDER_V3_MARKER = "SEQUENTIAL_RL_BEHAVIOR_REMINDER_V3"
+SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER = "SEQUENTIAL_RL_BEHAVIOR_REMINDER_V3_KOOL"
+FEEDBACK_LEARNING_REMINDER_V3_MARKER = "FEEDBACK_LEARNING_BEHAVIOR_REMINDER_V3"
+
+SEQUENTIAL_RL_REMINDER_V3_ALIASES = frozenset(
+    {
+        "steyvers_2009_bandit",
+        "13schulz2020finding",
+        "14kool2016when",
+    }
+)
+# Intended feedback family (Speekenbrink / Badham). No body registered:
+# FEEDBACK_REMINDER_V3_NOT_JUSTIFIED (family_prompt_v3/FEEDBACK_LEARNING_AUDIT.md).
+FEEDBACK_LEARNING_REMINDER_V3_ALIASES = frozenset(
+    {
+        "5speekenbrink2008learning",
+        "12badham2017deficits",
+    }
+)
+
+# Behavioral prediction + necessary former v2 interface rules (K-way, .get/None,
+# option-key mapping, anti-uniform, smoothing). Omits "reward is the primary
+# learning signal" (exploit-framing bias from keyed v2).
+_SEQUENTIAL_RL_BANDIT_BODY = (
+    "This program predicts human choices; it does not compute a reward-maximizing "
+    "policy. Even when participants are instructed to seek reward, their choices may "
+    "combine exploitation of learned rewards with uncertainty-sensitive exploration, "
+    "preference for relatively untried options, recency-weighted updating, "
+    "perseveration or switching, and participant-specific stochasticity. In a "
+    "repeated finite-horizon task, an exploratory choice may sacrifice immediate "
+    "expected reward to gain information that can improve later choices. The strength "
+    "and timing of this trade-off may differ across participants and trial positions. "
+    "Infer from the observed training history whether exploration is weak or strong "
+    "and whether it decreases, persists, or changes over the horizon; do not impose a "
+    "fixed explore-then-exploit schedule. Infer a plausible combination from the "
+    "observed training history; do not assume either purely greedy choice or "
+    "exploration for its own sake, and do not hard-code a single true action.\n"
+    "\n"
+    "`history` may be empty; when present it has `action` and `reward` (use `.get`—"
+    "reward may be absent or None). Treat missing or None reward as no observed "
+    "outcome for that step: skip it or handle it safely, and never add None to a "
+    "numeric accumulator. Map actions through the current valid option keys/"
+    "`problem['options']`—do not treat action ids as raw list indices into a fixed "
+    "array. Initialize every legal arm explicitly. Return a finite probability for "
+    "every legal arm (full K-way dict over `option['action']`). Use positive "
+    "smoothing so denominators cannot be zero; normalize safely. Use a uniform "
+    "fallback only when history is empty or yields no usable reward signal—"
+    "non-empty usable history must not collapse to uniform."
+)
+
+_SEQUENTIAL_RL_KOOL_BODY = (
+    "This program predicts human choices in a two-step task; it does not compute a "
+    "treasure-maximizing policy. Preserve the distinction between stage-1 spaceship "
+    "choices and stage-2 alien choices. Human behavior may combine model-based use of "
+    "learned transitions, model-free reward tracking, uncertainty-sensitive "
+    "exploration, recency, perseveration or switching, and participant-specific "
+    "stochasticity. Infer a plausible combination from the observed training history "
+    "rather than prescribing an optimal action.\n"
+    "\n"
+    "Because choices repeat across a finite horizon, behavior may reflect both "
+    "immediate reward and information or transition knowledge useful for later "
+    "choices. Infer from the observed training history whether and how this balance "
+    "changes across days and stages; do not impose a fixed exploration schedule.\n"
+    "\n"
+    "`history` may be empty; use `.get` for stage-conditional fields. Never read "
+    "current-trial `reward`/`treasure` from `problem`. Stage 1 (`stage==1`): integer "
+    "action 0/1 over spaceship `option_keys`/`spaceship_options`; learn from "
+    "`stage==1` history only. Stage 2 (`stage==2`): condition on `planet`, "
+    "`alien_options`/`option_keys`, and available `spaceship`/`stage1_action`; learn "
+    "from `stage==2` history using `feedback`/`reward` when present. Never "
+    "`option_keys.index(letter)` for actions. Treat missing or None outcomes as "
+    "unobserved and never add None to numeric accumulators. Clip probs; avoid "
+    "extremes from raw counts; return finite, smoothed, calibrated action "
+    "probabilities."
+)
+
+_SEQUENTIAL_RL_REMINDER_V3_BLOCKS: Dict[str, str] = {
+    "steyvers_2009_bandit": (
+        f"[{SEQUENTIAL_RL_REMINDER_V3_MARKER}]\n"
+        f"{_SEQUENTIAL_RL_BANDIT_BODY}\n"
+        f"[/{SEQUENTIAL_RL_REMINDER_V3_MARKER}]"
+    ),
+    "13schulz2020finding": (
+        f"[{SEQUENTIAL_RL_REMINDER_V3_MARKER}]\n"
+        f"{_SEQUENTIAL_RL_BANDIT_BODY}\n"
+        f"[/{SEQUENTIAL_RL_REMINDER_V3_MARKER}]"
+    ),
+    "14kool2016when": (
+        f"[{SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER}]\n"
+        f"{_SEQUENTIAL_RL_KOOL_BODY}\n"
+        f"[/{SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER}]"
+    ),
+}
+
+
+def using_pics_v3_sequential_rl_reminder_v3() -> bool:
+    return bool(getattr(_tls, "sequential_rl_reminder_v3", False))
+
+
+def using_pics_v3_feedback_learning_reminder_v3() -> bool:
+    return bool(getattr(_tls, "feedback_learning_reminder_v3", False))
+
+
+def configure_pics_v3_family_reminder_v3(
+    *,
+    sequential_rl: bool = False,
+    feedback_learning: bool = False,
+) -> None:
+    """Process-level opt-in for family reminder v3 (both default False)."""
+    _tls.sequential_rl_reminder_v3 = bool(sequential_rl)
+    _tls.feedback_learning_reminder_v3 = bool(feedback_learning)
+
+
+def sequential_rl_reminder_v3_block(dataset: Optional[str]) -> Optional[str]:
+    """Exact tagged block for a sequential-RL dataset, or None if not routed."""
+    alias = normalize_reminder_dataset_alias(dataset)
+    if alias is None:
+        return None
+    return _SEQUENTIAL_RL_REMINDER_V3_BLOCKS.get(alias)
+
+
+def feedback_learning_reminder_v3_block(dataset: Optional[str]) -> Optional[str]:
+    """No body registered (audit NOT_JUSTIFIED). Always returns None."""
+    del dataset  # routing checked by caller
+    return None
+
+
+def _family_reminder_v3_already_present(text: str) -> bool:
+    return (
+        SEQUENTIAL_RL_REMINDER_V3_MARKER in text
+        or SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER in text
+        or FEEDBACK_LEARNING_REMINDER_V3_MARKER in text
+    )
+
+
+def maybe_attach_family_reminder_v3(
+    text: str,
+    dataset: Optional[str] = None,
+) -> str:
+    """Replace HISTORY reminder v2 with Sequential-RL reminder v3 when flagged.
+
+    Default (both flags false): return ``text`` unchanged (byte-identical).
+    Sequential-RL flag: for Steyvers/Schulz/Kool, replace the existing
+    ``[HISTORY_ROBUSTNESS_BLOCK_V3]`` with the family v3 block (complete
+    replacement; necessary v2 interface rules live inside the v3 body).
+    Unrelated datasets print a diagnostic and are not mutated.
+    Feedback-learning flag: no body is registered — intended family datasets
+    raise; unrelated datasets print a diagnostic and are not mutated.
+    """
+    import re
+
+    seq = using_pics_v3_sequential_rl_reminder_v3()
+    fb = using_pics_v3_feedback_learning_reminder_v3()
+    if not seq and not fb:
+        return text
+
+    alias = normalize_reminder_dataset_alias(dataset)
+    if alias is None:
+        alias = current_pics_v3_reminder_dataset()
+
+    if fb:
+        if alias in FEEDBACK_LEARNING_REMINDER_V3_ALIASES:
+            raise RuntimeError(
+                "--pics_v3_feedback_learning_reminder_v3 is set but no "
+                "feedback-learning reminder v3 body is registered "
+                "(FEEDBACK_REMINDER_V3_NOT_JUSTIFIED; see "
+                "analysis_2026Sep/Sep20_V3/others/family_prompt_v3/"
+                "FEEDBACK_LEARNING_AUDIT.md). Refusing prompt mutation."
+            )
+        print(
+            f"[TEH] --pics_v3_feedback_learning_reminder_v3 ignored for "
+            f"dataset={alias!r} (not in feedback-learning family / no body); "
+            f"no prompt mutation"
+        )
+
+    if not seq:
+        return text
+
+    block = sequential_rl_reminder_v3_block(alias)
+    if block is None:
+        print(
+            f"[TEH] --pics_v3_sequential_rl_reminder_v3 ignored for "
+            f"dataset={alias!r} (not in sequential-RL family); no prompt mutation"
+        )
+        return text
+
+    body = text or ""
+    if _family_reminder_v3_already_present(body):
+        # Already replaced (or injected); do not duplicate.
+        if HISTORY_ROBUSTNESS_MARKER in body:
+            # Stale v2 still present alongside v3 — strip leftover v2.
+            pat = re.compile(
+                r"\[HISTORY_ROBUSTNESS_BLOCK_V3\][\s\S]*?\[/HISTORY_ROBUSTNESS_BLOCK_V3\]",
+                re.M,
+            )
+            body, _ = pat.subn("", body, count=1)
+            return body
+        return body
+
+    if HISTORY_ROBUSTNESS_MARKER in body:
+        pat = re.compile(
+            r"\[HISTORY_ROBUSTNESS_BLOCK_V3\][\s\S]*?\[/HISTORY_ROBUSTNESS_BLOCK_V3\]",
+            re.M,
+        )
+        new_body, n = pat.subn(block, body, count=1)
+        if n:
+            return new_body
+    return body.rstrip() + "\n\n" + block + "\n"

@@ -288,6 +288,35 @@ def build_gated_wandb_config(
                 cfg["target_transfer_iterations"] = 0
     except Exception:
         pass
+    try:
+        from utils.teh.pics_v3 import (
+            FAMILY_PROMPT_V3_CONTROL_KIND,
+            FAMILY_PROMPT_V3_RUN_TAG,
+            FAMILY_PROMPT_V3_TREATMENT_KIND,
+            FAMILY_PROMPT_V3_WANDB_GROUP,
+        )
+
+        seq_v3 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v3", False))
+        fb_v3 = bool(getattr(args, "pics_v3_feedback_learning_reminder_v3", False))
+        out_root_s = str(Path(output_root).resolve())
+        if seq_v3 or fb_v3 or FAMILY_PROMPT_V3_TREATMENT_KIND in out_root_s:
+            cfg["group"] = FAMILY_PROMPT_V3_WANDB_GROUP
+            cfg["run_tag"] = FAMILY_PROMPT_V3_RUN_TAG
+            cfg["kind"] = FAMILY_PROMPT_V3_TREATMENT_KIND
+            cfg["family_prompt_v3"] = {
+                "sequential_rl_reminder_v3": seq_v3,
+                "feedback_learning_reminder_v3": fb_v3,
+            }
+        elif FAMILY_PROMPT_V3_CONTROL_KIND in out_root_s:
+            cfg["group"] = FAMILY_PROMPT_V3_WANDB_GROUP
+            cfg["run_tag"] = FAMILY_PROMPT_V3_RUN_TAG
+            cfg["kind"] = FAMILY_PROMPT_V3_CONTROL_KIND
+            cfg["family_prompt_v3"] = {
+                "sequential_rl_reminder_v3": False,
+                "feedback_learning_reminder_v3": False,
+            }
+    except Exception:
+        pass
     return cfg
 
 

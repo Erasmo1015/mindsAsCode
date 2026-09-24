@@ -669,6 +669,7 @@ Final ICLR Method lineage: **g5e50p30** G.1 (first-30 ordinals, 16k, trial-first
 - G.1 ledger: `pics_v3/g1_job_paths_g5e50p30.tsv` (jobs `265753`–`265767`)
 - Annot package: `analysis_2026Sep/mem/pics_v3_g1_schema_v5/`
 - Concise report+figs: `…/source_selection_schema_v5/report/`
+- Paper-facing PDFs (Probability label; count **1414**): `analysis_2026Sep/Sep20_V3/mem/annotation_population/source_selection_final/`
 - Gated jobs (schema5 ledger `cluster/record/2026Sep21_PICS_v3_gated_g5e50p30.tsv`; reminder ledger `cluster/record/2026Sep22_PICS_v3_gated_reminder_v1.tsv`; active paths `pics_v3/gated_job_paths_g5e50p30.tsv`): keep `271238`–`271240`, `271242`–`271244`, `271246`–`271247`, `277676` (Peterson); reminder-v1 actives `287668`/`287670`/`287671` (guan/Schulz/Kool); centaur-gap-v1 actives `294983`/`294984`/`294985` (Speekenbrink/Badham/Steyvers) supersede reminder `287666`/`287667`/`287669`
 - Schema-v4 50-person freezes kept historical; do not overwrite
 - OpenEvolve matched baseline: **350 / 14000 / 16384 / g5e50p30** (`run_openevolve.py` defaults); dry-run `DRY_RUN=1 bash cluster/v3/ours/baselines/submit_openevolve.sh`
@@ -688,6 +689,20 @@ Six `pics_v3_reminder_v1` jobs `287666`–`287671` finished; paths updated in `g
 ## Short update (Sep 23 2026 — centaur-gap official)
 
 Promoted Speekenbrink/Badham/Steyvers → `294983`/`294984`/`294985` (`pics_v3_centaur_gap_v1`). guan/Schulz/Kool stay `287668`/`287670`/`287671`. Tables + map sources: `…/others/gated_g5e50p30/STATUS.md`.
+
+---
+
+## Short update (Sep 24 2026 — Sequential RL prompt audit)
+
+Read-only audit (Steyvers/Schulz/Kool): `analysis_2026Sep/Sep20_V3/others/sequential_rl_prompt_audit/` — verdict **REMINDER V3 JUSTIFIED**; wording provenance in `WORDING_PROVENANCE.md` (no code/jobs).
+
+---
+
+## Short update (Sep 24 2026 — family-prompt v3 experiment)
+
+Optional default-off Sequential-RL reminder v3 + matched live-independent A/B packaging (Steyvers/Schulz/Kool only; feedback family NOT_JUSTIFIED): `analysis_2026Sep/Sep20_V3/others/family_prompt_v3/`. Submit dry-run: `DRY_RUN=1 bash cluster/v3/ours/family_prompt_v3/submit_family_prompt_v3.sh`. No GPU submit yet.
+
+Read-only audit (Speekenbrink/Badham feedback-learning, jobs 294983/294984): `analysis_2026Sep/Sep20_V3/others/family_prompt_v3/FEEDBACK_LEARNING_AUDIT.md` — **FEEDBACK_REMINDER_V3_NOT_JUSTIFIED**.
 
 ---
 
