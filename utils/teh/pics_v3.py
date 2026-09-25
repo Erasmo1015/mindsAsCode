@@ -58,6 +58,13 @@ FAMILY_PROMPT_V3_KINDS = (
 FAMILY_PROMPT_V3_RUN_TAG = "g5e50p30_pics_v3_family_prompt_v3"
 FAMILY_PROMPT_V3_WANDB_GROUP = "t_pics_gated_family_prompt_v3"
 
+# Family-prompt v4 (Sequential-RL reminder v4; treatment-only live independent).
+# Never write under bare pics_v3/, reminder, gap, ablation, or family_prompt_v3.
+FAMILY_PROMPT_V4_KIND = "pics_v3_family_prompt_v4"
+FAMILY_PROMPT_V4_KINDS = (FAMILY_PROMPT_V4_KIND,)
+FAMILY_PROMPT_V4_RUN_TAG = "g5e50p30_pics_v3_family_prompt_v4"
+FAMILY_PROMPT_V4_WANDB_GROUP = "t_pics_gated_family_prompt_v4"
+
 ANNOTATION_PACKAGE = "pics_v3_g1_schema_v5"
 ANNOTATION_PACKAGE_V4 = "pics_v3_g1_schema_v4"  # legacy completed package
 ANNOTATION_PACKAGE_V5 = ANNOTATION_PACKAGE

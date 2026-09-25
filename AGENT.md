@@ -1,5 +1,7 @@
 Local vLLM mode
 
+- Sep25 generalization audit (CPU-only): `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep25/main_ablation/generalization_audit/` (plan+CSVs+FINAL_SYNTHESIS; no method/GPU changes).
+- Sep25 LOO pop rerank (CPU): `.../generalization_audit/` — early-stop supported; pop regularization not needed for late-evo gate (`LOO_POPULATION_RERANK_AUDIT.md`).
 - Recent updates (Apr 2026):
   - `te_aggregate.py` (two-phase TE profile+adapt) summary:
     - Implements Phase 1 **text-profile warmup** (default on): one LLM call per participant using `prompts/Template_evo/<dataset>/text_profile/text_profile.txt` plus a token-budgeted prefix of that participant’s **train** trials; writes `participant_*/profile.txt` and `participant_*/text_profile_meta.json`. Disable with `--profile_warmup False`.
@@ -703,6 +705,30 @@ Read-only audit (Steyvers/Schulz/Kool): `analysis_2026Sep/Sep20_V3/others/sequen
 Optional default-off Sequential-RL reminder v3 + matched live-independent A/B packaging (Steyvers/Schulz/Kool only; feedback family NOT_JUSTIFIED): `analysis_2026Sep/Sep20_V3/others/family_prompt_v3/`. Submit dry-run: `DRY_RUN=1 bash cluster/v3/ours/family_prompt_v3/submit_family_prompt_v3.sh`. No GPU submit yet.
 
 Read-only audit (Speekenbrink/Badham feedback-learning, jobs 294983/294984): `analysis_2026Sep/Sep20_V3/others/family_prompt_v3/FEEDBACK_LEARNING_AUDIT.md` — **FEEDBACK_REMINDER_V3_NOT_JUSTIFIED**.
+
+---
+
+## Short update (Sep 24 2026 — ABCDE ablation packed4)
+
+`submit_ablations.sh` accepts `TARGETS="..."` override. Standard A–E KINDs (no reminder-v3). Packed4: Enkavi/Speekenbrink/Guan/Steyvers → `cluster/record/2026Sep24_PICS_v3_ablation_packed4.tsv`.
+
+---
+
+## Short update (Sep 25 2026 — ablation full results)
+
+Full A–E + family_prompt_v3 table: `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep25/STATUS.md` (packed4 A/B still running).
+
+---
+
+## Short update (Sep 25 2026 — Seq-RL reminder-v3 audit)
+
+Read-only audit (keep v3 optional; Steyvers gain=uniform escape+None unlock; Schulz/Kool regress): `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep25/Seq-RL/SEQ_RL_RESULT_AUDIT.md`. No main-method change. Frozen-G.1 packaging + None-safety flag prepared then **reverted** (reports kept under Seq-RL/).
+
+---
+
+## Short update (Sep 25 2026 — Seq-RL reminder-v4)
+
+Optional default-off `--pics_v3_sequential_rl_reminder_v4` (policy `sequential_rl_reminder_v4`; KIND `pics_v3_family_prompt_v4`); dataset-specific Steyvers/Schulz/Kool bodies replace HISTORY v2 (mutual-exclude v3). Plan/report/renders: `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep25/Seq-RL/v4_implementation/`. Dry-run: `DRY_RUN=1 bash cluster/v3/ours/family_prompt_v4/submit_family_prompt_v4.sh`. No GPU submit yet.
 
 ---
 

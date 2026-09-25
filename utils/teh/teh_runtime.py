@@ -990,16 +990,20 @@ def setup_teh_run_prompts(
     )
     from utils.teh.limited_data_registry import LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
     from utils.teh.pics_v3_prompt_robustness import (
+        SEQUENTIAL_RL_REMINDER_V4_POLICY_ID,
         ensure_history_robustness_block,
         maybe_attach_family_reminder_v3,
+        maybe_attach_family_reminder_v4,
         resolve_history_robustness_policy_id,
         using_pics_v3_feedback_learning_reminder_v3,
         using_pics_v3_sequential_rl_reminder_v3,
+        using_pics_v3_sequential_rl_reminder_v4,
     )
 
     infer_body = infer_path.read_text(encoding="utf-8")
     reminder_policy_id = None
     family_reminder_v3_meta: Optional[str] = None
+    family_reminder_v4_meta: Optional[str] = None
     if ablate_dataset_adaptive_prompt:
         # Ablation E: registered description + runtime contract only; no reminder.
         reminder_policy_id = "ablated_no_history_reminder"
@@ -1035,6 +1039,20 @@ def setup_teh_run_prompts(
             using_pics_v3_feedback_learning_reminder_v3()
         ):
             family_reminder_v3_meta = "flag_set_no_mutation"
+        # Optional Sequential-RL reminder v4 REPLACES keyed/generic v2 when flagged.
+        before_v4 = infer_body
+        infer_body = maybe_attach_family_reminder_v4(
+            infer_body, dataset=dataset_alias
+        )
+        if infer_body != before_v4:
+            family_reminder_v4_meta = "sequential_rl_reminder_v4_replaces_v2"
+            reminder_policy_id = SEQUENTIAL_RL_REMINDER_V4_POLICY_ID
+            print(
+                f"[TEH] Replaced history reminder with Sequential-RL reminder v4 "
+                f"({family_reminder_v4_meta}) -> {infer_path}"
+            )
+        elif using_pics_v3_sequential_rl_reminder_v4():
+            family_reminder_v4_meta = "flag_set_no_mutation"
     infer_path.write_text(
         attach_runtime_contract_to_prompt(infer_body, contract),
         encoding="utf-8",
@@ -1107,6 +1125,7 @@ def setup_teh_run_prompts(
         "runtime_contract_appended": True,
         "pics_v3_reminder_policy": reminder_policy_id,
         "pics_v3_family_reminder_v3": family_reminder_v3_meta,
+        "pics_v3_family_reminder_v4": family_reminder_v4_meta,
         "limited_data_protocol": normalize_limited_data_protocol(limited_data_protocol),
         "limited_train_val": None if limited_train_val is None else int(limited_train_val),
         "prompt_examples_from_retained_observed": (

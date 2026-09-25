@@ -5669,6 +5669,7 @@ def _build_psych_prompt_text(
 ) -> str:
     from utils.teh.pics_v3_prompt_robustness import (
         maybe_attach_family_reminder_v3,
+        maybe_attach_family_reminder_v4,
         maybe_attach_history_robustness_after_task_description,
     )
 
@@ -5676,8 +5677,10 @@ def _build_psych_prompt_text(
     task_text = maybe_attach_history_robustness_after_task_description(
         base_prompt, dataset=dataset or None
     )
-    # Optional family reminder v3 REPLACES HISTORY v2 when flagged (before contract).
+    # Optional family reminder v3/v4 REPLACES HISTORY v2 when flagged (before contract).
+    # Flags are mutually exclusive at CLI; at most one attach mutates.
     task_text = maybe_attach_family_reminder_v3(task_text, dataset=dataset or None)
+    task_text = maybe_attach_family_reminder_v4(task_text, dataset=dataset or None)
     text = (
         f"{task_text}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{code_template_suffix}\n{candidate_output_rules}\n"
@@ -14724,6 +14727,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_v3_sequential_rl_reminder_v4",
+        action="store_true",
+        default=False,
+        help=(
+            "Optional PICS v3 Sequential-RL reminder v4 (default off): replaces the "
+            "keyed HISTORY reminder v2 with a dataset-specific v4 behavior block for "
+            "steyvers_2009_bandit, 13schulz2020finding, and 14kool2016when only. "
+            "Mutually exclusive with --pics_v3_sequential_rl_reminder_v3. Does not "
+            "change main defaults, reminder-v2/v3 source text, or error-feedback."
+        ),
+    )
+    parser.add_argument(
         "--t_pics_source",
         type=str,
         nargs="?",
@@ -15244,20 +15259,29 @@ def main():
     args = parser.parse_args()
     from utils.teh.pics_v3_prompt_robustness import (
         configure_pics_v3_family_reminder_v3,
+        configure_pics_v3_family_reminder_v4,
         configure_pics_v3_legacy_generic_reminder,
     )
 
     configure_pics_v3_legacy_generic_reminder(
         bool(getattr(args, "pics_v3_legacy_generic_reminder", False))
     )
+    _seq_v3 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v3", False))
+    _seq_v4 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v4", False))
+    if _seq_v3 and _seq_v4:
+        print(
+            "Error: --pics_v3_sequential_rl_reminder_v3 and "
+            "--pics_v3_sequential_rl_reminder_v4 are mutually exclusive; "
+            "refuse to choose silently."
+        )
+        return
     configure_pics_v3_family_reminder_v3(
-        sequential_rl=bool(
-            getattr(args, "pics_v3_sequential_rl_reminder_v3", False)
-        ),
+        sequential_rl=_seq_v3,
         feedback_learning=bool(
             getattr(args, "pics_v3_feedback_learning_reminder_v3", False)
         ),
     )
+    configure_pics_v3_family_reminder_v4(sequential_rl=_seq_v4)
     t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
     t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None

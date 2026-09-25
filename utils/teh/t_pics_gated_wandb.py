@@ -294,12 +294,24 @@ def build_gated_wandb_config(
             FAMILY_PROMPT_V3_RUN_TAG,
             FAMILY_PROMPT_V3_TREATMENT_KIND,
             FAMILY_PROMPT_V3_WANDB_GROUP,
+            FAMILY_PROMPT_V4_KIND,
+            FAMILY_PROMPT_V4_RUN_TAG,
+            FAMILY_PROMPT_V4_WANDB_GROUP,
         )
 
         seq_v3 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v3", False))
         fb_v3 = bool(getattr(args, "pics_v3_feedback_learning_reminder_v3", False))
+        seq_v4 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v4", False))
         out_root_s = str(Path(output_root).resolve())
-        if seq_v3 or fb_v3 or FAMILY_PROMPT_V3_TREATMENT_KIND in out_root_s:
+        if seq_v4 or FAMILY_PROMPT_V4_KIND in out_root_s:
+            cfg["group"] = FAMILY_PROMPT_V4_WANDB_GROUP
+            cfg["run_tag"] = FAMILY_PROMPT_V4_RUN_TAG
+            cfg["kind"] = FAMILY_PROMPT_V4_KIND
+            cfg["family_prompt_v4"] = {
+                "sequential_rl_reminder_v4": seq_v4,
+                "policy_id": "sequential_rl_reminder_v4",
+            }
+        elif seq_v3 or fb_v3 or FAMILY_PROMPT_V3_TREATMENT_KIND in out_root_s:
             cfg["group"] = FAMILY_PROMPT_V3_WANDB_GROUP
             cfg["run_tag"] = FAMILY_PROMPT_V3_RUN_TAG
             cfg["kind"] = FAMILY_PROMPT_V3_TREATMENT_KIND

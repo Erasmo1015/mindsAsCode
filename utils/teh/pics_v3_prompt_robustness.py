@@ -495,3 +495,233 @@ def maybe_attach_family_reminder_v3(
         if n:
             return new_body
     return body.rstrip() + "\n\n" + block + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Optional Sequential-RL reminder v4 (default OFF). Dataset-specific bodies
+# for Steyvers / Schulz / Kool only. When flagged, REPLACES keyed HISTORY v2
+# (and any leftover v3). Does not alter v3 source bodies or default/main runs.
+# Policy id: sequential_rl_reminder_v4.
+# ---------------------------------------------------------------------------
+
+SEQUENTIAL_RL_REMINDER_V4_POLICY_ID = "sequential_rl_reminder_v4"
+SEQUENTIAL_RL_REMINDER_V4_STEYVERS_MARKER = "SEQUENTIAL_RL_BEHAVIOR_REMINDER_V4_STEYVERS"
+SEQUENTIAL_RL_REMINDER_V4_SCHULZ_MARKER = "SEQUENTIAL_RL_BEHAVIOR_REMINDER_V4_SCHULZ"
+SEQUENTIAL_RL_REMINDER_V4_KOOL_MARKER = "SEQUENTIAL_RL_BEHAVIOR_REMINDER_V4_KOOL"
+
+SEQUENTIAL_RL_REMINDER_V4_ALIASES = frozenset(
+    {
+        "steyvers_2009_bandit",
+        "13schulz2020finding",
+        "14kool2016when",
+    }
+)
+
+SEQUENTIAL_RL_REMINDER_V4_MARKERS = frozenset(
+    {
+        SEQUENTIAL_RL_REMINDER_V4_STEYVERS_MARKER,
+        SEQUENTIAL_RL_REMINDER_V4_SCHULZ_MARKER,
+        SEQUENTIAL_RL_REMINDER_V4_KOOL_MARKER,
+    }
+)
+
+# Steyvers: preserve None-safety that unlocked runtime-valid programs; concise
+# explore–exploit; small supported mechanism set (not every mechanism).
+_SEQUENTIAL_RL_STEYVERS_BODY_V4 = (
+    "This program predicts human choices in a four-armed bandit; it does not "
+    "compute an optimal reward-maximizing policy. Across a finite horizon, "
+    "participants may trade immediate reward against information useful for later "
+    "choices. Exploration strength may vary by participant and trial position—"
+    "do not impose a fixed schedule such as always explore early then exploit.\n"
+    "\n"
+    "Allowed simple participant mechanisms (use a small combination supported by "
+    "observed behavior; do not implement every mechanism): smoothed reward "
+    "learning; uncertainty-sensitive exploration; recency; perseveration/"
+    "switching; stochastic choice. Avoid extreme probabilities and unnecessary "
+    "complexity.\n"
+    "\n"
+    "`history` may be empty; when present it has `action` and `reward` (use "
+    "`.get`—reward may be absent or None). Treat missing or None reward as no "
+    "observed outcome: skip it or handle it safely; never add None to a numeric "
+    "accumulator (`.get('reward', 0)` is insufficient when the key exists with "
+    "value None). Map actions through current valid option keys/"
+    "`problem['options']`—do not treat action ids as raw list indices into a "
+    "fixed array. Initialize every legal arm explicitly. Return a finite "
+    "probability for every legal arm (full K-way dict over `option['action']`, "
+    "K=4). Use positive smoothing; normalize safely. Use a uniform fallback only "
+    "when history is empty or yields no usable reward signal—non-empty usable "
+    "history must not collapse to uniform."
+)
+
+# Schulz: shorter/conservative vs v3 to reduce overfit; schema has no spatial
+# arm geometry—do not invent coordinates or unsupported features.
+_SEQUENTIAL_RL_SCHULZ_BODY_V4 = (
+    "This program predicts human choices in an eight-armed bandit; it does not "
+    "compute an optimal reward-maximizing policy. Across a finite horizon, "
+    "participants may briefly trade reward for information; prefer a simple "
+    "calibrated rule supported by observed behavior rather than stacking many "
+    "weakly supported mechanisms.\n"
+    "\n"
+    "Prefer smooth probabilities over highly confident action selection. "
+    "Participant stochasticity, recency, or perseveration may be used only when "
+    "supported. Do not invent spatial coordinates, arm relationships, or other "
+    "features absent from `problem` and `history`. Do not force nonuniform "
+    "predictions merely because history is nonempty—weak or uninformative "
+    "evidence may appropriately remain close to uniform.\n"
+    "\n"
+    "`history` may be empty; when present it has `action` and `reward` (use "
+    "`.get`—reward may be absent or None). Treat missing or None reward as no "
+    "observed outcome; never add None to a numeric accumulator. Return a full "
+    "K-way dict over every `option['action']` in `problem['options']` (K=8). "
+    "Positive smoothing and finite normalization required."
+)
+
+# Kool: dedicated two-step; prevent collapse to pooled reward-mean bandit.
+_SEQUENTIAL_RL_KOOL_BODY_V4 = (
+    "This program predicts human two-step choices; it does not compute a "
+    "treasure-maximizing policy. Preserve stage 1 (spaceship) vs stage 2 "
+    "(alien). Filter history by `stage`. Keep stage-2 values separate by "
+    "`planet` and alien identity where those fields are available. Never pool "
+    "rewards across stages, planets, or aliens. Never flatten this task into an "
+    "ordinary context-free reward-mean bandit.\n"
+    "\n"
+    "Stage 1 (`stage==1`): integer action 0/1 over spaceship `option_keys`/"
+    "`spaceship_options`; learn from `stage==1` history only. Allowed: "
+    "model-based use of learned transitions and stage-2 values; model-free "
+    "spaceship value learning; a simple mixture if supported by observed "
+    "behavior. Stage 2 (`stage==2`): condition on `planet`, `alien_options`/"
+    "`option_keys`, and available `spaceship`/`stage1_action`; model "
+    "alien-specific reward learning within the correct planet/context using "
+    "`feedback`/`reward` when present. Recency, perseveration, uncertainty, and "
+    "participant stochasticity are optional concise add-ons—not a requirement "
+    "to implement everything.\n"
+    "\n"
+    "`history` may be empty; use `.get` for stage-conditional fields. Never "
+    "read current-trial outcomes (`reward`/`treasure`) from `problem`. Treat "
+    "missing or None outcomes as unobserved; never add None to numeric "
+    "accumulators. Never `option_keys.index(letter)` for actions. Use "
+    "calibrated, bounded probabilities; avoid raw-count extremes."
+)
+
+_SEQUENTIAL_RL_REMINDER_V4_BLOCKS: Dict[str, str] = {
+    "steyvers_2009_bandit": (
+        f"[{SEQUENTIAL_RL_REMINDER_V4_STEYVERS_MARKER}]\n"
+        f"{_SEQUENTIAL_RL_STEYVERS_BODY_V4}\n"
+        f"[/{SEQUENTIAL_RL_REMINDER_V4_STEYVERS_MARKER}]"
+    ),
+    "13schulz2020finding": (
+        f"[{SEQUENTIAL_RL_REMINDER_V4_SCHULZ_MARKER}]\n"
+        f"{_SEQUENTIAL_RL_SCHULZ_BODY_V4}\n"
+        f"[/{SEQUENTIAL_RL_REMINDER_V4_SCHULZ_MARKER}]"
+    ),
+    "14kool2016when": (
+        f"[{SEQUENTIAL_RL_REMINDER_V4_KOOL_MARKER}]\n"
+        f"{_SEQUENTIAL_RL_KOOL_BODY_V4}\n"
+        f"[/{SEQUENTIAL_RL_REMINDER_V4_KOOL_MARKER}]"
+    ),
+}
+
+
+def using_pics_v3_sequential_rl_reminder_v4() -> bool:
+    return bool(getattr(_tls, "sequential_rl_reminder_v4", False))
+
+
+def configure_pics_v3_family_reminder_v4(*, sequential_rl: bool = False) -> None:
+    """Process-level opt-in for Sequential-RL reminder v4 (default False)."""
+    _tls.sequential_rl_reminder_v4 = bool(sequential_rl)
+
+
+def sequential_rl_reminder_v4_block(dataset: Optional[str]) -> Optional[str]:
+    """Exact tagged v4 block for a sequential-RL dataset, or None if not routed."""
+    alias = normalize_reminder_dataset_alias(dataset)
+    if alias is None:
+        return None
+    return _SEQUENTIAL_RL_REMINDER_V4_BLOCKS.get(alias)
+
+
+def _family_reminder_v4_already_present(text: str) -> bool:
+    return any(m in text for m in SEQUENTIAL_RL_REMINDER_V4_MARKERS)
+
+
+def _strip_history_and_v3_reminder_blocks(body: str) -> str:
+    """Remove HISTORY v2 and Sequential-RL v3 tagged blocks (defensive)."""
+    import re
+
+    out = body or ""
+    for open_m, close_m in (
+        (HISTORY_ROBUSTNESS_MARKER, HISTORY_ROBUSTNESS_MARKER),
+        (SEQUENTIAL_RL_REMINDER_V3_MARKER, SEQUENTIAL_RL_REMINDER_V3_MARKER),
+        (SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER, SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER),
+    ):
+        pat = re.compile(
+            rf"\[{re.escape(open_m)}\][\s\S]*?\[/{re.escape(close_m)}\]",
+            re.M,
+        )
+        out, _ = pat.subn("", out, count=1)
+    # Collapse excess blank lines left by stripping.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
+def maybe_attach_family_reminder_v4(
+    text: str,
+    dataset: Optional[str] = None,
+) -> str:
+    """Replace HISTORY v2 (and any v3) with Sequential-RL reminder v4 when flagged.
+
+    Default (flag false): return ``text`` unchanged (byte-identical).
+    Sequential-RL v4 flag: for Steyvers/Schulz/Kool, replace the existing
+    ``[HISTORY_ROBUSTNESS_BLOCK_V3]`` with the dataset-specific v4 block.
+    Unrelated datasets print a diagnostic and are not mutated.
+    Must not stack with v3 (CLI rejects simultaneous flags).
+    """
+    import re
+
+    if not using_pics_v3_sequential_rl_reminder_v4():
+        return text
+
+    alias = normalize_reminder_dataset_alias(dataset)
+    if alias is None:
+        alias = current_pics_v3_reminder_dataset()
+
+    block = sequential_rl_reminder_v4_block(alias)
+    if block is None:
+        print(
+            f"[TEH] --pics_v3_sequential_rl_reminder_v4 ignored for "
+            f"dataset={alias!r} (not in sequential-RL family); no prompt mutation"
+        )
+        return text
+
+    body = text or ""
+    if _family_reminder_v4_already_present(body):
+        # Already injected; strip any leftover HISTORY/v3 if present.
+        if (
+            HISTORY_ROBUSTNESS_MARKER in body
+            or SEQUENTIAL_RL_REMINDER_V3_MARKER in body
+            or SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER in body
+        ):
+            stripped = _strip_history_and_v3_reminder_blocks(body)
+            return stripped
+        return body
+
+    if HISTORY_ROBUSTNESS_MARKER in body:
+        pat = re.compile(
+            r"\[HISTORY_ROBUSTNESS_BLOCK_V3\][\s\S]*?\[/HISTORY_ROBUSTNESS_BLOCK_V3\]",
+            re.M,
+        )
+        new_body, n = pat.subn(block, body, count=1)
+        if n:
+            # Also strip accidental v3 if both somehow present.
+            if (
+                SEQUENTIAL_RL_REMINDER_V3_MARKER in new_body
+                or SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER in new_body
+            ):
+                new_body = _strip_history_and_v3_reminder_blocks(new_body)
+                # Stripping may have removed v4 if tags overlapped — re-ensure.
+                if not _family_reminder_v4_already_present(new_body):
+                    return new_body.rstrip() + "\n\n" + block + "\n"
+            return new_body
+
+    # No HISTORY block: strip any v3 then append v4.
+    body = _strip_history_and_v3_reminder_blocks(body)
+    return body.rstrip() + "\n\n" + block + "\n"

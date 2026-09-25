@@ -229,7 +229,9 @@ def test_fill_gated_args_unchanged_and_ablation_live_only():
     assert "--t_pics_gated_control_only" not in gated_fill
     assert "--t_pics_ablate_population" not in gated_fill
     assert "--ablate_dataset_adaptive_prompt" not in gated_fill
-    ablation_fill = common.split("t_pics_v3_fill_ablation_args()")[1]
+    ablation_fill = common.split("t_pics_v3_fill_ablation_args()")[1].split(
+        "t_pics_v3_fill_family_prompt_v3_args"
+    )[0]
     assert "--t_pics_reuse_gate_pool" not in ablation_fill
     # C/D/E live independent.
     assert ablation_fill.count("--t_pics_gated_independent") >= 3
@@ -247,7 +249,7 @@ def test_submit_packed_five_jobs_three_targets():
     assert "bergert_nosofsky_2007" in submit
     assert "1peterson2021using" not in submit
     assert "guan_2020_stopping" not in submit
-    assert "pv3a${condition}_packed3" in submit or 'pv3a${condition}_packed3' in submit
+    assert "pv3a${condition}_${PACK_TAG}" in submit or "pv3a${condition}_packed" in submit
     assert "ABLATION_TARGETS" in submit
     assert "run_one_dataset" in job
     assert "REUSE_GATE_POOL=FORBIDDEN" in job
@@ -256,11 +258,16 @@ def test_submit_packed_five_jobs_three_targets():
     assert "dataset_is_complete" in job
 
 
+
 def test_ablation_kinds_constants():
     assert ABLATION_KIND_NO_TRANSFER.endswith("no_transfer")
     assert ABLATION_KIND_NO_POPULATION.endswith("no_population")
     assert ABLATION_KIND_NO_EXPLORE.endswith("no_explore")
     assert ABLATION_KIND_NO_FRESH.endswith("no_fresh")
+    assert KIND not in ABLATION_KINDS
+    assert all(k.startswith("pics_v3_ablation_") for k in ABLATION_KINDS)
+    assert "live_reference" not in "".join(ABLATION_KINDS)
+
 
 
 def test_main_and_non_e_ablations_keep_reminder_v2_policy_id():
