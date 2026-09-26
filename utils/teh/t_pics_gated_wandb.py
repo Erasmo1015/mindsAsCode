@@ -276,15 +276,27 @@ def build_gated_wandb_config(
     try:
         from utils.teh.pics_v3_ablation import (
             ABLATION_WANDB_GROUP,
+            ALLOCATION_WANDB_GROUP,
             ablation_metadata_payload,
         )
 
         ablation_meta = ablation_metadata_payload(args)
         if ablation_meta.get("ablation_id"):
-            cfg["group"] = ABLATION_WANDB_GROUP
+            if str(ablation_meta.get("ablation_id") or "").startswith("allocation_"):
+                cfg["group"] = ablation_meta.get("wandb_group") or ALLOCATION_WANDB_GROUP
+                cfg["run_tag"] = ablation_meta.get("ablation_run_tag")
+            else:
+                cfg["group"] = ABLATION_WANDB_GROUP
             cfg["ablation"] = ablation_meta
             cfg["kind"] = ablation_meta.get("ablation_kind") or KIND
             if bool(getattr(args, "t_pics_gated_control_only", False)):
+                cfg["target_transfer_iterations"] = 0
+            if bool(getattr(args, "t_pics_gated_transfer_only", False)):
+                cfg["target_transfer_iterations"] = int(
+                    getattr(args, "global_iters", 0) or 0
+                )
+                cfg["transfer_only_allocation"] = True
+            if bool(getattr(args, "t_pics_ablate_population", False)):
                 cfg["target_transfer_iterations"] = 0
     except Exception:
         pass

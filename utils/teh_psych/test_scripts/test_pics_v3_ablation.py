@@ -209,7 +209,8 @@ def test_cli_flags_default_off_in_teh_source():
         "--t_pics_reuse_gate_pool",
     ):
         assert flag in teh_src
-    assert "requires --explore_candidates > 0." in teh_src
+    assert "requires --explore_candidates > 0" in teh_src
+    assert "unless --pics_v3_budget_allocation H" in teh_src
     assert "explore_candidates == 0 is allowed for the no-explore ablation" in teh_src
     # Live G.1 respects ablate (no forced require_auto when ablating).
     assert "require_auto_llm_prompt=not ablate_adaptive" in teh_src

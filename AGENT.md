@@ -732,7 +732,37 @@ Optional default-off `--pics_v3_sequential_rl_reminder_v4` (policy `sequential_r
 
 ---
 
+## Short update (Sep 25 2026 — budget-allocation F/G/H)
+
+Optional F/G/H search-depth ablations (KINDs `pics_v3_allocation_{f_transfer_init,g_target_pop_init,h_direct_person20}`; 6 datasets; explore=0; F=transfer-only frozen source). Reports: `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep25/budget_allocation_FGH/`. Dry-run: `DRY_RUN=1 bash cluster/v3/ours/ablation/budget_allocation/submit_budget_allocation.sh`. No GPU submit yet.
+
+---
+
+## Short update (Sep 26 2026 — F/G/H results)
+
+Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/others/ablation_FGH_Sep26/STATUS.md` — H closest to Original (avg −0.528 vs −0.521); F/G lag ~0.03–0.04.
+- Sep26 component mechanism audit (CPU read-only): `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep26/component_mechanism_audit/` — adaptive compression on Plonsky/Frey; fresh overfit heterogeneous (Bergert opposite); FINAL_RECOMMENDATION.md.
+
+---
+
 ## Short update (Sep 21 2026 — participant transition Schema v5)
 
 Population schema5 does **not** cover person MEM. Legacy annotate is still v3 (`risk`/`other_behavioral`). Added versioned `participant_transition_v5` (`utils/mem/schema_participant_transition_v5.py`; `--schema_version 5` → `annotations_v5.jsonl`): five constructs, global resume keys, strict official reference (no silent parent fallback), ΔF consistency, retained-construct `eligible_*_modified`, joint `--eligibility_mode restrict`. Audit: `…/source_selection_schema_v5/report/PARTICIPANT_TRANSITION_SCHEMA_V5_AUDIT.md`. Full person annot **not** started (pilot after main experiments). Canonical Schema-v5 annotation vLLM context (pop+person): **16384** (`utils/mem/annotation_context.py`); completed pop jobs historically used 32768 but reconstructed calls were all ≪16k — see `analysis_2026Sep/Sep20_V3/mem/annnotation/ANNOTATION_CONTEXT_16K.md`.
 
+---
+
+## Short update (Sep 25 2026 — participant Schema-v5 MEM pre-fit)
+
+Person annot complete (gated_job_paths_g5e50p30). Interactive MEM aborted; first CPU build contaminated by post-End interactive rewrites (explore skipped 13/15). Wiped; FORCE clean rebuild jobs 303815/812/813 + cov 303816; primary focals+joint design-support 303817. Pre-fit: `analysis_2026Sep/Sep20_V3/mem/annotation_participant/PRE_FIT_AUDIT.md` (uniqueness 0 dups; ΔF 0 fails; NMC by ds/iter/source). Nine primary focals fit (`restrict`, exclude unresolved NMC, `--max_motif_controls 0`); joint design-support only — no joint/exploratory matrix. Reports: `…/annotation_participant/fits_primary_focal/`, `…/joint_design_support/`.
+
+---
+
+## Short update (Sep 26 2026 — participant MEM RE rekey + follow-up)
+
+Raw `participant_id` is **not** globally unique across datasets; MixedLM now groups by `dataset::run_id::participant_id`. Rekeyed nine focals + Holm + diagnostics + evolution_normal FE/cluster+bootstrap + LOO + NMC risk-set audit + reduced joint design-support (no joint fits): `analysis_2026Sep/Sep20_V3/mem/annotation_participant/followup_sep26/FOLLOWUP_REPORT.md`. Prior raw-pid CIs superseded.
+
+---
+
+## Short update (Sep 26 2026 — MEM freeze)
+
+Focal+joint fitters require `dataset::run_id::participant_id` (tests: `tests/test_mem_grouping.py`). Locked paper table: `analysis_2026Sep/Sep20_V3/mem/annotation_participant/freeze_sep26/PAPER_TABLE.md`. Prior raw-pid fit dirs superseded.

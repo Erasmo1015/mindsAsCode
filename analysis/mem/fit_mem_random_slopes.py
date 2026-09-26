@@ -3,7 +3,12 @@
 
 For each focal directional motif M:
 
-  delta_f ~ M + other_supported_controls + iteration + (1 + M | participant_id)
+  delta_f ~ M + other_supported_controls + iteration
+    + (1 + M | dataset::run_id::participant_id)
+
+Raw ``participant_id`` alone is **forbidden** as the RE grouping key (ordinals
+restart per dataset). Both focal and joint fitters require ``dataset``,
+``run_id``, and ``participant_id`` and validate group uniqueness.
 
 Fits added / removed / modified separately (never averages opposite directions).
 CPU-only statsmodels MixedLM. Reports fixed effects, random-slope variance,
@@ -31,6 +36,7 @@ value_modified, feedback_added, feedback_modified on final Schema-v5 runs.
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import sys
 import warnings
@@ -55,6 +61,13 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
 )
 from utils.mem.participant_semantic_postprocess_v5 import (  # noqa: E402
     filter_frame_for_construct_effect_fitting,
+)
+from analysis.mem.mem_grouping import (  # noqa: E402
+    GROUPING_KEY_NAME,
+    MEM_GROUP_COL,
+    MemGroupingError,
+    attach_validated_mem_group,
+    make_global_participant_key,
 )
 
 
@@ -151,6 +164,9 @@ def _participant_slopes(
     return slopes, var_slope, n_informative
 
 
+# Re-export make_global_participant_key is already imported from mem_grouping.
+
+
 def fit_focal_motif(
     df: pd.DataFrame,
     *,
@@ -158,21 +174,48 @@ def fit_focal_motif(
     controls: Sequence[str],
     include_phase_effects: bool,
     structural_controls: Sequence[str],
+    optimizer_methods: Sequence[str] = ("lbfgs",),
+    reml: bool = True,
+    maxiter: int = 200,
+    center_iteration: bool = False,
+    scale_delta_f: bool = False,
 ) -> Dict[str, Any]:
     smf = _require_statsmodels()
     work = df.copy()
     work["delta_f"] = pd.to_numeric(work["delta_f"], errors="coerce")
     work["iteration"] = pd.to_numeric(work.get("iteration"), errors="coerce")
     work["participant_id"] = work["participant_id"].astype(str)
+    try:
+        work, group_meta = attach_validated_mem_group(work)
+    except MemGroupingError as exc:
+        return {
+            "focal": focal,
+            "status": "grouping_failed",
+            "error": str(exc),
+            "grouping_key": GROUPING_KEY_NAME,
+        }
     work[focal] = pd.to_numeric(work[focal], errors="coerce").fillna(0).astype(int)
     for c in list(controls) + list(structural_controls):
         if c in work.columns:
             work[c] = pd.to_numeric(work[c], errors="coerce").fillna(0).astype(int)
 
+    # Optional numerically equivalent transforms (same linear model up to scaling).
+    delta_scale = 1.0
+    if scale_delta_f:
+        sd = float(pd.to_numeric(work["delta_f"], errors="coerce").std(ddof=1) or 1.0)
+        if sd > 0:
+            work["delta_f"] = work["delta_f"] / sd
+            delta_scale = sd
+    if center_iteration and "iteration" in work.columns:
+        work["iteration"] = work["iteration"] - work["iteration"].mean()
+
     # Drop rows missing outcome / grouping
-    work = work.dropna(subset=["delta_f", "participant_id", "iteration"])
+    work = work.dropna(subset=["delta_f", MEM_GROUP_COL, "iteration"])
     n_pos = int((work[focal] == 1).sum())
-    n_parts = int(work.loc[work[focal] == 1, "participant_id"].nunique())
+    n_parts = int(work.loc[work[focal] == 1, MEM_GROUP_COL].nunique())
+    n_datasets = (
+        int(work["dataset"].nunique()) if "dataset" in work.columns and len(work) else 0
+    )
     if n_pos < 5 or n_parts < 2:
         return {
             "focal": focal,
@@ -180,12 +223,30 @@ def fit_focal_motif(
             "reason": "too_few_positive_rows_or_participants",
             "n_positive": n_pos,
             "n_participants_with_positive": n_parts,
+            "n_datasets": n_datasets,
             "n_rows": int(len(work)),
+            "grouping_key": GROUPING_KEY_NAME,
+            "grouping_meta": group_meta,
         }
 
     fixed_terms = [focal] + [c for c in controls if c != focal and c in work.columns]
     fixed_terms += [c for c in structural_controls if c in work.columns]
-    fixed_terms.append("iteration")
+    # Drop constant FE predictors (e.g. explore slice has iteration==0 for all rows).
+    kept: List[str] = []
+    dropped_constant: List[str] = []
+    for term in fixed_terms:
+        if term not in work.columns:
+            continue
+        nunq = int(pd.to_numeric(work[term], errors="coerce").nunique(dropna=True))
+        if nunq < 2 and term != focal:
+            dropped_constant.append(term)
+            continue
+        kept.append(term)
+    if "iteration" in work.columns and int(pd.to_numeric(work["iteration"], errors="coerce").nunique(dropna=True)) >= 2:
+        kept.append("iteration")
+    elif "iteration" in work.columns:
+        dropped_constant.append("iteration")
+    fixed_terms = kept
     if include_phase_effects and "phase" in work.columns and work["phase"].nunique() > 1:
         fixed_terms.append("C(phase)")
         # Motif × phase interaction when phases differ in ΔF meaning.
@@ -197,34 +258,80 @@ def fit_focal_motif(
     ):
         fixed_terms.append("C(reference_type)")
 
-    fe = " + ".join(fixed_terms)
+    fe = " + ".join(fixed_terms) if fixed_terms else "1"
     # statsmodels MixedLM formula uses vc or re_formula
     formula = f"delta_f ~ {fe}"
     re_formula = f"1 + {focal}"
 
     warnings_list: List[str] = []
+    if dropped_constant:
+        warnings_list.append(f"dropped_constant_fe:{','.join(dropped_constant)}")
+    if center_iteration:
+        warnings_list.append("centered_iteration")
+    if scale_delta_f and delta_scale != 1.0:
+        warnings_list.append(f"scaled_delta_f_by_{delta_scale:.6g}")
+
     status = "ok"
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            model = smf.mixedlm(formula, work, groups=work["participant_id"], re_formula=re_formula)
-            result = model.fit(method="lbfgs", reml=True, maxiter=200)
-            for w in caught:
-                warnings_list.append(str(w.message))
-    except Exception as exc:
-        msg = f"{type(exc).__name__}: {exc}"
+    result = None
+    used_method = None
+    method_attempts: List[Dict[str, Any]] = []
+    last_exc: Optional[str] = None
+    model = smf.mixedlm(
+        formula, work, groups=work[MEM_GROUP_COL], re_formula=re_formula
+    )
+    for method in optimizer_methods:
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                fit_res = model.fit(method=method, reml=reml, maxiter=maxiter)
+                msgs = [str(w.message) for w in caught]
+            method_attempts.append(
+                {
+                    "method": method,
+                    "converged": bool(fit_res.converged),
+                    "warnings": msgs,
+                }
+            )
+            result = fit_res
+            used_method = method
+            warnings_list.extend(msgs)
+            if bool(fit_res.converged):
+                # Prefer first converged method with finite, non-pathological FE SE.
+                try:
+                    se_try = float(fit_res.bse_fe.get(focal, float("nan")))
+                    coef_try = float(fit_res.fe_params.get(focal, float("nan")))
+                    if (
+                        math.isfinite(se_try)
+                        and math.isfinite(coef_try)
+                        and se_try <= max(10.0, 50.0 * (abs(coef_try) + 0.05))
+                    ):
+                        break
+                except Exception:
+                    break
+                # else keep trying next optimizer
+        except Exception as exc:
+            last_exc = f"{type(exc).__name__}: {exc}"
+            method_attempts.append(
+                {"method": method, "converged": False, "error": last_exc}
+            )
+            continue
+
+    if result is None:
         status = "fit_failed"
-        if "Singular" in msg or "singular" in msg.lower():
+        if last_exc and ("Singular" in last_exc or "singular" in last_exc.lower()):
             status = "singular_or_boundary"
         return {
             "focal": focal,
             "status": status,
-            "error": msg,
+            "error": last_exc,
             "formula": formula,
             "re_formula": re_formula,
+            "optimizer_attempts": method_attempts,
             "n_rows": int(len(work)),
             "n_positive": n_pos,
             "n_participants_with_positive": n_parts,
+            "grouping_key": GROUPING_KEY_NAME,
+            "grouping_meta": group_meta,
         }
 
     # Singularity / Hessian diagnostics
@@ -274,19 +381,51 @@ def fit_focal_motif(
             ci_high = float(conf.loc[focal, 1])
     except Exception:
         pass
+    # Rescale FE to original delta_f units if outcome was standardized.
+    if delta_scale != 1.0:
+        fixed_coef = fixed_coef * delta_scale
+        fixed_se = fixed_se * delta_scale if fixed_se == fixed_se else fixed_se
+        if ci_low is not None:
+            ci_low = ci_low * delta_scale
+        if ci_high is not None:
+            ci_high = ci_high * delta_scale
 
     slopes, var_slope, n_info = _participant_slopes(result, focal=focal, fixed_coef=fixed_coef)
+    if delta_scale != 1.0 and var_slope is not None:
+        var_slope = float(var_slope) * (delta_scale ** 2)
+
+    # Intercept variance from cov_re when available
+    var_intercept = None
+    try:
+        cov = result.cov_re
+        if hasattr(cov, "iloc") and cov.shape[0] >= 1:
+            var_intercept = float(cov.iloc[0, 0])
+            if delta_scale != 1.0:
+                var_intercept = var_intercept * (delta_scale ** 2)
+    except Exception:
+        pass
 
     return {
         "focal": focal,
         "status": status,
         "formula": formula,
         "re_formula": re_formula,
+        "grouping_key": GROUPING_KEY_NAME,
+        "grouping_column": MEM_GROUP_COL,
+        "grouping_meta": group_meta,
         "n_rows": int(len(work)),
         "n_positive": n_pos,
         "n_participants_with_positive": n_parts,
+        "n_groups": int(work[MEM_GROUP_COL].nunique()),
+        "n_datasets": n_datasets,
         "n_informative_participants": n_info,
         "converged": bool(result.converged),
+        "optimizer": used_method,
+        "optimizer_attempts": method_attempts,
+        "reml": reml,
+        "center_iteration": center_iteration,
+        "scale_delta_f": scale_delta_f,
+        "delta_f_scale": delta_scale,
         "warnings": warnings_list,
         "singular_or_boundary": singular,
         "hessian": hess_diag,
@@ -297,6 +436,7 @@ def fit_focal_motif(
             "ci_low": ci_low,
             "ci_high": ci_high,
         },
+        "random_intercept_variance": var_intercept,
         "random_slope_variance": var_slope,
         "participant_slopes": slopes,
         "llf": float(result.llf) if result.llf is not None else None,
@@ -323,6 +463,13 @@ def main() -> None:
         "--structural_controls",
         default="",
         help="Optional structural_* columns as fixed controls only.",
+    )
+    parser.add_argument(
+        "--max_motif_controls",
+        type=int,
+        default=8,
+        help="Max other supported directional motifs as FE controls "
+        "(0 = primary focal-only: delta_f ~ focal + iteration).",
     )
     parser.add_argument(
         "--combine_phases",
@@ -431,9 +578,9 @@ def main() -> None:
                             flush=True,
                         )
         # Controls: other supported motifs; never opposite-direction averaging.
-        controls = [c for c in supported if c != focal]
-        # Prefer not to explode FE dim: keep same-direction and common others.
-        # Cap controls at 8 densest supported columns excluding focal.
+        # Primary one-focal models use --max_motif_controls 0.
+        max_ctrl = max(0, int(args.max_motif_controls))
+        controls = [c for c in supported if c != focal] if max_ctrl > 0 else []
         controls_sorted = sorted(
             controls,
             key=lambda c: next(
@@ -441,7 +588,7 @@ def main() -> None:
                 0,
             ),
             reverse=True,
-        )[:8]
+        )[:max_ctrl]
         print(
             f"[fit_rs] Fitting focal={focal} controls={controls_sorted} "
             f"n_rows={len(df_focal)} eligibility_mode={eligibility_mode}",
@@ -515,10 +662,17 @@ def main() -> None:
                 "qvalue_bh": fe.get("qvalue_bh"),
                 "ci_low": fe.get("ci_low"),
                 "ci_high": fe.get("ci_high"),
+                "random_intercept_variance": r.get("random_intercept_variance"),
                 "random_slope_variance": r.get("random_slope_variance"),
                 "n_informative_participants": r.get("n_informative_participants"),
+                "n_rows": r.get("n_rows", r.get("n_rows_eligible")),
+                "n_positive": r.get("n_positive"),
+                "n_groups": r.get("n_groups"),
+                "n_datasets": r.get("n_datasets"),
                 "converged": r.get("converged"),
                 "singular_or_boundary": r.get("singular_or_boundary"),
+                "optimizer": r.get("optimizer"),
+                "grouping_key": r.get("grouping_key"),
                 "formula": r.get("formula"),
                 "re_formula": r.get("re_formula"),
             }

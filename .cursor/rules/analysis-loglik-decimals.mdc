@@ -1,0 +1,13 @@
+---
+description: Temporary analysis reports use 2-decimal loglik formatting
+alwaysApply: true
+---
+
+# Analysis report loglik decimals
+
+When generating **temporary / analysis-only** reports (under `analysis_*/`, chat tables, STATUS drafts that are not finalized official records):
+
+- Round and display **log-likelihood / selection-score** values to **two decimal places** (e.g. `−0.51`, not `−0.5114`).
+- Apply the same to means, deltas, and Avg columns in markdown tables meant for quick reading.
+
+Do **not** silently round away precision in underlying CSVs or scripts that feed official numerical audits unless the user asks; keep higher precision in machine-readable artifacts, display two decimals in narrative/temp tables.

@@ -197,7 +197,9 @@ from utils.teh.t_pics_gated_transfer import (
     gated_independent_enabled,
     gated_reuse_gate_pool_path,
     gated_run_metadata,
+    gated_transfer_only_enabled,
     gate_record_payload,
+    GateDecision,
     load_frozen_transfer_config,
     participant_run_is_complete,
     population_arm_is_complete,
@@ -4500,18 +4502,35 @@ def _run_t_pics_gated_population_arms(
     Ablation branches (default off):
     - ``--t_pics_reuse_gate_pool``: skip live G.2; load an existing elite pool.
     - ``--t_pics_gated_control_only``: no source/transfer; live control G.2 only.
+    - ``--t_pics_gated_transfer_only``: frozen source + transfer G.2 only (no control /
+      competitive gate); force retain transfer (budget-allocation F).
     """
     independent = gated_independent_enabled(args)
     control_only = gated_control_only_enabled(args)
+    transfer_only = gated_transfer_only_enabled(args)
     reuse_pool = gated_reuse_gate_pool_path(args)
     if control_only and independent:
         raise RuntimeError(
             "--t_pics_gated_control_only cannot be combined with "
             "--t_pics_gated_independent (independent still runs transfer)."
         )
+    if transfer_only and independent:
+        raise RuntimeError(
+            "--t_pics_gated_transfer_only cannot be combined with "
+            "--t_pics_gated_independent (F uses frozen schema-v5 source rank-1)."
+        )
+    if transfer_only and control_only:
+        raise RuntimeError(
+            "--t_pics_gated_transfer_only cannot be combined with "
+            "--t_pics_gated_control_only."
+        )
     if control_only and reuse_pool is not None:
         raise RuntimeError(
             "--t_pics_gated_control_only cannot be combined with --t_pics_reuse_gate_pool."
+        )
+    if transfer_only and reuse_pool is not None:
+        raise RuntimeError(
+            "--t_pics_gated_transfer_only cannot be combined with --t_pics_reuse_gate_pool."
         )
     explicit_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
     if explicit_source:
@@ -4730,6 +4749,198 @@ def _run_t_pics_gated_population_arms(
             shutil.copytree(retained_pool, selected_link)
         (layout["selected"] / "SELECTED_ARM.txt").write_text(
             "control\n", encoding="utf-8"
+        )
+        return _load_one_initial_pool_dir(str(retained_pool))
+
+    if transfer_only:
+        # Budget-allocation F: frozen schema-v5 source → transfer G.2 only.
+        # No control arm, no competitive gate; force retain transfer.
+        if independent:
+            raise RuntimeError(
+                "internal: transfer_only path must not run with independent G.1"
+            )
+        source_rank1 = Path(entry.rank1_program)
+        if not source_rank1.is_file():
+            raise FileNotFoundError(
+                f"--t_pics_gated_transfer_only requires frozen source rank-1: "
+                f"{source_rank1}"
+            )
+        seed_path = str(args.seed_path or default_seed_path(str(args.dataset)))
+        transfer_argv = build_transfer_argv(
+            dataset=str(args.dataset),
+            output_dir=str(layout["transfer"]),
+            seed_path=seed_path,
+            source_program=str(source_rank1),
+            source_dataset=entry.selected_source,
+        )
+        _write_arm_intended_argv(layout["transfer"] / "INTENDED_ARGV.txt", transfer_argv)
+        print(
+            f"[T-PICS gated] transfer-only allocation F target={args.dataset} "
+            f"selected_source={entry.selected_source} rank-1={source_rank1} "
+            f"config={cfg_path} (frozen YAML reuse; no control arm / no gate)"
+        )
+        transfer_suffix = _cross_task_source_suffix(
+            source_dataset=str(entry.selected_source),
+            program_path=str(source_rank1),
+            args=args,
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            best_loglik=None,
+            require_source_examples=True,
+        )
+        freeze_path = Path(run_root) / G2_PAIRED_PACK_FILENAME
+        freeze_payload = _ensure_g2_paired_pack_freeze(
+            args=args,
+            participants=participants,
+            seed_program_path=seed_program_path,
+            run_prompts_dir=run_prompts_dir,
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            source_suffix=transfer_suffix,
+            freeze_path=freeze_path,
+            source_dataset=str(entry.selected_source),
+            source_rank1=source_rank1,
+        )
+        gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
+        if not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve():
+            write_paired_pack_freeze(gate_freeze, freeze_payload)
+        freeze_path_str = str(freeze_path)
+        expected_iters = int(args.global_iters)
+        if hasattr(wandb_module, "set_g2_arm"):
+            wandb_module.set_g2_arm("transfer")
+        transfer_ok = population_arm_is_complete(
+            layout["transfer"], expected_global_iters=expected_iters
+        )
+        transfer_failed = False
+        transfer_program_ok = False
+        if transfer_ok:
+            print(f"[T-PICS gated] skip complete transfer G.2 -> {layout['transfer']}")
+            transfer_pool = _load_gated_arm_pool(layout["transfer"])
+            transfer_program_ok, _ = program_has_valid_choose(layout["transfer_rank1"])
+            if hasattr(wandb_module, "maybe_backfill_g2_arm"):
+                wandb_module.maybe_backfill_g2_arm("transfer", layout["transfer"])
+        else:
+            try:
+                transfer_pool = run_global_evolution_phase(
+                    **_gated_global_phase_kwargs(
+                        args,
+                        participants=participants,
+                        seed_program_path=seed_program_path,
+                        client=client,
+                        wandb_module=wandb_module,
+                        psych_dataset_split=psych_dataset_split,
+                        filter_mixed_gambles=filter_mixed_gambles,
+                        run_prompts_dir=run_prompts_dir,
+                        output_dir=layout["transfer"],
+                        prompt_suffix=transfer_suffix,
+                        g2_arm="transfer",
+                        g2_paired_pack_path=freeze_path_str,
+                    )
+                )
+                transfer_ok = population_arm_is_complete(
+                    layout["transfer"], expected_global_iters=expected_iters
+                )
+                transfer_program_ok, _ = program_has_valid_choose(
+                    layout["transfer_rank1"]
+                )
+            except Exception as exc:
+                transfer_failed = True
+                transfer_pool = []
+                (layout["transfer"] / "TRANSFER_ARM_FAILED.json").write_text(
+                    json.dumps(
+                        {"error": str(exc), "type": type(exc).__name__}, indent=2
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                raise RuntimeError(
+                    f"T-PICS gated transfer-only arm failed: {layout['transfer']}: {exc}"
+                ) from exc
+        if not transfer_ok or not transfer_pool or not transfer_program_ok:
+            raise RuntimeError(
+                f"T-PICS gated transfer-only arm incomplete/invalid: "
+                f"{layout['transfer']}"
+            )
+        transfer_score = evaluate_pooled_train_val_loglik(
+            layout["transfer_rank1"],
+            dataset=str(args.dataset),
+            participant_ids=participants,
+            split_ratio=float(args.split_ratio),
+            split_seed=int(args.split_seed),
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            local_dataset=args.local_dataset,
+            mixed_gambles_csv=args.mixed_gambles_csv,
+            n_eval_seeds=int(args.n_eval_seeds),
+            limited_data_protocol=str(args.limited_data_protocol),
+            limited_train_val=args.limited_train_val,
+            max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+            speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+        )
+        # Do not call decide_gate: missing control arm would force control selection.
+        decision = GateDecision(
+            selected_arm="transfer",
+            reason="transfer_only_allocation_f",
+            control_score=None,
+            transfer_score=float(transfer_score)
+            if transfer_score is not None and math.isfinite(float(transfer_score))
+            else None,
+            score_difference=None,
+        )
+        retained_pool = layout["transfer_pool"]
+        record = gate_record_payload(
+            target=str(args.dataset),
+            selected_source=entry.selected_source,
+            decision=decision,
+            control_rank1=Path("(none)"),
+            transfer_rank1=layout["transfer_rank1"],
+            retained_pool=retained_pool,
+            config_path=cfg_path,
+            selector_name=selector_name,
+            selected_source_rank1=source_rank1,
+        )
+        record["never_ran_control_arm"] = True
+        record["forced_transfer_selection"] = True
+        record["frozen_source_rank1"] = str(source_rank1.resolve())
+        write_gate_record(layout["gate_record"], record)
+        if hasattr(wandb_module, "publish_gate_record"):
+            wandb_module.publish_gate_record(layout["gate_record"])
+        _merge_run_metadata(
+            Path(run_root),
+            {
+                "gate_record_path": str(layout["gate_record"]),
+                "gate": record,
+                "pooled_train_val_loglik_control": None,
+                "pooled_train_val_loglik_transfer": transfer_score,
+                "gate_reason": "transfer_only_allocation_f",
+                "selected_arm": "transfer",
+                "retained_pool_path": str(retained_pool),
+                "g2_arms_shared_target_prompt": True,
+                "g2_paired_pack_path": str(freeze_path),
+                "g2_paired_pack_version": G2_PAIRED_PACK_VERSION,
+                "g2_paired_n_examples_included": freeze_payload.get(
+                    "n_examples_included"
+                ),
+                "transfer_only_allocation": True,
+                "frozen_source_rank1": str(source_rank1.resolve()),
+            },
+        )
+        print(
+            f"[T-PICS gated] transfer-only selected transfer "
+            f"transfer_{GATE_SCORE_FIELD}={transfer_score}"
+        )
+        selected_link = layout["selected_pool"]
+        if selected_link.exists() or selected_link.is_symlink():
+            if selected_link.is_symlink() or selected_link.is_file():
+                selected_link.unlink()
+            else:
+                shutil.rmtree(selected_link)
+        try:
+            selected_link.symlink_to(retained_pool.resolve())
+        except OSError:
+            shutil.copytree(retained_pool, selected_link)
+        (layout["selected"] / "SELECTED_ARM.txt").write_text(
+            "transfer\n", encoding="utf-8"
         )
         return _load_one_initial_pool_dir(str(retained_pool))
 
@@ -14666,6 +14877,30 @@ def main():
         ),
     )
     parser.add_argument(
+        "--t_pics_gated_transfer_only",
+        action="store_true",
+        default=False,
+        help=(
+            "PICS v3 budget-allocation F (default off): with --t_pics_gated_transfer, "
+            "run only the transfer G.2 arm conditioned on the frozen schema-v5 source "
+            "rank-1 program. Skips the control arm and competitive gate; forces "
+            "transfer retention. Incompatible with --t_pics_gated_independent and "
+            "--t_pics_gated_control_only."
+        ),
+    )
+    parser.add_argument(
+        "--pics_v3_budget_allocation",
+        type=str,
+        default=None,
+        choices=["F", "G", "H", "f", "g", "h"],
+        metavar="F|G|H",
+        help=(
+            "PICS v3 budget-allocation label (default off). F=transfer-init, "
+            "G=target-pop-init, H=direct-person20. Sets unambiguous metadata and "
+            "allows H to use --t_pics_ablate_population with explore_candidates=0."
+        ),
+    )
+    parser.add_argument(
         "--t_pics_ablate_population",
         action="store_true",
         default=False,
@@ -15286,8 +15521,16 @@ def main():
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
     t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
     t_pics_control_only = bool(getattr(args, "t_pics_gated_control_only", False))
+    t_pics_transfer_only = bool(getattr(args, "t_pics_gated_transfer_only", False))
     t_pics_ablate_population = bool(getattr(args, "t_pics_ablate_population", False))
     ablate_adaptive_prompt = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
+    budget_allocation = None
+    raw_alloc = getattr(args, "pics_v3_budget_allocation", None)
+    if raw_alloc is not None:
+        from utils.teh.pics_v3_ablation import normalize_budget_allocation_label
+
+        budget_allocation = normalize_budget_allocation_label(raw_alloc)
+        args.pics_v3_budget_allocation = budget_allocation
     if t_pics_gated_independent and not t_pics_gated:
         print("Error: --t_pics_gated_independent requires --t_pics_gated_transfer.")
         return
@@ -15300,10 +15543,25 @@ def main():
     if t_pics_control_only and not t_pics_gated:
         print("Error: --t_pics_gated_control_only requires --t_pics_gated_transfer.")
         return
+    if t_pics_transfer_only and not t_pics_gated:
+        print("Error: --t_pics_gated_transfer_only requires --t_pics_gated_transfer.")
+        return
     if t_pics_control_only and t_pics_gated_independent:
         print(
             "Error: --t_pics_gated_control_only cannot be combined with "
             "--t_pics_gated_independent."
+        )
+        return
+    if t_pics_transfer_only and t_pics_gated_independent:
+        print(
+            "Error: --t_pics_gated_transfer_only cannot be combined with "
+            "--t_pics_gated_independent (uses frozen schema-v5 source)."
+        )
+        return
+    if t_pics_transfer_only and t_pics_control_only:
+        print(
+            "Error: --t_pics_gated_transfer_only cannot be combined with "
+            "--t_pics_gated_control_only."
         )
         return
     if t_pics_ablate_population and t_pics_gated:
@@ -15316,6 +15574,27 @@ def main():
         print(
             "Error: --t_pics_ablate_population cannot be combined with "
             "--t_pics_gated_control_only."
+        )
+        return
+    if t_pics_ablate_population and t_pics_transfer_only:
+        print(
+            "Error: --t_pics_ablate_population cannot be combined with "
+            "--t_pics_gated_transfer_only."
+        )
+        return
+    if budget_allocation == "F" and not t_pics_transfer_only:
+        print(
+            "Error: --pics_v3_budget_allocation F requires --t_pics_gated_transfer_only."
+        )
+        return
+    if budget_allocation == "G" and not t_pics_control_only:
+        print(
+            "Error: --pics_v3_budget_allocation G requires --t_pics_gated_control_only."
+        )
+        return
+    if budget_allocation == "H" and not t_pics_ablate_population:
+        print(
+            "Error: --pics_v3_budget_allocation H requires --t_pics_ablate_population."
         )
         return
     if t_pics_gated:
@@ -15432,24 +15711,40 @@ def main():
                     else (
                         "; control-only ablation (source identity only, rank-1 not required)"
                         if t_pics_control_only
-                        else "; rank-1 choose() validated; no GPU yet"
+                        else (
+                            "; transfer-only allocation F (frozen source rank-1 required)"
+                            if t_pics_transfer_only
+                            else "; rank-1 choose() validated; no GPU yet"
+                        )
                     )
                 )
                 + ")"
             )
     if t_pics_ablate_population:
         if int(args.explore_candidates) <= 0:
-            print(
-                "Error: --t_pics_ablate_population requires --explore_candidates > 0 "
-                "(seed explore)."
-            )
-            return
+            if budget_allocation == "H":
+                print(
+                    f"[T-PICS allocation H] no-population with explore=0 "
+                    f"(seed→person_iters={args.n_iterations})"
+                )
+            else:
+                print(
+                    "Error: --t_pics_ablate_population requires --explore_candidates > 0 "
+                    "(seed explore), unless --pics_v3_budget_allocation H."
+                )
+                return
         if args.global_phase:
             print("Error: --t_pics_ablate_population requires --no-global_phase.")
             return
         print(
             f"[T-PICS ablation] no-population preflight OK "
             f"(explore={args.explore_candidates} person_iters={args.n_iterations})"
+        )
+    if t_pics_transfer_only:
+        print(
+            f"[T-PICS allocation F] transfer-only preflight OK "
+            f"(global_iters={args.global_iters} person_iters={args.n_iterations} "
+            f"explore={args.explore_candidates}; frozen schema-v5 source)"
         )
     if args.fitness_metric == "loglik" and not is_binary_loglik_dataset(args.dataset) and not (
         args.dataset == "cpc18" and not args.cpc18_official_mse

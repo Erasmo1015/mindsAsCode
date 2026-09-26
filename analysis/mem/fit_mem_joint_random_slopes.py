@@ -11,8 +11,10 @@ assumed for participant_transition_v5:
           + iteration
 
 Random effects are a subset of those motif columns (plus intercept), chosen via
-``--random_slopes``. Primary optimizer is REML + lbfgs (matches focal pipeline);
-optional secondary methods (cg, powell) are also fit and stored.
+``--random_slopes``, grouped by **``dataset::run_id::participant_id``** (raw
+``participant_id`` alone is forbidden). Primary optimizer is REML + lbfgs
+(matches focal pipeline); optional secondary methods (cg, powell) are also fit
+and stored.
 
 Eligibility (schema_v3/v5 CSV):
   --eligibility_mode off        use all rows; legacy v2 OK
@@ -52,6 +54,13 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
 )
 from utils.mem.participant_semantic_postprocess_v5 import (  # noqa: E402
     filter_frame_for_construct_effect_fitting,
+)
+from analysis.mem.mem_grouping import (  # noqa: E402
+    GROUPING_KEY_NAME,
+    MEM_GROUP_COL,
+    MemGroupingError,
+    attach_validated_mem_group,
+    make_global_participant_key,
 )
 
 
@@ -194,6 +203,8 @@ def prepare_joint_frame(
         "delta_f",
         "participant_id",
         "iteration",
+        "dataset",
+        "run_id",
     }
     missing = [c for c in needed if c not in work.columns]
     if missing:
@@ -202,6 +213,7 @@ def prepare_joint_frame(
     work["delta_f"] = pd.to_numeric(work["delta_f"], errors="coerce")
     work["iteration"] = pd.to_numeric(work["iteration"], errors="coerce")
     work["participant_id"] = work["participant_id"].astype(str)
+    work, group_meta = attach_validated_mem_group(work)
 
     motif_cols = [
         c
@@ -215,13 +227,13 @@ def prepare_joint_frame(
             raise ValueError(f"random slope '{c}' is constant after prep")
 
     before = len(work)
-    work = work.dropna(subset=["delta_f", "participant_id", "iteration"]).copy()
+    work = work.dropna(subset=["delta_f", MEM_GROUP_COL, "iteration"]).copy()
     work = work.reset_index(drop=True)
 
     # Fingerprint of analysis rows (sorted index hash of original indices if available)
     idx_bytes = ",".join(map(str, work.index.tolist())).encode("utf-8")
     # Prefer original CSV row order after dropna: use stable content hash
-    content_cols = ["participant_id", "delta_f", "iteration"] + motif_cols
+    content_cols = [MEM_GROUP_COL, "delta_f", "iteration"] + motif_cols
     content = work[content_cols].to_csv(index=False).encode("utf-8")
     fingerprint = hashlib.sha256(content).hexdigest()
 
@@ -230,9 +242,9 @@ def prepare_joint_frame(
         pos = work[c] == 1
         support[c] = {
             "n_positive_rows": int(pos.sum()),
-            "n_participants_with_pos": int(work.loc[pos, "participant_id"].nunique()),
+            "n_participants_with_pos": int(work.loc[pos, MEM_GROUP_COL].nunique()),
             "n_participants_both_levels": int(
-                work.groupby("participant_id")[c]
+                work.groupby(MEM_GROUP_COL)[c]
                 .apply(lambda s: s.nunique() >= 2)
                 .sum()
             ),
@@ -241,7 +253,10 @@ def prepare_joint_frame(
     meta = {
         "n_rows_before_dropna": int(before),
         "n_rows": int(len(work)),
-        "n_participants": int(work["participant_id"].nunique()),
+        "n_participants": int(work[MEM_GROUP_COL].nunique()),
+        "n_datasets": int(work["dataset"].nunique()),
+        "grouping_key": GROUPING_KEY_NAME,
+        "grouping_meta": group_meta,
         "phase": phase,
         "fingerprint_sha256": fingerprint,
         "motif_support": support,
@@ -302,7 +317,7 @@ def _extract_random_effects(
 
         if arr.size < len(labels):
             arr = np.pad(arr, (0, len(labels) - arr.size))
-        row: Dict[str, Any] = {"participant_id": pid}
+        row: Dict[str, Any] = {"participant_id": pid, "mem_group": pid}
         # intercept
         b0 = float(arr[0])
         mu0 = float(fe_params.get("Intercept", 0.0))
@@ -417,7 +432,7 @@ def fit_joint_random_slopes(
     re_names = _re_labels(random_slopes)
 
     model = smf.mixedlm(
-        formula, work, groups=work["participant_id"], re_formula=re_formula
+        formula, work, groups=work[MEM_GROUP_COL], re_formula=re_formula
     )
 
     method_results: Dict[str, Any] = {}
@@ -545,7 +560,7 @@ def fit_joint_random_slopes(
     for i, a in enumerate(random_slopes):
         for b in random_slopes[i + 1 :]:
             both = 0
-            for pid, g in work.groupby("participant_id"):
+            for pid, g in work.groupby(MEM_GROUP_COL):
                 if g[a].nunique() >= 2 and g[b].nunique() >= 2:
                     both += 1
             pairwise[f"{a}__{b}"] = both
@@ -906,9 +921,13 @@ def main() -> None:
                 continue
             s = pd.to_numeric(work[t], errors="coerce").fillna(0)
             n_pos = int((s == 1).sum())
+            try:
+                gkey = make_global_participant_key(work)
+            except Exception:
+                gkey = work["participant_id"].astype(str)
             n_both = int(
-                work.assign(_x=s)
-                .groupby("participant_id")["_x"]
+                work.assign(_x=s, _g=gkey)
+                .groupby("_g")["_x"]
                 .nunique()
                 .ge(2)
                 .sum()

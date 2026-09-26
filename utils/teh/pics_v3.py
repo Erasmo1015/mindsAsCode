@@ -47,6 +47,18 @@ ABLATION_KINDS = (
 )
 ABLATION_RUN_TAG = "g5e50p30_pics_v3_ablation"
 
+# Budget-allocation F/G/H (search-depth comparison; not A–E; never write under pics_v3/).
+ALLOCATION_KIND_F_TRANSFER_INIT = "pics_v3_allocation_f_transfer_init"
+ALLOCATION_KIND_G_TARGET_POP_INIT = "pics_v3_allocation_g_target_pop_init"
+ALLOCATION_KIND_H_DIRECT_PERSON20 = "pics_v3_allocation_h_direct_person20"
+ALLOCATION_KINDS = (
+    ALLOCATION_KIND_F_TRANSFER_INIT,
+    ALLOCATION_KIND_G_TARGET_POP_INIT,
+    ALLOCATION_KIND_H_DIRECT_PERSON20,
+)
+ALLOCATION_RUN_TAG = "g5e50p30_pics_v3_budget_allocation"
+ALLOCATION_WANDB_GROUP = "t_pics_gated_budget_allocation"
+
 # Family-prompt v3 experiment (optional reminder augmentation; default off).
 # Live-independent matched A/B; never write under bare pics_v3/ or reminder/gap KINDs.
 FAMILY_PROMPT_V3_CONTROL_KIND = "pics_v3_family_prompt_v3_control"

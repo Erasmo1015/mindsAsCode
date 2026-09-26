@@ -767,6 +767,11 @@ def gated_control_only_enabled(args: Any) -> bool:
     return bool(getattr(args, "t_pics_gated_control_only", False))
 
 
+def gated_transfer_only_enabled(args: Any) -> bool:
+    """Budget-allocation F: run only the transfer G.2 arm (force retain transfer)."""
+    return bool(getattr(args, "t_pics_gated_transfer_only", False))
+
+
 def gated_reuse_gate_pool_path(args: Any) -> Optional[Path]:
     raw = str(getattr(args, "t_pics_reuse_gate_pool", "") or "").strip()
     if not raw:
