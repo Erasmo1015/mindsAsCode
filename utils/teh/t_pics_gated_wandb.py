@@ -321,8 +321,33 @@ def build_gated_wandb_config(
         seq_v4 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v4", False))
         ij_hybrid = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
         out_root_s = str(Path(output_root).resolve())
+        aamas_track = str(getattr(args, "pics_aamas_v0_track_mode", "") or "")
+        aamas_mode = str(getattr(args, "pics_aamas_v0", "") or "")
+        if aamas_track or aamas_mode or "pics_aamas_v0" in out_root_s:
+            from utils.teh.pics_aamas_v0 import kind_for_track
+
+            if aamas_track:
+                kind = kind_for_track(aamas_track)
+            elif "pics_aamas_v0_target_only" in out_root_s:
+                kind = "pics_aamas_v0_target_only"
+            elif "pics_aamas_v0_transfer_based_only" in out_root_s:
+                kind = "pics_aamas_v0_transfer_based_only"
+            elif "pics_aamas_v0_official_gate" in out_root_s:
+                kind = "pics_aamas_v0_official_gate"
+            else:
+                kind = "pics_aamas_v0"
+            cfg["group"] = kind
+            cfg["kind"] = kind
+            cfg["run_tag"] = kind
+            cfg["pics_aamas_v0_track_mode"] = aamas_track or aamas_mode
+            cfg["provisional_experimental_track"] = aamas_track in (
+                "target_only",
+                "transfer_based_only",
+            )
+            cfg["official_main_result"] = aamas_track == "official_gate"
+            # Keep AAMAS KIND even if a historical reminder flag is also present.
         # I/J hybrid keeps its own KIND even when Sequential-RL reminder-v4 is on.
-        if ij_hybrid or any(k in out_root_s for k in IJ_HYBRID_KINDS):
+        elif ij_hybrid or any(k in out_root_s for k in IJ_HYBRID_KINDS):
             if seq_v4:
                 cfg["sequential_rl_reminder_v4"] = True
             # do not rewrite kind/group to family_prompt_v4

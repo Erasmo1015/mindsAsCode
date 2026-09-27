@@ -4086,7 +4086,10 @@ def _run_t_pics_source_population(
     )
     ablate_adaptive = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
     hybrid_grounded = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
-    registered_body = ablate_adaptive or hybrid_grounded
+    from utils.teh.pics_aamas_v0 import aamas_v0_prompt_enabled
+
+    aamas_v0_prompt = aamas_v0_prompt_enabled(args)
+    registered_body = ablate_adaptive or hybrid_grounded or aamas_v0_prompt
     require_auto = bool(require_auto_llm_prompt) and not registered_body
     prefer_auto = (
         (
@@ -4128,6 +4131,7 @@ def _run_t_pics_source_population(
         llm_decoding_seed=llm_decoding_seed,
         ablate_dataset_adaptive_prompt=ablate_adaptive,
         pics_v3_hybrid_grounded_prompt=hybrid_grounded,
+        pics_aamas_v0_prompt=aamas_v0_prompt,
     )
     source_seed = str(source_prompts_dir / "seed_program.py")
     print(
@@ -4489,6 +4493,106 @@ def _ensure_g2_paired_pack_freeze(
     return payload
 
 
+def _write_aamas_population_marker(
+    *,
+    arm_dir: Path,
+    dataset: str,
+    prompt_meta: Dict[str, Any],
+    args: Any,
+    track_mode: str,
+    source_dataset: Optional[str] = None,
+    source_rank1_sha256: Optional[str] = None,
+) -> None:
+    from utils.teh.pics_aamas_v0 import write_population_completion
+
+    write_population_completion(
+        arm_dir,
+        dataset=str(dataset),
+        prompt_meta=prompt_meta,
+        global_iters=int(args.global_iters),
+        n_candidates=int(args.n_candidates),
+        range_start_ordinal=getattr(args, "range_start_ordinal", None),
+        range_end_ordinal=getattr(args, "range_end_ordinal", None),
+        track_mode=track_mode,
+        model_name=str(args.model_name),
+        hard_prompt_token_cap=int(args.hard_prompt_token_cap),
+        llm_max_tokens=int(args.llm_max_tokens),
+        max_parent_chars=int(args.max_parent_chars),
+        vllm_max_model_len=int(os.environ.get("VLLM_MAX_MODEL_LEN") or 16384),
+        source_dataset=source_dataset,
+        source_rank1_sha256=source_rank1_sha256,
+    )
+
+
+def _run_aamas_v0_target_only_population(
+    *,
+    args: Any,
+    run_root: Path,
+    participants: List[int],
+    seed_program_path: str,
+    client: OpenAI,
+    wandb_module: Optional[Any],
+    psych_dataset_split: str,
+    filter_mixed_gambles: bool,
+    run_prompts_dir: str,
+) -> List[Tuple[Any, ...]]:
+    """Live target-only 10x10 population. No source, no transfer arm, no gate."""
+    layout = run_layout(Path(run_root))
+    layout["control"].mkdir(parents=True, exist_ok=True)
+    layout["selected"].mkdir(parents=True, exist_ok=True)
+    (Path(run_root) / "TRACK_STATUS.txt").write_text(
+        "temporary_experimental_track\n"
+        "track_mode=target_only\n"
+        "not_official_main_result\n",
+        encoding="utf-8",
+    )
+    (layout["control"] / "ARM_ROLE.txt").write_text("target_only\n", encoding="utf-8")
+    prompt_meta_path = Path(run_prompts_dir) / "prompt_meta.json"
+    prompt_meta = json.loads(prompt_meta_path.read_text(encoding="utf-8"))
+    expected = int(args.global_iters)
+    complete = population_arm_is_complete(
+        layout["control"], expected_global_iters=expected
+    ) and (layout["control"] / "STAGE_COMPLETE.json").is_file()
+    if complete:
+        print(f"[AAMAS v0] skip complete target-only population -> {layout['control']}")
+    else:
+        run_global_evolution_phase(
+            **_gated_global_phase_kwargs(
+                args,
+                participants=participants,
+                seed_program_path=seed_program_path,
+                client=client,
+                wandb_module=wandb_module,
+                psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=filter_mixed_gambles,
+                run_prompts_dir=run_prompts_dir,
+                output_dir=layout["control"],
+                prompt_suffix=None,
+                g2_arm=None,
+            )
+        )
+        _write_aamas_population_marker(
+            arm_dir=layout["control"],
+            dataset=str(args.dataset),
+            prompt_meta=prompt_meta,
+            args=args,
+            track_mode="target_only",
+        )
+    retained = layout["control_pool"]
+    selected_link = layout["selected_pool"]
+    if selected_link.exists() or selected_link.is_symlink():
+        if selected_link.is_symlink() or selected_link.is_file():
+            selected_link.unlink()
+        else:
+            shutil.rmtree(selected_link)
+    try:
+        selected_link.symlink_to(retained.resolve())
+    except OSError:
+        shutil.copytree(retained, selected_link)
+    (layout["selected"] / "SELECTED_ARM.txt").write_text("target_only\n", encoding="utf-8")
+    return _load_one_initial_pool_dir(str(retained))
+
+
 def _run_t_pics_gated_population_arms(
     *,
     args: Any,
@@ -4509,6 +4613,57 @@ def _run_t_pics_gated_population_arms(
     - ``--t_pics_gated_transfer_only``: frozen source + transfer G.2 only (no control /
       competitive gate); force retain transfer (budget-allocation F).
     """
+    aamas_track = str(getattr(args, "pics_aamas_v0_track_mode", "") or "")
+    if aamas_track == "target_only":
+        return _run_aamas_v0_target_only_population(
+            args=args,
+            run_root=run_root,
+            participants=participants,
+            seed_program_path=seed_program_path,
+            client=client,
+            wandb_module=wandb_module,
+            psych_dataset_split=psych_dataset_split,
+            filter_mixed_gambles=filter_mixed_gambles,
+            run_prompts_dir=run_prompts_dir,
+        )
+    mat_target = str(getattr(args, "pics_aamas_v0_materialize_target_only_run", "") or "").strip()
+    mat_transfer = str(getattr(args, "pics_aamas_v0_materialize_transfer_run", "") or "").strip()
+    if aamas_track == "official_gate" and mat_target and mat_transfer:
+        from utils.teh.pics_aamas_v0 import materialize_official_gate
+
+        def _eval_score(program_path: Path, provenance: Dict[str, Any]) -> float:
+            score = evaluate_pooled_train_val_loglik(
+                Path(program_path),
+                dataset=str(args.dataset),
+                participant_ids=[int(p) for p in provenance.get("participant_ids") or participants],
+                split_ratio=float(args.split_ratio),
+                split_seed=int(args.split_seed),
+                psych_dataset_split=psych_dataset_split,
+                filter_mixed_gambles=filter_mixed_gambles,
+                local_dataset=args.local_dataset,
+                mixed_gambles_csv=args.mixed_gambles_csv,
+                n_eval_seeds=int(args.n_eval_seeds),
+                limited_data_protocol=str(args.limited_data_protocol),
+                limited_train_val=args.limited_train_val,
+                max_observed_trials_per_participant=args.max_observed_trials_per_participant,
+                speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
+            )
+            if score is None or not math.isfinite(float(score)):
+                raise RuntimeError(f"official gate score is not finite: {program_path}")
+            return float(score)
+
+        record = materialize_official_gate(
+            target_only_run=Path(mat_target),
+            transfer_run=Path(mat_transfer),
+            output_dir=Path(run_root),
+            target_dataset=str(args.dataset),
+            evaluate_score=_eval_score,
+        )
+        print(
+            f"[AAMAS v0] materialized official gate selected={record['selected_arm']} "
+            f"reason={record['reason']}"
+        )
+        return _load_one_initial_pool_dir(str(record["retained_pool_path"]))
     independent = gated_independent_enabled(args)
     control_only = gated_control_only_enabled(args)
     transfer_only = gated_transfer_only_enabled(args)
@@ -4763,7 +4918,26 @@ def _run_t_pics_gated_population_arms(
             raise RuntimeError(
                 "internal: transfer_only path must not run with independent G.1"
             )
-        source_rank1 = Path(entry.rank1_program)
+        if str(getattr(args, "pics_aamas_v0_track_mode", "") or "") == "transfer_based_only":
+            from utils.teh.pics_aamas_v0 import resolve_aamas_v0_source_program
+
+            manifest = (os.environ.get("AAMAS_V0_SOURCE_JOB_MANIFEST") or "").strip() or None
+            source_rank1 = resolve_aamas_v0_source_program(
+                target_dataset=str(args.dataset),
+                source_dataset=str(entry.selected_source),
+                repo_root=_REPO_ROOT,
+                psych_split=str(psych_dataset_split),
+                config_path=cfg_path,
+                job_id=(os.environ.get("AAMAS_V0_POPULATION_JOB_ID") or "").strip()
+                or None,
+                job_manifest=Path(manifest) if manifest else None,
+            )
+            print(
+                f"[AAMAS v0] transfer source rank-1 from fresh population bank: "
+                f"{source_rank1}"
+            )
+        else:
+            source_rank1 = Path(entry.rank1_program)
         if not source_rank1.is_file():
             raise FileNotFoundError(
                 f"--t_pics_gated_transfer_only requires frozen source rank-1: "
@@ -4779,9 +4953,9 @@ def _run_t_pics_gated_population_arms(
         )
         _write_arm_intended_argv(layout["transfer"] / "INTENDED_ARGV.txt", transfer_argv)
         print(
-            f"[T-PICS gated] transfer-only allocation F target={args.dataset} "
+            f"[T-PICS gated] transfer-only target={args.dataset} "
             f"selected_source={entry.selected_source} rank-1={source_rank1} "
-            f"config={cfg_path} (frozen YAML reuse; no control arm / no gate)"
+            f"config={cfg_path} (no control arm / no gate)"
         )
         transfer_suffix = _cross_task_source_suffix(
             source_dataset=str(entry.selected_source),
@@ -4905,7 +5079,33 @@ def _run_t_pics_gated_population_arms(
         )
         record["never_ran_control_arm"] = True
         record["forced_transfer_selection"] = True
+        record["gate_applied"] = False
+        record["pics_aamas_v0_track_mode"] = str(
+            getattr(args, "pics_aamas_v0_track_mode", "") or ""
+        )
+        record["official_main_result"] = False
         record["frozen_source_rank1"] = str(source_rank1.resolve())
+        if str(getattr(args, "pics_aamas_v0_track_mode", "") or "") == "transfer_based_only":
+            record["reason"] = "transfer_based_only_no_gate"
+            record["provisional_experimental_track"] = True
+            prompt_meta = json.loads(
+                (Path(run_prompts_dir) / "prompt_meta.json").read_text(encoding="utf-8")
+            )
+            _write_aamas_population_marker(
+                arm_dir=layout["transfer"],
+                dataset=str(args.dataset),
+                prompt_meta=prompt_meta,
+                args=args,
+                track_mode="transfer_based_only",
+                source_dataset=str(entry.selected_source),
+                source_rank1_sha256=hashlib.sha256(source_rank1.read_bytes()).hexdigest(),
+            )
+            (Path(run_root) / "TRACK_STATUS.txt").write_text(
+                "temporary_experimental_track\n"
+                "track_mode=transfer_based_only\n"
+                "not_official_main_result\n",
+                encoding="utf-8",
+            )
         write_gate_record(layout["gate_record"], record)
         if hasattr(wandb_module, "publish_gate_record"):
             wandb_module.publish_gate_record(layout["gate_record"])
@@ -4962,7 +5162,23 @@ def _run_t_pics_gated_population_arms(
         source_rank1 = Path(live_best)
         source_best_loglik = live_ll
     else:
-        source_rank1 = Path(entry.rank1_program)
+        if str(getattr(args, "pics_aamas_v0_track_mode", "") or "") == "official_gate":
+            from utils.teh.pics_aamas_v0 import resolve_aamas_v0_source_program
+
+            manifest = (os.environ.get("AAMAS_V0_SOURCE_JOB_MANIFEST") or "").strip() or None
+            source_rank1 = resolve_aamas_v0_source_program(
+                target_dataset=str(args.dataset),
+                source_dataset=str(entry.selected_source),
+                repo_root=_REPO_ROOT,
+                psych_split=str(psych_dataset_split),
+                config_path=cfg_path,
+                job_id=(os.environ.get("AAMAS_V0_POPULATION_JOB_ID") or "").strip()
+                or None,
+                job_manifest=Path(manifest) if manifest else None,
+            )
+            print(f"[AAMAS v0] official gate source rank-1: {source_rank1}")
+        else:
+            source_rank1 = Path(entry.rank1_program)
         source_best_loglik = None
 
     seed_path = str(args.seed_path or default_seed_path(str(args.dataset)))
@@ -5160,14 +5376,35 @@ def _run_t_pics_gated_population_arms(
             speekenbrink_split=str(getattr(args, "speekenbrink_split", "chronological")),
         )
 
-    decision = decide_gate(
-        control_score=control_score,
-        transfer_score=transfer_score,
-        control_arm_ok=control_ok,
-        transfer_arm_ok=transfer_ok and not transfer_failed,
-        transfer_program_ok=transfer_program_ok,
-        tie_tolerance=GATE_TIE_TOLERANCE,
-    )
+    if str(getattr(args, "pics_aamas_v0_track_mode", "") or "") == "official_gate":
+        from utils.teh.pics_aamas_v0 import decide_aamas_v0_gate
+
+        if control_score is None or transfer_score is None:
+            raise RuntimeError(
+                "AAMAS v0 official gate requires finite train∪val scores on both arms"
+            )
+        aamas_gate = decide_aamas_v0_gate(
+            target_only_score=float(control_score),
+            transfer_score=float(transfer_score),
+        )
+        decision = GateDecision(
+            selected_arm="transfer" if aamas_gate["selected_arm"] == "transfer" else "control",
+            reason=str(aamas_gate["reason"]),
+            control_score=float(control_score),
+            transfer_score=float(transfer_score),
+            score_difference=float(aamas_gate["score_difference_transfer_minus_target_only"]),
+            tie_tolerance=0.0,
+        )
+    else:
+        aamas_gate = None
+        decision = decide_gate(
+            control_score=control_score,
+            transfer_score=transfer_score,
+            control_arm_ok=control_ok,
+            transfer_arm_ok=transfer_ok and not transfer_failed,
+            transfer_program_ok=transfer_program_ok,
+            tie_tolerance=GATE_TIE_TOLERANCE,
+        )
     retained_pool = (
         layout["transfer_pool"] if decision.selected_arm == "transfer" else layout["control_pool"]
     )
@@ -5183,6 +5420,37 @@ def _run_t_pics_gated_population_arms(
         selector_name=selector_name,
         selected_source_rank1=source_rank1,
     )
+    if aamas_gate is not None:
+        record["pics_aamas_v0_track_mode"] = "official_gate"
+        record["official_main_result"] = True
+        record["aamas_selected_arm"] = aamas_gate["selected_arm"]
+        record["test_used_for_gate"] = False
+        record["tie_policy"] = "exact_tie_selects_target_only"
+        record["tie_tolerance"] = 0.0
+        prompt_meta = json.loads(
+            (Path(run_prompts_dir) / "prompt_meta.json").read_text(encoding="utf-8")
+        )
+        _write_aamas_population_marker(
+            arm_dir=layout["control"],
+            dataset=str(args.dataset),
+            prompt_meta=prompt_meta,
+            args=args,
+            track_mode="official_gate",
+        )
+        if transfer_program_ok and Path(source_rank1).is_file():
+            _write_aamas_population_marker(
+                arm_dir=layout["transfer"],
+                dataset=str(args.dataset),
+                prompt_meta=prompt_meta,
+                args=args,
+                track_mode="official_gate",
+                source_dataset=str(entry.selected_source),
+                source_rank1_sha256=hashlib.sha256(Path(source_rank1).read_bytes()).hexdigest(),
+            )
+        (Path(run_root) / "TRACK_STATUS.txt").write_text(
+            "official_method\ntrack_mode=official_gate\n",
+            encoding="utf-8",
+        )
     write_gate_record(layout["gate_record"], record)
     if hasattr(wandb_module, "publish_gate_record"):
         wandb_module.publish_gate_record(layout["gate_record"])
@@ -5220,8 +5488,11 @@ def _run_t_pics_gated_population_arms(
         selected_link.symlink_to(retained_pool.resolve())
     except OSError:
         shutil.copytree(retained_pool, selected_link)
+    selected_name = (
+        aamas_gate["selected_arm"] if aamas_gate is not None else decision.selected_arm
+    )
     (layout["selected"] / "SELECTED_ARM.txt").write_text(
-        decision.selected_arm + "\n", encoding="utf-8"
+        selected_name + "\n", encoding="utf-8"
     )
     return _load_one_initial_pool_dir(str(retained_pool))
 
@@ -5882,20 +6153,28 @@ def _build_psych_prompt_text(
     runtime_contract: str = "",
     dataset: str = "",
 ) -> str:
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
     from utils.teh.pics_v3_prompt_robustness import (
         maybe_attach_family_reminder_v3,
         maybe_attach_family_reminder_v4,
         maybe_attach_history_robustness_after_task_description,
     )
 
-    # PICS v3: reminder block immediately after dataset-adaptive task text.
-    task_text = maybe_attach_history_robustness_after_task_description(
-        base_prompt, dataset=dataset or None
-    )
+    # AAMAS v0 bakes its prompt policy into the infer file. Do not attach the
+    # historical generic / keyed / v4 blocks a second time.
+    if using_pics_aamas_v0_prompt():
+        task_text = base_prompt
+    else:
+        # PICS v3: reminder block immediately after dataset-adaptive task text.
+        task_text = maybe_attach_history_robustness_after_task_description(
+            base_prompt, dataset=dataset or None
+        )
     # Optional family reminder v3/v4 REPLACES HISTORY v2 when flagged (before contract).
     # Flags are mutually exclusive at CLI; at most one attach mutates.
-    task_text = maybe_attach_family_reminder_v3(task_text, dataset=dataset or None)
-    task_text = maybe_attach_family_reminder_v4(task_text, dataset=dataset or None)
+    # AAMAS v0 already applied its own reminder and must not stack these.
+    if not using_pics_aamas_v0_prompt():
+        task_text = maybe_attach_family_reminder_v3(task_text, dataset=dataset or None)
+        task_text = maybe_attach_family_reminder_v4(task_text, dataset=dataset or None)
     text = (
         f"{task_text}\n{state_text}{extra_state_text}\n{parent_context}"
         f"{code_template_suffix}\n{candidate_output_rules}\n"
@@ -14954,6 +15233,46 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_aamas_v0",
+        type=str,
+        default=None,
+        choices=["population", "downstream"],
+        help=(
+            "Superseded. Refuses to run. Use --pics_aamas_v0_track_mode "
+            "{official_gate,target_only,transfer_based_only}."
+        ),
+    )
+    parser.add_argument(
+        "--pics_aamas_v0_track_mode",
+        type=str,
+        default=None,
+        choices=["official_gate", "target_only", "transfer_based_only"],
+        help=(
+            "PICS AAMAS v0 schedule (default off). official_gate is the official "
+            "method: target-only 10x10, transfer 10x10, strict train/val gate, "
+            "explore 50, person 10x10. target_only and transfer_based_only are "
+            "temporary experimental tracks. Same prompt policy for all three."
+        ),
+    )
+    parser.add_argument(
+        "--pics_aamas_v0_materialize_target_only_run",
+        type=str,
+        default=None,
+        help=(
+            "Official-gate only: reuse this completed target_only population "
+            "instead of regenerating the target-only arm."
+        ),
+    )
+    parser.add_argument(
+        "--pics_aamas_v0_materialize_transfer_run",
+        type=str,
+        default=None,
+        help=(
+            "Official-gate only: reuse this completed transfer_based_only "
+            "population instead of regenerating the transfer arm."
+        ),
+    )
+    parser.add_argument(
         "--pics_v3_ij_hybrid",
         type=str,
         default=None,
@@ -15544,6 +15863,19 @@ def main():
         ),
     )
     configure_pics_v3_family_reminder_v4(sequential_rl=_seq_v4)
+    from utils.teh.pics_aamas_v0 import configure_pics_aamas_v0_prompt
+
+    aamas_v0_legacy = str(getattr(args, "pics_aamas_v0", "") or "").strip() or None
+    aamas_v0_mode = str(getattr(args, "pics_aamas_v0_track_mode", "") or "").strip() or None
+    if aamas_v0_legacy:
+        print(
+            "Error: --pics_aamas_v0 population|downstream is superseded and will "
+            "not run. Use --pics_aamas_v0_track_mode target_only for a fresh "
+            "target population, transfer_based_only after that bank exists, or "
+            "official_gate for the gated method."
+        )
+        return
+    configure_pics_aamas_v0_prompt(bool(aamas_v0_mode))
     t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
     t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
@@ -15570,6 +15902,91 @@ def main():
         print(
             "Error: --pics_v3_hybrid_grounded_prompt cannot be combined with "
             "--ablate_dataset_adaptive_prompt."
+        )
+        return
+    if aamas_v0_mode and (
+        ablate_adaptive_prompt
+        or hybrid_grounded_prompt
+        or ij_hybrid
+        or budget_allocation
+        or _seq_v3
+        or _seq_v4
+        or bool(getattr(args, "pics_v3_feedback_learning_reminder_v3", False))
+        or bool(getattr(args, "pics_v3_legacy_generic_reminder", False))
+    ):
+        print(
+            "Error: --pics_aamas_v0 cannot be combined with historical prompt "
+            "ablation, hybrid, I/J, budget-allocation, or reminder-v3/v4 flags."
+        )
+        return
+    if aamas_v0_mode == "target_only" and (
+        t_pics_transfer_only
+        or t_pics_control_only
+        or t_pics_gated_independent
+        or bool(getattr(args, "t_pics", False))
+        or getattr(args, "t_pics_source", None)
+        or getattr(args, "global_prompt_source_program", None)
+        or getattr(args, "global_prompt_source_dataset", None)
+        or not t_pics_gated
+    ):
+        print(
+            "Error: --pics_aamas_v0_track_mode target_only requires "
+            "--t_pics_gated_transfer and forbids a source program, transfer arm, "
+            "and control-only/transfer-only switches."
+        )
+        return
+    if aamas_v0_mode == "transfer_based_only" and not (
+        t_pics_gated and t_pics_transfer_only and not t_pics_control_only
+        and not t_pics_gated_independent
+    ):
+        print(
+            "Error: --pics_aamas_v0_track_mode transfer_based_only requires "
+            "--t_pics_gated_transfer and --t_pics_gated_transfer_only."
+        )
+        return
+    if aamas_v0_mode == "official_gate" and (
+        not t_pics_gated
+        or t_pics_transfer_only
+        or t_pics_control_only
+        or t_pics_gated_independent
+    ):
+        print(
+            "Error: --pics_aamas_v0_track_mode official_gate requires "
+            "--t_pics_gated_transfer and forbids transfer-only, control-only, "
+            "and independent source generation."
+        )
+        return
+    if aamas_v0_mode and (
+        int(args.global_iters) != 10
+        or int(args.n_candidates) != 10
+        or int(args.fresh_n_candidates) != 10
+        or int(args.n_iterations) != 10
+        or int(args.explore_candidates) != 50
+        or int(args.max_error_prompt_chars) != 0
+        or args.refinement_phase
+        or str(args.evolution_selection_score) != "train_val"
+        or str(args.limited_data_protocol) != "structure_aware_v3"
+        or int(args.limited_train_val or 0) != 40
+    ):
+        print(
+            "Error: AAMAS v0 track_mode requires global_iters=10, n_candidates=10, "
+            "fresh_n_candidates=10, n_iterations=10, explore_candidates=50, "
+            "max_error_prompt_chars=0, --no-refinement_phase, train_val selection, "
+            "and structure_aware_v3 with limited_train_val=40."
+        )
+        return
+    mat_target = str(getattr(args, "pics_aamas_v0_materialize_target_only_run", "") or "").strip()
+    mat_transfer = str(getattr(args, "pics_aamas_v0_materialize_transfer_run", "") or "").strip()
+    if (mat_target or mat_transfer) and aamas_v0_mode != "official_gate":
+        print(
+            "Error: materialize run paths are only valid with "
+            "--pics_aamas_v0_track_mode official_gate."
+        )
+        return
+    if bool(mat_target) != bool(mat_transfer):
+        print(
+            "Error: official-gate materialize requires both the target-only run "
+            "and the transfer-based-only run."
         )
         return
     if ij_hybrid == "I" and not (
@@ -15737,6 +16154,11 @@ def main():
                 f"target={entry.target} source={entry.selected_source}; "
                 f"no transfer map required; live G.1)"
             )
+        elif aamas_v0_mode == "target_only":
+            print(
+                "[AAMAS v0] target_only preflight OK "
+                "(temporary experimental track; no source, no transfer, no gate)"
+            )
         else:
             try:
                 cfg_path = Path(str(args.t_pics_source_config))
@@ -15744,7 +16166,12 @@ def main():
                     cfg_path = (_REPO_ROOT / cfg_path).resolve()
                 cfg = load_frozen_transfer_config(cfg_path)
                 errors = validate_frozen_transfer_config(
-                    cfg, require_files=not t_pics_gated_independent and not t_pics_control_only
+                    cfg,
+                    require_files=(
+                        not t_pics_gated_independent
+                        and not t_pics_control_only
+                        and aamas_v0_mode not in ("transfer_based_only", "official_gate")
+                    ),
                 )
             except (OSError, ValueError, KeyError) as exc:
                 print(f"Error: T-PICS gated transfer config failed: {exc}")
@@ -16230,12 +16657,15 @@ def main():
             )
             if float(getattr(args, "mdl_lambda", 0.0) or 0.0) > 0.0:
                 run_name = f"{run_name}_mdl_l{args.mdl_lambda}"
-            wandb.init(
-                project=str(getattr(args, "wandb_project", None) or TEH_WANDB_PROJECT),
-                name=run_name,
-                config=vars(args),
-                reinit=False,
-            )
+            _wandb_init_kwargs: Dict[str, Any] = {
+                "project": str(getattr(args, "wandb_project", None) or TEH_WANDB_PROJECT),
+                "name": run_name,
+                "config": vars(args),
+                "reinit": False,
+            }
+            if str(getattr(args, "pics_aamas_v0", "") or "") == "population":
+                _wandb_init_kwargs["group"] = "pics_aamas_v0_population"
+            wandb.init(**_wandb_init_kwargs)
             wandb_enabled = True
             
         except Exception as e:
@@ -16388,7 +16818,18 @@ def main():
     gated_meta: Optional[Dict[str, Any]] = None
     if t_pics_gated:
         explicit_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
-        if explicit_source:
+        if aamas_v0_mode == "target_only":
+            gated_meta = {
+                "pics_aamas_v0_track_mode": "target_only",
+                "provisional_experimental_track": True,
+                "official_main_result": False,
+                "reused_frozen_g1_rank1": False,
+                "selected_source": None,
+                "global_iters": int(args.global_iters),
+                "n_iterations": int(args.n_iterations),
+                "explore_candidates": int(args.explore_candidates),
+            }
+        elif explicit_source:
             _gated_entry = make_explicit_independent_source_entry(
                 target=str(args.dataset),
                 source=explicit_source,
@@ -16424,11 +16865,14 @@ def main():
                 cfg_path = (_REPO_ROOT / cfg_path).resolve()
             _gated_cfg = load_frozen_transfer_config(cfg_path)
             _gated_entry = selected_source_for_target(str(args.dataset), config=_gated_cfg)
-            _gated_rank1 = resolve_gated_transfer_source_rank1(
-                independent=t_pics_gated_independent,
-                entry=_gated_entry,
-                run_root=Path(base_run_dir),
-            )
+            if aamas_v0_mode in ("transfer_based_only", "official_gate"):
+                _gated_rank1 = Path("FRESH_AAMAS_V0_TARGET_ONLY_BANK")
+            else:
+                _gated_rank1 = resolve_gated_transfer_source_rank1(
+                    independent=t_pics_gated_independent,
+                    entry=_gated_entry,
+                    run_root=Path(base_run_dir),
+                )
             gated_meta = gated_run_metadata(
                 config_path=_gated_cfg.path,
                 target=str(args.dataset),
@@ -16444,7 +16888,14 @@ def main():
                     "explore_candidates": int(args.explore_candidates),
                     "explore_population_top_k": int(args.explore_population_top_k),
                     "independent_source_population": bool(t_pics_gated_independent),
-                    "reused_frozen_g1_rank1": not bool(t_pics_gated_independent),
+                    "reused_frozen_g1_rank1": (
+                        False
+                        if aamas_v0_mode in ("transfer_based_only", "official_gate")
+                        else not bool(t_pics_gated_independent)
+                    ),
+                    "pics_aamas_v0_track_mode": aamas_v0_mode,
+                    "official_main_result": aamas_v0_mode == "official_gate",
+                    "provisional_experimental_track": aamas_v0_mode == "transfer_based_only",
                 },
             )
     metadata_log = _write_run_metadata(
@@ -16463,7 +16914,10 @@ def main():
     evo_iters = int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0)
     ablate_adaptive_prompt = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
     hybrid_grounded_prompt = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
-    registered_body = ablate_adaptive_prompt or hybrid_grounded_prompt
+    from utils.teh.pics_aamas_v0 import aamas_v0_prompt_enabled
+
+    aamas_v0_prompt = aamas_v0_prompt_enabled(args)
+    registered_body = ablate_adaptive_prompt or hybrid_grounded_prompt or aamas_v0_prompt
     prefer_auto_llm_prompt = bool(
         (
             evo_iters > 0
@@ -16518,6 +16972,7 @@ def main():
         llm_decoding_seed=(int(args.split_seed) + 90_000) if t_pics_gated else None,
         ablate_dataset_adaptive_prompt=ablate_adaptive_prompt,
         pics_v3_hybrid_grounded_prompt=hybrid_grounded_prompt,
+        pics_aamas_v0_prompt=aamas_v0_prompt,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")
@@ -16546,7 +17001,7 @@ def main():
                 },
             )
 
-    if t_pics_gated:
+    if t_pics_gated and aamas_v0_mode != "target_only":
         wandb = init_gated_wandb_reporter(
             args=args,
             output_root=Path(base_run_dir),
@@ -16567,12 +17022,18 @@ def main():
             enabled=not bool(args.no_log),
         )
         wandb_enabled = bool(getattr(wandb, "_enabled", False))
+        from utils.teh.pics_aamas_v0 import kind_for_track
+
         _merge_run_metadata(
             Path(base_run_dir),
             {
                 "wandb_run_id": getattr(wandb, "run_id", None),
                 "wandb_project": getattr(wandb, "project", None),
-                "wandb_group": "t_pics_gated_main",
+                "wandb_group": (
+                    kind_for_track(str(getattr(args, "pics_aamas_v0_track_mode", "") or ""))
+                    if str(getattr(args, "pics_aamas_v0_track_mode", "") or "")
+                    else "t_pics_gated_main"
+                ),
                 "wandb_job_type": "t_pics_gated",
             },
         )
@@ -16844,6 +17305,28 @@ def main():
             mem_trace=args.mem_trace,
             prompt_suffix=global_prompt_suffix,
         )
+        if str(getattr(args, "pics_aamas_v0", "") or "") == "population":
+            from utils.teh.pics_aamas_v0 import write_population_completion
+
+            if global_prompt_suffix:
+                raise RuntimeError(
+                    "AAMAS v0 population refused a cross-task source suffix."
+                )
+            write_population_completion(
+                Path(base_run_dir),
+                dataset=str(args.dataset),
+                prompt_meta=prompt_meta,
+                global_iters=int(args.global_iters),
+                n_candidates=int(args.n_candidates),
+                range_start_ordinal=getattr(args, "range_start_ordinal", None),
+                range_end_ordinal=getattr(args, "range_end_ordinal", None),
+            )
+            print(
+                f"[AAMAS v0] population complete -> {base_run_dir}/STAGE_COMPLETE.json"
+            )
+            if wandb is not None:
+                wandb.finish()
+            return
 
     explore_from_handoff_parents = resolve_explore_from_handoff_parents(
         has_initial_pool=has_initial_pool,

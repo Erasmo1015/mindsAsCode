@@ -746,6 +746,7 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep27 J-vs-E hybrid prompt audit (read-only, four datasets): `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/hybrid_prompt_audit/HYBRID_VS_E_AUDIT.md` — schedule (E transfer gate) dominates; generic reminder not the gap.
 - Sep27 I+J counterfactual gate refreshed on all ten (read-only): `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/counterfactual_gate/COUNTERFACTUAL_GATE.md` — USE J TARGET-ONLY.
 - Sep27 final reminder mechanism audit (read-only): `analysis_2026Sep/Sep20_V3/others/final_reminder_mechanism_audit/FINAL_REMINDER_MECHANISM_AUDIT.md` — keep v4 on Steyvers/Schulz, v1 on Kool, v2 on Badham; one Speekenbrink weather-outcome deletion.
+- Sep27 AAMAS v0: official track `official_gate` (`pics_aamas_v0_official_gate`); temporary tracks `target_only` / `transfer_based_only`. Batch-1 launcher `cluster/v0/ours/main/aamas_v0/target_only/submit_batch1_target_only.sh` (not submitted). Method `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/docs_v0/AAMAS_V0_METHOD.md`.
 
 ---
 

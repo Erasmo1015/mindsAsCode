@@ -804,6 +804,7 @@ def setup_teh_run_prompts(
     llm_decoding_seed: Optional[int] = None,
     ablate_dataset_adaptive_prompt: bool = False,
     pics_v3_hybrid_grounded_prompt: bool = False,
+    pics_aamas_v0_prompt: bool = False,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
@@ -828,17 +829,29 @@ def setup_teh_run_prompts(
     injection (including reminder-v4 when flagged). Does not generate auto_llm
     compressed summaries. Mutually exclusive with ablate_dataset_adaptive_prompt.
 
+    When pics_aamas_v0_prompt is True, same registered-description merge, but the
+    reminder policy is ``pics_aamas_v0`` (shared behavior objective; dataset
+    reminder only for Steyvers/Schulz v4, Kool v1, Badham v2, and Guan). No
+    generic reminder and no auto_llm summary. Mutually exclusive with the
+    ablation and hybrid flags. Historical reminder rendering is unchanged.
+
     When limited_data_protocol is enabled, parsed behavioral prompt examples are
     taken only from the retained limited-data train+val subset (same manifest as
     scoring). Task descriptions and schema notes remain dataset-level metadata.
     """
     hybrid_grounded = bool(pics_v3_hybrid_grounded_prompt)
+    aamas_v0 = bool(pics_aamas_v0_prompt)
     if ablate_dataset_adaptive_prompt and hybrid_grounded:
         raise ValueError(
             "pics_v3_hybrid_grounded_prompt cannot be combined with "
             "ablate_dataset_adaptive_prompt"
         )
-    if ablate_dataset_adaptive_prompt or hybrid_grounded:
+    if aamas_v0 and (ablate_dataset_adaptive_prompt or hybrid_grounded):
+        raise ValueError(
+            "pics_aamas_v0_prompt cannot be combined with "
+            "ablate_dataset_adaptive_prompt or pics_v3_hybrid_grounded_prompt"
+        )
+    if ablate_dataset_adaptive_prompt or hybrid_grounded or aamas_v0:
         prefer_auto_llm_prompt = False
         require_auto_llm_prompt = False
         use_llm = False
@@ -931,6 +944,7 @@ def setup_teh_run_prompts(
         or require_auto_llm_prompt
         or ablate_dataset_adaptive_prompt
         or hybrid_grounded
+        or aamas_v0
     ):
         # Ablation / hybrid must not sneak in prompts/external strategy files.
         reference_prompt = None
@@ -984,7 +998,7 @@ def setup_teh_run_prompts(
             history_max_entries=history_max_entries,
             max_examples=max_examples,
             force_registered_task_description=bool(
-                ablate_dataset_adaptive_prompt or hybrid_grounded
+                ablate_dataset_adaptive_prompt or hybrid_grounded or aamas_v0
             ),
         )
         if _is_gamble_ab_task(sample_trial_list):
@@ -998,6 +1012,10 @@ def setup_teh_run_prompts(
         elif hybrid_grounded:
             print(
                 f"[TEH] Wrote hybrid grounded registered-description prompt -> {infer_path}"
+            )
+        elif aamas_v0:
+            print(
+                f"[TEH] Wrote AAMAS v0 registered-description prompt -> {infer_path}"
             )
         else:
             print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
@@ -1029,6 +1047,20 @@ def setup_teh_run_prompts(
         print(
             f"[TEH] Skipping history reminder injection "
             f"(ablate_dataset_adaptive_prompt) -> {infer_path}"
+        )
+    elif aamas_v0:
+        from utils.teh.pics_aamas_v0 import (
+            apply_aamas_v0_prompt_body,
+            reminder_decision,
+        )
+
+        infer_body = apply_aamas_v0_prompt_body(infer_body, dataset_alias)
+        decision = reminder_decision(dataset_alias)
+        reminder_policy_id = "pics_aamas_v0"
+        family_reminder_v4_meta = decision.reminder_id
+        print(
+            f"[TEH] Applied AAMAS v0 prompt policy "
+            f"(reminder={decision.reminder_id}) -> {infer_path}"
         )
     elif (
         normalize_limited_data_protocol(limited_data_protocol)
@@ -1115,6 +1147,8 @@ def setup_teh_run_prompts(
         prompt_mode = "registered_description_ablation"
     elif hybrid_grounded:
         prompt_mode = "hybrid_grounded_registered"
+    elif aamas_v0:
+        prompt_mode = "aamas_v0_registered"
     else:
         prompt_mode = "merge_fallback"
     infer_sha256 = hashlib.sha256(infer_text_final.encode("utf-8")).hexdigest()
@@ -1141,6 +1175,10 @@ def setup_teh_run_prompts(
         "require_auto_llm_prompt": bool(require_auto_llm_prompt),
         "ablate_dataset_adaptive_prompt": bool(ablate_dataset_adaptive_prompt),
         "pics_v3_hybrid_grounded_prompt": bool(hybrid_grounded),
+        "pics_aamas_v0_prompt": bool(aamas_v0),
+        "pics_aamas_v0_reminder_id": (
+            family_reminder_v4_meta if aamas_v0 else None
+        ),
         "llm_decoding_seed": None if llm_decoding_seed is None else int(llm_decoding_seed),
         "n_prompt_example_trials": len(sample_trial_list),
         "prompt_examples_exclude_test": True,
