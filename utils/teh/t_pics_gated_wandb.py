@@ -282,7 +282,11 @@ def build_gated_wandb_config(
 
         ablation_meta = ablation_metadata_payload(args)
         if ablation_meta.get("ablation_id"):
-            if str(ablation_meta.get("ablation_id") or "").startswith("allocation_"):
+            aid = str(ablation_meta.get("ablation_id") or "")
+            if aid.startswith("ij_"):
+                cfg["group"] = ablation_meta.get("wandb_group") or "t_pics_gated_ij_hybrid"
+                cfg["run_tag"] = ablation_meta.get("ablation_run_tag")
+            elif aid.startswith("allocation_"):
                 cfg["group"] = ablation_meta.get("wandb_group") or ALLOCATION_WANDB_GROUP
                 cfg["run_tag"] = ablation_meta.get("ablation_run_tag")
             else:
@@ -309,13 +313,20 @@ def build_gated_wandb_config(
             FAMILY_PROMPT_V4_KIND,
             FAMILY_PROMPT_V4_RUN_TAG,
             FAMILY_PROMPT_V4_WANDB_GROUP,
+            IJ_HYBRID_KINDS,
         )
 
         seq_v3 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v3", False))
         fb_v3 = bool(getattr(args, "pics_v3_feedback_learning_reminder_v3", False))
         seq_v4 = bool(getattr(args, "pics_v3_sequential_rl_reminder_v4", False))
+        ij_hybrid = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
         out_root_s = str(Path(output_root).resolve())
-        if seq_v4 or FAMILY_PROMPT_V4_KIND in out_root_s:
+        # I/J hybrid keeps its own KIND even when Sequential-RL reminder-v4 is on.
+        if ij_hybrid or any(k in out_root_s for k in IJ_HYBRID_KINDS):
+            if seq_v4:
+                cfg["sequential_rl_reminder_v4"] = True
+            # do not rewrite kind/group to family_prompt_v4
+        elif seq_v4 or FAMILY_PROMPT_V4_KIND in out_root_s:
             cfg["group"] = FAMILY_PROMPT_V4_WANDB_GROUP
             cfg["run_tag"] = FAMILY_PROMPT_V4_RUN_TAG
             cfg["kind"] = FAMILY_PROMPT_V4_KIND

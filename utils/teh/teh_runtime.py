@@ -803,6 +803,7 @@ def setup_teh_run_prompts(
     require_auto_llm_prompt: bool = False,
     llm_decoding_seed: Optional[int] = None,
     ablate_dataset_adaptive_prompt: bool = False,
+    pics_v3_hybrid_grounded_prompt: bool = False,
 ) -> Path:
     """
     Create run_dir/prompts/ with infer_single_choice.txt (generated), templates, refine, seed.
@@ -822,11 +823,22 @@ def setup_teh_run_prompts(
     injection (no legacy generic, no dataset-keyed v1/v2). Main / non-ablation
     SA40 runs remain unchanged.
 
+    When pics_v3_hybrid_grounded_prompt is True, same registered-description merge
+    as the ablation above, but **keeps** HISTORY / keyed / Sequential-RL reminder
+    injection (including reminder-v4 when flagged). Does not generate auto_llm
+    compressed summaries. Mutually exclusive with ablate_dataset_adaptive_prompt.
+
     When limited_data_protocol is enabled, parsed behavioral prompt examples are
     taken only from the retained limited-data train+val subset (same manifest as
     scoring). Task descriptions and schema notes remain dataset-level metadata.
     """
-    if ablate_dataset_adaptive_prompt:
+    hybrid_grounded = bool(pics_v3_hybrid_grounded_prompt)
+    if ablate_dataset_adaptive_prompt and hybrid_grounded:
+        raise ValueError(
+            "pics_v3_hybrid_grounded_prompt cannot be combined with "
+            "ablate_dataset_adaptive_prompt"
+        )
+    if ablate_dataset_adaptive_prompt or hybrid_grounded:
         prefer_auto_llm_prompt = False
         require_auto_llm_prompt = False
         use_llm = False
@@ -918,8 +930,9 @@ def setup_teh_run_prompts(
         or used_dataset_prompt_file
         or require_auto_llm_prompt
         or ablate_dataset_adaptive_prompt
+        or hybrid_grounded
     ):
-        # Ablation must not sneak in prompts/external strategy files.
+        # Ablation / hybrid must not sneak in prompts/external strategy files.
         reference_prompt = None
     if not used_dataset_prompt_file and reference_prompt is not None:
         text = strip_embedded_choose_from_evolution_prompt(
@@ -970,7 +983,9 @@ def setup_teh_run_prompts(
             example_char_budget=example_char_budget,
             history_max_entries=history_max_entries,
             max_examples=max_examples,
-            force_registered_task_description=bool(ablate_dataset_adaptive_prompt),
+            force_registered_task_description=bool(
+                ablate_dataset_adaptive_prompt or hybrid_grounded
+            ),
         )
         if _is_gamble_ab_task(sample_trial_list):
             merged = _apply_gamble_neutral_wording(merged)
@@ -979,6 +994,10 @@ def setup_teh_run_prompts(
         if ablate_dataset_adaptive_prompt:
             print(
                 f"[TEH] Wrote registered-description ablation prompt -> {infer_path}"
+            )
+        elif hybrid_grounded:
+            print(
+                f"[TEH] Wrote hybrid grounded registered-description prompt -> {infer_path}"
             )
         else:
             print(f"[TEH] Wrote merged fallback prompt -> {infer_path}")
@@ -1094,6 +1113,8 @@ def setup_teh_run_prompts(
         prompt_mode = "dataset_prompt_file"
     elif ablate_dataset_adaptive_prompt:
         prompt_mode = "registered_description_ablation"
+    elif hybrid_grounded:
+        prompt_mode = "hybrid_grounded_registered"
     else:
         prompt_mode = "merge_fallback"
     infer_sha256 = hashlib.sha256(infer_text_final.encode("utf-8")).hexdigest()
@@ -1119,6 +1140,7 @@ def setup_teh_run_prompts(
         "prefer_auto_llm_prompt": bool(prefer_auto_llm_prompt),
         "require_auto_llm_prompt": bool(require_auto_llm_prompt),
         "ablate_dataset_adaptive_prompt": bool(ablate_dataset_adaptive_prompt),
+        "pics_v3_hybrid_grounded_prompt": bool(hybrid_grounded),
         "llm_decoding_seed": None if llm_decoding_seed is None else int(llm_decoding_seed),
         "n_prompt_example_trials": len(sample_trial_list),
         "prompt_examples_exclude_test": True,

@@ -7,6 +7,8 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from utils.teh.pics_v3 import (
+    ABLATION_KIND_I_HYBRID_TRANSFER,
+    ABLATION_KIND_J_HYBRID_TARGET,
     ABLATION_KIND_NO_ADAPTIVE_PROMPT,
     ABLATION_KIND_NO_EXPLORE,
     ABLATION_KIND_NO_FRESH,
@@ -20,11 +22,15 @@ from utils.teh.pics_v3 import (
     ALLOCATION_KINDS,
     ALLOCATION_RUN_TAG,
     ALLOCATION_WANDB_GROUP,
+    IJ_HYBRID_KINDS,
+    IJ_HYBRID_RUN_TAG,
+    IJ_HYBRID_WANDB_GROUP,
 )
 
 ABLATION_WANDB_GROUP = "t_pics_gated_ablation"
 ABLATION_WANDB_TAGS = ("ICLR", "SA40", "gated_t_pics", "ablation")
 ALLOCATION_WANDB_TAGS = ("ICLR", "SA40", "gated_t_pics", "budget_allocation")
+IJ_HYBRID_WANDB_TAGS = ("ICLR", "SA40", "gated_t_pics", "ij_hybrid")
 
 # Nominal 35-round phase budgets (10 cand/iter; explore 50 ≡ 5 rounds).
 ABLATION_PHASE_BUDGETS = {
@@ -139,6 +145,74 @@ ALLOCATION_PHASE_BUDGETS = {
     },
 }
 
+# I/J hybrid grounded prompt (registered description + reminders; explore=50).
+# Not equal to F/G (those use explore=0 + auto_llm).
+IJ_HYBRID_PHASE_BUDGETS = {
+    "I": {
+        "kind": ABLATION_KIND_I_HYBRID_TRANSFER,
+        "paper_label": "I",
+        "global_iters": 10,
+        "n_g2_arms": 1,
+        "explore_candidates": 50,
+        "n_iterations": 10,
+        "fresh_n_candidates": 10,
+        "control_only": False,
+        "transfer_only": True,
+        "ablate_population": False,
+        "hybrid_grounded_prompt": True,
+        "live_independent_source": False,
+        "frozen_source": True,
+    },
+    "J": {
+        "kind": ABLATION_KIND_J_HYBRID_TARGET,
+        "paper_label": "J",
+        "global_iters": 10,
+        "n_g2_arms": 1,
+        "explore_candidates": 50,
+        "n_iterations": 10,
+        "fresh_n_candidates": 10,
+        "control_only": True,
+        "transfer_only": False,
+        "ablate_population": False,
+        "hybrid_grounded_prompt": True,
+        "live_independent_source": False,
+        "frozen_source": False,
+    },
+}
+
+
+def normalize_ij_hybrid_label(raw: Any) -> Optional[str]:
+    """Return canonical I|J or None."""
+    if raw is None:
+        return None
+    s = str(raw).strip().upper()
+    if s in ("I", "J"):
+        return s
+    low = s.lower()
+    if "hybrid_transfer" in low or low.endswith("_i_hybrid_transfer"):
+        return "I"
+    if "hybrid_target" in low or low.endswith("_j_hybrid_target"):
+        return "J"
+    return None
+
+
+def ij_hybrid_label_from_args(args: Any) -> Optional[str]:
+    """Explicit --pics_v3_ij_hybrid or KIND / hybrid+schedule heuristics."""
+    explicit = normalize_ij_hybrid_label(getattr(args, "pics_v3_ij_hybrid", None))
+    if explicit:
+        return explicit
+    kind = str(getattr(args, "kind", "") or getattr(args, "output_kind", "") or "")
+    from_kind = normalize_ij_hybrid_label(kind)
+    if from_kind:
+        return from_kind
+    if not bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False)):
+        return None
+    if bool(getattr(args, "t_pics_gated_transfer_only", False)):
+        return "I"
+    if bool(getattr(args, "t_pics_gated_control_only", False)):
+        return "J"
+    return None
+
 
 def normalize_budget_allocation_label(raw: Any) -> Optional[str]:
     """Return canonical F|G|H or None."""
@@ -185,9 +259,13 @@ def budget_allocation_label_from_args(args: Any) -> Optional[str]:
 def ablation_id_from_args(args: Any) -> Optional[str]:
     """Return canonical ablation id when an ablation flag is set; else None.
 
-    Budget-allocation F/G/H takes priority over A–E flag heuristics so G is not
-    mis-labeled as ``no_transfer`` and H is not mis-labeled as ``no_population``.
+    I/J hybrid and budget-allocation F/G/H take priority over A–E flag heuristics
+    so G is not mis-labeled as ``no_transfer`` and H is not mis-labeled as
+    ``no_population``.
     """
+    ij = ij_hybrid_label_from_args(args)
+    if ij is not None:
+        return f"ij_{ij}"
     alloc = budget_allocation_label_from_args(args)
     if alloc is not None:
         return f"allocation_{alloc}"
@@ -217,12 +295,48 @@ def ablation_id_from_args(args: Any) -> Optional[str]:
     for label, spec in ALLOCATION_PHASE_BUDGETS.items():
         if kind == spec["kind"]:
             return f"allocation_{label}"
+    for label, spec in IJ_HYBRID_PHASE_BUDGETS.items():
+        if kind == spec["kind"]:
+            return f"ij_{label}"
     return None
 
 
 def ablation_metadata_payload(args: Any) -> dict:
     """Resolved phase/candidate counts for run config / W&B (ablation runs only)."""
     ablation_id = ablation_id_from_args(args)
+    ij = ij_hybrid_label_from_args(args)
+    if ij is not None:
+        spec = IJ_HYBRID_PHASE_BUDGETS.get(ij, {})
+        return {
+            "ablation_id": ablation_id,
+            "ablation_kind": spec.get("kind"),
+            "ablation_run_tag": IJ_HYBRID_RUN_TAG,
+            "ij_hybrid": ij,
+            "budget_allocation": None,
+            "control_only": bool(getattr(args, "t_pics_gated_control_only", False)),
+            "transfer_only": bool(getattr(args, "t_pics_gated_transfer_only", False)),
+            "ablate_population": bool(getattr(args, "t_pics_ablate_population", False)),
+            "ablate_dataset_adaptive_prompt": bool(
+                getattr(args, "ablate_dataset_adaptive_prompt", False)
+            ),
+            "pics_v3_hybrid_grounded_prompt": bool(
+                getattr(args, "pics_v3_hybrid_grounded_prompt", False)
+            ),
+            "ablate_history_reminder": False,
+            "live_independent_source": bool(
+                getattr(args, "t_pics_gated_independent", False)
+            ),
+            "reuse_gate_pool": None,
+            "global_iters": int(getattr(args, "global_iters", 0) or 0),
+            "explore_candidates": int(getattr(args, "explore_candidates", 0) or 0),
+            "n_iterations": int(getattr(args, "n_iterations", 0) or 0),
+            "fresh_n_candidates": int(getattr(args, "fresh_n_candidates", 0) or 0),
+            "n_candidates": int(getattr(args, "n_candidates", 10) or 10),
+            "known_ablation_kinds": list(ABLATION_KINDS),
+            "known_allocation_kinds": list(ALLOCATION_KINDS),
+            "known_ij_hybrid_kinds": list(IJ_HYBRID_KINDS),
+            "wandb_group": IJ_HYBRID_WANDB_GROUP,
+        }
     alloc = budget_allocation_label_from_args(args)
     if alloc is not None:
         spec = ALLOCATION_PHASE_BUDGETS.get(alloc, {})

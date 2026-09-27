@@ -4085,14 +4085,16 @@ def _run_t_pics_source_population(
         int(n_iterations) if n_iterations is not None else int(args.global_iters)
     )
     ablate_adaptive = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
-    require_auto = bool(require_auto_llm_prompt) and not ablate_adaptive
+    hybrid_grounded = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
+    registered_body = ablate_adaptive or hybrid_grounded
+    require_auto = bool(require_auto_llm_prompt) and not registered_body
     prefer_auto = (
         (
             bool(getattr(args, "prefer_auto_llm_prompt", False))
             or int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0) > 0
             or require_auto
         )
-        and not ablate_adaptive
+        and not registered_body
     )
     source_prompts_dir = setup_teh_run_prompts(
         output_dir,
@@ -4100,7 +4102,7 @@ def _run_t_pics_source_population(
         Path(seed_program_path),
         client=client,
         model_name=args.model_name,
-        use_llm=not args.no_llm_prompt and not ablate_adaptive,
+        use_llm=not args.no_llm_prompt and not registered_body,
         base_prompt_path=args.base_prompt,
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
@@ -4125,6 +4127,7 @@ def _run_t_pics_source_population(
         require_auto_llm_prompt=require_auto,
         llm_decoding_seed=llm_decoding_seed,
         ablate_dataset_adaptive_prompt=ablate_adaptive,
+        pics_v3_hybrid_grounded_prompt=hybrid_grounded,
     )
     source_seed = str(source_prompts_dir / "seed_program.py")
     print(
@@ -4335,8 +4338,9 @@ def _ensure_gated_independent_source_population(
         f"source_emnlp_range={source_start}-{source_end} iters={expected_iters} "
         f"(not reusing frozen G.1 programs)"
     )
-    # Ablation E must not force fail-closed auto prompts on live G.1.
+    # Ablation E / hybrid I–J must not force fail-closed auto prompts on live G.1.
     ablate_adaptive = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
+    hybrid_grounded = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
     return _run_t_pics_source_population(
         source_dataset=str(source_dataset),
         source_participants=source_pids,
@@ -4348,7 +4352,7 @@ def _ensure_gated_independent_source_population(
         psych_dataset_split=psych_dataset_split,
         filter_mixed_gambles=source_filter,
         n_iterations=expected_iters,
-        require_auto_llm_prompt=not ablate_adaptive,
+        require_auto_llm_prompt=not (ablate_adaptive or hybrid_grounded),
         llm_decoding_seed=int(args.split_seed) + 90_000,
     )
 
@@ -14938,6 +14942,29 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_v3_hybrid_grounded_prompt",
+        action="store_true",
+        default=False,
+        help=(
+            "PICS v3 I/J hybrid prompt (default off): use the registered/original "
+            "dataset task description plus schema/examples merge (no auto_llm "
+            "compressed summary), keep HISTORY/keyed/Sequential-RL reminders, and "
+            "append the target runtime contract. Mutually exclusive with "
+            "--ablate_dataset_adaptive_prompt. Does not change main defaults when unset."
+        ),
+    )
+    parser.add_argument(
+        "--pics_v3_ij_hybrid",
+        type=str,
+        default=None,
+        choices=["I", "J", "i", "j"],
+        metavar="I|J",
+        help=(
+            "PICS v3 I/J experiment label (default off). I=hybrid transfer-init, "
+            "J=hybrid target-only. Sets unambiguous metadata for wandb/isolation."
+        ),
+    )
+    parser.add_argument(
         "--pics_v3_sequential_rl_reminder_v3",
         action="store_true",
         default=False,
@@ -15524,6 +15551,14 @@ def main():
     t_pics_transfer_only = bool(getattr(args, "t_pics_gated_transfer_only", False))
     t_pics_ablate_population = bool(getattr(args, "t_pics_ablate_population", False))
     ablate_adaptive_prompt = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
+    hybrid_grounded_prompt = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
+    ij_hybrid = None
+    raw_ij = getattr(args, "pics_v3_ij_hybrid", None)
+    if raw_ij is not None:
+        from utils.teh.pics_v3_ablation import normalize_ij_hybrid_label
+
+        ij_hybrid = normalize_ij_hybrid_label(raw_ij)
+        args.pics_v3_ij_hybrid = ij_hybrid
     budget_allocation = None
     raw_alloc = getattr(args, "pics_v3_budget_allocation", None)
     if raw_alloc is not None:
@@ -15531,6 +15566,28 @@ def main():
 
         budget_allocation = normalize_budget_allocation_label(raw_alloc)
         args.pics_v3_budget_allocation = budget_allocation
+    if ablate_adaptive_prompt and hybrid_grounded_prompt:
+        print(
+            "Error: --pics_v3_hybrid_grounded_prompt cannot be combined with "
+            "--ablate_dataset_adaptive_prompt."
+        )
+        return
+    if ij_hybrid == "I" and not (
+        t_pics_transfer_only and hybrid_grounded_prompt
+    ):
+        print(
+            "Error: --pics_v3_ij_hybrid I requires --t_pics_gated_transfer_only "
+            "and --pics_v3_hybrid_grounded_prompt."
+        )
+        return
+    if ij_hybrid == "J" and not (
+        t_pics_control_only and hybrid_grounded_prompt
+    ):
+        print(
+            "Error: --pics_v3_ij_hybrid J requires --t_pics_gated_control_only "
+            "and --pics_v3_hybrid_grounded_prompt."
+        )
+        return
     if t_pics_gated_independent and not t_pics_gated:
         print("Error: --t_pics_gated_independent requires --t_pics_gated_transfer.")
         return
@@ -16405,25 +16462,27 @@ def main():
     )
     evo_iters = int(getattr(args, "dataset_prompt_evolution_iterations", 0) or 0)
     ablate_adaptive_prompt = bool(getattr(args, "ablate_dataset_adaptive_prompt", False))
+    hybrid_grounded_prompt = bool(getattr(args, "pics_v3_hybrid_grounded_prompt", False))
+    registered_body = ablate_adaptive_prompt or hybrid_grounded_prompt
     prefer_auto_llm_prompt = bool(
         (
             evo_iters > 0
             or getattr(args, "prefer_auto_llm_prompt", False)
             or t_pics_gated
         )
-        and not ablate_adaptive_prompt
+        and not registered_body
     )
     # PICS v3 global-only G.1 with --prefer_auto_llm_prompt must fail closed (no
     # reference / merge fallback). Scoped to structure_aware_v3 so historical v1 /
     # preliminary-v2 G.1 keep their previous soft-fallback behavior. There is no
     # --require_auto_llm_prompt CLI flag; this wires setup_teh_run_prompts(...).
-    # --ablate_dataset_adaptive_prompt clears fail-closed for that ablation only.
+    # --ablate_dataset_adaptive_prompt / hybrid grounded clear fail-closed.
     g1_require_auto = bool(
         getattr(args, "prefer_auto_llm_prompt", False)
         and getattr(args, "global_phase", False)
         and int(getattr(args, "n_iterations", 0) or 0) == 0
         and str(getattr(args, "limited_data_protocol", "") or "") == "structure_aware_v3"
-        and not ablate_adaptive_prompt
+        and not registered_body
     )
     run_prompts_dir = setup_teh_run_prompts(
         Path(base_run_dir),
@@ -16431,7 +16490,7 @@ def main():
         Path(seed_program_path),
         client=teh_client,
         model_name=args.model_name,
-        use_llm=not args.no_llm_prompt and not ablate_adaptive_prompt,
+        use_llm=not args.no_llm_prompt and not registered_body,
         base_prompt_path=args.base_prompt,
         local_dataset=args.local_dataset,
         mixed_gambles_csv=args.mixed_gambles_csv,
@@ -16454,10 +16513,11 @@ def main():
         limited_train_val=args.limited_train_val,
         max_observed_trials_per_participant=args.max_observed_trials_per_participant,
         require_auto_llm_prompt=bool(
-            (t_pics_gated or g1_require_auto) and not ablate_adaptive_prompt
+            (t_pics_gated or g1_require_auto) and not registered_body
         ),
         llm_decoding_seed=(int(args.split_seed) + 90_000) if t_pics_gated else None,
         ablate_dataset_adaptive_prompt=ablate_adaptive_prompt,
+        pics_v3_hybrid_grounded_prompt=hybrid_grounded_prompt,
     )
     print(f"TEH run prompts directory: {run_prompts_dir}")
     seed_program_path = str(run_prompts_dir / "seed_program.py")

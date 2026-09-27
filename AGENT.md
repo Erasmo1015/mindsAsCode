@@ -742,6 +742,10 @@ Optional F/G/H search-depth ablations (KINDs `pics_v3_allocation_{f_transfer_ini
 
 Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/others/ablation_FGH_Sep26/STATUS.md` — H closest to Original (avg −0.528 vs −0.521); F/G lag ~0.03–0.04.
 - Sep26 component mechanism audit (CPU read-only): `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep26/component_mechanism_audit/` — adaptive compression on Plonsky/Frey; fresh overfit heterogeneous (Bergert opposite); FINAL_RECOMMENDATION.md.
+- Sep26 I/J hybrid grounded (ready, not submitted): KINDs `pics_v3_ablation_i_hybrid_transfer` / `pics_v3_ablation_j_hybrid_target`; launchers `cluster/v3/ours/ablation_ij/`; report `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/IMPLEMENTATION_STATUS.md`.
+- Sep27 J-vs-E hybrid prompt audit (read-only, four datasets): `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/hybrid_prompt_audit/HYBRID_VS_E_AUDIT.md` — schedule (E transfer gate) dominates; generic reminder not the gap.
+- Sep27 I+J counterfactual gate refreshed on all ten (read-only): `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/counterfactual_gate/COUNTERFACTUAL_GATE.md` — USE J TARGET-ONLY.
+- Sep27 final reminder mechanism audit (read-only): `analysis_2026Sep/Sep20_V3/others/final_reminder_mechanism_audit/FINAL_REMINDER_MECHANISM_AUDIT.md` — keep v4 on Steyvers/Schulz, v1 on Kool, v2 on Badham; one Speekenbrink weather-outcome deletion.
 
 ---
 

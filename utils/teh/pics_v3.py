@@ -38,14 +38,26 @@ ABLATION_KIND_NO_POPULATION = "pics_v3_ablation_no_population"
 ABLATION_KIND_NO_EXPLORE = "pics_v3_ablation_no_explore"
 ABLATION_KIND_NO_FRESH = "pics_v3_ablation_no_fresh"
 ABLATION_KIND_NO_ADAPTIVE_PROMPT = "pics_v3_ablation_no_adaptive_prompt"
+# I/J: hybrid grounded prompt (registered description + reminders; not auto_llm).
+# Isolated from A–E and F/G/H; never write under bare pics_v3/.
+ABLATION_KIND_I_HYBRID_TRANSFER = "pics_v3_ablation_i_hybrid_transfer"
+ABLATION_KIND_J_HYBRID_TARGET = "pics_v3_ablation_j_hybrid_target"
 ABLATION_KINDS = (
     ABLATION_KIND_NO_TRANSFER,
     ABLATION_KIND_NO_POPULATION,
     ABLATION_KIND_NO_EXPLORE,
     ABLATION_KIND_NO_FRESH,
     ABLATION_KIND_NO_ADAPTIVE_PROMPT,
+    ABLATION_KIND_I_HYBRID_TRANSFER,
+    ABLATION_KIND_J_HYBRID_TARGET,
 )
 ABLATION_RUN_TAG = "g5e50p30_pics_v3_ablation"
+IJ_HYBRID_RUN_TAG = "g5e50p30_pics_v3_ij_hybrid"
+IJ_HYBRID_WANDB_GROUP = "t_pics_gated_ij_hybrid"
+IJ_HYBRID_KINDS = (
+    ABLATION_KIND_I_HYBRID_TRANSFER,
+    ABLATION_KIND_J_HYBRID_TARGET,
+)
 
 # Budget-allocation F/G/H (search-depth comparison; not A–E; never write under pics_v3/).
 ALLOCATION_KIND_F_TRANSFER_INIT = "pics_v3_allocation_f_transfer_init"
