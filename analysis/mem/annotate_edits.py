@@ -102,6 +102,7 @@ from utils.mem.trace import (  # noqa: E402
     hydrate_parent_record,
     hydrate_trace_code_fields,
     iter_jsonl_records,
+    record_contains_test_metrics,
     resolve_program_code,
     split_annotation_batches,
 )
@@ -189,12 +190,25 @@ def _discover_trace_files(run_dir: Path) -> List[Path]:
 
 def _load_grouped_candidates(
     trace_files: Sequence[Path],
+    *,
+    run_id_override: Optional[str] = None,
+    track_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[Tuple[Any, ...], Dict[str, Any]], Dict[Tuple[Any, ...], List[Dict[str, Any]]]]:
     contexts: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     candidates: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
     for path in trace_files:
         participant_dir = Path(path).parent
         for rec in iter_jsonl_records([path]):
+            if run_id_override or track_meta:
+                rec = dict(rec)
+                if record_contains_test_metrics(rec):
+                    raise RuntimeError(
+                        "AAMAS v0 refusing test-metric keys in participant trace"
+                    )
+                if run_id_override:
+                    rec["run_id"] = str(run_id_override)
+                if track_meta:
+                    rec.update(track_meta)
             key = (
                 rec.get("run_id"),
                 rec.get("dataset"),
@@ -1095,6 +1109,12 @@ def _enrich_annotation_row(
             enriched["reference_parent_score"] = src.get("reference_parent_score")
         if src.get("train_loglik") is not None:
             enriched["train_loglik"] = src.get("train_loglik")
+        if src.get("track_mode"):
+            enriched["track_mode"] = src.get("track_mode")
+            enriched["provisional_experimental_track"] = bool(
+                src.get("provisional_experimental_track")
+            )
+            enriched["paper_mem"] = bool(src.get("paper_mem"))
         if src.get("val_loglik") is not None:
             enriched["val_loglik"] = src.get("val_loglik")
         if src.get("source") is not None:
@@ -1244,6 +1264,20 @@ def _write_annotation_rows(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run_dir", type=str, required=True, help="PICS/TEH run directory")
+    parser.add_argument(
+        "--run_id_override",
+        type=str,
+        default="",
+        help="Provenance-only resume run id. AAMAS v0 passes track_mode__job_<id> "
+        "so generic trace run ids (selected/control) cannot collide.",
+    )
+    parser.add_argument(
+        "--track_mode",
+        type=str,
+        default="",
+        help="AAMAS v0 track_mode. When set, only selected/participant_* traces "
+        "are read and the run must match that track.",
+    )
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -1447,6 +1481,22 @@ def main() -> None:
         }
 
     run_dir = Path(args.run_dir)
+    run_id_override = str(args.run_id_override or "").strip() or None
+    track_mode = str(args.track_mode or "").strip()
+    track_meta = None
+    if track_mode or run_id_override:
+        from analysis.mem.aamas_v0_mem import (  # noqa: WPS433
+            assert_aamas_participant_annotation_root,
+            track_provenance,
+        )
+
+        if not track_mode or not run_id_override:
+            raise SystemExit(
+                "AAMAS participant annotation requires both --track_mode and "
+                "--run_id_override"
+            )
+        assert_aamas_participant_annotation_root(run_dir, track_mode=track_mode)
+        track_meta = track_provenance(track_mode)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = out_dir / "raw_responses"
@@ -1482,6 +1532,12 @@ def main() -> None:
             )
 
     trace_files = _discover_trace_files(run_dir)
+    if track_mode:
+        from analysis.mem.aamas_v0_mem import (  # noqa: WPS433
+            participant_trace_files,
+        )
+
+        trace_files = participant_trace_files(trace_files)
     if not trace_files:
         raise SystemExit(f"No mem_trace.jsonl under {run_dir}")
     print(
@@ -1491,7 +1547,11 @@ def main() -> None:
         flush=True,
     )
 
-    contexts, candidates = _load_grouped_candidates(trace_files)
+    contexts, candidates = _load_grouped_candidates(
+        trace_files,
+        run_id_override=run_id_override,
+        track_meta=track_meta,
+    )
     if participant_filter is not None:
         contexts = {
             k: v for k, v in contexts.items() if str(k[2]) in participant_filter

@@ -723,3 +723,33 @@ def append_runtime_contract_if_present(
         return prompt_text
     contract = path.read_text(encoding="utf-8").strip()
     return attach_runtime_contract_to_prompt(prompt_text, contract)
+
+
+def runtime_contract_marker_count(prompt_text: str) -> int:
+    return str(prompt_text or "").count(RUNTIME_CONTRACT_HEADER)
+
+
+def finalize_aamas_runtime_contract(
+    prompt_text: str,
+    run_prompts_dir: Optional[Path | str],
+) -> str:
+    """Return the prompt with exactly one runtime contract and no second copy.
+
+    The AAMAS registered infer file already ends with the contract, and the
+    packer counts that string. Appending the saved contract again pushes the
+    final prompt over the 14000-token cap.
+    """
+    count = runtime_contract_marker_count(prompt_text)
+    if count == 1:
+        return prompt_text
+    if count == 0:
+        updated = append_runtime_contract_if_present(prompt_text, run_prompts_dir)
+        if runtime_contract_marker_count(updated) != 1:
+            raise RuntimeError(
+                "AAMAS v0 final prompt is missing the TARGET RUNTIME CONTRACT."
+            )
+        return updated
+    raise RuntimeError(
+        "AAMAS v0 final prompt contains "
+        f"{count} TARGET RUNTIME CONTRACT markers; expected 1."
+    )

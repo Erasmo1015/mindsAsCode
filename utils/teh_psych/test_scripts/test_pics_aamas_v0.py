@@ -49,7 +49,7 @@ _HISTORICAL_SHA256 = {
         "904af3f8d0a175a584d9bf5c810ca31b914ea5e54a44d6be1e1e0ce04ae1d5d1",
     "cluster/Old/2026Sep/v3/ours/ablation_ij/job_ij_hybrid_h100.sh":
         "3e26c68761ce180daff7f87fc016ede6ef4ccb69dc2c3bb09340841e2b6f7c7b",
-    "cluster/Old/2026Sep/Qwen/_common.sh":
+    "cluster/Old/2026Sep/v2/Qwen/_common.sh":
         "92eaf4e75191b120e623083cead92d653fb40c585e1afd652f57d8e31741ed7e",
     "utils/teh/pics_v3_prompt_robustness.py":
         "55b7cae766d6e5285dfdd26a1bd03b931f4207f9e4358f0bc90f9d08fb1cc31b",
@@ -204,7 +204,7 @@ def test_downstream_loader_fail_closed(tmp_path: Path):
         "kind": "pics_aamas_v0_target_only",
         "track_mode": "target_only",
         "arm_role": "target_only",
-        "prompt_policy": "pics_aamas_v0",
+        "prompt_policy": "aamas_v0_lossless_data_v1",
         "test_used_for_selection": False,
         "sa40_fingerprint": "abc",
         "global_iters": 10,
@@ -344,7 +344,7 @@ def test_launchers_are_isolated():
     fill = (REPO / "cluster/v0/ours/main/aamas_v0/_fill.sh").read_text(encoding="utf-8")
     assert "aamas_v0_fill_track_args" in fill
     assert "--pics_aamas_v0_track_mode" in fill
-    common = (REPO / "cluster/Old/2026Sep/Qwen/_common.sh").read_text(encoding="utf-8")
+    common = (REPO / "cluster/Old/2026Sep/v2/Qwen/_common.sh").read_text(encoding="utf-8")
     assert "t_pics_v3_fill_gated_args()" in common
     gated = common[common.index("t_pics_v3_fill_gated_args()"): common.index("t_pics_v3_fill_ij_hybrid_args()")]
     assert "pics_aamas_v0" not in gated
@@ -362,7 +362,7 @@ def test_materialize_gate_matches_provenance(tmp_path: Path):
             "dataset": "2plonsky2018when",
             "kind": kind,
             "track_mode": "target_only" if role == "target_only" else "transfer_based_only",
-            "prompt_policy": "pics_aamas_v0",
+            "prompt_policy": "aamas_v0_lossless_data_v1",
             "prompt_mode": "aamas_v0_registered",
             "rendered_prompt_sha256": "abc",
             "sa40_fingerprint": "fp",

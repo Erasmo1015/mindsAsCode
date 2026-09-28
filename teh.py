@@ -1554,7 +1554,7 @@ def _phase_llm_decoding_seed_base(
     participant_id: Optional[int] = None,
     batch_offset: int = 0,
 ) -> int:
-    """Deterministic per-request seed base. Matched across G.2 arms (no arm id)."""
+    """PICS / historical per-request seed base. AAMAS runs do not use this."""
     pid_key = int(participant_id) if participant_id is not None else 0
     return (
         int(split_seed)
@@ -1563,6 +1563,17 @@ def _phase_llm_decoding_seed_base(
         + pid_key * 17_179
         + int(batch_offset)
     )
+
+
+def _aamas_or_legacy_seed(legacy: int, namespace: str, **coords: Any) -> int:
+    """Keep the historical split_seed formula unless this process is an AAMAS run."""
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+
+    if not using_pics_aamas_v0_prompt():
+        return int(legacy)
+    from utils.teh.aamas_v0_lossless_trials import pics_lossless_subseed
+
+    return int(pics_lossless_subseed(namespace, **coords))
 
 
 def load_valid_participant_ids_from_json(
@@ -3375,7 +3386,13 @@ def run_global_evolution_phase(
         pool_size = len(elite_parents)
         if sample_parents and pool_size > 0:
             rng = np.random.default_rng(
-                int(split_seed) + 50_000 + int(iteration_step) * 1_000_003
+                _aamas_or_legacy_seed(
+                    int(split_seed) + 50_000 + int(iteration_step) * 1_000_003,
+                    "parent_sampling",
+                    dataset=str(dataset),
+                    phase="population",
+                    iteration=int(iteration_step),
+                )
             )
             parent_idxs, best_k, sampled_k = _select_parent_indices_from_elite_pool(
                 pool_size,
@@ -3489,6 +3506,8 @@ def run_global_evolution_phase(
             f"num_unique_errors_available={num_unique_errors_available}, "
             f"error_prompt_chars_used={error_prompt_chars_used}"
         )
+        from utils.teh.aamas_v0_lossless_trials import pics_run_seed
+
         variant_kwargs = {
             "train_trials": pooled_train,
             "extra_prompt_trials": pooled_val if pooled_val else None,
@@ -3496,7 +3515,13 @@ def run_global_evolution_phase(
             "dataset": dataset,
             "max_prompt_train_trials": max_prompt_train_trials,
             "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
-            "prompt_train_trials_seed": int(split_seed) + 60_000 + iteration_step,
+            "prompt_train_trials_seed": _aamas_or_legacy_seed(
+                int(split_seed) + 60_000 + int(iteration_step),
+                "prompt_trial_subsample",
+                dataset=str(dataset),
+                phase="population",
+                iteration=int(iteration_step),
+            ),
             "fitness_metric": "loglik",
             "max_workers": max_workers,
             "run_prompts_dir": run_prompts_dir,
@@ -3521,10 +3546,18 @@ def run_global_evolution_phase(
             "prompt_suffix": prompt_suffix,
             "g2_arm": g2_arm,
             "g2_paired_pack_path": g2_paired_pack_path,
-            "llm_decoding_seed_base": _phase_llm_decoding_seed_base(
-                split_seed=int(split_seed),
-                iteration_step=int(iteration_step),
+            "llm_decoding_seed_base": _aamas_or_legacy_seed(
+                _phase_llm_decoding_seed_base(
+                    split_seed=int(split_seed),
+                    iteration_step=int(iteration_step),
+                ),
+                "llm_request_base",
+                dataset=str(dataset),
+                phase="population",
+                iteration=int(iteration_step),
+                role="iteration",
             ),
+            "pics_run_seed": pics_run_seed(),
         }
         candidate_codes, candidate_sources = _generate_iteration_candidate_codes(
             client=client,
@@ -4370,8 +4403,17 @@ def _runtime_contract_text(run_prompts_dir: Optional[str]) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def _g2_paired_pack_example_seed(split_seed: int) -> int:
+def _g2_paired_pack_example_seed(split_seed: int, dataset: str = "") -> int:
     """Freeze target examples with the G.2 iteration-0 subsample seed; reuse all five iters."""
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+
+    if using_pics_aamas_v0_prompt():
+        return _aamas_or_legacy_seed(
+            int(split_seed) + 60_000 + 1,
+            "paired_pack_examples",
+            dataset=str(dataset),
+            phase="population",
+        )
     return int(split_seed) + 60_000 + 1
 
 
@@ -4412,7 +4454,7 @@ def _ensure_g2_paired_pack_freeze(
     code_template_suffix = single_code_template_prompt_suffix(code_template)
     runtime_contract = _runtime_contract_text(run_prompts_dir)
     seed_code = Path(seed_program_path).read_text(encoding="utf-8")
-    example_seed = _g2_paired_pack_example_seed(int(args.split_seed))
+    example_seed = _g2_paired_pack_example_seed(int(args.split_seed), str(args.dataset))
     participant_ids = [int(p) for p in participants]
     source_filter = bool(filter_mixed_gambles) or str(source_dataset) == "mixed_gambles"
 
@@ -5923,7 +5965,9 @@ def estimate_tokens(text: str, *, estimator: str = "char4") -> int:
     """
     if not text:
         return 0
-    if using_v2_prompt_contract():
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+
+    if using_v2_prompt_contract() or using_pics_aamas_v0_prompt():
         from utils.teh.prompt_units import qwen_user_prompt_token_count
 
         return qwen_user_prompt_token_count(text)
@@ -6047,6 +6091,13 @@ def _serialize_trials_for_prompt(
     dataset: str,
     compact: bool,
 ) -> str:
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+
+    if using_pics_aamas_v0_prompt():
+        raise RuntimeError(
+            "AAMAS v0 trial text must be packed by the lossless selector; "
+            "the one-line and eight-entry serializers are not used."
+        )
     if using_v2_prompt_contract():
         # Keep snapshot JSON. v2 over-budget handling is trial-count caps in
         # _truncate_psych_prompt_to_budget, not rewriting examples as one-liners.
@@ -6184,6 +6235,162 @@ def _build_psych_prompt_text(
     return text
 
 
+def _commit_aamas_explore_prompt_map(
+    diagnostics_dir: Optional[Path],
+    *,
+    participant_id: Optional[int],
+    rows: List[Dict[str, Any]],
+) -> None:
+    """Persist exploration candidate-to-prompt mapping. Resume must match it."""
+    if diagnostics_dir is None or not rows:
+        return
+    path = Path(diagnostics_dir) / "explore_phase" / "prompt_selection_map.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, Any]
+    if path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        payload = {
+            "policy": "aamas_v0_lossless_data_v1",
+            "participant_id": participant_id,
+            "candidates": [],
+        }
+    existing = {
+        int(row["candidate_index"]): row for row in payload.get("candidates") or []
+    }
+    for row in rows:
+        previous = existing.get(int(row["candidate_index"]))
+        if previous is not None and previous.get("assigned_text_sha256") != row.get(
+            "assigned_text_sha256"
+        ):
+            raise RuntimeError(
+                "AAMAS v0 exploration resume would change the candidate prompt map "
+                f"at candidate {row['candidate_index']}."
+            )
+        existing[int(row["candidate_index"])] = row
+    payload["candidates"] = [existing[key] for key in sorted(existing)]
+    payload["policy"] = "aamas_v0_lossless_data_v1"
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _pack_aamas_lossless_prompt(
+    *,
+    base_prompt: str,
+    train_trials_source: List[Dict[str, Any]],
+    val_trials_source: Optional[List[Dict[str, Any]]],
+    parent_programs: List[str],
+    parent_context_builder: Callable[..., str],
+    parent_context_kwargs: Dict[str, Any],
+    code_template_suffix: str,
+    candidate_output_rules: str,
+    dataset: str,
+    hard_prompt_token_cap: int,
+    max_parent_chars: int,
+    runtime_contract: str,
+) -> Tuple[str, Dict[str, Any], List[str]]:
+    """Pack one AAMAS-v0 prompt. Bypasses the one-line and trial-cap ladder."""
+    from utils.teh.aamas_v0_lossless_trials import (
+        PHASE_EXPLORATION,
+        TRIAL_PROMPT_POLICY_ID,
+        current_selection,
+        render_for_request,
+    )
+
+    request = current_selection()
+    if request is None:
+        raise RuntimeError(
+            "AAMAS v0 lossless packing requires a bound trial-selection request."
+        )
+    pool = list(train_trials_source or [])
+    if val_trials_source:
+        pool.extend(list(val_trials_source))
+    parents = list(parent_programs)
+    steps = ["aamas_v0_lossless_data_v1"]
+
+    def _wrap(trial_text: str, parent_list: List[str]) -> str:
+        parent_context = parent_context_builder(
+            prompt_parent_programs=list(parent_list),
+            **parent_context_kwargs,
+        )
+        return _build_psych_prompt_text(
+            base_prompt=base_prompt,
+            state_text=trial_text,
+            extra_state_text="",
+            parent_context=parent_context,
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=candidate_output_rules,
+            runtime_contract=runtime_contract,
+            dataset=dataset,
+        )
+
+    cursor_parent = request.cursor_parent or (
+        parents[0] if len(parents) == 1 else "def choose(problem, history):\n    return 0.5\n"
+    )
+    canonical_wrap = lambda body, _parent=cursor_parent: _wrap(body, [_parent] if _parent else [])
+    actual_wrap = lambda body: _wrap(body, parents)
+    text, stats = render_for_request(
+        pool,
+        dataset=dataset,
+        request=request,
+        actual_wrap=actual_wrap,
+        canonical_wrap=canonical_wrap,
+        cap=int(hard_prompt_token_cap),
+    )
+    prompt = actual_wrap(text) if text else actual_wrap("")
+    tokens = estimate_tokens(prompt, estimator="qwen_chat")
+    if tokens > int(hard_prompt_token_cap) and max_parent_chars > 0 and parents:
+        trimmed = []
+        changed = False
+        for program in parents:
+            shortened, was = _truncate_parent_program_for_prompt(program, int(max_parent_chars))
+            trimmed.append(shortened)
+            changed = changed or was
+        if changed:
+            steps.append("truncate_parent_chars_existing_policy")
+            parents = trimmed
+            actual_wrap = lambda body: _wrap(body, parents)
+            text, stats = render_for_request(
+                pool,
+                dataset=dataset,
+                request=request,
+                actual_wrap=actual_wrap,
+                canonical_wrap=canonical_wrap,
+                cap=int(hard_prompt_token_cap),
+            )
+            prompt = actual_wrap(text) if text else actual_wrap("")
+            tokens = estimate_tokens(prompt, estimator="qwen_chat")
+    if "history_prefix" in prompt:
+        raise RuntimeError("AAMAS v0 prompt rendered the forbidden name history_prefix")
+    if tokens > int(hard_prompt_token_cap):
+        raise PromptBudgetExceededError(
+            f"AAMAS v0 lossless prompt is {tokens} tokens over cap {hard_prompt_token_cap}",
+            tokens=tokens,
+            cap=int(hard_prompt_token_cap),
+            overflow_components={"prompt": tokens},
+            truncation_steps=steps,
+        )
+    diag = {
+        "truncated": tokens > 0 and int(stats.get("n_supervised") or 0) < len(pool),
+        "prompt_tokens_before_truncation": tokens,
+        "prompt_tokens_after_truncation": tokens,
+        "prompt_token_estimator": "qwen_chat",
+        "train_trials_before": len(pool),
+        "train_trials_after": int(stats.get("n_supervised") or 0),
+        "val_trials_before": 0,
+        "val_trials_after": 0,
+        "parents_before": len(parent_programs),
+        "parents_after": len(parents),
+        "compact_serialization": False,
+        "freeze_examples": False,
+        "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "aamas_selection": stats,
+        "selection_step": int(request.step),
+        "lossless_serializer": True,
+        "exploration_heterogeneous": request.phase == PHASE_EXPLORATION,
+    }
+    return prompt, diag, steps
+
+
 def _truncate_psych_prompt_to_budget(
     *,
     base_prompt: str,
@@ -6215,6 +6422,24 @@ def _truncate_psych_prompt_to_budget(
     """
     Structured truncation for Psych/TEH prompts. Returns (prompt, diagnostics, steps).
     """
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+
+    if using_pics_aamas_v0_prompt() and not freeze_examples:
+        return _pack_aamas_lossless_prompt(
+            base_prompt=base_prompt,
+            train_trials_source=list(train_trials_source or train_trials),
+            val_trials_source=val_trials_source,
+            parent_programs=list(parent_programs),
+            parent_context_builder=parent_context_builder,
+            parent_context_kwargs=parent_context_kwargs,
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=candidate_output_rules,
+            dataset=dataset,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            max_parent_chars=max_parent_chars,
+            runtime_contract=runtime_contract,
+        )
+
     steps: List[str] = []
     compact = False
     out_reserve = int(output_reserve)
@@ -6659,7 +6884,14 @@ def run_loglik_refinement_phase(
         if sample_parents and pool_size > 0:
             pid_key = int(participant_id) if participant_id is not None else 0
             rng = np.random.default_rng(
-                int(split_seed) + 9_000_000 + int(iteration_step) * 1_000_003 + pid_key * 17_179
+                _aamas_or_legacy_seed(
+                    int(split_seed) + 9_000_000 + int(iteration_step) * 1_000_003 + pid_key * 17_179,
+                    "parent_sampling",
+                    dataset=str(dataset),
+                    phase="refinement",
+                    participant=int(pid_key),
+                    iteration=int(iteration_step),
+                )
             )
             parent_idxs, best_k, sampled_k = _select_parent_indices_from_elite_pool(
                 pool_size,
@@ -6759,7 +6991,14 @@ def run_loglik_refinement_phase(
             "dataset": dataset,
             "max_prompt_train_trials": max_prompt_train_trials,
             "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
-            "prompt_train_trials_seed": split_seed,
+            "prompt_train_trials_seed": _aamas_or_legacy_seed(
+                int(split_seed),
+                "prompt_trial_subsample",
+                dataset=str(dataset),
+                phase="refinement",
+                participant=int(participant_id) if participant_id is not None else None,
+                iteration=int(iteration_step),
+            ),
             "fitness_metric": fitness_metric,
             "max_workers": max_workers,
             "prompt_suffix": refine_suffix,
@@ -10182,6 +10421,9 @@ def _generate_iteration_candidate_codes(
     n_normal = n_total - fresh_n
     codes: List[str] = []
     sources: List[str] = []
+    cursor_parent = ""
+    if fresh_parent_programs:
+        cursor_parent = str(fresh_parent_programs[0])
     if fresh_n > 0:
         fresh_kw = dict(variant_kwargs)
         fresh_kw.update(
@@ -10198,6 +10440,8 @@ def _generate_iteration_candidate_codes(
             fresh_kw["parent_overall_logliks"] = fresh_parent_overall_logliks
         if fresh_parent_program_ids is not None:
             fresh_kw["parent_program_ids"] = list(fresh_parent_program_ids)
+        fresh_kw["pics_lossless_cursor_parent"] = cursor_parent
+        fresh_kw["pics_lossless_generation_role"] = "fresh"
         fresh_codes = generate_program_variants(**fresh_kw)
         codes.extend(fresh_codes)
         sources.extend(["fresh"] * len(fresh_codes))
@@ -10220,6 +10464,8 @@ def _generate_iteration_candidate_codes(
             normal_kw["parent_overall_logliks"] = normal_parent_overall_logliks
         if normal_parent_program_ids is not None:
             normal_kw["parent_program_ids"] = list(normal_parent_program_ids)
+        normal_kw["pics_lossless_cursor_parent"] = cursor_parent
+        normal_kw["pics_lossless_generation_role"] = "parent"
         normal_codes = generate_program_variants(**normal_kw)
         codes.extend(normal_codes)
         sources.extend(["normal"] * len(normal_codes))
@@ -10274,6 +10520,11 @@ def generate_program_variants(
     g2_arm: Optional[str] = None,
     g2_paired_pack_path: Optional[str] = None,
     parent_program_ids: Optional[List[str]] = None,
+    pics_run_seed: Optional[int] = None,
+    pics_lossless_selection_step: Optional[int] = None,
+    pics_lossless_cursor_parent: Optional[str] = None,
+    pics_lossless_candidate_offset: int = 0,
+    pics_lossless_generation_role: str = "default",
 ) -> List[str]:
     """
     Generate full program variants based on parent program and training trials.
@@ -10388,7 +10639,22 @@ Provide only the code for choose(...) as a complete function body.
     refinement_val_observations = prompt_observation_trials is not None
     val_trials_for_budget: Optional[List[Dict[str, Any]]] = None
     val_source: Optional[List[Dict[str, Any]]] = None
-    if g2_paired_pack_path:
+    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+
+    if using_pics_aamas_v0_prompt() and not g2_paired_pack_path:
+        pool = list(train_trials)
+        if extra_prompt_trials:
+            pool.extend(list(extra_prompt_trials))
+        if prompt_observation_trials is not None:
+            pool = list(prompt_observation_trials)
+        observation_trials_source = pool
+        trials_for_prompt = pool
+        val_source = None
+        val_trials_for_budget = None
+        pre_capped_train = True
+        pre_capped_val = True
+        refinement_val_observations = False
+    elif g2_paired_pack_path:
         freeze_payload = load_paired_pack_freeze(Path(g2_paired_pack_path))
         freeze_examples = True
         runtime_contract = _runtime_contract_text(run_prompts_dir)
@@ -10488,33 +10754,117 @@ Provide only the code for choose(...) as a complete function body.
             **parent_ctx_kwargs,
         )
 
-    prompt_text, trunc_diag, trunc_steps = _truncate_psych_prompt_to_budget(
-        base_prompt=base_prompt,
-        train_trials=trials_for_prompt,
-        train_trials_source=observation_trials_source,
-        val_trials=val_trials_for_budget,
-        val_trials_source=val_source,
-        extra_prompt_trials_label=extra_prompt_trials_label,
-        parent_programs=prompt_parent_programs,
-        parent_context_builder=_parent_ctx_builder,
-        parent_context_kwargs={},
-        code_template_suffix=code_template_suffix,
-        candidate_output_rules=candidate_output_rules,
-        dataset=dataset,
-        dataset_type=dataset_type,
-        hard_prompt_token_cap=hard_prompt_token_cap,
-        prompt_token_estimator=prompt_token_estimator,
-        max_prompt_train_trials=max_prompt_train_trials,
-        max_prompt_trials_per_problem=max_prompt_trials_per_problem,
-        prompt_train_trials_seed=prompt_train_trials_seed,
-        max_parent_chars=max_parent_chars,
-        refinement_val_observations=refinement_val_observations,
-        pre_capped_train=pre_capped_train,
-        pre_capped_val=pre_capped_val,
-        runtime_contract=runtime_contract,
-        freeze_examples=freeze_examples,
-        output_reserve=int(max_tokens),
+    from utils.teh.aamas_v0_lossless_trials import (
+        PHASE_EXPLORATION,
+        SelectionRequest,
+        pics_lossless_llm_request_seed,
+        pics_run_seed as current_pics_run_seed,
+        map_generation_phase,
+        selection_scope,
     )
+
+    aamas_on = using_pics_aamas_v0_prompt()
+    mapped_phase = map_generation_phase(phase)
+    if aamas_on:
+        from utils.teh.prompt_context import RUNTIME_CONTRACT_HEADER
+
+        # The registered infer prompt already contains the contract. Passing it
+        # again would attach a second copy inside the packed string.
+        if RUNTIME_CONTRACT_HEADER in base_prompt:
+            runtime_contract = ""
+        elif not runtime_contract:
+            runtime_contract = _runtime_contract_text(run_prompts_dir)
+    if aamas_on and pics_run_seed is None:
+        pics_run_seed = current_pics_run_seed()
+    if aamas_on and pics_run_seed is None:
+        raise RuntimeError(
+            "AAMAS v0 search requires --pics_run_seed. "
+            "split_seed is the data-split seed and does not drive generation."
+        )
+    if pics_lossless_selection_step is not None:
+        base_step = int(pics_lossless_selection_step)
+    elif iteration is not None:
+        base_step = max(0, int(iteration) - 1)
+    else:
+        base_step = 0
+    digest_participant = None if mapped_phase == "population" else participant_id
+    heterogeneous_explore = (
+        aamas_on and mapped_phase == PHASE_EXPLORATION and int(n_variants) > 1
+    )
+
+    def _call_truncate(step: int):
+        kwargs = dict(
+            base_prompt=base_prompt,
+            train_trials=trials_for_prompt,
+            train_trials_source=observation_trials_source,
+            val_trials=val_trials_for_budget,
+            val_trials_source=val_source,
+            extra_prompt_trials_label=extra_prompt_trials_label,
+            parent_programs=prompt_parent_programs,
+            parent_context_builder=_parent_ctx_builder,
+            parent_context_kwargs={},
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=candidate_output_rules,
+            dataset=dataset,
+            dataset_type=dataset_type,
+            hard_prompt_token_cap=hard_prompt_token_cap,
+            prompt_token_estimator=prompt_token_estimator,
+            max_prompt_train_trials=max_prompt_train_trials,
+            max_prompt_trials_per_problem=max_prompt_trials_per_problem,
+            prompt_train_trials_seed=prompt_train_trials_seed,
+            max_parent_chars=max_parent_chars,
+            refinement_val_observations=refinement_val_observations,
+            pre_capped_train=pre_capped_train,
+            pre_capped_val=pre_capped_val,
+            runtime_contract=runtime_contract,
+            freeze_examples=freeze_examples,
+            output_reserve=int(max_tokens),
+        )
+        if not aamas_on:
+            return _truncate_psych_prompt_to_budget(**kwargs)
+        request = SelectionRequest(
+            dataset=str(dataset),
+            phase=mapped_phase,
+            step=int(step),
+            master_seed=int(pics_run_seed),
+            participant_id=None if digest_participant is None else int(digest_participant),
+            cursor_parent=str(pics_lossless_cursor_parent or ""),
+        )
+        with selection_scope(request):
+            return _truncate_psych_prompt_to_budget(**kwargs)
+
+    explore_rows: List[Dict[str, Any]] = []
+    if heterogeneous_explore:
+        prompt_texts: List[str] = []
+        trunc_diag = {}
+        trunc_steps = []
+        for cand_i in range(int(n_variants)):
+            step = int(pics_lossless_candidate_offset) + cand_i
+            prompt_text, trunc_diag, trunc_steps = _call_truncate(step)
+            prompt_texts.append(prompt_text)
+            selection = dict(trunc_diag.get("aamas_selection") or {})
+            explore_rows.append(
+                {
+                    "candidate_index": step,
+                    "selection_step": step,
+                    "participant_id": participant_id,
+                    "assigned_text_sha256": selection.get("assigned_text_sha256"),
+                    "assigned_positions": selection.get("assigned_positions"),
+                    "assigned_block_ids": selection.get("block_ids"),
+                    "digest": selection.get("digest"),
+                    "policy": "aamas_v0_lossless_data_v1",
+                }
+            )
+    else:
+        prompt_text, trunc_diag, trunc_steps = _call_truncate(base_step)
+        prompt_texts = [prompt_text] * int(n_variants)
+
+    if explore_rows:
+        _commit_aamas_explore_prompt_map(
+            prompt_diagnostics_dir,
+            participant_id=participant_id,
+            rows=explore_rows,
+        )
 
     parent_lengths_after = [len(p) for p in prompt_parent_programs]
     truncated_count = sum(
@@ -10618,41 +10968,72 @@ Provide only the code for choose(...) as a complete function body.
     if diagnostics_dir is None and prompt_stats_path is not None:
         diagnostics_dir = prompt_stats_path.parent.parent
 
-    tokens_final = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
-    if freeze_examples:
-        if not fits_input_and_context(
-            tokens_final,
-            input_ceiling=hard_prompt_token_cap,
-            output_reserve=int(max_tokens),
-        ):
-            raise PairedPackingFitError(
-                "G.2 packed prompt overflowed after truncation with frozen examples "
-                f"(tokens={tokens_final}, cap={hard_prompt_token_cap}, "
-                f"output_reserve={int(max_tokens)}). "
-                "No post-packing re-append or example shrink is allowed."
-            )
-        # Contract is already inside the packed prompt. Do not re-append.
-    else:
-        if tokens_final > hard_prompt_token_cap:
-            try:
-                prompt_text, _ = _enforce_prompt_budget(
-                    prompt_text,
-                    hard_prompt_token_cap=hard_prompt_token_cap,
-                    strict_prompt_budget=strict_prompt_budget,
-                    prompt_token_estimator=prompt_token_estimator,
-                    overflow_components=trunc_diag.get("overflow_components") or {},
-                    truncation_steps=trunc_steps,
-                    phase=phase,
-                    participant_id=participant_id,
-                    iteration=iteration,
-                    candidate_index=None,
-                    diagnostics_dir=diagnostics_dir,
-                    diagnostics_base=diag_base,
+    finalized_prompts: List[str] = []
+    for raw_prompt in prompt_texts:
+        text = raw_prompt
+        tokens_final = estimate_tokens(text, estimator=prompt_token_estimator)
+        if freeze_examples:
+            if not fits_input_and_context(
+                tokens_final,
+                input_ceiling=hard_prompt_token_cap,
+                output_reserve=int(max_tokens),
+            ):
+                raise PairedPackingFitError(
+                    "G.2 packed prompt overflowed after truncation with frozen examples "
+                    f"(tokens={tokens_final}, cap={hard_prompt_token_cap}, "
+                    f"output_reserve={int(max_tokens)}). "
+                    "No post-packing re-append or example shrink is allowed."
                 )
-            except PromptBudgetExceededError:
-                raise
-        prompt_text = append_runtime_contract_if_present(prompt_text, run_prompts_dir)
-        tokens_final = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
+        else:
+            if aamas_on and tokens_final > hard_prompt_token_cap:
+                raise PromptBudgetExceededError(
+                    "AAMAS v0 lossless prompt exceeded the hard cap after packing "
+                    f"(tokens={tokens_final}, cap={hard_prompt_token_cap}).",
+                    tokens=tokens_final,
+                    cap=int(hard_prompt_token_cap),
+                    overflow_components={"prompt": tokens_final},
+                    truncation_steps=list(trunc_steps),
+                )
+            if (not aamas_on) and tokens_final > hard_prompt_token_cap:
+                try:
+                    text, _ = _enforce_prompt_budget(
+                        text,
+                        hard_prompt_token_cap=hard_prompt_token_cap,
+                        strict_prompt_budget=strict_prompt_budget,
+                        prompt_token_estimator=prompt_token_estimator,
+                        overflow_components=trunc_diag.get("overflow_components") or {},
+                        truncation_steps=trunc_steps,
+                        phase=phase,
+                        participant_id=participant_id,
+                        iteration=iteration,
+                        candidate_index=None,
+                        diagnostics_dir=diagnostics_dir,
+                        diagnostics_base=diag_base,
+                    )
+                except PromptBudgetExceededError:
+                    raise
+            if aamas_on:
+                from utils.teh.prompt_context import finalize_aamas_runtime_contract
+
+                # The packer already counted this string, including the one
+                # contract inside the registered infer prompt. Do not append
+                # runtime_contract.txt a second time.
+                text = finalize_aamas_runtime_contract(text, run_prompts_dir)
+            else:
+                text = append_runtime_contract_if_present(text, run_prompts_dir)
+            tokens_final = estimate_tokens(text, estimator=prompt_token_estimator)
+            if aamas_on and tokens_final > hard_prompt_token_cap:
+                raise PromptBudgetExceededError(
+                    "AAMAS v0 lossless prompt exceeded the hard cap after the runtime contract "
+                    f"(tokens={tokens_final}, cap={hard_prompt_token_cap}).",
+                    tokens=tokens_final,
+                    cap=int(hard_prompt_token_cap),
+                    overflow_components={"prompt": tokens_final},
+                    truncation_steps=list(trunc_steps),
+                )
+        finalized_prompts.append(text)
+    prompt_texts = finalized_prompts or [""]
+    prompt_text = prompt_texts[0]
 
     diag_base["final_chat_template_tokens"] = tokens_final
     diag_base["prompt_tokens_after_truncation"] = tokens_final
@@ -10661,14 +11042,25 @@ Provide only the code for choose(...) as a complete function body.
     explain_artifact_by_idx: Dict[int, Dict[str, Any]] = {}
 
     def _generate_one(cand_idx: int = 0) -> str:
+        cand_idx = int(cand_idx)
+        prompt_text = prompt_texts[cand_idx] if cand_idx < len(prompt_texts) else prompt_texts[0]
         if not prompt_text:
             return ""
-        cand_idx = int(cand_idx)
-        request_seed = (
-            None
-            if llm_decoding_seed_base is None
-            else int(llm_decoding_seed_base) + cand_idx
-        )
+        if aamas_on:
+            request_seed = pics_lossless_llm_request_seed(
+                dataset=str(dataset),
+                phase=str(mapped_phase),
+                participant=None if participant_id is None else int(participant_id),
+                iteration=None if iteration is None else int(iteration),
+                role=str(pics_lossless_generation_role),
+                candidate=int(pics_lossless_candidate_offset) + cand_idx,
+            )
+        else:
+            request_seed = (
+                None
+                if llm_decoding_seed_base is None
+                else int(llm_decoding_seed_base) + cand_idx
+            )
         call_diag = {
             **diag_base,
             "candidate_index": cand_idx,
@@ -10961,6 +11353,7 @@ def _run_pre_evolution_explore_phase(
         )
     candidate_codes: List[str] = []
     candidate_prompt_parent_ids: List[str] = []
+    explore_selection_offset = 0
     for parent_i, ((parent_code, parent_id), n_from_parent) in enumerate(
         zip(explore_parents, parent_counts)
     ):
@@ -10970,6 +11363,8 @@ def _run_pre_evolution_explore_phase(
             parent_accs = [float(baseline_train_eval["avg_loglik"])]
         else:
             parent_accs = [float(baseline_train_eval["accuracy"])]
+        from utils.teh.aamas_v0_lossless_trials import pics_run_seed
+
         variants = generate_program_variants(
             client=client,
             model_name=model_name,
@@ -10982,7 +11377,14 @@ def _run_pre_evolution_explore_phase(
             parent_train_accuracies=parent_accs,
             max_prompt_train_trials=max_prompt_train_trials,
             max_prompt_trials_per_problem=max_prompt_trials_per_problem,
-            prompt_train_trials_seed=int(split_seed) + 70_000 + parent_i * 1_009,
+            prompt_train_trials_seed=_aamas_or_legacy_seed(
+                int(split_seed) + 70_000 + int(parent_i) * 1_009,
+                "prompt_trial_subsample",
+                dataset=str(dataset),
+                phase="exploration",
+                participant=int(participant_id),
+                parent_index=int(parent_i),
+            ),
             fitness_metric=fitness_metric,
             cpc18_official_mse=False,
             max_workers=max_workers,
@@ -10999,13 +11401,26 @@ def _run_pre_evolution_explore_phase(
             participant_id=int(participant_id),
             iteration=None,
             prompt_suffix=prompt_suffix,
-            llm_decoding_seed_base=_phase_llm_decoding_seed_base(
-                split_seed=int(split_seed),
-                iteration_step=0,
-                participant_id=int(participant_id),
-                batch_offset=int(parent_i) * 10_007,
+            llm_decoding_seed_base=_aamas_or_legacy_seed(
+                _phase_llm_decoding_seed_base(
+                    split_seed=int(split_seed),
+                    iteration_step=0,
+                    participant_id=int(participant_id),
+                    batch_offset=int(parent_i) * 10_007,
+                ),
+                "llm_request_base",
+                dataset=str(dataset),
+                phase="exploration",
+                participant=int(participant_id),
+                parent_index=int(parent_i),
+                role="explore",
             ),
+            pics_run_seed=pics_run_seed(),
+            pics_lossless_cursor_parent=str(parent_code),
+            pics_lossless_candidate_offset=int(explore_selection_offset),
+            pics_lossless_generation_role="explore",
         )
+        explore_selection_offset += int(n_from_parent)
         candidate_codes.extend(variants)
         candidate_prompt_parent_ids.extend([str(parent_id)] * len(variants))
         print(
@@ -12234,7 +12649,14 @@ def run_evolution(
         if sample_parents and pool_size > 0:
             pid_key = int(participant_id) if participant_id is not None else 0
             rng = np.random.default_rng(
-                int(split_seed) + int(iteration_step) * 1_000_003 + pid_key * 17_179
+                _aamas_or_legacy_seed(
+                    int(split_seed) + int(iteration_step) * 1_000_003 + pid_key * 17_179,
+                    "parent_sampling",
+                    dataset=str(dataset),
+                    phase="participant_evolution",
+                    participant=int(pid_key),
+                    iteration=int(iteration_step),
+                )
             )
             parent_idxs, best_k, sampled_k = _select_parent_indices_from_elite_pool(
                 pool_size,
@@ -12422,13 +12844,22 @@ def run_evolution(
             fresh_parent_train_accs = [float(baseline_train_eval["avg_loglik"])]
         else:
             fresh_parent_train_accs = [baseline_train_eval["accuracy"]]
+        from utils.teh.aamas_v0_lossless_trials import pics_run_seed
+
         variant_kwargs = {
             "train_trials": train_trials,
             "max_tokens": llm_max_tokens,
             "dataset": dataset,
             "max_prompt_train_trials": max_prompt_train_trials,
             "max_prompt_trials_per_problem": max_prompt_trials_per_problem,
-            "prompt_train_trials_seed": split_seed,
+            "prompt_train_trials_seed": _aamas_or_legacy_seed(
+                int(split_seed),
+                "prompt_trial_subsample",
+                dataset=str(dataset),
+                phase="participant_evolution",
+                participant=int(participant_id) if participant_id is not None else None,
+                iteration=int(iteration_step),
+            ),
             "fitness_metric": fitness_metric,
             "cpc18_official_mse": False,
             "max_workers": max_workers,
@@ -12451,11 +12882,20 @@ def run_evolution(
             "past_error_prompt_section": error_prompt_section,
             "max_error_prompt_chars": max_error_prompt_chars,
             "error_feedback_mode": error_feedback_mode,
-            "llm_decoding_seed_base": _phase_llm_decoding_seed_base(
-                split_seed=int(split_seed),
-                iteration_step=int(iteration_step),
-                participant_id=int(participant_id) if participant_id is not None else None,
+            "llm_decoding_seed_base": _aamas_or_legacy_seed(
+                _phase_llm_decoding_seed_base(
+                    split_seed=int(split_seed),
+                    iteration_step=int(iteration_step),
+                    participant_id=int(participant_id) if participant_id is not None else None,
+                ),
+                "llm_request_base",
+                dataset=str(dataset),
+                phase="participant_evolution",
+                participant=int(participant_id) if participant_id is not None else None,
+                iteration=int(iteration_step),
+                role="iteration",
             ),
+            "pics_run_seed": pics_run_seed(),
         }
         extra_prompt_trials = _person_evolution_extra_prompt_trials(
             t_pics_gated_transfer=bool(t_pics_gated_transfer),
@@ -15255,6 +15695,29 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_aamas_v0_population_bank_only",
+        action="store_true",
+        default=False,
+        help=(
+            "With --pics_aamas_v0_track_mode target_only, run only the 10-iteration "
+            "population bank and stop after target_population/control/STAGE_COMPLETE.json. "
+            "Requires --n_iterations 0 and --explore_candidates 0. Does not run "
+            "exploration or participant evolution."
+        ),
+    )
+    parser.add_argument(
+        "--pics_run_seed",
+        type=int,
+        default=0,
+        help=(
+            "PICS method seed for an AAMAS-v0 run. Controls trial-prompt selection, "
+            "LLM request seeds, candidate generation, parent sampling, exploration "
+            "schedules, and participant-evolution randomness. Does not change the "
+            "train/validation/test split or the retained SA40 subset. Default 0. "
+            "Change this, not --split_seed, for a method-seed rerun."
+        ),
+    )
+    parser.add_argument(
         "--pics_aamas_v0_materialize_target_only_run",
         type=str,
         default=None,
@@ -15876,6 +16339,26 @@ def main():
         )
         return
     configure_pics_aamas_v0_prompt(bool(aamas_v0_mode))
+    if aamas_v0_mode:
+        from utils.teh.aamas_v0_lossless_trials import set_pics_run_seeds
+
+        set_pics_run_seeds(run_seed=int(args.pics_run_seed), split_seed=int(args.split_seed))
+    bank_only = bool(getattr(args, "pics_aamas_v0_population_bank_only", False))
+    if bank_only and aamas_v0_mode != "target_only":
+        print(
+            "Error: --pics_aamas_v0_population_bank_only requires "
+            "--pics_aamas_v0_track_mode target_only."
+        )
+        return
+    if bank_only and (
+        int(args.n_iterations) != 0 or int(args.explore_candidates) != 0
+    ):
+        print(
+            "Error: --pics_aamas_v0_population_bank_only requires "
+            "--n_iterations 0 and --explore_candidates 0 so exploration and "
+            "participant evolution do not run."
+        )
+        return
     t_pics_gated = bool(getattr(args, "t_pics_gated_transfer", False))
     t_pics_gated_independent = bool(getattr(args, "t_pics_gated_independent", False))
     t_pics_gated_source = str(getattr(args, "t_pics_gated_source", "") or "").strip() or None
@@ -15960,8 +16443,8 @@ def main():
         int(args.global_iters) != 10
         or int(args.n_candidates) != 10
         or int(args.fresh_n_candidates) != 10
-        or int(args.n_iterations) != 10
-        or int(args.explore_candidates) != 50
+        or (not bank_only and int(args.n_iterations) != 10)
+        or (not bank_only and int(args.explore_candidates) != 50)
         or int(args.max_error_prompt_chars) != 0
         or args.refinement_phase
         or str(args.evolution_selection_score) != "train_val"
@@ -16813,6 +17296,15 @@ def main():
             base_run_dir = args.output_dir
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
 
+    if aamas_v0_mode:
+        from utils.teh.aamas_v0_lossless_trials import (
+            assert_legacy_output_not_resumed,
+            write_trial_policy_marker,
+        )
+
+        assert_legacy_output_not_resumed(base_run_dir)
+        write_trial_policy_marker(base_run_dir)
+
     cmd_log = _write_command_line_log(Path(base_run_dir))
     print(f"Wrote full command line to {cmd_log}")
     gated_meta: Optional[Dict[str, Any]] = None
@@ -16969,7 +17461,15 @@ def main():
         require_auto_llm_prompt=bool(
             (t_pics_gated or g1_require_auto) and not registered_body
         ),
-        llm_decoding_seed=(int(args.split_seed) + 90_000) if t_pics_gated else None,
+        llm_decoding_seed=(
+            _aamas_or_legacy_seed(
+                int(args.split_seed) + 90_000,
+                "registered_prompt",
+                dataset=str(args.dataset),
+            )
+            if aamas_v0_mode
+            else ((int(args.split_seed) + 90_000) if t_pics_gated else None)
+        ),
         ablate_dataset_adaptive_prompt=ablate_adaptive_prompt,
         pics_v3_hybrid_grounded_prompt=hybrid_grounded_prompt,
         pics_aamas_v0_prompt=aamas_v0_prompt,
@@ -17233,6 +17733,20 @@ def main():
                     except Exception:
                         wandb.finish()
             raise
+        if bool(getattr(args, "pics_aamas_v0_population_bank_only", False)):
+            marker = (
+                Path(base_run_dir)
+                / "target_population"
+                / "control"
+                / "STAGE_COMPLETE.json"
+            )
+            print(
+                "[AAMAS v0] population-only bank stopped after "
+                f"{marker}. Exploration and participant evolution were not started."
+            )
+            if wandb is not None:
+                wandb.finish()
+            return
         selected_dir = run_layout(Path(base_run_dir))["selected"]
         selected_dir.mkdir(parents=True, exist_ok=True)
         base_run_dir = str(selected_dir)

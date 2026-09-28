@@ -746,7 +746,10 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep27 J-vs-E hybrid prompt audit (read-only, four datasets): `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/hybrid_prompt_audit/HYBRID_VS_E_AUDIT.md` — schedule (E transfer gate) dominates; generic reminder not the gap.
 - Sep27 I+J counterfactual gate refreshed on all ten (read-only): `analysis_2026Sep/Sep20_V3/others/ablation_IJ_Sep26/counterfactual_gate/COUNTERFACTUAL_GATE.md` — USE J TARGET-ONLY.
 - Sep27 final reminder mechanism audit (read-only): `analysis_2026Sep/Sep20_V3/others/final_reminder_mechanism_audit/FINAL_REMINDER_MECHANISM_AUDIT.md` — keep v4 on Steyvers/Schulz, v1 on Kool, v2 on Badham; one Speekenbrink weather-outcome deletion.
-- Sep27 AAMAS v0: official track `official_gate` (`pics_aamas_v0_official_gate`); temporary tracks `target_only` / `transfer_based_only`. Batch-1 launcher `cluster/v0/ours/main/aamas_v0/target_only/submit_batch1_target_only.sh` (not submitted). Method `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/docs_v0/AAMAS_V0_METHOD.md`.
+- Sep28 AAMAS v0 Batch-1 target-only finished (jobs 305707–305710, six datasets). Test comparison `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/batch1_vs_ablations/BATCH1_VS_ABLATIONS.md`.
+- Sep28 AAMAS v0 trial-visibility audit (read-only): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/AUDIT_REPORT.md` — resetting/continuous population prompts repeat one SA40 prefix; person prompts keep full SA40 as char4 one-liners.
+- Sep28 AAMAS v0 trial-representation design (not implemented): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/sequence_representation_design/FINAL_RECOMMENDATION.md`.
+- Sep28 AAMAS v0 lossless prompts (`aamas_v0_lossless_data_v1`); immediate experiment is the complete target-only all-15 launcher `cluster/v0/ours/main/aamas_v0/target_only/submit_lossless_v1_target_only_all15.sh`: `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/docs_v0/AAMAS_V0_METHOD.md`.
 
 ---
 
@@ -771,3 +774,9 @@ Raw `participant_id` is **not** globally unique across datasets; MixedLM now gro
 ## Short update (Sep 26 2026 — MEM freeze)
 
 Focal+joint fitters require `dataset::run_id::participant_id` (tests: `tests/test_mem_grouping.py`). Locked paper table: `analysis_2026Sep/Sep20_V3/mem/annotation_participant/freeze_sep26/PAPER_TABLE.md`. Prior raw-pid fit dirs superseded.
+
+---
+
+## Short update (Sep 28 2026 — AAMAS v0 MEM provenance)
+
+AAMAS v0 MEM discovery/provenance adapter: `analysis/mem/aamas_v0_mem.py`. Audit: `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/mem/COMPATIBILITY_AUDIT.md`.

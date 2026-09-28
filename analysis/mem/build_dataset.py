@@ -449,6 +449,7 @@ def build_rows_v5(
     require_finite_delta_f: bool = True,
     require_annotation: bool = True,
     exclusions_path: Optional[Path] = None,
+    run_id_override: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Counter]:
     """Build schema-v5 rows with five constructs + state + eligibility + transition_*."""
     rows: List[Dict[str, Any]] = []
@@ -461,6 +462,9 @@ def build_rows_v5(
     transition_cols = all_transition_type_columns_v5()
 
     for rec in _iter_candidate_traces(run_dir):
+        if run_id_override:
+            rec = dict(rec)
+            rec["run_id"] = str(run_id_override)
         pid = rec.get("participant_id")
         cid = str(rec.get("candidate_id"))
         ref_id = rec.get("reference_id") or rec.get("reference_parent_id")

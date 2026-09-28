@@ -13,7 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from utils.teh.aamas_v0_lossless_trials import (
+    TRIAL_PROMPT_POLICY_ID,
+    pics_recorded_split_seed,
+    pics_run_seed,
+)
+
 _tls = threading.local()
+_process_enabled = False
 
 PROMPT_POLICY_ID = "pics_aamas_v0"
 # Superseded KINDs. Launchers that write these must fail closed.
@@ -116,12 +123,18 @@ BEHAVIOR_OBJECTIVE_BLOCK = (
 
 
 def configure_pics_aamas_v0_prompt(enabled: bool) -> None:
-    """Process-level opt-in. Default off, so historical generation is unchanged."""
+    """Process-level opt-in. Default off, so historical generation is unchanged.
+
+    The flag is process-wide. Participant evolution runs in worker threads, and
+    a thread-local flag would send those threads back to the one-line serializer.
+    """
+    global _process_enabled
+    _process_enabled = bool(enabled)
     _tls.enabled = bool(enabled)
 
 
 def using_pics_aamas_v0_prompt() -> bool:
-    return bool(getattr(_tls, "enabled", False))
+    return bool(_process_enabled or getattr(_tls, "enabled", False))
 
 
 @dataclass(frozen=True)
@@ -364,7 +377,8 @@ def write_population_completion(
         "track_mode": str(track_mode),
         "provisional_experimental_track": bool(provisional),
         "official_main_result": track_mode == TRACK_OFFICIAL_GATE and not provisional,
-        "prompt_policy": PROMPT_POLICY_ID,
+        "prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
         "prompt_mode": prompt_meta.get("prompt_mode"),
         "rendered_prompt_sha256": prompt_meta.get("infer_prompt_sha256"),
         "reminder_id": decision.reminder_id,
@@ -393,6 +407,8 @@ def write_population_completion(
         "source_dataset": source_dataset,
         "source_rank1_sha256": source_rank1_sha256,
         "arm_role": "transfer" if source_dataset else "target_only",
+        "split_seed": pics_recorded_split_seed(),
+        "pics_run_seed": pics_run_seed(),
     }
     prov_path = run_dir / "POPULATION_PROVENANCE.json"
     prov_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
@@ -415,7 +431,8 @@ def write_population_completion(
         "dataset": str(dataset),
         "kind": resolved_kind,
         "track_mode": str(track_mode),
-        "prompt_policy": PROMPT_POLICY_ID,
+        "prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
         "reminder_id": decision.reminder_id,
         "sa40_fingerprint": provenance["sa40_fingerprint"],
         "global_iters": int(global_iters),
@@ -423,6 +440,8 @@ def write_population_completion(
         "rank1_program": str(best.resolve()),
         "rank1_sha256": program_sha,
         "pooled_train_val_score": score,
+        "split_seed": provenance["split_seed"],
+        "pics_run_seed": provenance["pics_run_seed"],
         "runtime_valid": True,
         "provenance_path": str(prov_path.resolve()),
     }
@@ -556,8 +575,14 @@ def resolve_aamas_v0_source_program(
         raise RuntimeError("AAMAS v0 source population kind is not target_only")
     if str(prov.get("track_mode") or "") != TRACK_TARGET_ONLY:
         raise RuntimeError("AAMAS v0 source population track_mode is not target_only")
-    if marker.get("prompt_policy") != PROMPT_POLICY_ID or prov.get("prompt_policy") != PROMPT_POLICY_ID:
-        raise RuntimeError("AAMAS v0 population prompt policy mismatch")
+    if (
+        marker.get("prompt_policy") != TRIAL_PROMPT_POLICY_ID
+        or prov.get("prompt_policy") != TRIAL_PROMPT_POLICY_ID
+    ):
+        raise RuntimeError(
+            "AAMAS v0 population prompt policy mismatch "
+            f"(expected {TRIAL_PROMPT_POLICY_ID})"
+        )
     if str(marker.get("dataset") or "") != expected or str(prov.get("dataset") or "") != expected:
         raise RuntimeError("AAMAS v0 population dataset key mismatch")
     if str(prov.get("limited_data_protocol") or "") != "structure_aware_v3":
@@ -794,8 +819,11 @@ def _require_matching_provenance(left: Mapping[str, Any], right: Mapping[str, An
         raise RuntimeError("official-gate materialize participant_ids mismatch")
     if left.get("test_used_for_selection") is not False or right.get("test_used_for_selection") is not False:
         raise RuntimeError("official-gate materialize refused a population that used test for selection")
-    if str(left.get("prompt_policy") or "") != PROMPT_POLICY_ID:
-        raise RuntimeError("official-gate materialize prompt policy is not pics_aamas_v0")
+    if str(left.get("prompt_policy") or "") != TRIAL_PROMPT_POLICY_ID:
+        raise RuntimeError(
+            "official-gate materialize prompt policy is not "
+            f"{TRIAL_PROMPT_POLICY_ID}"
+        )
 
 
 def materialize_official_gate(
