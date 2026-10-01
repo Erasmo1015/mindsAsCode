@@ -368,7 +368,18 @@ def write_population_completion(
     valid, valid_reason = program_has_valid_choose(best)
     program_bytes = best.read_bytes()
     program_sha = hashlib.sha256(program_bytes).hexdigest()
+    from utils.teh.pics_v4 import using_pics_v4
+
     decision = reminder_decision(dataset)
+    reminder_id = decision.reminder_id
+    if using_pics_v4():
+        from utils.teh.pics_v4 import (
+            ADDITIONAL_PROMPT_POLICY_ID,
+            METHOD_VERSION,
+            uniform_additional_prompt_sha256,
+        )
+
+        reminder_id = ADDITIONAL_PROMPT_POLICY_ID
     score = results.get("pool_best_selection_score")
     provenance: Dict[str, Any] = {
         "schema": "pics_aamas_v0_population_provenance_v1",
@@ -381,7 +392,7 @@ def write_population_completion(
         "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
         "prompt_mode": prompt_meta.get("prompt_mode"),
         "rendered_prompt_sha256": prompt_meta.get("infer_prompt_sha256"),
-        "reminder_id": decision.reminder_id,
+        "reminder_id": reminder_id,
         "sa40_fingerprint": prompt_meta.get("observed_subset_fingerprint"),
         "observed_train_fingerprint": prompt_meta.get("observed_train_fingerprint"),
         "observed_val_fingerprint": prompt_meta.get("observed_val_fingerprint"),
@@ -410,13 +421,18 @@ def write_population_completion(
         "split_seed": pics_recorded_split_seed(),
         "pics_run_seed": pics_run_seed(),
     }
+    if using_pics_v4():
+        provenance["method_version"] = METHOD_VERSION
+        provenance["additional_prompt_policy"] = ADDITIONAL_PROMPT_POLICY_ID
+        provenance["additional_prompt_sha256"] = uniform_additional_prompt_sha256()
     prov_path = run_dir / "POPULATION_PROVENANCE.json"
     prov_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     if not valid:
         raise RuntimeError(
             f"AAMAS v0 population rank-1 failed runtime check ({valid_reason}): {best}"
         )
-    if provenance["prompt_mode"] != "aamas_v0_registered":
+    allowed_modes = {"aamas_v0_registered", "pics_v4_registered"}
+    if provenance["prompt_mode"] not in allowed_modes:
         raise RuntimeError(
             f"AAMAS v0 population prompt_mode={provenance['prompt_mode']!r}"
         )
@@ -433,7 +449,7 @@ def write_population_completion(
         "track_mode": str(track_mode),
         "prompt_policy": TRIAL_PROMPT_POLICY_ID,
         "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
-        "reminder_id": decision.reminder_id,
+        "reminder_id": reminder_id,
         "sa40_fingerprint": provenance["sa40_fingerprint"],
         "global_iters": int(global_iters),
         "n_candidates": int(n_candidates),

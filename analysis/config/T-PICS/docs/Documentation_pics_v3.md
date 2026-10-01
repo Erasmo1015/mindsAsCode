@@ -6,6 +6,8 @@ supersedes EMNLP PICS, v1 gated T-PICS, and preliminary T-PICS v2. This file is
 the single authoritative, self-contained description of the method as
 implemented; older docs are historical records only.
 
+PICS v4 is a separate experimental method (`compact_faithful_trial_v1` plus one uniform additional prompt). It does not change this ICLR description. See `Documentation_pics_v4.md`.
+
 Tracked constants: `utils/teh/pics_v3.py`. Gated pipeline:
 `utils/teh/t_pics_gated_transfer.py`. Data protocol:
 `utils/teh/limited_data_protocol.py` / `limited_data_registry.py`.

@@ -825,6 +825,11 @@ def assert_legacy_output_not_resumed(output_dir: Any) -> None:
     if policy_path.is_file():
         payload = json.loads(policy_path.read_text(encoding="utf-8"))
         found = str(payload.get("trial_prompt_policy") or payload.get("prompt_policy") or "")
+        if str(payload.get("method_version") or "") == "pics_v4":
+            raise RuntimeError(
+                f"Refusing to resume {root} under {TRIAL_PROMPT_POLICY_ID}; "
+                "directory method_version is pics_v4."
+            )
         if found != TRIAL_PROMPT_POLICY_ID:
             raise RuntimeError(
                 f"Refusing to resume {root} under {TRIAL_PROMPT_POLICY_ID}; "

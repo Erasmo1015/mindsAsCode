@@ -760,6 +760,8 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep29 pre-lossless exact coverage (CPU job 308142): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/pre_lossless_exact_coverage/`.
 - Sep29 one-line vs v2 snapshot field loss (15 SA40 trials): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/one_line_vs_snapshot/`.
 - Sep29 compact faithful trial text `compact_faithful_trial_v1` (seeded cursor unchanged): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/compact_faithful_trial_v1/REPORT.md`.
+- Oct1 `pics_v4` (`compact_faithful_trial_v1` + `uniform_additional_prompt_v2`): `analysis_2026Sep/Sep30_pics_v4/REPORT.md`; preflight `analysis_2026Sep/Sep30_pics_v4/PREFLIGHT_AUDIT.md`; method `analysis/config/T-PICS/docs/Documentation_pics_v4.md`.
+- Oct1 read-only uniform-prompt duplication and coverage audit: `analysis_2026Sep/Sep30_pics_v4/REMINDER_DUPLICATION_AUDIT.md`.
 
 ---
 

@@ -1049,19 +1049,34 @@ def setup_teh_run_prompts(
             f"(ablate_dataset_adaptive_prompt) -> {infer_path}"
         )
     elif aamas_v0:
-        from utils.teh.pics_aamas_v0 import (
-            apply_aamas_v0_prompt_body,
-            reminder_decision,
-        )
+        from utils.teh.pics_v4 import using_pics_v4
 
-        infer_body = apply_aamas_v0_prompt_body(infer_body, dataset_alias)
-        decision = reminder_decision(dataset_alias)
-        reminder_policy_id = "pics_aamas_v0"
-        family_reminder_v4_meta = decision.reminder_id
-        print(
-            f"[TEH] Applied AAMAS v0 prompt policy "
-            f"(reminder={decision.reminder_id}) -> {infer_path}"
-        )
+        if using_pics_v4():
+            from utils.teh.pics_v4 import (
+                ADDITIONAL_PROMPT_POLICY_ID,
+                apply_pics_v4_prompt_body,
+            )
+
+            infer_body = apply_pics_v4_prompt_body(infer_body)
+            reminder_policy_id = ADDITIONAL_PROMPT_POLICY_ID
+            family_reminder_v4_meta = ADDITIONAL_PROMPT_POLICY_ID
+            print(
+                f"[TEH] Applied PICS v4 uniform additional prompt -> {infer_path}"
+            )
+        else:
+            from utils.teh.pics_aamas_v0 import (
+                apply_aamas_v0_prompt_body,
+                reminder_decision,
+            )
+
+            infer_body = apply_aamas_v0_prompt_body(infer_body, dataset_alias)
+            decision = reminder_decision(dataset_alias)
+            reminder_policy_id = "pics_aamas_v0"
+            family_reminder_v4_meta = decision.reminder_id
+            print(
+                f"[TEH] Applied AAMAS v0 prompt policy "
+                f"(reminder={decision.reminder_id}) -> {infer_path}"
+            )
     elif (
         normalize_limited_data_protocol(limited_data_protocol)
         == LIMITED_DATA_PROTOCOL_STRUCTURE_AWARE_V3
@@ -1148,7 +1163,9 @@ def setup_teh_run_prompts(
     elif hybrid_grounded:
         prompt_mode = "hybrid_grounded_registered"
     elif aamas_v0:
-        prompt_mode = "aamas_v0_registered"
+        from utils.teh.pics_v4 import using_pics_v4
+
+        prompt_mode = "pics_v4_registered" if using_pics_v4() else "aamas_v0_registered"
     else:
         prompt_mode = "merge_fallback"
     infer_sha256 = hashlib.sha256(infer_text_final.encode("utf-8")).hexdigest()

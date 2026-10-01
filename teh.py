@@ -4547,6 +4547,9 @@ def _write_aamas_population_marker(
 ) -> None:
     from utils.teh.pics_aamas_v0 import write_population_completion
 
+    from utils.teh.pics_v4 import KIND_TARGET_ONLY as PICS_V4_KIND
+    from utils.teh.pics_v4 import using_pics_v4
+
     write_population_completion(
         arm_dir,
         dataset=str(dataset),
@@ -4556,6 +4559,7 @@ def _write_aamas_population_marker(
         range_start_ordinal=getattr(args, "range_start_ordinal", None),
         range_end_ordinal=getattr(args, "range_end_ordinal", None),
         track_mode=track_mode,
+        kind=PICS_V4_KIND if using_pics_v4() else None,
         model_name=str(args.model_name),
         hard_prompt_token_cap=int(args.hard_prompt_token_cap),
         llm_max_tokens=int(args.llm_max_tokens),
@@ -15780,6 +15784,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_v4",
+        action="store_true",
+        default=False,
+        help=(
+            "PICS v4: compact_faithful_trial_v1 trials plus one uniform additional "
+            "prompt for every dataset. Requires --pics_aamas_v0_track_mode and a "
+            "pics_v4 output directory. Does not change AAMAS-v0 or PICS-v3."
+        ),
+    )
+    parser.add_argument(
         "--pics_aamas_v0_track_mode",
         type=str,
         default=None,
@@ -16436,11 +16450,26 @@ def main():
         )
         return
     configure_pics_aamas_v0_prompt(bool(aamas_v0_mode))
+    from utils.teh.pics_v4 import configure_pics_v4
+
+    pics_v4_on = bool(getattr(args, "pics_v4", False))
+    configure_pics_v4(pics_v4_on)
+    if pics_v4_on and aamas_v0_mode != "target_only":
+        print(
+            "Error: --pics_v4 requires --pics_aamas_v0_track_mode target_only."
+        )
+        return
     if aamas_v0_mode:
         from utils.teh.aamas_v0_lossless_trials import set_pics_run_seeds
 
         set_pics_run_seeds(run_seed=int(args.pics_run_seed), split_seed=int(args.split_seed))
     bank_only = bool(getattr(args, "pics_aamas_v0_population_bank_only", False))
+    if pics_v4_on and bank_only:
+        print(
+            "Error: --pics_v4 runs the complete target-only pipeline and refuses "
+            "--pics_aamas_v0_population_bank_only."
+        )
+        return
     if bank_only and aamas_v0_mode != "target_only":
         print(
             "Error: --pics_aamas_v0_population_bank_only requires "
@@ -17395,13 +17424,19 @@ def main():
         Path(base_run_dir).mkdir(parents=True, exist_ok=True)
 
     if aamas_v0_mode:
-        from utils.teh.aamas_v0_lossless_trials import (
-            assert_legacy_output_not_resumed,
-            write_trial_policy_marker,
-        )
+        if pics_v4_on:
+            from utils.teh.pics_v4 import assert_pics_v4_resume, write_pics_v4_marker
 
-        assert_legacy_output_not_resumed(base_run_dir)
-        write_trial_policy_marker(base_run_dir)
+            assert_pics_v4_resume(base_run_dir)
+            write_pics_v4_marker(base_run_dir)
+        else:
+            from utils.teh.aamas_v0_lossless_trials import (
+                assert_legacy_output_not_resumed,
+                write_trial_policy_marker,
+            )
+
+            assert_legacy_output_not_resumed(base_run_dir)
+            write_trial_policy_marker(base_run_dir)
         from utils.teh.prompt_examples import configure_aamas_prompt_examples
 
         configure_aamas_prompt_examples(
@@ -17642,7 +17677,13 @@ def main():
                 "wandb_run_id": getattr(wandb, "run_id", None),
                 "wandb_project": getattr(wandb, "project", None),
                 "wandb_group": (
-                    kind_for_track(str(getattr(args, "pics_aamas_v0_track_mode", "") or ""))
+                    (
+                        "pics_v4_target_only"
+                        if bool(getattr(args, "pics_v4", False))
+                        else kind_for_track(
+                            str(getattr(args, "pics_aamas_v0_track_mode", "") or "")
+                        )
+                    )
                     if str(getattr(args, "pics_aamas_v0_track_mode", "") or "")
                     else "t_pics_gated_main"
                 ),
