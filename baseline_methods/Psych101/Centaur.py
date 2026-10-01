@@ -217,6 +217,200 @@ def centaur_output_base_dir(
     return f"generated_outputs/psych101_{split}/centaur/{alias}/run_{timestamp}"
 
 
+CENTAUR_EVAL_MODE_MULTI = "multi_call"
+CENTAUR_EVAL_MODE_ONE = "one_call"
+CENTAUR_EVAL_MODES = (CENTAUR_EVAL_MODE_MULTI, CENTAUR_EVAL_MODE_ONE)
+CENTAUR_EVAL_PROVENANCE = "centaur_eval_provenance.json"
+CENTAUR_ACTION_PROB_CLIP = 1e-9
+# PICS-comparable next-token readout. Not official Centaur response-token NLL.
+ONE_CALL_METRIC = "valid_action_next_token_softmax"
+
+
+def normalize_centaur_eval_mode(value: object) -> str:
+    mode = str(value if value is not None else CENTAUR_EVAL_MODE_MULTI).strip().lower()
+    if mode not in CENTAUR_EVAL_MODES:
+        raise ValueError(
+            f"Unknown --centaur_eval_mode {value!r}; expected one of {CENTAUR_EVAL_MODES}"
+        )
+    return mode
+
+
+def one_call_context_from_prefix(prefix: str) -> str:
+    """Same transcript as multi_call, ending immediately before the action token.
+
+    multi_call prefixes end with ``You press ``. one_call keeps that text and
+    stops after the shared ``<<`` so the next token is the action label.
+    """
+    if not prefix.endswith("You press "):
+        raise ValueError(
+            "one_call context requires the multi_call prefix to end with "
+            f"'You press '; got tail={prefix[-40:]!r}"
+        )
+    context = prefix + "<<"
+    if not context.endswith("You press <<"):
+        raise ValueError(
+            f"one_call context did not end at the action boundary: {context[-40:]!r}"
+        )
+    return context
+
+
+def verify_one_call_action_tokens(
+    encode_ids: Any,
+    context: str,
+    labels: Sequence[str],
+) -> List[int]:
+    """Fail closed unless each label is exactly one token after ``context``.
+
+    ``encode_ids`` must match the Centaur tokenizer with special tokens off.
+    The checked string is ``context + label`` only. ``>>`` and ``.`` are not
+    part of the scored input.
+    """
+    if not context.endswith("You press <<"):
+        raise ValueError(
+            "one_call token check requires the prompt to end with 'You press <<', "
+            f"got tail={context[-40:]!r}"
+        )
+    if ">>" in context[context.rfind("You press <<") :] or context.endswith("."):
+        raise ValueError("one_call prompt includes a suffix token before the action label")
+    base = [int(i) for i in encode_ids(context)]
+    if not base:
+        raise ValueError("one_call prompt tokenized to an empty sequence")
+    token_ids: List[int] = []
+    for label in labels:
+        text = str(label)
+        if text == "" or any(ch.isspace() for ch in text):
+            raise ValueError(f"one_call action label {label!r} is empty or contains whitespace")
+        full = [int(i) for i in encode_ids(context + text)]
+        if full[: len(base)] != base:
+            raise ValueError(
+                f"one_call token boundary shifted for action label {label!r}. "
+                "The label is not a single next token after 'You press <<'."
+            )
+        rest = full[len(base) :]
+        if len(rest) != 1:
+            raise ValueError(
+                f"one_call requires exactly one token for action label {label!r} "
+                f"after 'You press <<'; tokenizer produced {len(rest)} tokens {rest!r}"
+            )
+        token_ids.append(rest[0])
+    if len(set(token_ids)) != len(token_ids):
+        raise ValueError(
+            f"one_call action labels {list(labels)!r} collided to token ids {token_ids!r}"
+        )
+    return token_ids
+
+
+def softmax_valid_action_logits(logits: Sequence[float]) -> List[float]:
+    """Softmax over valid-action logits only. Other vocabulary mass is discarded."""
+    if len(logits) < 2:
+        raise ValueError(f"one_call softmax requires K>=2 logits, got {len(logits)}")
+    vals = [float(z) for z in logits]
+    if any(not math.isfinite(z) for z in vals):
+        raise ValueError(f"one_call logits are non-finite: {vals!r}")
+    m = max(vals)
+    exps = [math.exp(z - m) for z in vals]
+    denom = sum(exps)
+    if denom <= 0 or not math.isfinite(denom):
+        raise ValueError(f"one_call softmax denominator is invalid for logits {vals!r}")
+    return [e / denom for e in exps]
+
+
+def clip_action_probs(probs: Sequence[float]) -> List[float]:
+    """Same clip as the multi_call suffix softmax."""
+    return [
+        float(min(max(float(p), CENTAUR_ACTION_PROB_CLIP), 1.0 - CENTAUR_ACTION_PROB_CLIP))
+        for p in probs
+    ]
+
+
+def _centaur_result_markers(path: Path) -> List[Path]:
+    return [
+        path / "participant_details_loglik.csv",
+        path / "summary_loglik.csv",
+        path / "log" / "predictions_vs_actual.csv",
+        path / "log" / "one_call_predictions.jsonl",
+    ]
+
+
+def assert_centaur_output_mode(path: Path, mode: str) -> None:
+    """Refuse to resume or share a directory across eval modes."""
+    mode = normalize_centaur_eval_mode(mode)
+    path = Path(path)
+    if path.name in CENTAUR_EVAL_MODES and path.name != mode:
+        raise ValueError(
+            f"Refusing centaur_eval_mode={mode}: output directory {path} "
+            f"is named for {path.name}. Modes cannot share an output directory."
+        )
+    provenance = path / CENTAUR_EVAL_PROVENANCE
+    if provenance.is_file():
+        try:
+            stamped = json.loads(provenance.read_text(encoding="utf-8")).get(
+                "centaur_eval_mode"
+            )
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Unreadable Centaur provenance at {provenance}: {e}") from e
+        if stamped != mode:
+            raise ValueError(
+                f"Refusing to resume {path}: provenance mode is {stamped!r}, "
+                f"requested {mode!r}. Modes cannot share or resume the same directory."
+            )
+    elif mode == CENTAUR_EVAL_MODE_ONE and any(p.exists() for p in _centaur_result_markers(path)):
+        raise ValueError(
+            f"Refusing one_call into {path}: unmarked Centaur results are treated as "
+            "multi_call and cannot be resumed as one_call."
+        )
+    command = path / "log" / "command.txt"
+    if command.is_file():
+        text = command.read_text(encoding="utf-8", errors="replace")
+        for other in CENTAUR_EVAL_MODES:
+            if other == mode:
+                continue
+            if f"--centaur_eval_mode {other}" in text or f"--centaur_eval_mode={other}" in text:
+                raise ValueError(
+                    f"Refusing centaur_eval_mode={mode}: {command} records {other}."
+                )
+
+
+def resolve_centaur_mode_output_dir(requested: str, mode: str) -> Path:
+    """Place one_call under a ``one_call`` leaf. multi_call keeps the requested path."""
+    mode = normalize_centaur_eval_mode(mode)
+    path = Path(requested)
+    if path.name in CENTAUR_EVAL_MODES and path.name != mode:
+        raise ValueError(
+            f"Refusing centaur_eval_mode={mode} for output directory named {path.name!r}."
+        )
+    if mode == CENTAUR_EVAL_MODE_ONE and path.name != CENTAUR_EVAL_MODE_ONE:
+        occupied = (path / CENTAUR_EVAL_PROVENANCE).exists() or any(
+            marker.exists() for marker in _centaur_result_markers(path)
+        )
+        if occupied:
+            assert_centaur_output_mode(path, mode)
+        path = path / CENTAUR_EVAL_MODE_ONE
+    assert_centaur_output_mode(path, mode)
+    return path
+
+
+def write_centaur_eval_provenance(path: Path, mode: str) -> Path:
+    mode = normalize_centaur_eval_mode(mode)
+    assert_centaur_output_mode(path, mode)
+    path.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "centaur_eval_mode": mode,
+        "one_call_metric": ONE_CALL_METRIC if mode == CENTAUR_EVAL_MODE_ONE else None,
+        "not_official_centaur_response_token_nll": True,
+        "description": (
+            "one_call is a PICS-comparable valid-action next-token readout. "
+            "It is not official Centaur raw response-token NLL. "
+            "multi_call scores each full <<key>>. suffix and softmaxes those scores."
+            if mode == CENTAUR_EVAL_MODE_ONE
+            else "multi_call scores each full <<key>>. suffix and softmaxes those scores."
+        ),
+    }
+    out = path / CENTAUR_EVAL_PROVENANCE
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
 def check_centaur_runtime_deps(*, load_unsloth_api: bool = True) -> Dict[str, Any]:
     """Import the Centaur scoring stack without loading the 70B weights or requiring CUDA."""
     report: Dict[str, Any] = {"ok": True, "packages": [], "cuda_available": None}
@@ -815,9 +1009,12 @@ class CentaurChooser:
         self.max_seq_length = max_seq_length
         self.load_in_4bit = load_in_4bit
         self.task_instruction: str = ""
+        self.eval_mode: str = CENTAUR_EVAL_MODE_MULTI
+        self.n_model_forwards: int = 0
         self._model = None
         self._tokenizer = None
         self.last_prob_debug: Dict[str, Any] = {}
+        self._one_call_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -842,6 +1039,7 @@ class CentaurChooser:
         import torch
 
         self._ensure_loaded()
+        self.n_model_forwards += 1
         model = self._model
         tokenizer = self._tokenizer
         device = next(model.parameters()).device
@@ -918,7 +1116,106 @@ class CentaurChooser:
             "keys": keys,
             "probs": probs,
         }
-        return [float(min(max(p, 1e-9), 1.0 - 1e-9)) for p in probs]
+        return clip_action_probs(probs)
+
+    def score_action_probs(
+        self, trials: List[Dict[str, Any]], trial_index: int
+    ) -> List[float]:
+        """Dispatch on ``eval_mode``. multi_call is ``action_probs_from_suffixes``."""
+        mode = normalize_centaur_eval_mode(self.eval_mode)
+        if mode == CENTAUR_EVAL_MODE_MULTI:
+            return self.action_probs_from_suffixes(trials, trial_index)
+        return self.action_probs_one_call(trials, trial_index)
+
+    def _encode_ids(self, text: str) -> List[int]:
+        self._ensure_loaded()
+        enc = self._tokenizer(text, add_special_tokens=False)
+        ids = enc["input_ids"]
+        if hasattr(ids, "tolist"):
+            ids = ids.tolist()
+        if ids and isinstance(ids[0], (list, tuple)):
+            ids = ids[0]
+        return [int(i) for i in ids]
+
+    def _next_token_logits(self, text: str) -> Any:
+        """One forward pass. Reads the next-token logit vector. Does not sample."""
+        import torch
+
+        self._ensure_loaded()
+        self.n_model_forwards += 1
+        device = next(self._model.parameters()).device
+        enc = self._tokenizer(text, return_tensors="pt", add_special_tokens=False)
+        input_ids = enc["input_ids"].to(device)
+        if int(input_ids.shape[1]) < 1:
+            raise ValueError("one_call prompt tokenized to an empty sequence")
+        with torch.no_grad():
+            out = self._model(input_ids=input_ids)
+        return out.logits[0, -1, :]
+
+    def action_probs_one_call(
+        self, trials: List[Dict[str, Any]], trial_index: int
+    ) -> List[float]:
+        """Valid-action next-token softmax. Not official Centaur token NLL.
+
+        One forward on the multi_call prefix extended only through ``<<``.
+        ``>>`` and ``.`` are not scored. The observed action is not appended.
+        """
+        problem = trials[trial_index]["problem"]
+        keys = [str(k) for k in centaur_display_keys(problem)]
+        if len(keys) < 2:
+            raise ValueError(f"Expected >=2 display keys, got {keys!r}")
+        prefix = build_centaur_prompt_prefix_indexed(
+            trials, trial_index, instruction=self.task_instruction
+        )
+        alias = str(problem.get("dataset_alias") or "")
+        if alias == MIXED_GAMBLES or is_mixed_gambles_dataset(alias):
+            if keys != ["A", "B"]:
+                raise ValueError(
+                    f"mixed_gambles Centaur must score <<A>>/<<B>>, got display keys {keys!r}"
+                )
+            if "Option A delivers" not in prefix:
+                raise ValueError(
+                    "mixed_gambles Centaur prefix is missing Option A/B gamble text"
+                )
+        context = one_call_context_from_prefix(prefix)
+        action = int(trials[trial_index]["action"])
+        if not 0 <= action < len(keys):
+            raise ValueError(f"action {action} out of range for K={len(keys)}")
+        boundary = context[context.rfind("You press <<") :]
+        if boundary != "You press <<":
+            raise ValueError(
+                "one_call observed action leaked into the prompt before logits "
+                f"were read: tail={boundary!r}"
+            )
+        cache_key = (trial_index, context, tuple(keys))
+        cached = self._one_call_cache.get(cache_key)
+        if cached is not None:
+            self.last_prob_debug = cached
+            return list(cached["clipped_probs"])
+        token_ids = verify_one_call_action_tokens(self._encode_ids, context, keys)
+        logits = self._next_token_logits(context)
+        raw: List[float] = []
+        for tid in token_ids:
+            val = float(logits[tid].item()) if hasattr(logits[tid], "item") else float(logits[tid])
+            if not math.isfinite(val):
+                raise ValueError(f"one_call logit for token id {tid} is non-finite: {val!r}")
+            raw.append(val)
+        unclipped = softmax_valid_action_logits(raw)
+        clipped = clip_action_probs(unclipped)
+        debug = {
+            "centaur_eval_mode": CENTAUR_EVAL_MODE_ONE,
+            "fallback_source": None,
+            "keys": keys,
+            "token_ids": token_ids,
+            "raw_logits": raw,
+            "probs_unclipped": unclipped,
+            "clipped_probs": clipped,
+            "context": context,
+            "n_forwards_this_trial": 1,
+        }
+        self._one_call_cache[cache_key] = debug
+        self.last_prob_debug = debug
+        return list(clipped)
 
     def prob_choose_second_option(self, trials: List[Dict[str, Any]], trial_index: int) -> float:
         """Bernoulli P(action=1); for K=2 this is the second display-key probability."""
@@ -961,7 +1258,7 @@ def evaluate_centaur_on_trials(
         for pos, i in enumerate(indices):
             y = int(trials[i]["action"])
             try:
-                probs = chooser.action_probs_from_suffixes(trials, i)
+                probs = chooser.score_action_probs(trials, i)
                 if y < 0 or y >= len(probs):
                     raise ValueError(f"action {y} out of range for K={len(probs)}")
                 p_obs = float(probs[y])
@@ -1004,52 +1301,76 @@ def collect_centaur_predictions(
     dataset: str,
     split_name: str,
     score_indices: Optional[Sequence[int]] = None,
+    subset_fingerprint: str = "",
+    test_fingerprint: str = "",
 ) -> List[Dict[str, Any]]:
     if score_indices is None:
         indices = list(range(len(trials)))
     else:
         indices = [int(i) for i in score_indices]
+    mode = normalize_centaur_eval_mode(chooser.eval_mode)
     rows: List[Dict[str, Any]] = []
     for local_i, i in enumerate(indices):
         t = trials[i]
         y = int(t["action"])
-        keys = centaur_display_keys(t["problem"])
+        keys = [str(k) for k in centaur_display_keys(t["problem"])]
         p_obs: Optional[float] = None
         pred: Optional[int] = None
         error = ""
         probs_json = ""
+        trial_loglik: Optional[float] = None
         try:
-            probs = chooser.action_probs_from_suffixes(trials, i)
+            probs = chooser.score_action_probs(trials, i)
             probs_json = json.dumps([float(p) for p in probs])
             if 0 <= y < len(probs):
                 p_obs = float(probs[y])
+                p_obs = min(max(p_obs, CENTAUR_ACTION_PROB_CLIP), 1.0 - CENTAUR_ACTION_PROB_CLIP)
+                trial_loglik = math.log(p_obs)
             pred = int(max(range(len(probs)), key=lambda a: probs[a]))
         except Exception as e:
             error = str(e)
-        rows.append(
-            {
-                "participant_id": participant_id,
-                "dataset": dataset,
-                "split": split_name,
-                "trial_index": local_i,
-                "prompt_trial_index": i,
-                "option_key_0": keys[0] if len(keys) > 0 else "",
-                "option_key_1": keys[1] if len(keys) > 1 else "",
-                "n_keys": len(keys),
-                "actual_action": y,
-                "pred_prob_observed": p_obs,
-                "pred_prob_action1": (
-                    float(json.loads(probs_json)[1])
-                    if probs_json and len(json.loads(probs_json)) == 2
-                    else p_obs
-                ),
-                "pred_action": pred,
-                "probs_json": probs_json,
-                "history_len": len(t.get("history", [])),
-                "schema_type": t.get("problem", {}).get("schema_type", ""),
-                "error": error,
-            }
-        )
+        row: Dict[str, Any] = {
+            "participant_id": participant_id,
+            "dataset": dataset,
+            "split": split_name,
+            "trial_index": local_i,
+            "prompt_trial_index": i,
+            "centaur_eval_mode": mode,
+            "option_key_0": keys[0] if len(keys) > 0 else "",
+            "option_key_1": keys[1] if len(keys) > 1 else "",
+            "n_keys": len(keys),
+            "n_valid_actions": len(keys),
+            "actual_action": y,
+            "pred_prob_observed": p_obs,
+            "pred_prob_action1": (
+                float(json.loads(probs_json)[1])
+                if probs_json and len(json.loads(probs_json)) >= 2
+                else p_obs
+            ),
+            "pred_action": pred,
+            "probs_json": probs_json,
+            "trial_loglik": trial_loglik,
+            "subset_fingerprint": subset_fingerprint,
+            "test_fingerprint": test_fingerprint,
+            "history_len": len(t.get("history", [])),
+            "schema_type": t.get("problem", {}).get("schema_type", ""),
+            "error": error,
+        }
+        if mode == CENTAUR_EVAL_MODE_ONE:
+            dbg = chooser.last_prob_debug if not error else {}
+            unclipped = list(dbg.get("probs_unclipped") or [])
+            row.update(
+                {
+                    "valid_action_labels": json.dumps(list(dbg.get("keys") or keys)),
+                    "valid_action_token_ids": json.dumps(list(dbg.get("token_ids") or [])),
+                    "valid_action_logits": json.dumps(list(dbg.get("raw_logits") or [])),
+                    "valid_action_probabilities": json.dumps(unclipped),
+                    "observed_action": y,
+                    "observed_action_label": keys[y] if 0 <= y < len(keys) else "",
+                    "observed_action_probability": p_obs,
+                }
+            )
+        rows.append(row)
     return rows
 
 
@@ -1211,6 +1532,10 @@ def _write_loglik_csvs(
                 "val_loglik",
                 "test_loglik",
                 "test_accuracy",
+                "centaur_eval_mode",
+                "n_model_forwards",
+                "subset_fingerprint",
+                "test_fingerprint",
             ],
         )
         w.writeheader()
@@ -1226,9 +1551,21 @@ def _write_loglik_csvs(
                 "avg_train_loglik",
                 "avg_val_loglik",
                 "avg_test_loglik",
+                "centaur_eval_mode",
+                "n_model_forwards",
             ],
         )
         w.writeheader()
+        modes = {str(d.get("centaur_eval_mode") or "") for d in participant_loglik}
+        if len(modes) > 1:
+            raise ValueError(
+                f"Refusing to summarize mixed centaur_eval_mode values: {sorted(modes)}"
+            )
+        forwards = [
+            int(d["n_model_forwards"])
+            for d in participant_loglik
+            if d.get("n_model_forwards") is not None
+        ]
         w.writerow(
             _round_floats_for_csv_row(
                 {
@@ -1236,6 +1573,8 @@ def _write_loglik_csvs(
                     "avg_train_loglik": _safe_mean_numeric(tr),
                     "avg_val_loglik": _safe_mean_numeric(va),
                     "avg_test_loglik": _safe_mean_numeric(te),
+                    "centaur_eval_mode": next(iter(modes)) if modes else "",
+                    "n_model_forwards": int(sum(forwards)),
                 }
             )
         )
@@ -1247,11 +1586,21 @@ def _write_predictions_csv(base_run_dir: Path, rows: List[Dict[str, Any]]) -> No
     out = log_dir / "predictions_vs_actual.csv"
     if not rows:
         return
+    modes = {str(r.get("centaur_eval_mode") or "") for r in rows}
+    if len(modes) > 1:
+        raise ValueError(
+            f"Refusing to write mixed centaur_eval_mode predictions: {sorted(modes)}"
+        )
     fieldnames = list(rows[0].keys())
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
+    if CENTAUR_EVAL_MODE_ONE in modes:
+        jsonl = log_dir / "one_call_predictions.jsonl"
+        with jsonl.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, default=str) + "\n")
 
 
 def run_smoke_prompt_check(
@@ -1405,6 +1754,8 @@ def _evaluate_participant(
     if manifest_jsonl_path is not None and should_persist_limited_data_manifest(manifest):
         append_limited_data_manifest_jsonl(manifest_jsonl_path, manifest)
     chooser.task_instruction = instruction
+    chooser.n_model_forwards = 0
+    chooser._one_call_cache = {}
     if _centaur_uses_sa40_fair_timeline(limited_data_protocol):
         raw_train, raw_val, _raw_test, _kind = load_raw_participant_splits(
             dataset,
@@ -1478,6 +1829,8 @@ def _evaluate_participant(
         dataset=normalize_psych101_dataset_alias(dataset),
         split_name="test",
         score_indices=score_indices,
+        subset_fingerprint=str(getattr(manifest, "subset_fingerprint", "") or ""),
+        test_fingerprint=str(getattr(manifest, "test_fingerprint", "") or ""),
     )
     summary = {
         "participant_id": participant_row_index,
@@ -1485,6 +1838,10 @@ def _evaluate_participant(
         "val_loglik": None,
         "test_loglik": test_eval["avg_loglik"],
         "test_accuracy": test_eval["accuracy"],
+        "centaur_eval_mode": normalize_centaur_eval_mode(chooser.eval_mode),
+        "n_model_forwards": int(chooser.n_model_forwards),
+        "subset_fingerprint": str(getattr(manifest, "subset_fingerprint", "") or ""),
+        "test_fingerprint": str(getattr(manifest, "test_fingerprint", "") or ""),
     }
     return summary, preds
 
@@ -1522,6 +1879,17 @@ def main() -> None:
     parser.add_argument("--split_ratio", type=float, default=0.6)
     parser.add_argument("--split_seed", type=int, default=0)
     parser.add_argument("--fitness_metric", type=str, default="loglik", choices=["loglik"])
+    parser.add_argument(
+        "--centaur_eval_mode",
+        type=str,
+        default=CENTAUR_EVAL_MODE_MULTI,
+        choices=list(CENTAUR_EVAL_MODES),
+        help=(
+            "multi_call (default): score each full <<key>>. suffix separately and softmax. "
+            "one_call: one next-token forward, softmax over valid action labels only. "
+            "one_call is a PICS-comparable readout, not official Centaur response-token NLL."
+        ),
+    )
     parser.add_argument(
         "--centaur_model",
         type=str,
@@ -1682,11 +2050,14 @@ def main() -> None:
         return
 
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
-    base_run_dir = Path(
+    eval_mode = normalize_centaur_eval_mode(args.centaur_eval_mode)
+    requested_out = (
         args.output_dir
         if args.output_dir
         else centaur_output_base_dir(dataset, timestamp, psych_dataset_split=psych_split)
     )
+    base_run_dir = resolve_centaur_mode_output_dir(requested_out, eval_mode)
+    write_centaur_eval_provenance(base_run_dir, eval_mode)
     cmd_log = _write_command_line_log(base_run_dir)
     print(f"Wrote full command line to {cmd_log}")
     manifest_jsonl = base_run_dir / "log" / LIMITED_DATA_MANIFEST_JSONL_FILENAME
@@ -1700,12 +2071,13 @@ def main() -> None:
             import wandb as _wandb
 
             wandb_module = _wandb
-            run_name = f"{dataset}_{timestamp}"
+            run_name = f"{dataset}_{eval_mode}_{timestamp}"
             wandb_module.init(
                 project=WANDB_PROJECT,
                 name=run_name,
                 config={
                     "dataset": dataset,
+                    "centaur_eval_mode": eval_mode,
                     "split_ratio": args.split_ratio,
                     "split_seed": args.split_seed,
                     "limited_data_protocol": args.limited_data_protocol,
@@ -1733,6 +2105,7 @@ def main() -> None:
             wandb_module = None
 
     chooser = CentaurChooser(args.centaur_model, max_seq_length=args.max_seq_length)
+    chooser.eval_mode = eval_mode
     participant_loglik: List[Dict[str, Any]] = []
     prediction_rows: List[Dict[str, Any]] = []
 

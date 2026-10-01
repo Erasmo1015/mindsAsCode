@@ -750,6 +750,16 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep28 AAMAS v0 trial-visibility audit (read-only): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/AUDIT_REPORT.md` — resetting/continuous population prompts repeat one SA40 prefix; person prompts keep full SA40 as char4 one-liners.
 - Sep28 AAMAS v0 trial-representation design (not implemented): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/sequence_representation_design/FINAL_RECOMMENDATION.md`.
 - Sep28 AAMAS v0 lossless prompts (`aamas_v0_lossless_data_v1`); immediate experiment is the complete target-only all-15 launcher `cluster/v0/ours/main/aamas_v0/target_only/submit_lossless_v1_target_only_all15.sh`: `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/docs_v0/AAMAS_V0_METHOD.md`.
+- Sep29 AAMAS v0 saves one final prompt per run/LLM phase under `prompt_examples/` (`utils/teh/prompt_examples.py`); the observed-data gate has no prompt file.
+- Sep29 AAMAS v0 trial packing fills the seeded order across block boundaries (`utils/teh/aamas_v0_lossless_trials.py`); report `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/lossless_result_integrity/followup/PACKING_FIX.md`.
+- Sep29 future AAMAS v0 outputs stamp `packing_implementation=aamas_v0_greedy_pack_v1` and refuse resume of a marker that omits it; pre-fix lossless outputs stay provisional history, not final results (`analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/lossless_result_integrity/followup/PROVENANCE_AUDIT.md`).
+- Sep29 mid-run sentinel: `python analysis/aamas_v0_midrun_sentinel.py --job_id <JOB_ID>`.
+- Sep29 population-bank compare (read-only, 305707–305710 vs 307707–307710): `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/lossless_result_integrity/followup/POPULATION_BANK_COMPARE.md`.
+- Sep29 sampled lossless-vs-old mechanism audit (CPU job 308038): `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/lossless_result_integrity/sample_mechanism_audit/`.
+- Sep29 per-call lossless representation audit (CPU job 308105): `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/lossless_result_integrity/per_call_representation_audit/`.
+- Sep29 pre-lossless exact coverage (CPU job 308142): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/pre_lossless_exact_coverage/`.
+- Sep29 one-line vs v2 snapshot field loss (15 SA40 trials): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/one_line_vs_snapshot/`.
+- Sep29 compact faithful trial text `compact_faithful_trial_v1` (seeded cursor unchanged): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/compact_faithful_trial_v1/REPORT.md`.
 
 ---
 
@@ -780,3 +790,6 @@ Focal+joint fitters require `dataset::run_id::participant_id` (tests: `tests/tes
 ## Short update (Sep 28 2026 — AAMAS v0 MEM provenance)
 
 AAMAS v0 MEM discovery/provenance adapter: `analysis/mem/aamas_v0_mem.py`. Audit: `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0/mem/COMPATIBILITY_AUDIT.md`.
+
+- Sep30 Centaur multi-action audit (read-only): `analysis_2026Sep/Sep27_aamas_v0/others/centaur_multiaction_audit/REPORT.md`.
+- Sep30 optional Centaur `one_call` readout (not official token NLL): `analysis_2026Sep/Sep27_aamas_v0/others/centaur_multiaction_audit/one_call/REPORT.md`.

@@ -6235,6 +6235,63 @@ def _build_psych_prompt_text(
     return text
 
 
+def _aamas_explore_map_row(
+    *,
+    step: int,
+    participant_id: Optional[int],
+    selection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One exploration candidate's trials, aligned with that candidate's prompt body."""
+    from utils.teh.aamas_v0_lossless_trials import (
+        PACKING_IMPLEMENTATION_ID,
+        TRIAL_PROMPT_POLICY_ID,
+    )
+
+    trials = list(selection.get("trials") or [])
+    return {
+        "candidate_index": step,
+        "selection_step": step,
+        "participant_id": participant_id,
+        "assigned_text_sha256": selection.get("assigned_text_sha256"),
+        "trials": trials,
+        "assigned_positions": [int(trial["trial_position"]) for trial in trials],
+        "assigned_block_ids": [str(trial["block_id"]) for trial in trials],
+        "digest": selection.get("digest"),
+        "policy": TRIAL_PROMPT_POLICY_ID,
+        "packing_implementation": PACKING_IMPLEMENTATION_ID,
+    }
+
+
+def _candidate_prompt_diagnostic(
+    diag_base: Dict[str, Any],
+    candidate_diag: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Copy shared prompt metadata, then this candidate's own selection."""
+    merged = dict(diag_base)
+    if not candidate_diag:
+        return merged
+    for key in (
+        "aamas_selection",
+        "selection_step",
+        "truncated",
+        "prompt_tokens_before_truncation",
+        "exploration_heterogeneous",
+        "lossless_serializer",
+        "trial_prompt_policy",
+    ):
+        if key in candidate_diag:
+            merged[key] = candidate_diag[key]
+    merged.update(
+        _prompt_example_split_diagnostic_fields(
+            train_before=int(candidate_diag.get("train_trials_before") or 0),
+            train_after=int(candidate_diag.get("train_trials_after") or 0),
+            val_before=int(candidate_diag.get("val_trials_before") or 0),
+            val_after=int(candidate_diag.get("val_trials_after") or 0),
+        )
+    )
+    return merged
+
+
 def _commit_aamas_explore_prompt_map(
     diagnostics_dir: Optional[Path],
     *,
@@ -6247,11 +6304,23 @@ def _commit_aamas_explore_prompt_map(
     path = Path(diagnostics_dir) / "explore_phase" / "prompt_selection_map.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: Dict[str, Any]
+    from utils.teh.aamas_v0_lossless_trials import (
+        PACKING_IMPLEMENTATION_ID,
+        TRIAL_PROMPT_POLICY_ID,
+    )
+
     if path.is_file():
         payload = json.loads(path.read_text(encoding="utf-8"))
+        recorded_pack = payload.get("packing_implementation")
+        if recorded_pack != PACKING_IMPLEMENTATION_ID:
+            raise RuntimeError(
+                f"Refusing to resume exploration map {path}: packing implementation "
+                f"{recorded_pack!r} does not match {PACKING_IMPLEMENTATION_ID}."
+            )
     else:
         payload = {
-            "policy": "aamas_v0_lossless_data_v1",
+            "policy": TRIAL_PROMPT_POLICY_ID,
+            "packing_implementation": PACKING_IMPLEMENTATION_ID,
             "participant_id": participant_id,
             "candidates": [],
         }
@@ -6269,7 +6338,8 @@ def _commit_aamas_explore_prompt_map(
             )
         existing[int(row["candidate_index"])] = row
     payload["candidates"] = [existing[key] for key in sorted(existing)]
-    payload["policy"] = "aamas_v0_lossless_data_v1"
+    payload["policy"] = TRIAL_PROMPT_POLICY_ID
+    payload["packing_implementation"] = PACKING_IMPLEMENTATION_ID
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -6305,7 +6375,7 @@ def _pack_aamas_lossless_prompt(
     if val_trials_source:
         pool.extend(list(val_trials_source))
     parents = list(parent_programs)
-    steps = ["aamas_v0_lossless_data_v1"]
+    steps = [TRIAL_PROMPT_POLICY_ID]
 
     def _wrap(trial_text: str, parent_list: List[str]) -> str:
         parent_context = parent_context_builder(
@@ -6385,7 +6455,7 @@ def _pack_aamas_lossless_prompt(
         "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
         "aamas_selection": stats,
         "selection_step": int(request.step),
-        "lossless_serializer": True,
+        "lossless_serializer": False,
         "exploration_heterogeneous": request.phase == PHASE_EXPLORATION,
     }
     return prompt, diag, steps
@@ -10834,6 +10904,7 @@ Provide only the code for choose(...) as a complete function body.
             return _truncate_psych_prompt_to_budget(**kwargs)
 
     explore_rows: List[Dict[str, Any]] = []
+    candidate_trunc_diags: List[Dict[str, Any]] = []
     if heterogeneous_explore:
         prompt_texts: List[str] = []
         trunc_diag = {}
@@ -10842,22 +10913,19 @@ Provide only the code for choose(...) as a complete function body.
             step = int(pics_lossless_candidate_offset) + cand_i
             prompt_text, trunc_diag, trunc_steps = _call_truncate(step)
             prompt_texts.append(prompt_text)
+            candidate_trunc_diags.append(dict(trunc_diag))
             selection = dict(trunc_diag.get("aamas_selection") or {})
             explore_rows.append(
-                {
-                    "candidate_index": step,
-                    "selection_step": step,
-                    "participant_id": participant_id,
-                    "assigned_text_sha256": selection.get("assigned_text_sha256"),
-                    "assigned_positions": selection.get("assigned_positions"),
-                    "assigned_block_ids": selection.get("block_ids"),
-                    "digest": selection.get("digest"),
-                    "policy": "aamas_v0_lossless_data_v1",
-                }
+                _aamas_explore_map_row(
+                    step=step,
+                    participant_id=participant_id,
+                    selection=selection,
+                )
             )
     else:
         prompt_text, trunc_diag, trunc_steps = _call_truncate(base_step)
         prompt_texts = [prompt_text] * int(n_variants)
+        candidate_trunc_diags = [dict(trunc_diag)]
 
     if explore_rows:
         _commit_aamas_explore_prompt_map(
@@ -11061,8 +11129,13 @@ Provide only the code for choose(...) as a complete function body.
                 if llm_decoding_seed_base is None
                 else int(llm_decoding_seed_base) + cand_idx
             )
+        source_diag = (
+            candidate_trunc_diags[cand_idx]
+            if cand_idx < len(candidate_trunc_diags)
+            else candidate_trunc_diags[-1]
+        )
         call_diag = {
-            **diag_base,
+            **_candidate_prompt_diagnostic(diag_base, source_diag),
             "candidate_index": cand_idx,
             "llm_decoding_seed": request_seed,
         }
@@ -11123,6 +11196,30 @@ Provide only the code for choose(...) as a complete function body.
             }
             if request_seed is not None:
                 create_kwargs["seed"] = int(request_seed)
+            if aamas_on:
+                from utils.teh.prompt_examples import maybe_save_aamas_prompt_example
+
+                selection_step = (
+                    int(pics_lossless_candidate_offset) + int(cand_idx)
+                    if heterogeneous_explore
+                    else int(base_step)
+                )
+                try:
+                    maybe_save_aamas_prompt_example(
+                        api_messages=create_kwargs["messages"],
+                        user_text=prompt_text,
+                        qwen_input_tokens=int(tokens),
+                        parent_programs=list(prompt_parent_programs),
+                        parent_ids=list(diag_base.get("parent_ids_after") or []),
+                        generation_phase=str(phase),
+                        dataset=str(dataset),
+                        participant_id=participant_id,
+                        iteration=None if iteration is None else int(iteration),
+                        selection_step=selection_step,
+                        candidate_index=int(cand_idx),
+                    )
+                except Exception as exc:
+                    print(f"Warning: AAMAS prompt example was not saved: {exc}")
             resp = client.chat.completions.create(**create_kwargs)
             raw_content = resp.choices[0].message.content or ""
             if explain_mode:
@@ -16439,11 +16536,12 @@ def main():
             "and independent source generation."
         )
         return
+    expected_person_iters = int(os.environ.get("AAMAS_PERSON_ITERS") or 10)
     if aamas_v0_mode and (
         int(args.global_iters) != 10
         or int(args.n_candidates) != 10
         or int(args.fresh_n_candidates) != 10
-        or (not bank_only and int(args.n_iterations) != 10)
+        or (not bank_only and int(args.n_iterations) != expected_person_iters)
         or (not bank_only and int(args.explore_candidates) != 50)
         or int(args.max_error_prompt_chars) != 0
         or args.refinement_phase
@@ -16453,7 +16551,7 @@ def main():
     ):
         print(
             "Error: AAMAS v0 track_mode requires global_iters=10, n_candidates=10, "
-            "fresh_n_candidates=10, n_iterations=10, explore_candidates=50, "
+            f"fresh_n_candidates=10, n_iterations={expected_person_iters}, explore_candidates=50, "
             "max_error_prompt_chars=0, --no-refinement_phase, train_val selection, "
             "and structure_aware_v3 with limited_train_val=40."
         )
@@ -17304,6 +17402,20 @@ def main():
 
         assert_legacy_output_not_resumed(base_run_dir)
         write_trial_policy_marker(base_run_dir)
+        from utils.teh.prompt_examples import configure_aamas_prompt_examples
+
+        configure_aamas_prompt_examples(
+            Path(base_run_dir),
+            track_mode=str(aamas_v0_mode),
+            population_iters=int(args.global_iters),
+            evolution_iters=int(args.n_iterations),
+            explore_candidates=int(args.explore_candidates),
+            representative_participant_id=(
+                min(int(pid) for pid in participants_to_process)
+                if participants_to_process
+                else None
+            ),
+        )
 
     cmd_log = _write_command_line_log(Path(base_run_dir))
     print(f"Wrote full command line to {cmd_log}")

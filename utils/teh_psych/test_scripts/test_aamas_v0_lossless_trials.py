@@ -9,6 +9,7 @@ import pytest
 
 from utils.teh.aamas_v0_lossless_trials import (
     CAP,
+    PACKING_IMPLEMENTATION_ID,
     PHASE_EXPLORATION,
     PHASE_PARTICIPANT_EVOLUTION,
     PHASE_POPULATION,
@@ -118,11 +119,12 @@ def test_all_datasets_share_phase_mapping_and_serializer_name():
         assert map_generation_phase("explore") == PHASE_EXPLORATION
         assert map_generation_phase("evolution") == PHASE_PARTICIPANT_EVOLUTION
         text, _body, stats = _render(_chain(0, 2, "unit:0"), dataset, cap=4000)
-        assert "problem = " in text
-        assert "history = " in text
+        assert '"problem":' in text
+        assert '"observed_action":' in text
         assert "history_prefix" not in text
+        assert "reset_before" not in text
         assert stats["policy"] == TRIAL_PROMPT_POLICY_ID
-        assert "one-line" not in text
+        assert stats["history_mismatches"] == 0
 
 
 def test_roundtrip_and_no_current_outcome_in_problem():
@@ -137,8 +139,13 @@ def test_roundtrip_and_no_current_outcome_in_problem():
     rebuilt = reconstruct_histories(window)
     for trial, history in zip(window, rebuilt):
         assert history == list(trial["history"])
-    assert "reward\": null" in rendered or '"reward": null' in rendered
-    assert "Fields inside a history dictionary may be absent or None" in body
+    assert '"observed_action":' in body
+    assert "history_before" in body or '"outcome":' in body
+    for line in body.splitlines():
+        if not line.startswith("{"):
+            continue
+        record = json.loads(line)
+        assert "1000" not in json.dumps(record.get("problem"))
 
 
 def test_independent_history_empty_and_continuous_session():
@@ -147,8 +154,9 @@ def test_independent_history_empty_and_continuous_session():
         for i in range(3)
     ]
     text, body, _stats = _render(indep, "mixed_gambles", cap=8000)
-    assert "history = []" in text
-    assert "All trials are independent" in body
+    assert "history resets" in text
+    assert '"observed_action":' in body
+    assert "reset_before" not in text
     kool = []
     history = []
     for day, action in ((1, 0), (1, 1), (2, 0)):
@@ -156,9 +164,9 @@ def test_independent_history_empty_and_continuous_session():
         history = list(history) + [{"action": action, "reward": 1}]
     kool.append(_trial(5, 0, [], unit="day:1", session=0, day=1))
     text, _body, _stats = _render(kool, "14kool2016when", cap=8000)
-    assert "does not reset at day boundaries" in text
-    assert text.count("reset_before = True") == 2
-    assert text.count("reset_before = False") == 2
+    assert text.count("history resets") == 2
+    assert "participant 4" in text and "participant 5" in text
+    assert "reset_before" not in text
 
 
 def test_later_window_reconstructs_and_kool_late_position_is_reachable():
@@ -166,17 +174,17 @@ def test_later_window_reconstructs_and_kool_late_position_is_reachable():
     for trial in rows:
         trial["problem"]["dataset_alias"] = "14kool2016when"
         trial["problem"]["presented_day"] = 1 + trial["_ldp"]["session_index"] // 3
-    early, _body, early_stats = _render(rows, "14kool2016when", step=0, cap=500)
-    late, _body, late_stats = _render(rows, "14kool2016when", step=1, cap=500)
+    early, _body, early_stats = _render(rows, "14kool2016when", step=0, cap=140)
+    late, _body, late_stats = _render(rows, "14kool2016when", step=1, cap=140)
     assert early_stats["min_position"] == 0
     assert late_stats["min_position"] > early_stats["max_position"]
     reached = []
     for step in range(8):
-        _text, _unused, stats = _render(rows, "14kool2016when", step=step, cap=500)
+        _text, _unused, stats = _render(rows, "14kool2016when", step=step, cap=140)
         reached.extend(stats["positions"])
     assert max(reached) == 5
-    shown = late.split("history = ", 1)[1].split("\n", 1)[0]
-    assert shown.count("{") > 1
+    line = next(line for line in late.splitlines() if "history_before" in line)
+    assert line.count("{") > 1
 
 
 def test_seed_reproducibility_balance_and_shared_population_schedule():
@@ -209,16 +217,16 @@ def test_seed_reproducibility_balance_and_shared_population_schedule():
 
 def test_population_candidates_share_evidence_and_new_pass_waits():
     trials = _chain(0, 3, "unit:0")
-    _p0, _b0, step0 = _render(trials, "12badham2017deficits", step=0, cap=320)
-    _p1, _b1, step1 = _render(trials, "12badham2017deficits", step=1, cap=320)
-    _p2, _b2, step2 = _render(trials, "12badham2017deficits", step=2, cap=320)
+    _p0, _b0, step0 = _render(trials, "12badham2017deficits", step=0, cap=100)
+    _p1, _b1, step1 = _render(trials, "12badham2017deficits", step=1, cap=100)
+    _p2, _b2, step2 = _render(trials, "12badham2017deficits", step=2, cap=100)
     assert step0["positions"] == [0]
     assert step1["positions"] == [1]
     assert step2["positions"] == [2]
-    _p3, _b3, step3 = _render(trials, "12badham2017deficits", step=3, cap=320)
+    _p3, _b3, step3 = _render(trials, "12badham2017deficits", step=3, cap=100)
     assert step3["positions"] == [0]
-    same_a, _x, stats_a = _render(trials, "12badham2017deficits", step=1, cap=320)
-    same_b, _y, stats_b = _render(trials, "12badham2017deficits", step=1, cap=320, extra="PARENT")
+    same_a, _x, stats_a = _render(trials, "12badham2017deficits", step=1, cap=100)
+    same_b, _y, stats_b = _render(trials, "12badham2017deficits", step=1, cap=100, extra="PARENT")
     assert stats_a["assigned_positions"] == stats_b["assigned_positions"]
     assert stats_b["positions"][0] == stats_a["positions"][0]
 
@@ -243,8 +251,10 @@ def test_exploration_steps_and_resume_map(tmp_path: Path):
         )
         texts.append(text)
         assert stats["selection_step"] == step
-        assert "history = " in text
-    assert texts[0] != texts[1]
+        assert '"observed_action":' in text
+        assert stats["full_retained_fits"] is True
+        assert stats["n_supervised"] == 3
+    assert texts[0] == texts[1] == texts[2]
     rows = [
         {"candidate_index": step, "assigned_text_sha256": f"hash-{step}"}
         for step in range(50)
@@ -293,9 +303,15 @@ def test_no_capped_history_and_token_cap():
         _trial(0, 0, history + [{"action": 1, "reward": 1}], unit="unit:long", session=2),
     ]
     text, _body, stats = _render(trials, "10frey2017risk", cap=14000)
-    history_line = next(line for line in text.splitlines() if line.startswith("history = [") and line != "history = []")
-    payload = json.loads(history_line.split("=", 1)[1])
-    assert len(payload) > 8
+    records = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+    long_histories = [
+        record["outcome"] for record in records if len(record.get("outcome") or []) > 8
+    ] + [
+        record["history_before"]
+        for record in records
+        if len(record.get("history_before") or []) > 8
+    ]
+    assert long_histories
     assert stats["prompt_tokens"] <= 14000
     assert "history_prefix" not in text
 
@@ -339,9 +355,20 @@ def test_pics_v3_serializer_unchanged_and_legacy_resume_fails(tmp_path: Path):
         assert_legacy_output_not_resumed(legacy)
     fresh = tmp_path / "job_new"
     write_trial_policy_marker(fresh)
-    assert json.loads((fresh / "TRIAL_PROMPT_POLICY.json").read_text(encoding="utf-8"))[
-        "trial_prompt_policy"
-    ] == TRIAL_PROMPT_POLICY_ID
+    marker = json.loads((fresh / "TRIAL_PROMPT_POLICY.json").read_text(encoding="utf-8"))
+    assert marker["trial_prompt_policy"] == TRIAL_PROMPT_POLICY_ID
+    assert marker["packing_implementation"] == PACKING_IMPLEMENTATION_ID
+    pre_fix = tmp_path / "job_pre_fix"
+    pre_fix.mkdir()
+    (pre_fix / "TRIAL_PROMPT_POLICY.json").write_text(
+        json.dumps({"trial_prompt_policy": TRIAL_PROMPT_POLICY_ID, "pics_run_seed": 0, "split_seed": 0}),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="packing implementation"):
+        write_trial_policy_marker(pre_fix)
+    assert "packing_implementation" not in json.loads(
+        (pre_fix / "TRIAL_PROMPT_POLICY.json").read_text(encoding="utf-8")
+    )
 
 
 def test_pics_run_seed_keeps_sa40_and_reruns_method(tmp_path: Path):

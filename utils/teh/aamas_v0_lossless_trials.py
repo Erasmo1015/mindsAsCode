@@ -23,13 +23,19 @@ from utils.teh.limited_data_registry import (
 from utils.teh.prompt_snapshots import sanitize_problem_for_choose
 from utils.teh.prompt_units import qwen_user_prompt_token_count, trial_unit_id
 
-TRIAL_PROMPT_POLICY_ID = "aamas_v0_lossless_data_v1"
+TRIAL_PROMPT_POLICY_ID = "compact_faithful_trial_v1"
 LEGACY_TRIAL_PROMPT_POLICY_ID = "pics_aamas_v0"
+# Greedy seeded fill. Pre-fix lossless runs omit this field and must not be resumed.
+PACKING_IMPLEMENTATION_ID = "aamas_v0_greedy_pack_v1"
 SELECTION_NAMESPACE = "trial_selection"
 PHASE_POPULATION = "population"
 PHASE_EXPLORATION = "exploration"
 PHASE_PARTICIPANT_EVOLUTION = "participant_evolution"
 CAP = 14000
+
+
+class TrialWindowDoesNotFitError(RuntimeError):
+    """A single complete trial does not fit in an otherwise empty trial section."""
 
 # Method randomness. split_seed stays the data-split seed.
 _PICS_RUN_SEED: Optional[int] = None
@@ -181,10 +187,30 @@ def _dumps(obj: Any) -> str:
 
 
 def _pid(trial: Dict[str, Any]) -> int:
+    """Native participant identity. Missing ids are an error, not ordinal 0."""
     raw = trial.get("_prompt_participant_id")
     if raw is None:
-        raw = (trial.get("problem") or {}).get("participant_id", 0)
+        raw = (trial.get("problem") or {}).get("participant_id")
+    if raw is None:
+        raise ValueError(
+            "Trial has no participant identity. Seeding and block ids use the native "
+            "participant id; processing ordinal 0 is not a substitute."
+        )
     return int(raw)
+
+
+def _stamp_missing_participant(
+    trials: Sequence[Dict[str, Any]],
+    participant_id: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Fill a missing prompt id from the request's native participant id."""
+    stamped: List[Dict[str, Any]] = []
+    for trial in trials:
+        row = dict(trial)
+        if participant_id is not None and row.get("_prompt_participant_id") is None:
+            row["_prompt_participant_id"] = int(participant_id)
+        stamped.append(row)
+    return stamped
 
 
 def _scope_id(trial: Dict[str, Any], dataset: str) -> str:
@@ -321,17 +347,11 @@ def render_window(trials: Sequence[Dict[str, Any]], *, trial_offset: int = 0) ->
 
 
 def render_schedule_text(windows: Sequence[Sequence[Dict[str, Any]]], dataset: str) -> str:
-    spec = limited_data_spec(dataset)
-    parts = [HISTORY_INTERPRETATION]
-    if spec.category == CONTINUOUS_SESSION:
-        parts.append(CONTINUOUS_NOTE)
-    elif spec.category == INDEPENDENT_TRIAL:
-        parts.append(INDEPENDENT_NOTE)
-    offset = 0
-    for window in windows:
-        parts.append(render_window(window, trial_offset=offset))
-        offset += len(window)
-    return "\n".join(parts)
+    """Trial text for the seeded cursor. The cursor is unchanged; the lines are compact."""
+    del dataset
+    from utils.teh.compact_faithful_trials import render_compact_schedule
+
+    return render_compact_schedule(windows)
 
 
 def reconstruct_histories(window: Sequence[Dict[str, Any]]) -> List[List[Any]]:
@@ -401,11 +421,84 @@ class _Cursor:
 class ScheduleState:
     participant_order: List[int]
     queues: Dict[int, List[_Cursor]]
+    blocks: List[_Cursor]
+    block_index: int = 0
     rr: int = 0
     exhausted_passes: int = 0
 
     def clone(self) -> "ScheduleState":
         return copy.deepcopy(self)
+
+
+def _linearize_blocks(
+    participant_order: Sequence[int],
+    queues: Dict[int, List[_Cursor]],
+) -> List[_Cursor]:
+    """One seeded block sequence: round-robin, one whole block at a time."""
+    if not participant_order:
+        return []
+    progress = {int(pid): 0 for pid in participant_order}
+    order: List[_Cursor] = []
+    rr = 0
+    n = len(participant_order)
+    total = sum(len(queues.get(int(pid)) or []) for pid in participant_order)
+    while len(order) < total:
+        placed = False
+        for attempt in range(n):
+            pid = int(participant_order[(rr + attempt) % n])
+            queue = queues.get(pid) or []
+            index = progress[pid]
+            if index < len(queue):
+                order.append(queue[index])
+                progress[pid] = index + 1
+                rr = (list(participant_order).index(pid) + 1) % n
+                placed = True
+                break
+        if not placed:
+            break
+    return order
+
+
+def _trial_key(trial: Dict[str, Any]) -> Tuple[str, int]:
+    return (str(trial.get("_block_id")), int(trial.get("_block_pos", 0)))
+
+
+def _trial_entry(trial: Dict[str, Any]) -> Dict[str, Any]:
+    block_id = str(trial.get("_block_id"))
+    position = int(trial.get("_block_pos", 0))
+    return {
+        "participant_id": _pid(trial),
+        "block_id": block_id,
+        "trial_position": position,
+        "trial_id": f"{block_id}#{position}",
+    }
+
+
+def _cursor_view(state: ScheduleState) -> Dict[str, int]:
+    if not state.blocks or state.block_index >= len(state.blocks):
+        index = 0
+        offset = 0
+    else:
+        index = int(state.block_index)
+        offset = int(state.blocks[index].index)
+    return {
+        "current_block_index": index,
+        "next_unused_trial_offset": offset,
+        "completed_pass_count": int(state.exhausted_passes),
+    }
+
+
+def _rewind_to_pass_start(state: ScheduleState) -> None:
+    for cursor in state.blocks:
+        cursor.index = 0
+    state.block_index = 0
+    state.rr = 0
+
+
+def _pass_has_remaining(state: ScheduleState) -> bool:
+    if not state.blocks or state.block_index >= len(state.blocks):
+        return False
+    return any(cursor.remaining > 0 for cursor in state.blocks[state.block_index :])
 
 
 def _build_state(
@@ -416,7 +509,7 @@ def _build_state(
     phase: str,
     participant_id: Optional[int],
 ) -> ScheduleState:
-    tagged = [dict(trial) for trial in trials]
+    tagged = _stamp_missing_participant(trials, participant_id)
     for index, trial in enumerate(tagged):
         trial["_pool_order"] = index
     blocks = group_blocks(tagged, dataset)
@@ -459,41 +552,25 @@ def _build_state(
             for block in order
             if block
         ]
-    return ScheduleState(participant_order=shuffled_pids, queues=queues, rr=0)
+    return ScheduleState(
+        participant_order=shuffled_pids,
+        queues=queues,
+        blocks=_linearize_blocks(shuffled_pids, queues),
+        block_index=0,
+        rr=0,
+    )
 
 
-def _next_cursor(state: ScheduleState) -> Optional[_Cursor]:
-    if not state.participant_order:
-        return None
-    n = len(state.participant_order)
-    for attempt in range(n):
-        pid = state.participant_order[(state.rr + attempt) % n]
-        queue = state.queues.get(pid) or []
-        for cursor in queue:
-            if cursor.remaining > 0:
-                state.rr = (state.participant_order.index(pid) + 1) % n
-                return cursor
+def _advance_to_open_trial(state: ScheduleState, included: set) -> Optional[_Cursor]:
+    """Move to the next trial in traversal order that this prompt has not used."""
+    while state.block_index < len(state.blocks):
+        cursor = state.blocks[state.block_index]
+        while cursor.index < len(cursor.trials) and _trial_key(cursor.trials[cursor.index]) in included:
+            cursor.index += 1
+        if cursor.remaining > 0:
+            return cursor
+        state.block_index += 1
     return None
-
-
-def _take_window(
-    cursor: _Cursor,
-    existing: Sequence[Sequence[Dict[str, Any]]],
-    wrap,
-    cap: int,
-    dataset: str,
-) -> int:
-    """How many trials of this cursor fit after the windows already chosen."""
-    best = 0
-    remaining = cursor.remaining
-    for count in range(1, remaining + 1):
-        window = cursor.trials[cursor.index : cursor.index + count]
-        body = render_schedule_text(list(existing) + [window], dataset)
-        if chat_tokens(wrap(body)) <= cap:
-            best = count
-        else:
-            break
-    return best
 
 
 def pack_from_state(
@@ -503,43 +580,108 @@ def pack_from_state(
     cap: int,
     dataset: str,
 ) -> Tuple[str, ScheduleState, Dict[str, Any]]:
-    """Pack one prompt. Does not start a new pass inside this prompt."""
+    """Greedy fill in the seeded block order.
+
+    A whole remaining block suffix that fits is included, and packing continues
+    into the next block of the same prompt. A suffix that does not fit contributes
+    its largest complete-trial prefix, then the prompt stops. Reaching the end of
+    the pass with room left wraps to the start without repeating a trial already
+    in this prompt. The retained set is never duplicated inside one prompt.
+    """
     working = state.clone()
+    cursor_before = _cursor_view(working)
     windows: List[List[Dict[str, Any]]] = []
-    taken_keys = set()
-    while True:
-        cursor = _next_cursor(working)
+    included: set = set()
+    wraps_inside = 0
+    stopped_on_limit = False
+    retained = {
+        _trial_key(trial)
+        for cursor in working.blocks
+        for trial in cursor.trials
+    }
+    guard = len(retained) + 2
+    while guard > 0:
+        guard -= 1
+        cursor = _advance_to_open_trial(working, included)
         if cursor is None:
-            break
-        identity = (cursor.participant_id, cursor.block_id, cursor.index)
-        if identity in taken_keys:
-            break
-        whole = cursor.remaining
-        whole_windows = windows + [cursor.trials[cursor.index : cursor.index + whole]]
-        whole_body = render_schedule_text(whole_windows, dataset)
-        if chat_tokens(wrap(whole_body)) <= cap:
-            windows.append(cursor.trials[cursor.index : cursor.index + whole])
-            cursor.index += whole
-            taken_keys.add(identity)
+            if included and included >= retained:
+                _rewind_to_pass_start(working)
+                working.exhausted_passes += 1
+                break
+            if not working.blocks:
+                break
+            _rewind_to_pass_start(working)
+            working.exhausted_passes += 1
+            wraps_inside += 1
+            if wraps_inside > 1:
+                break
             continue
-        count = _take_window(cursor, windows, wrap, cap, dataset)
+        suffix = []
+        for trial in cursor.trials[cursor.index :]:
+            if _trial_key(trial) in included:
+                break
+            suffix.append(trial)
+        if not suffix:
+            working.block_index += 1
+            continue
+        whole_body = render_schedule_text(windows + [suffix], dataset)
+        if chat_tokens(wrap(whole_body)) <= cap:
+            windows.append(list(suffix))
+            for trial in suffix:
+                included.add(_trial_key(trial))
+            cursor.index += len(suffix)
+            working.block_index += 1
+            continue
+        count = 0
+        for size in range(1, len(suffix) + 1):
+            body = render_schedule_text(windows + [suffix[:size]], dataset)
+            if chat_tokens(wrap(body)) <= cap:
+                count = size
+            else:
+                break
         if count <= 0:
+            if not included:
+                lone = cursor.trials[cursor.index : cursor.index + 1]
+                lone_body = render_schedule_text([lone], dataset)
+                lone_tokens = chat_tokens(wrap(lone_body))
+                raise TrialWindowDoesNotFitError(
+                    "AAMAS v0 trial does not fit under the prompt token limit "
+                    f"(cap={cap}, tokens={lone_tokens}, block_id={cursor.block_id}, "
+                    f"trial_position={int(cursor.trials[cursor.index].get('_block_pos', cursor.index))}). "
+                    "The trial text was not truncated."
+                )
+            stopped_on_limit = True
             break
-        windows.append(cursor.trials[cursor.index : cursor.index + count])
+        prefix = list(cursor.trials[cursor.index : cursor.index + count])
+        windows.append(prefix)
+        for trial in prefix:
+            included.add(_trial_key(trial))
         cursor.index += count
-        taken_keys.add(identity)
+        stopped_on_limit = True
         break
     text = render_schedule_text(windows, dataset) if windows else ""
     stats = _stats(windows, dataset)
-    mismatches = 0
-    for window in windows:
-        rebuilt = reconstruct_histories(window)
-        for trial, history in zip(window, rebuilt):
-            if history != list(trial.get("history") or []):
-                mismatches += 1
+    flat = [trial for window in windows for trial in window]
+    from utils.teh.compact_faithful_trials import round_trip_mismatches
+
+    mismatches = round_trip_mismatches(text, flat) if text else 0
+    if mismatches:
+        raise RuntimeError(
+            f"Compact trial text does not round-trip sanitized problem and history "
+            f"({mismatches} trials)."
+        )
     stats["history_mismatches"] = mismatches
-    stats["prompt_tokens"] = chat_tokens(wrap(text)) if text else chat_tokens(wrap(""))
-    stats["new_pass_started_inside_prompt"] = 0
+    stats["prompt_tokens"] = chat_tokens(wrap(text)) if text or windows else chat_tokens(wrap(""))
+    stats["new_pass_started_inside_prompt"] = int(wraps_inside)
+    stats["trials"] = [_trial_entry(trial) for trial in flat]
+    stats["cursor_before"] = cursor_before
+    stats["cursor_after"] = _cursor_view(working)
+    stats["full_retained_fits"] = bool(retained) and included == retained and len(flat) == len(retained)
+    stats["next_trial_would_exceed"] = bool(stopped_on_limit)
+    if stats["prompt_tokens"] > int(cap) and flat:
+        raise TrialWindowDoesNotFitError(
+            f"AAMAS v0 packed prompt is {stats['prompt_tokens']} tokens, over cap {cap}."
+        )
     return text, working, stats
 
 
@@ -574,28 +716,15 @@ def state_at_step(
 
 
 def _fully_exhausted(state: ScheduleState) -> bool:
-    return _next_peek_without_moving(state) is None
-
-
-def _next_peek_without_moving(state: ScheduleState) -> Optional[_Cursor]:
-    probe = state.clone()
-    return _next_cursor(probe)
+    return not _pass_has_remaining(state)
 
 
 def _restart_pass(state: ScheduleState, *, vary: bool = False) -> ScheduleState:
+    """Start the next pass at block 0. The seeded order does not rotate."""
+    del vary
     restarted = state.clone()
-    for queue in restarted.queues.values():
-        for cursor in queue:
-            cursor.index = 0
-    restarted.rr = 0
+    _rewind_to_pass_start(restarted)
     restarted.exhausted_passes += 1
-    if vary:
-        pids = restarted.participant_order
-        if len(pids) > 1:
-            restarted.participant_order = pids[1:] + pids[:1]
-        for pid, queue in list(restarted.queues.items()):
-            if len(queue) > 1:
-                restarted.queues[pid] = queue[1:] + queue[:1]
     return restarted
 
 
@@ -633,7 +762,9 @@ def render_for_request(
     canonical_wrap,
     cap: int = CAP,
 ) -> Tuple[str, Dict[str, Any]]:
-    vary = bool(request.vary_exhausted_pass or request.phase == PHASE_EXPLORATION)
+    # Exploration used to rotate block order on each new pass. The cursor now
+    # wraps to the same seeded order. vary_exhausted_pass is accepted and ignored.
+    vary = False
     state = state_at_step(
         trials,
         dataset=dataset,
@@ -654,11 +785,15 @@ def render_for_request(
     stats["selection_step"] = int(request.step)
     stats["phase"] = request.phase
     stats["policy"] = TRIAL_PROMPT_POLICY_ID
+    stats["packing_implementation"] = PACKING_IMPLEMENTATION_ID
     stats["assigned_positions"] = assigned_stats.get("positions")
     stats["assigned_block_ids"] = assigned_stats.get("block_ids")
     stats["assigned_participant_ids"] = assigned_stats.get("participant_ids")
     stats["assigned_supervised"] = assigned_stats.get("n_supervised")
-    stats["assigned_text_sha256"] = hashlib.sha256(assigned_text.encode("utf-8")).hexdigest()
+    # Hash the trial body that is actually rendered. Canonical assignment stays
+    # on assigned_* so a shared cursor parent does not depend on parent length.
+    stats["assigned_text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    stats["canonical_text_sha256"] = hashlib.sha256(assigned_text.encode("utf-8")).hexdigest()
     stats["digest"] = selection_digest(
         master_seed=request.master_seed,
         dataset=dataset,
@@ -694,6 +829,12 @@ def assert_legacy_output_not_resumed(output_dir: Any) -> None:
             raise RuntimeError(
                 f"Refusing to resume {root} under {TRIAL_PROMPT_POLICY_ID}; "
                 f"directory policy is {found!r}."
+            )
+        recorded_pack = payload.get("packing_implementation")
+        if recorded_pack != PACKING_IMPLEMENTATION_ID:
+            raise RuntimeError(
+                f"Refusing to resume {root}: packing implementation "
+                f"{recorded_pack!r} does not match {PACKING_IMPLEMENTATION_ID}."
             )
         _assert_recorded_seeds_match(root, payload)
         return
@@ -731,6 +872,7 @@ def write_trial_policy_marker(output_dir: Any) -> None:
     payload: Dict[str, Any] = {
         "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
         "prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "packing_implementation": PACKING_IMPLEMENTATION_ID,
     }
     run_seed = pics_run_seed()
     split_seed = pics_recorded_split_seed()
