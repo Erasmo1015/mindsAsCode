@@ -760,7 +760,24 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep29 pre-lossless exact coverage (CPU job 308142): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/pre_lossless_exact_coverage/`.
 - Sep29 one-line vs v2 snapshot field loss (15 SA40 trials): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/one_line_vs_snapshot/`.
 - Sep29 compact faithful trial text `compact_faithful_trial_v1` (seeded cursor unchanged): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/compact_faithful_trial_v1/REPORT.md`.
-- Oct1 `pics_v4` (`compact_faithful_trial_v1` + `uniform_additional_prompt_v2`): `analysis_2026Sep/Sep30_pics_v4/REPORT.md`; preflight `analysis_2026Sep/Sep30_pics_v4/PREFLIGHT_AUDIT.md`; method `analysis/config/T-PICS/docs/Documentation_pics_v4.md`.
+- Oct3 `pics_v4` final (`structured_snapshot_v2`, `uniform_additional_prompt_v3`, `shuffled_block_slot_stable_v1`, `first_n`, cap 15360, `sha256_unique_v1` cap 5): `utils/teh/pics_v4.py`.
+- Oct2 Guan/Bergert integrity replay (310370 vs 305707, 310371 vs 305708): `analysis_2026Sep/Sep30_pics_v4/integrity_replay_audit/REPORT.md`.
+- Oct2 Guan participant-evolution ablation (uniform / order / explore-pool; frozen job 305707, participants 19/15/17, iters 1–3): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/`.
+- Oct2 Guan exploration-only ablation (uniform_only 310645, order_only 310646; participants 19/15/17): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/EXPLORE_RESULTS.md`.
+- Oct2 Guan population-only ablation (310665 uniform, 310666 oneline, 310667 rotation): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/POPULATION_RESULTS.md`.
+- Oct2 Guan oneline+rotation without uniform (job 310675, `oneline_rotation_no_uniform`): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/ONELINE_ROTATION_RESULTS.md`.
+- Oct2 Guan restored-information one-line population (job 310692, `oneline_rotation_restored_v2_info`): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/RESTORED_INFO_RESULTS.md`.
+- Oct2 PICS-v4 `elite_policy=sha256_unique_v1`: population exact-SHA cap 50; participant handoff keeps population rank-1 plus ≤4 other unique population programs by participant re-score, then unique exploration up to 50, no duplicate backfill (`utils/teh/elite_sha.py`). Guan population-only job 310715: `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/DEDUP_RESULTS.md`.
+- Oct2 Guan one-trial-per-participant population job 310720: `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/ONE_TRIAL_RESULTS.md`. V2 prefix job 310736: `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/V2_ONE_TRIAL_RESULTS.md`.
+- Oct2 Guan AAMAS-v0 reproducibility under historical budgeting (jobs 310741 Check A, 310745 Checks B–C, `aamas_v0_guan_repro_check`, vs job 305707): `analysis_2026Sep/Sep27_aamas_v0/others/aamas_v0_guan_repro/REPORT.md`.
+- Oct2 EMNLP trial-format audit: `analysis_2026Sep/Sep30_pics_v4/emnlp_trial_format_audit/REPORT.md`. Guan participant v2-snapshot ablation (jobs 310756 explore, 310757 evolution): `analysis_2026Sep/Sep30_pics_v4/participant_v2_ablation/REPORT.md`.
+- Oct2 uniform-reminder replacement ablation (jobs 310766 Guan population, 310767 Guan explore, 310768 Plonsky population, 310769 Plonsky explore; vs 305707 and 305710): `analysis_2026Sep/Sep30_pics_v4/uniform_prompt_clean_ablation/REPORT.md`. Participant evolution continuation (jobs 310789 Guan, 310790 Plonsky; iterations 1–3 from those explore pools): `analysis_2026Sep/Sep30_pics_v4/uniform_prompt_clean_ablation/PARTICIPANT_EVOLUTION.md`.
+- Oct2 Guan slot-stable v2 panels (job 310808, isolated population driver, vs 305707): `analysis_2026Sep/Sep30_pics_v4/candidate_slot_fixed_panels/REPORT.md`.
+- Oct2 chronological anchored panels (jobs 310823 Guan population, 310824 Badham explore, 310825 Badham evolution): `analysis_2026Sep/Sep30_pics_v4/anchored_slot_panels/REPORT.md`.
+- Oct2 Badham participant-1 chronological exploration failure diagnosis: `analysis_2026Sep/Sep30_pics_v4/anchored_slot_panels/badham_pid1_failure.md`.
+- Oct2 Guan population panel composition (jobs 305707, 310808, 310823): `analysis_2026Sep/Sep30_pics_v4/anchored_slot_panels/population_panel_difference.md`.
+- Oct2 Badham participant v2-prefix vs matched one-line (jobs 310785/310805 v2, 310786/310806 one-line; participants 0–2, vs 306103): `analysis_2026Sep/Sep30_pics_v4/participant_v2_long_trial_ablation/REPORT.md`.
+- Oct1 deterministic root-cause audit (310098 vs 305709, 310097 vs 305708): `analysis_2026Sep/Sep30_pics_v4/live_result_audit/deterministic_root_cause/REPORT.md`.
 - Oct1 read-only uniform-prompt duplication and coverage audit: `analysis_2026Sep/Sep30_pics_v4/REMINDER_DUPLICATION_AUDIT.md`.
 
 ---

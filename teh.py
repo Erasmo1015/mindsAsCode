@@ -267,6 +267,15 @@ def _effective_psych_dataset_split(dataset: str, psych_dataset_split: str) -> st
     return normalize_psych_dataset_split(psych_dataset_split)
 
 
+def _population_elite_policy() -> Optional[str]:
+    from utils.teh.elite_sha import ELITE_POLICY_SHA256_UNIQUE_V1
+    from utils.teh.pics_v4 import using_pics_v4
+
+    if using_pics_v4():
+        return ELITE_POLICY_SHA256_UNIQUE_V1
+    return None
+
+
 def _elite_pool_capacity(sample_size: int, elite_pool_size: Optional[int]) -> int:
     """Max programs retained in the elite pool (after sorting by fitness, best first)."""
     if elite_pool_size is None:
@@ -305,6 +314,50 @@ def _cap_elite_preserving_program_ids(
     kept = pinned + others[:keep_others]
     sort_elites(kept, mdl_lambda)
     elite_parents[:] = kept
+
+
+def _apply_pics_v4_post_explore_elite(
+    elite_parents: List[Tuple[Any, ...]],
+    elite_val_logliks: List[Optional[float]],
+    *,
+    n_population: int,
+    elite_cap: int,
+    pinned_ids: Sequence[str],
+    track_elite_val_loglik: bool,
+    mdl_lambda: float,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Replace the active participant elite with the PICS-v4 unique handoff."""
+    from utils.teh.elite_sha import build_participant_handoff_pool, cap_participant_elite
+
+    n_population = max(0, min(int(n_population), len(elite_parents)))
+    if track_elite_val_loglik and len(elite_val_logliks) < len(elite_parents):
+        elite_val_logliks.extend([None] * (len(elite_parents) - len(elite_val_logliks)))
+    companions = list(elite_val_logliks) if track_elite_val_loglik else None
+    if n_population > 0:
+        elites, vals, pins, stats = build_participant_handoff_pool(
+            elite_parents[:n_population],
+            elite_parents[n_population:],
+            elite_cap=elite_cap,
+            population_rank1_id=str(elite_parents[0][3]),
+            mdl_lambda=mdl_lambda,
+            population_vals=None if companions is None else companions[:n_population],
+            exploration_vals=None if companions is None else companions[n_population:],
+        )
+    else:
+        elites, vals, stats = cap_participant_elite(
+            elite_parents,
+            elite_cap=elite_cap,
+            pinned_ids=pinned_ids,
+            sha_unique=True,
+            mdl_lambda=mdl_lambda,
+            companions=companions,
+        )
+        pins = [str(item) for item in pinned_ids if any(str(parent[3]) == str(item) for parent in elites)]
+        stats = dict(stats or {})
+    elite_parents[:] = list(elites)
+    if track_elite_val_loglik:
+        elite_val_logliks[:] = list(vals or [])
+    return list(pins), dict(stats)
 
 
 def _write_elite_pool_dir(
@@ -1554,7 +1607,12 @@ def _phase_llm_decoding_seed_base(
     participant_id: Optional[int] = None,
     batch_offset: int = 0,
 ) -> int:
-    """PICS / historical per-request seed base. AAMAS runs do not use this."""
+    """Historical per-request seed base used by the AAMAS-v0 target-only jobs.
+
+    ``pics_run_seed`` does not enter this formula. It only seeds the trial
+    schedule. Candidate index and the fresh-candidate offset are added by
+    the caller.
+    """
     pid_key = int(participant_id) if participant_id is not None else 0
     return (
         int(split_seed)
@@ -1566,14 +1624,14 @@ def _phase_llm_decoding_seed_base(
 
 
 def _aamas_or_legacy_seed(legacy: int, namespace: str, **coords: Any) -> int:
-    """Keep the historical split_seed formula unless this process is an AAMAS run."""
-    from utils.teh.pics_aamas_v0 import using_pics_aamas_v0_prompt
+    """Return the historical split_seed formula.
 
-    if not using_pics_aamas_v0_prompt():
-        return int(legacy)
-    from utils.teh.aamas_v0_lossless_trials import pics_lossless_subseed
-
-    return int(pics_lossless_subseed(namespace, **coords))
+    Trial, block, and participant order use ``pics_run_seed`` through the
+    schedule cursor. This helper must not fold that seed into LLM requests,
+    parent sampling, or prompt-trial subsampling.
+    """
+    del namespace, coords
+    return int(legacy)
 
 
 def load_valid_participant_ids_from_json(
@@ -3384,6 +3442,8 @@ def run_global_evolution_phase(
             (iter_dir / "candidates").mkdir(exist_ok=True)
 
         pool_size = len(elite_parents)
+        sampled_parent_ids: List[str] = []
+        sampled_parent_shas: List[str] = []
         if sample_parents and pool_size > 0:
             rng = np.random.default_rng(
                 _aamas_or_legacy_seed(
@@ -3405,6 +3465,12 @@ def run_global_evolution_phase(
             )
             selected_parents = [elite_parents[int(j)] for j in parent_idxs]
             num_parents_to_use = len(selected_parents)
+            from utils.teh.elite_sha import source_sha256
+
+            sampled_parent_ids = [str(parent[3]) for parent in selected_parents]
+            sampled_parent_shas = [
+                source_sha256(str(parent[0] or "")) for parent in selected_parents
+            ]
             if sampled_parents_decay:
                 print(
                     f"\nUsing {num_parents_to_use} global parent(s) "
@@ -3419,6 +3485,12 @@ def run_global_evolution_phase(
             num_parents_to_use = min(sample_size, pool_size)
             selected_parents = elite_parents[:num_parents_to_use]
             parent_idxs = list(range(num_parents_to_use))
+            from utils.teh.elite_sha import source_sha256
+
+            sampled_parent_ids = [str(parent[3]) for parent in selected_parents]
+            sampled_parent_shas = [
+                source_sha256(str(parent[0] or "")) for parent in selected_parents
+            ]
             print(f"\nUsing top {num_parents_to_use} global parent(s):")
 
         for i, parent_tuple in enumerate(selected_parents):
@@ -3784,7 +3856,23 @@ def run_global_evolution_phase(
         sort_elites(elite_parents, mdl_lambda)
         elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
         # Prune after all candidates are evaluated (audit rows recorded above).
-        elite_parents = elite_parents[:elite_cap]
+        elite_dedup_stats: Optional[Dict[str, int]] = None
+        from utils.teh.pics_v4 import using_pics_v4
+
+        if using_pics_v4():
+            from utils.teh.elite_sha import (
+                POPULATION_PINNED_PROGRAM_IDS,
+                dedupe_elite_exact_sha,
+            )
+
+            elite_parents, elite_dedup_stats = dedupe_elite_exact_sha(
+                elite_parents,
+                elite_cap=elite_cap,
+                pinned_ids=POPULATION_PINNED_PROGRAM_IDS,
+                mdl_lambda=mdl_lambda,
+            )
+        else:
+            elite_parents = elite_parents[:elite_cap]
         pool_best_ll = _train_loglik_from_elite_tuple(
             elite_parents[0], evolution_selection_score=evolution_selection_score
         )
@@ -3900,6 +3988,16 @@ def run_global_evolution_phase(
             }
             if use_train_val:
                 metrics["pool_best_selection_score"] = pool_best_selection
+            if elite_dedup_stats is not None:
+                from utils.teh.elite_sha import ELITE_POLICY_SHA256_UNIQUE_V1
+
+                metrics["elite_policy"] = ELITE_POLICY_SHA256_UNIQUE_V1
+                metrics["pool_size"] = int(elite_dedup_stats["pool_size"])
+                metrics["n_unique_sha"] = int(elite_dedup_stats["n_unique_sha"])
+                metrics["n_duplicate_removed"] = int(elite_dedup_stats["n_duplicate_removed"])
+                metrics["sampled_parent_ids"] = list(sampled_parent_ids)
+                metrics["sampled_parent_shas"] = list(sampled_parent_shas)
+                metrics["n_distinct_sampled_parents"] = len(set(sampled_parent_shas))
             if mdl_enabled(mdl_lambda):
                 metrics["mdl_lambda"] = float(mdl_lambda)
                 metrics.update(
@@ -4020,6 +4118,7 @@ def run_global_evolution_phase(
             "max_observed_trials_per_participant": budget_n,
             "pool_size": len(elite_parents),
             "pool_best_program_id": str(elite_parents[0][3]),
+            "elite_policy": _population_elite_policy(),
             "pool_best_global_train_loglik": pool_best_global_train_ll,
             "pool_best_selection_score": pool_best_selection_score,
             "evolution_selection_score": evolution_selection_score,
@@ -6252,6 +6351,9 @@ def _aamas_explore_map_row(
     )
 
     trials = list(selection.get("trials") or [])
+    from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY, using_pics_v4
+
+    recorded_policy = PICS_V4_TRIAL_POLICY if using_pics_v4() else TRIAL_PROMPT_POLICY_ID
     return {
         "candidate_index": step,
         "selection_step": step,
@@ -6261,7 +6363,7 @@ def _aamas_explore_map_row(
         "assigned_positions": [int(trial["trial_position"]) for trial in trials],
         "assigned_block_ids": [str(trial["block_id"]) for trial in trials],
         "digest": selection.get("digest"),
-        "policy": TRIAL_PROMPT_POLICY_ID,
+        "policy": recorded_policy,
         "packing_implementation": PACKING_IMPLEMENTATION_ID,
     }
 
@@ -6296,6 +6398,31 @@ def _candidate_prompt_diagnostic(
     return merged
 
 
+def _commit_generation_panel_map(
+    diagnostics_dir: Optional[Path],
+    *,
+    phase: str,
+    participant_id: Optional[int],
+    rows: List[Dict[str, Any]],
+) -> None:
+    """Persist a phase-local panel map.
+
+    Exploration owns ``explore_phase/prompt_selection_map.json``. Population
+    and participant evolution do not read, write, or validate that file.
+    Their slot identity is the phase-scoped shuffled panel. A shorter parent
+    suffix is allowed and must not be checked against the exploration map.
+    """
+    from utils.teh.aamas_v0_lossless_trials import PHASE_EXPLORATION
+
+    if str(phase) != PHASE_EXPLORATION:
+        return
+    _commit_aamas_explore_prompt_map(
+        diagnostics_dir,
+        participant_id=participant_id,
+        rows=rows,
+    )
+
+
 def _commit_aamas_explore_prompt_map(
     diagnostics_dir: Optional[Path],
     *,
@@ -6322,8 +6449,11 @@ def _commit_aamas_explore_prompt_map(
                 f"{recorded_pack!r} does not match {PACKING_IMPLEMENTATION_ID}."
             )
     else:
+        from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY, using_pics_v4
+
+        recorded_policy = PICS_V4_TRIAL_POLICY if using_pics_v4() else TRIAL_PROMPT_POLICY_ID
         payload = {
-            "policy": TRIAL_PROMPT_POLICY_ID,
+            "policy": recorded_policy,
             "packing_implementation": PACKING_IMPLEMENTATION_ID,
             "participant_id": participant_id,
             "candidates": [],
@@ -6342,7 +6472,9 @@ def _commit_aamas_explore_prompt_map(
             )
         existing[int(row["candidate_index"])] = row
     payload["candidates"] = [existing[key] for key in sorted(existing)]
-    payload["policy"] = TRIAL_PROMPT_POLICY_ID
+    from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY, using_pics_v4
+
+    payload["policy"] = PICS_V4_TRIAL_POLICY if using_pics_v4() else TRIAL_PROMPT_POLICY_ID
     payload["packing_implementation"] = PACKING_IMPLEMENTATION_ID
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -6379,7 +6511,14 @@ def _pack_aamas_lossless_prompt(
     if val_trials_source:
         pool.extend(list(val_trials_source))
     parents = list(parent_programs)
-    steps = [TRIAL_PROMPT_POLICY_ID]
+    from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY, using_pics_v4
+
+    trial_policy = PICS_V4_TRIAL_POLICY if using_pics_v4() else TRIAL_PROMPT_POLICY_ID
+    if using_pics_v4():
+        from utils.teh.pics_v4 import HARD_PROMPT_TOKEN_CAP as _V4_HARD_PROMPT_TOKEN_CAP
+
+        hard_prompt_token_cap = int(_V4_HARD_PROMPT_TOKEN_CAP)
+    steps = [trial_policy]
 
     def _wrap(trial_text: str, parent_list: List[str]) -> str:
         parent_context = parent_context_builder(
@@ -6456,7 +6595,8 @@ def _pack_aamas_lossless_prompt(
         "parents_after": len(parents),
         "compact_serialization": False,
         "freeze_examples": False,
-        "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "trial_prompt_policy": trial_policy,
+        "hard_prompt_token_cap": int(hard_prompt_token_cap),
         "aamas_selection": stats,
         "selection_step": int(request.step),
         "lossless_serializer": False,
@@ -10516,6 +10656,7 @@ def _generate_iteration_candidate_codes(
             fresh_kw["parent_program_ids"] = list(fresh_parent_program_ids)
         fresh_kw["pics_lossless_cursor_parent"] = cursor_parent
         fresh_kw["pics_lossless_generation_role"] = "fresh"
+        fresh_kw["pics_lossless_candidate_offset"] = 0
         fresh_codes = generate_program_variants(**fresh_kw)
         codes.extend(fresh_codes)
         sources.extend(["fresh"] * len(fresh_codes))
@@ -10540,6 +10681,7 @@ def _generate_iteration_candidate_codes(
             normal_kw["parent_program_ids"] = list(normal_parent_program_ids)
         normal_kw["pics_lossless_cursor_parent"] = cursor_parent
         normal_kw["pics_lossless_generation_role"] = "parent"
+        normal_kw["pics_lossless_candidate_offset"] = int(fresh_n)
         normal_codes = generate_program_variants(**normal_kw)
         codes.extend(normal_codes)
         sources.extend(["normal"] * len(normal_codes))
@@ -10831,7 +10973,6 @@ Provide only the code for choose(...) as a complete function body.
     from utils.teh.aamas_v0_lossless_trials import (
         PHASE_EXPLORATION,
         SelectionRequest,
-        pics_lossless_llm_request_seed,
         pics_run_seed as current_pics_run_seed,
         map_generation_phase,
         selection_scope,
@@ -10862,8 +11003,10 @@ Provide only the code for choose(...) as a complete function body.
     else:
         base_step = 0
     digest_participant = None if mapped_phase == "population" else participant_id
-    heterogeneous_explore = (
-        aamas_on and mapped_phase == PHASE_EXPLORATION and int(n_variants) > 1
+    from utils.teh.pics_v4 import using_pics_v4 as _using_pics_v4
+
+    heterogeneous_explore = aamas_on and int(n_variants) > 1 and (
+        mapped_phase == PHASE_EXPLORATION or _using_pics_v4()
     )
 
     def _call_truncate(step: int):
@@ -10932,8 +11075,9 @@ Provide only the code for choose(...) as a complete function body.
         candidate_trunc_diags = [dict(trunc_diag)]
 
     if explore_rows:
-        _commit_aamas_explore_prompt_map(
+        _commit_generation_panel_map(
             prompt_diagnostics_dir,
+            phase=mapped_phase,
             participant_id=participant_id,
             rows=explore_rows,
         )
@@ -11118,21 +11262,11 @@ Provide only the code for choose(...) as a complete function body.
         prompt_text = prompt_texts[cand_idx] if cand_idx < len(prompt_texts) else prompt_texts[0]
         if not prompt_text:
             return ""
-        if aamas_on:
-            request_seed = pics_lossless_llm_request_seed(
-                dataset=str(dataset),
-                phase=str(mapped_phase),
-                participant=None if participant_id is None else int(participant_id),
-                iteration=None if iteration is None else int(iteration),
-                role=str(pics_lossless_generation_role),
-                candidate=int(pics_lossless_candidate_offset) + cand_idx,
-            )
-        else:
-            request_seed = (
-                None
-                if llm_decoding_seed_base is None
-                else int(llm_decoding_seed_base) + cand_idx
-            )
+        request_seed = (
+            None
+            if llm_decoding_seed_base is None
+            else int(llm_decoding_seed_base) + cand_idx
+        )
         source_diag = (
             candidate_trunc_diags[cand_idx]
             if cand_idx < len(candidate_trunc_diags)
@@ -11379,7 +11513,20 @@ def _run_pre_evolution_explore_phase(
     """
     n_explore = int(explore_candidates)
     if n_explore <= 0:
-        return
+        from utils.teh.pics_v4 import using_pics_v4
+
+        if using_pics_v4() and initial_pool_from_global and elite_parents:
+            pins, _stats = _apply_pics_v4_post_explore_elite(
+                elite_parents,
+                elite_val_logliks,
+                n_population=len(elite_parents),
+                elite_cap=_elite_pool_capacity(sample_size, elite_pool_size),
+                pinned_ids=(),
+                track_elite_val_loglik=track_elite_val_loglik,
+                mdl_lambda=normalize_mdl_lambda(mdl_lambda),
+            )
+            return pins
+        return []
     mdl_lambda = normalize_mdl_lambda(mdl_lambda)
 
     use_train_val = _uses_train_val_evolution_selection(evolution_selection_score, fitness_metric)
@@ -11683,7 +11830,24 @@ def _run_pre_evolution_explore_phase(
             elite_val_logliks.append(_safe_float(result.get("val_loglik")))
 
     elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
-    if pin_program_ids:
+    handoff_pins: List[str] = []
+    handoff_stats: Optional[Dict[str, Any]] = None
+    from utils.teh.pics_v4 import using_pics_v4
+
+    if using_pics_v4():
+        n_population = (
+            int(initial_pool_size_before_explore or 0) if initial_pool_from_global else 0
+        )
+        handoff_pins, handoff_stats = _apply_pics_v4_post_explore_elite(
+            elite_parents,
+            elite_val_logliks,
+            n_population=n_population,
+            elite_cap=elite_cap,
+            pinned_ids=tuple(pin_program_ids or ()),
+            track_elite_val_loglik=track_elite_val_loglik,
+            mdl_lambda=mdl_lambda,
+        )
+    elif pin_program_ids:
         _cap_elite_preserving_program_ids(
             elite_parents,
             elite_val_logliks,
@@ -11781,6 +11945,11 @@ def _run_pre_evolution_explore_phase(
                 metrics["best_explore_train_acc"] = selected_results[0].get("train_acc")
         if best_explore_test_record is not None:
             metrics["diagnostic_test"] = best_explore_test_record
+        if handoff_stats is not None:
+            from utils.teh.elite_sha import elite_policy_provenance
+
+            metrics.update(elite_policy_provenance())
+            metrics.update(handoff_stats)
         (explore_dir / "metrics.json").write_text(
             json.dumps(metrics, indent=2), encoding="utf-8"
         )
@@ -11878,6 +12047,7 @@ def _run_pre_evolution_explore_phase(
                     prompted_parent_ids=[str(prompt_pid)],
                 ),
             )
+    return handoff_pins
 
 
 def _person_evolution_extra_prompt_trials(
@@ -11969,6 +12139,8 @@ def run_evolution(
     explore_seed_candidates: int = 0,
     t_pics_gated_transfer: bool = False,
     pics_v3_elite_failover: bool = False,
+    reuse_recorded_elite: bool = False,
+    recorded_elite_val_logliks: Optional[List[Optional[float]]] = None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -12576,22 +12748,37 @@ def run_evolution(
     if global_elite_parents:
         if fitness_metric != "loglik":
             raise ValueError("global_elite_parents requires fitness_metric='loglik'")
-        elite_parents, elite_val_logliks = _global_elite_to_participant_elite(
-            global_elite_parents,
-            train_trials,
-            val_trials,
-            dataset=dataset,
-            n_eval_seeds=n_eval_seeds,
-            evolution_selection_score=evolution_selection_score,
-            selection_warn_key=selection_warn_key,
-            mdl_lambda=mdl_lambda,
-            strict_observed_union=strict_observed_union,
-        )
+        if reuse_recorded_elite:
+            if recorded_elite_val_logliks is None or len(recorded_elite_val_logliks) != len(
+                global_elite_parents
+            ):
+                raise ValueError(
+                    "reuse_recorded_elite requires recorded_elite_val_logliks "
+                    "aligned with global_elite_parents."
+                )
+            elite_parents = [tuple(parent) for parent in global_elite_parents]
+            elite_val_logliks = list(recorded_elite_val_logliks)
+            print(
+                f"\nEvolution initial pool: {len(elite_parents)} program(s) "
+                f"loaded from recorded scores (no re-score, no exploration)."
+            )
+        else:
+            elite_parents, elite_val_logliks = _global_elite_to_participant_elite(
+                global_elite_parents,
+                train_trials,
+                val_trials,
+                dataset=dataset,
+                n_eval_seeds=n_eval_seeds,
+                evolution_selection_score=evolution_selection_score,
+                selection_warn_key=selection_warn_key,
+                mdl_lambda=mdl_lambda,
+                strict_observed_union=strict_observed_union,
+            )
+            print(
+                f"\nEvolution initial pool: {len(elite_parents)} program(s) initialized from "
+                f"global phase elite pool (per-participant train/val re-evaluated; global order preserved)."
+            )
         global_pool_handoff = True
-        print(
-            f"\nEvolution initial pool: {len(elite_parents)} program(s) initialized from "
-            f"global phase elite pool (per-participant train/val re-evaluated; global order preserved)."
-        )
         if save_artifacts and output_path is not None:
             dst_pool = output_path / "initial_pool_from_global"
             if dst_pool.exists():
@@ -12648,6 +12835,7 @@ def run_evolution(
             f"(trial-weighted train+val loglik for pool ranking)"
         )
 
+    participant_pinned_ids: List[str] = []
     if (
         int(explore_candidates) > 0
         and run_phase in ("all", "evolution")
@@ -12669,7 +12857,7 @@ def run_evolution(
                 f"(explore_population_top_k={int(explore_population_top_k)}; "
                 f"ids={[pid for _, pid in explore_parent_programs]})."
             )
-        _run_pre_evolution_explore_phase(
+        participant_pinned_ids = _run_pre_evolution_explore_phase(
             explore_candidates=int(explore_candidates),
             client=client,
             model_name=model_name,
@@ -12720,8 +12908,21 @@ def run_evolution(
             ),
             mdl_lambda=mdl_lambda,
             strict_observed_union=strict_observed_union,
-        )
+        ) or []
         last_significant_best = float(elite_parents[0][1])
+    elif global_pool_handoff and elite_parents and run_phase in ("all", "evolution"):
+        from utils.teh.pics_v4 import using_pics_v4
+
+        if using_pics_v4():
+            participant_pinned_ids, _handoff_stats = _apply_pics_v4_post_explore_elite(
+                elite_parents,
+                elite_val_logliks,
+                n_population=len(elite_parents),
+                elite_cap=_elite_pool_capacity(sample_size, elite_pool_size),
+                pinned_ids=(),
+                track_elite_val_loglik=track_elite_val_loglik,
+                mdl_lambda=mdl_lambda,
+            )
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []
@@ -12732,6 +12933,9 @@ def run_evolution(
     for iteration in range(n_iterations):
         iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
         iter_best_selection_score: Optional[float] = None
+        elite_dedup_stats: Optional[Dict[str, Any]] = None
+        sampled_parent_ids: List[str] = []
+        sampled_parent_shas: List[str] = []
         print(f"\n{'='*80}")
         print(f"Iteration {iteration_step}/{n_iterations}")
         print(f"{'='*80}")
@@ -12790,6 +12994,12 @@ def run_evolution(
                 f"(sample_size={sample_size}, sample_parents=False):"
             )
         parent_codes = [p[0] for p in selected_parents]
+        from utils.teh.elite_sha import source_sha256
+
+        sampled_parent_ids = [str(parent[3]) for parent in selected_parents]
+        sampled_parent_shas = [
+            source_sha256(str(parent[0] or "")) for parent in selected_parents
+        ]
 
         mem_selected_parent_records: List[Dict[str, Any]] = []
         mem_best_parent_rec: Optional[Dict[str, Any]] = None
@@ -13730,21 +13940,49 @@ def run_evolution(
                     elite_val_logliks.append(_safe_float(result.get("val_loglik")))
 
             # Sort elite set by fitness (descending) and keep top programs.
-            # Global handoff: preserve global order through iteration 1; sort from iteration 2+.
-            should_sort_elite = (not global_pool_handoff) or (iteration_step >= 1)
-            if track_elite_val_loglik:
-                paired_elite = list(zip(elite_parents, elite_val_logliks))
-                if should_sort_elite:
-                    sort_elite_pairs(paired_elite, mdl_lambda)
-                elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
-                paired_elite = paired_elite[:elite_cap]
-                elite_parents = [p[0] for p in paired_elite]
-                elite_val_logliks = [p[1] for p in paired_elite]
+            # Historical runs keep duplicate sources. PICS-v4 keeps one exact SHA.
+            elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
+            from utils.teh.pics_v4 import using_pics_v4
+
+            if using_pics_v4():
+                from utils.teh.elite_sha import cap_participant_elite
+
+                companions = None
+                if track_elite_val_loglik:
+                    if len(elite_val_logliks) < len(elite_parents):
+                        elite_val_logliks.extend(
+                            [None] * (len(elite_parents) - len(elite_val_logliks))
+                        )
+                    companions = list(elite_val_logliks[: len(elite_parents)])
+                elite_parents, updated_vals, elite_dedup_stats = cap_participant_elite(
+                    elite_parents,
+                    elite_cap=elite_cap,
+                    pinned_ids=participant_pinned_ids,
+                    sha_unique=True,
+                    mdl_lambda=mdl_lambda,
+                    companions=companions,
+                )
+                if track_elite_val_loglik:
+                    elite_val_logliks = list(updated_vals or [])
             else:
-                if should_sort_elite:
-                    sort_elites(elite_parents, mdl_lambda)
-                elite_cap = _elite_pool_capacity(sample_size, elite_pool_size)
-                elite_parents = elite_parents[:elite_cap]
+                from utils.teh.elite_sha import cap_participant_elite
+
+                should_sort_elite = (not global_pool_handoff) or (iteration_step >= 1)
+                companions = None
+                if track_elite_val_loglik:
+                    paired_n = min(len(elite_parents), len(elite_val_logliks))
+                    elite_parents = list(elite_parents[:paired_n])
+                    companions = list(elite_val_logliks[:paired_n])
+                elite_parents, updated_vals, _legacy_stats = cap_participant_elite(
+                    elite_parents,
+                    elite_cap=elite_cap,
+                    sha_unique=False,
+                    mdl_lambda=mdl_lambda,
+                    companions=companions,
+                    sort=should_sort_elite,
+                )
+                if track_elite_val_loglik:
+                    elite_val_logliks = list(updated_vals or [])
 
             print(f"\nElite set updated: {len(elite_parents)} programs (elite_pool_cap={elite_cap})")
 
@@ -14171,6 +14409,17 @@ def run_evolution(
         metrics["num_invalid_candidates"] = num_invalid_candidates
         metrics["num_unique_errors_available"] = num_unique_errors_available
         metrics["error_prompt_chars_used"] = error_prompt_chars_used
+        from utils.teh.pics_v4 import using_pics_v4
+
+        if using_pics_v4():
+            from utils.teh.elite_sha import elite_policy_provenance
+
+            metrics.update(elite_policy_provenance())
+            if elite_dedup_stats is not None:
+                metrics.update(elite_dedup_stats)
+            metrics["sampled_parent_ids"] = list(sampled_parent_ids)
+            metrics["sampled_parent_shas"] = list(sampled_parent_shas)
+            metrics["n_distinct_sampled_parents"] = len(set(sampled_parent_shas))
         if person_iter_test_record is not None:
             metrics["diagnostic_test"] = person_iter_test_record
         if save_artifacts and iter_dir is not None:
@@ -15788,7 +16037,7 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "PICS v4: compact_faithful_trial_v1 trials plus one uniform additional "
+            "PICS v4: historical one-line trials plus one uniform additional "
             "prompt for every dataset. Requires --pics_aamas_v0_track_mode and a "
             "pics_v4 output directory. Does not change AAMAS-v0 or PICS-v3."
         ),

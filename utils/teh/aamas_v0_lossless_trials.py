@@ -23,8 +23,9 @@ from utils.teh.limited_data_registry import (
 from utils.teh.prompt_snapshots import sanitize_problem_for_choose
 from utils.teh.prompt_units import qwen_user_prompt_token_count, trial_unit_id
 
-TRIAL_PROMPT_POLICY_ID = "compact_faithful_trial_v1"
+TRIAL_PROMPT_POLICY_ID = "compact_faithful_trial_v2"
 LEGACY_TRIAL_PROMPT_POLICY_ID = "pics_aamas_v0"
+PREVIOUS_COMPACT_POLICY_ID = "compact_faithful_trial_v1"
 # Greedy seeded fill. Pre-fix lossless runs omit this field and must not be resumed.
 PACKING_IMPLEMENTATION_ID = "aamas_v0_greedy_pack_v1"
 SELECTION_NAMESPACE = "trial_selection"
@@ -346,9 +347,70 @@ def render_window(trials: Sequence[Dict[str, Any]], *, trial_offset: int = 0) ->
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _one_line_schedule(windows: Sequence[Sequence[Dict[str, Any]]], dataset: str) -> str:
+    """Historical participant one-line text. The cursor chooses the trials."""
+    from data_modules.psych101_binary import format_trial_for_prompt
+
+    lines: List[str] = []
+    number = 0
+    for window in windows:
+        for offset, trial in enumerate(window):
+            number += 1
+            line = format_trial_for_prompt(trial, number)
+            if str(dataset) == "14kool2016when":
+                nxt = trial.get("_real_next")
+                if (
+                    nxt is None
+                    and offset + 1 < len(window)
+                    and window[offset + 1].get("_block_id") == trial.get("_block_id")
+                ):
+                    nxt = window[offset + 1]
+                delta = history_delta(trial, nxt if isinstance(nxt, dict) else None)
+                if delta:
+                    rendered = delta[0] if len(delta) == 1 else delta
+                    line += "; history_update=" + _dumps(rendered)
+            lines.append(line)
+    return "\n".join(lines)
+
+
+_PRECHOICE_FORBIDDEN = (
+    "weather_outcome",
+    "was_correct",
+    "exploded",
+    "outcome_marker",
+    "probe_in_set",
+    "correct_category",
+    "response_key",
+    "observed_action",
+    "history_before",
+)
+
+
+def _assert_one_line_prechoice(text: str) -> None:
+    """Current outcomes stay after the observed action. Hidden answers stay out."""
+    if "probe_in_set" in text or '"observed_action"' in text:
+        raise RuntimeError("PICS v4 one-line prompt contains a wrapper or hidden-answer field.")
+    for line in text.splitlines():
+        if "action=" not in line:
+            continue
+        prefix = line.split("action=", 1)[0]
+        for key in _PRECHOICE_FORBIDDEN:
+            if key in prefix:
+                raise RuntimeError(f"PICS v4 pre-choice text contains {key}.")
+        if "[kool/stage1]" in line and "; planet=" in prefix:
+            raise RuntimeError("PICS v4 stage-1 line contains the current planet.")
+
+
 def render_schedule_text(windows: Sequence[Sequence[Dict[str, Any]]], dataset: str) -> str:
-    """Trial text for the seeded cursor. The cursor is unchanged; the lines are compact."""
-    del dataset
+    """Trial text for the seeded cursor.
+
+    PICS v4 uses the historical one-line formatter. Other AAMAS callers keep
+    the compact records already shipped by those runs.
+    """
+    from utils.teh.pics_v4 import using_pics_v4
+
+    if using_pics_v4():
+        return _one_line_schedule(windows, dataset)
     from utils.teh.compact_faithful_trials import render_compact_schedule
 
     return render_compact_schedule(windows)
@@ -662,14 +724,20 @@ def pack_from_state(
     text = render_schedule_text(windows, dataset) if windows else ""
     stats = _stats(windows, dataset)
     flat = [trial for window in windows for trial in window]
-    from utils.teh.compact_faithful_trials import round_trip_mismatches
+    from utils.teh.pics_v4 import using_pics_v4
 
-    mismatches = round_trip_mismatches(text, flat) if text else 0
-    if mismatches:
-        raise RuntimeError(
-            f"Compact trial text does not round-trip sanitized problem and history "
-            f"({mismatches} trials)."
-        )
+    if using_pics_v4():
+        _assert_one_line_prechoice(text)
+        mismatches = 0
+    else:
+        from utils.teh.compact_faithful_trials import round_trip_mismatches
+
+        mismatches = round_trip_mismatches(text, flat) if text else 0
+        if mismatches:
+            raise RuntimeError(
+                f"Compact trial text does not round-trip sanitized problem and history "
+                f"({mismatches} trials)."
+            )
     stats["history_mismatches"] = mismatches
     stats["prompt_tokens"] = chat_tokens(wrap(text)) if text or windows else chat_tokens(wrap(""))
     stats["new_pass_started_inside_prompt"] = int(wraps_inside)
@@ -762,6 +830,29 @@ def render_for_request(
     canonical_wrap,
     cap: int = CAP,
 ) -> Tuple[str, Dict[str, Any]]:
+    from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY, using_pics_v4
+
+    if using_pics_v4():
+        from utils.teh.pics_v4_panels import render_slot_panel
+
+        del canonical_wrap
+        text, stats = render_slot_panel(
+            trials,
+            dataset=dataset,
+            request=request,
+            actual_wrap=actual_wrap,
+            cap=cap,
+            policy_id=PICS_V4_TRIAL_POLICY,
+        )
+        if int(stats.get("panel_n") or 0) and not int(stats.get("n_supervised") or 0):
+            raise TrialWindowDoesNotFitError(
+                f"PICS v4 slot panel does not fit a single trial under cap {cap}."
+            )
+        if int(stats.get("prompt_tokens") or 0) > int(cap):
+            raise TrialWindowDoesNotFitError(
+                f"PICS v4 prompt is {stats['prompt_tokens']} tokens, over cap {cap}."
+            )
+        return text, stats
     # Exploration used to rotate block order on each new pass. The cursor now
     # wraps to the same seeded order. vary_exhausted_pass is accepted and ignored.
     vary = False
@@ -784,7 +875,9 @@ def render_for_request(
     )
     stats["selection_step"] = int(request.step)
     stats["phase"] = request.phase
-    stats["policy"] = TRIAL_PROMPT_POLICY_ID
+    from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY, using_pics_v4
+
+    stats["policy"] = PICS_V4_TRIAL_POLICY if using_pics_v4() else TRIAL_PROMPT_POLICY_ID
     stats["packing_implementation"] = PACKING_IMPLEMENTATION_ID
     stats["assigned_positions"] = assigned_stats.get("positions")
     stats["assigned_block_ids"] = assigned_stats.get("block_ids")
@@ -854,7 +947,7 @@ def assert_legacy_output_not_resumed(output_dir: Any) -> None:
         if not isinstance(payload, dict):
             continue
         found = str(payload.get("prompt_policy") or "")
-        if found == LEGACY_TRIAL_PROMPT_POLICY_ID or (
+        if found in {LEGACY_TRIAL_PROMPT_POLICY_ID, PREVIOUS_COMPACT_POLICY_ID} or (
             found and found != TRIAL_PROMPT_POLICY_ID
         ):
             raise RuntimeError(

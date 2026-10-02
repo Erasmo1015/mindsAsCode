@@ -758,6 +758,41 @@ def summarize_runtime_schema_for_prompt(trials: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def action_meaning_clause(trial: Dict[str, Any], *, contract: str = "v1") -> str:
+    """Action-meaning parenthetical already printed by ``format_trial_for_prompt``.
+
+    ``contract='v2'`` uses that function's balloon and category branches, so a
+    Frey-risk trial is pump/stop and a schema-D card trial keeps flip/stop with
+    that trial's ``option_keys``.
+    """
+    p = trial.get("problem") or {}
+    schema = p.get("schema_type", "?")
+    action = trial.get("action")
+    keys = p.get("option_keys") or []
+    if not isinstance(keys, list):
+        keys = []
+    key_lbl = _action_key_label(keys, action if isinstance(action, int) else -1)
+    if str(contract).strip().lower() == "v2":
+        if p.get("balloon_id") is not None or p.get("pump_key") is not None:
+            return "(0=pump, 1=stop)"
+        if p.get("stimulus_features") is not None or p.get("rule_block_id") is not None:
+            return f"(key={key_lbl})"
+    if schema == "categorical_bandit":
+        return "(internal)"
+    if schema == "bergert_pairwise":
+        return "(1=option_A, 0=option_B)"
+    if schema == "guan_stopping":
+        return "(0=continue, 1=stop)"
+    if schema == "kool_twostep":
+        if int(p.get("stage") or 0) == 1:
+            return "(0=first presented spaceship, 1=second)"
+        return "(0=first presented alien, 1=second)"
+    if schema == "D":
+        k0, k1 = (keys[0], keys[1]) if len(keys) >= 2 else ("?", "?")
+        return f"(action=0 flip {k0}, action=1 stop {k1})"
+    return f"(key={key_lbl})"
+
+
 def format_trial_for_prompt(
     trial: Dict[str, Any], index: int, *, contract: str = "v1"
 ) -> str:
@@ -773,6 +808,7 @@ def format_trial_for_prompt(
     action = trial["action"]
     keys = p.get("option_keys", [])
     key_lbl = _action_key_label(keys, action)
+    meaning = action_meaning_clause(trial, contract=contract)
     hist = trial.get("history", [])
     hist_len = len(hist)
     hist_fb = None
@@ -780,24 +816,37 @@ def format_trial_for_prompt(
         last = hist[-1]
         hist_fb = last.get("feedback", last.get("reward"))
 
-    if str(contract).strip().lower() == "v2":
-        if p.get("balloon_id") is not None or p.get("pump_key") is not None:
-            return (
-                f"{index}. [balloon] balloon_id={p.get('balloon_id')}; "
-                f"step_index={p.get('step_index')}; "
-                f"pump_count_before={p.get('pump_count_before')}; "
-                f"accumulated_points_before={p.get('accumulated_points_before')}; "
-                f"pump_key={p.get('pump_key')}; stop_key={p.get('stop_key')}; "
-                f"option_keys={keys}; action={action} (0=pump, 1=stop); "
-                f"history_len={hist_len}"
-            )
-        if p.get("stimulus_features") is not None or p.get("rule_block_id") is not None:
-            return (
-                f"{index}. [category] rule_block_id={p.get('rule_block_id')}; "
-                f"stimulus_features={p.get('stimulus_features')}; "
-                f"schema_type={schema}; option_keys={keys}; "
-                f"action={action} (key={key_lbl}); history_len={hist_len}"
-            )
+    # Six one-line repairs. The other schemas keep the historical clauses below.
+    if p.get("balloon_id") is not None or p.get("pump_key") is not None:
+        line = (
+            f"{index}. [balloon] balloon_id={p.get('balloon_id')}; "
+            f"step_index={p.get('step_index')}; "
+            f"pump_count_before={p.get('pump_count_before')}; "
+            f"accumulated_points_before={p.get('accumulated_points_before')}; "
+            f"pump_key={p.get('pump_key')}; stop_key={p.get('stop_key')}; "
+            f"option_keys={keys}; action={action} (0=pump, 1=stop)"
+        )
+        if p.get("outcome_marker") is not None:
+            line += f"; outcome_marker={p.get('outcome_marker')}"
+        if p.get("exploded") is not None:
+            line += f"; exploded={p.get('exploded')}"
+        return line + f"; history_len={hist_len}"
+    if p.get("memory_set_letters") is not None or p.get("probe_letter") is not None:
+        return (
+            f"{index}. [recent_probes] memory_set_letters={p.get('memory_set_letters')}; "
+            f"probe_letter={p.get('probe_letter')}; option_keys={keys}; "
+            f"action={action} (key={key_lbl}); history_len={hist_len}"
+        )
+    if p.get("stimulus_features") is not None or p.get("rule_block_id") is not None:
+        line = (
+            f"{index}. [category_learning] rule_block_id={p.get('rule_block_id')}; "
+            f"stimulus_features={p.get('stimulus_features')}; "
+            f"category_key_mapping={p.get('category_key_mapping')}; "
+            f"option_keys={keys}; action={action} (key={key_lbl})"
+        )
+        if p.get("correct_category") is not None:
+            line += f"; correct_category={p.get('correct_category')}"
+        return line + f"; history_len={hist_len}"
 
     if schema == "categorical_bandit":
         last_reward = hist[-1].get("reward", hist[-1].get("feedback")) if hist else None
@@ -812,7 +861,7 @@ def format_trial_for_prompt(
             f"n_arms={p.get('n_arms', len(keys))}; option_keys={keys}; "
             f"raw_coding={raw_coding}; "
             f"internal_action_coding={p.get('internal_action_coding')}; "
-            f"action={action} (internal); history_len={hist_len}"
+            f"action={action} {meaning}; history_len={hist_len}"
             + (f"; last_reward={last_reward}" if last_reward is not None else "")
         )
 
@@ -826,7 +875,7 @@ def format_trial_for_prompt(
             f"option_B={{'alternative_id': {ob.get('alternative_id')!r}, "
             f"'cues': {ob.get('cues')}}}; "
             f"access cues via option_A['cues']['cue1']..cue6 (NOT option_A['cue1']); "
-            f"option_keys={keys}; action={action} (1=option_A, 0=option_B); "
+            f"option_keys={keys}; action={action} {meaning}; "
             f"history_len={hist_len}"
         )
 
@@ -836,24 +885,27 @@ def format_trial_for_prompt(
             f"environment={p.get('environment')}; problem_id={p.get('problem_id')}; "
             f"sequence_length={p.get('sequence_length')}; position={p.get('position')}; "
             f"values_observed={p.get('values_observed')}; option_keys={keys}; "
-            f"action={action} (0=continue, 1=stop); history_len={hist_len}"
+            f"action={action} {meaning}; history_len={hist_len}"
         )
 
     if schema == "kool_twostep":
         stage = p.get("stage")
         if int(stage or 0) == 1:
             return (
-                f"{index}. [kool/stage1] day={p.get('presented_day')}; "
+                f"{index}. [kool/stage1] day={p.get('presented_day')}; stage=1; "
                 f"spaceship_options={p.get('spaceship_options', keys)}; "
+                f"spaceship_labels={p.get('spaceship_labels')}; "
+                f"planet_labels={p.get('planet_labels')}; "
+                f"planet_aliens={p.get('planet_aliens')}; "
                 f"option_keys={keys}; action={action} "
-                f"(0=first presented spaceship, 1=second); history_len={hist_len}"
+                f"{meaning}; history_len={hist_len}"
             )
         return (
             f"{index}. [kool/stage2] day={p.get('presented_day')}; planet={p.get('planet')}; "
             f"alien_options={p.get('alien_options', keys)}; "
             f"spaceship={p.get('spaceship')}; stage1_action={p.get('stage1_action')}; "
             f"option_keys={keys}; action={action} "
-            f"(0=first presented alien, 1=second); history_len={hist_len}"
+            f"{meaning}; history_len={hist_len}"
             + (f"; last_hist_stage={hist[-1].get('stage')}" if hist else "")
         )
 
@@ -865,33 +917,41 @@ def format_trial_for_prompt(
                 f"{index}. [gamble/A] gamble_A probs={ga.get('probs')} rewards={ga.get('rewards')}; "
                 f"gamble_B probs={gb.get('probs')} rewards={gb.get('rewards')}; "
                 f"option_keys={keys}; has_feedback={p.get('has_feedback')}; "
-                f"action={action} (key={key_lbl}); history_len={hist_len}"
+                f"action={action} {meaning}; history_len={hist_len}"
                 + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
             )
         return (
             f"{index}. [binary/A] option_keys={keys}; problem_keys={sorted(k for k in p if k not in ('dataset_alias', 'experiment_id'))}; "
-            f"action={action} (key={key_lbl}); history_len={hist_len}"
+            f"action={action} {meaning}; history_len={hist_len}"
         )
 
     if schema == "B":
         subtype = _schema_b_subtype(p)
         if subtype == "weather":
-            return (
-                f"{index}. [weather/B] cards={p.get('cards')}; weather_outcome={p.get('weather_outcome')}; "
-                f"was_correct={p.get('was_correct')}; option_keys={keys}; "
-                f"action={action} (key={key_lbl}); history_len={hist_len}"
-                + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
+            features = p.get("features") or {}
+            task = features.get("task", "weather_prediction")
+            line = (
+                f"{index}. [weather/B] cards={p.get('cards')}; task={task}; "
+                f"option_keys={keys}; action={action} {meaning}"
             )
+            if p.get("weather_outcome") is not None:
+                line += f"; weather_outcome={p.get('weather_outcome')}"
+            if p.get("was_correct") is not None:
+                line += f"; was_correct={p.get('was_correct')}"
+            line += f"; history_len={hist_len}"
+            if hist_fb is not None:
+                line += f"; last_feedback={hist_fb}"
+            return line
         if subtype == "tree":
             return (
                 f"{index}. [tree/B] tree_features={p.get('tree_features')}; garden={p.get('garden')}; "
                 f"phase={p.get('phase')}; option_keys={keys}; "
-                f"action={action} (key={key_lbl}); history_len={hist_len}"
+                f"action={action} {meaning}; history_len={hist_len}"
                 + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
             )
         return (
             f"{index}. [product/B] ratings_A={p.get('ratings_A')}; ratings_B={p.get('ratings_B')}; "
-            f"option_keys={keys}; action={action} (key={key_lbl}); history_len={hist_len}"
+            f"option_keys={keys}; action={action} {meaning}; history_len={hist_len}"
         )
 
     if schema == "C":
@@ -899,25 +959,34 @@ def format_trial_for_prompt(
             f"{index}. [bandit/C] game_id={p.get('game_id')}; n_trials_game={p.get('n_trials_game')}; "
             f"phase={p.get('phase')}; trial_index={p.get('trial_index')}; payoff={p.get('payoff')}; "
             f"machine_options={p.get('machine_options')}; option_keys={keys}; "
-            f"action={action} (key={key_lbl}); history_len={hist_len}"
+            f"action={action} {meaning}; history_len={hist_len}"
             + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
         )
 
     if schema == "D":
-        k0, k1 = (keys[0], keys[1]) if len(keys) >= 2 else ("?", "?")
         return (
             f"{index}. [cct/D] round_id={p.get('round_id')}; current_score={p.get('current_score')}; "
             f"cards_flipped={p.get('cards_flipped')}; n_cards_remaining={p.get('n_cards_remaining')}; "
             f"gain_amount={p.get('gain_amount')}; loss_amount={p.get('loss_amount')}; "
             f"n_loss_cards={p.get('n_loss_cards')}; option_keys={keys} "
-            f"(action=0 flip {k0}, action=1 stop {k1}); "
+            f"{meaning}; "
             f"action={action} (key={key_lbl}); history_len={hist_len}"
         )
 
+    if "gamble_A" in p or "gamble_B" in p:
+        ga = p.get("gamble_A", {})
+        gb = p.get("gamble_B", {})
+        return (
+            f"{index}. [gamble/A] gamble_A probs={ga.get('probs')} rewards={ga.get('rewards')}; "
+            f"gamble_B probs={gb.get('probs')} rewards={gb.get('rewards')}; "
+            f"option_keys={keys}; has_feedback={p.get('has_feedback')}; "
+            f"action={action} {meaning}; history_len={hist_len}"
+            + (f"; last_feedback={hist_fb}" if hist_fb is not None else "")
+        )
     meta_keys = sorted(k for k in p if k not in ("dataset_alias", "experiment_id"))
     return (
         f"{index}. [schema={schema}] option_keys={keys}; problem_keys={meta_keys}; "
-        f"action={action} (key={key_lbl}); history_len={hist_len}"
+        f"action={action} {meaning}; history_len={hist_len}"
     )
 
 

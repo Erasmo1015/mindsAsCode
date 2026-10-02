@@ -371,6 +371,11 @@ def write_population_completion(
     from utils.teh.pics_v4 import using_pics_v4
 
     decision = reminder_decision(dataset)
+    policy_id = TRIAL_PROMPT_POLICY_ID
+    if using_pics_v4():
+        from utils.teh.pics_v4 import PICS_V4_TRIAL_POLICY
+
+        policy_id = PICS_V4_TRIAL_POLICY
     reminder_id = decision.reminder_id
     if using_pics_v4():
         from utils.teh.pics_v4 import (
@@ -388,8 +393,8 @@ def write_population_completion(
         "track_mode": str(track_mode),
         "provisional_experimental_track": bool(provisional),
         "official_main_result": track_mode == TRACK_OFFICIAL_GATE and not provisional,
-        "prompt_policy": TRIAL_PROMPT_POLICY_ID,
-        "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "prompt_policy": policy_id,
+        "trial_prompt_policy": policy_id,
         "prompt_mode": prompt_meta.get("prompt_mode"),
         "rendered_prompt_sha256": prompt_meta.get("infer_prompt_sha256"),
         "reminder_id": reminder_id,
@@ -422,9 +427,16 @@ def write_population_completion(
         "pics_run_seed": pics_run_seed(),
     }
     if using_pics_v4():
+        from utils.teh.pics_v4 import PICS_RUN_SEED_SCOPE, SEARCH_RNG_POLICY
+
         provenance["method_version"] = METHOD_VERSION
         provenance["additional_prompt_policy"] = ADDITIONAL_PROMPT_POLICY_ID
         provenance["additional_prompt_sha256"] = uniform_additional_prompt_sha256()
+        from utils.teh.elite_sha import elite_policy_provenance
+
+        provenance["search_rng"] = SEARCH_RNG_POLICY
+        provenance["pics_run_seed_scope"] = PICS_RUN_SEED_SCOPE
+        provenance.update(elite_policy_provenance())
     prov_path = run_dir / "POPULATION_PROVENANCE.json"
     prov_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     if not valid:
@@ -447,8 +459,8 @@ def write_population_completion(
         "dataset": str(dataset),
         "kind": resolved_kind,
         "track_mode": str(track_mode),
-        "prompt_policy": TRIAL_PROMPT_POLICY_ID,
-        "trial_prompt_policy": TRIAL_PROMPT_POLICY_ID,
+        "prompt_policy": policy_id,
+        "trial_prompt_policy": policy_id,
         "reminder_id": reminder_id,
         "sa40_fingerprint": provenance["sa40_fingerprint"],
         "global_iters": int(global_iters),
@@ -461,6 +473,15 @@ def write_population_completion(
         "runtime_valid": True,
         "provenance_path": str(prov_path.resolve()),
     }
+    if using_pics_v4():
+        marker["search_rng"] = provenance["search_rng"]
+        marker["pics_run_seed_scope"] = provenance["pics_run_seed_scope"]
+        marker["elite_policy"] = provenance["elite_policy"]
+        marker["participant_population_unique_cap"] = provenance[
+            "participant_population_unique_cap"
+        ]
+        marker["elite_pool_size_is_upper_bound"] = provenance["elite_pool_size_is_upper_bound"]
+        marker["duplicate_backfill"] = provenance["duplicate_backfill"]
     complete = run_dir / "STAGE_COMPLETE.json"
     complete.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     return complete

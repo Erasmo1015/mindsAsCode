@@ -10,9 +10,10 @@ import copy
 import json
 from typing import Any, Dict, List, Optional, Sequence
 
+from data_modules.psych101_binary import action_meaning_clause
 from utils.teh.prompt_snapshots import _CURRENT_OUTCOME_KEYS, sanitize_problem_for_choose
 
-POLICY_ID = "compact_faithful_trial_v1"
+POLICY_ID = "compact_faithful_trial_v2"
 
 
 def _canon(value: Any) -> Any:
@@ -69,7 +70,11 @@ def render_trial_record(
         raise RuntimeError(
             "Pre-choice problem still contains outcome fields: " + ", ".join(leaked)
         )
-    record: Dict[str, Any] = {"problem": problem, "observed_action": trial.get("action")}
+    record: Dict[str, Any] = {
+        "problem": problem,
+        "observed_action": trial.get("action"),
+        "action_meaning": action_meaning_clause(trial, contract="v2"),
+    }
     if include_history_before:
         record = {
             "history_before": _canon(list(trial.get("history") or [])),

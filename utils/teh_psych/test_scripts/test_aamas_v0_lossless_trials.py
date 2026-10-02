@@ -21,8 +21,6 @@ from utils.teh.aamas_v0_lossless_trials import (
     reconstruct_histories,
     render_for_request,
     render_window,
-    pics_lossless_llm_request_seed,
-    pics_lossless_subseed,
     pics_run_seed,
     selection_digest,
     set_pics_run_seeds,
@@ -407,14 +405,15 @@ def test_pics_run_seed_keeps_sa40_and_reruns_method(tmp_path: Path):
     assert fp_fixed != fp_other_split
 
     def _llm(candidate: int = 0) -> int:
-        return pics_lossless_llm_request_seed(
+        base = teh._aamas_or_legacy_seed(
+            teh._phase_llm_decoding_seed_base(split_seed=0, iteration_step=1),
+            "llm_request_base",
             dataset="2plonsky2018when",
-            phase=PHASE_POPULATION,
-            participant=None,
+            phase="population",
             iteration=1,
-            role="fresh",
-            candidate=candidate,
+            role="iteration",
         )
+        return int(base) + int(candidate)
 
     configure_pics_aamas_v0_prompt(False)
     pics_llm = teh._phase_llm_decoding_seed_base(split_seed=4, iteration_step=2, participant_id=3, batch_offset=5)
@@ -453,8 +452,8 @@ def test_pics_run_seed_keeps_sa40_and_reruns_method(tmp_path: Path):
         assert schedule_1 != schedule_0
         assert teh._aamas_or_legacy_seed(
             99, "parent_sampling", dataset="2plonsky2018when", phase="population", iteration=1
-        ) != parent_0
-        assert _llm() != llm_0
+        ) == parent_0
+        assert _llm() == llm_0
         assert structure_aware_subset_fingerprint(**fp_args) == fp_fixed
         transfer = selection_digest(
             master_seed=1,
@@ -465,17 +464,8 @@ def test_pics_run_seed_keeps_sa40_and_reruns_method(tmp_path: Path):
         assert transfer == schedule_1
 
         set_pics_run_seeds(run_seed=1, split_seed=0)
-        assert _llm() == pics_lossless_llm_request_seed(
-            dataset="2plonsky2018when",
-            phase=PHASE_POPULATION,
-            participant=None,
-            iteration=1,
-            role="fresh",
-            candidate=0,
-        )
-        assert pics_lossless_subseed("llm_request", dataset="2plonsky2018when", phase=PHASE_POPULATION, candidate=0) == pics_lossless_subseed(
-            "llm_request", dataset="2plonsky2018when", phase=PHASE_POPULATION, candidate=0
-        )
+        assert _llm() == 80_000 + 1_000_003
+        assert _llm(9) == 80_000 + 1_000_003 + 9
 
         marked = tmp_path / "job"
         write_trial_policy_marker(marked)
