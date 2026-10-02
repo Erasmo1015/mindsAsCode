@@ -3429,11 +3429,65 @@ def run_global_evolution_phase(
             f"min_improvement={_EARLY_STOP_MIN_IMPROVEMENT:.3f}"
         )
 
+    from utils.teh.pics_v4 import HARD_PROMPT_TOKEN_CAP, using_pics_v4 as _population_v4
+
+    population_trials = list(pooled_train)
+    if pooled_val:
+        population_trials.extend(list(pooled_val))
+    if _population_v4():
+        from utils.teh.aamas_v0_lossless_trials import pics_run_seed as _population_run_seed
+        from utils.teh.pics_v4_panels import bank_filename, evolution_bank_dir
+
+        run_seed = _population_run_seed()
+        if run_seed is None:
+            raise RuntimeError("PICS v4 population panels require --pics_run_seed.")
+        _ensure_pics_v4_population_fresh_bank(
+            dataset=str(dataset),
+            trials=population_trials,
+            seed_code=str(seed_code),
+            n_slots=int(n_candidates_per_iteration),
+            run_prompts_dir=run_prompts_dir,
+            output_dir=global_dir if save_artifacts else None,
+            fitness_metric="loglik",
+            master_seed=int(run_seed),
+            cap=int(HARD_PROMPT_TOKEN_CAP),
+        )
+        parent_bank_path = evolution_bank_dir(global_dir) / bank_filename("population", "parent_conditioned")
+        if save_artifacts and parent_bank_path.is_file():
+            _ensure_pics_v4_population_parent_bank(
+                dataset=str(dataset),
+                trials=population_trials,
+                elite_parents=elite_parents,
+                sample_size=int(sample_size),
+                max_parent_chars=int(max_parent_chars),
+                n_slots=int(n_candidates_per_iteration),
+                run_prompts_dir=run_prompts_dir,
+                output_dir=global_dir,
+                fitness_metric="loglik",
+                master_seed=int(run_seed),
+                cap=int(HARD_PROMPT_TOKEN_CAP),
+            )
+
     for iteration in range(n_iterations):
         iteration_step = iteration + 1
         print(f"\n{'='*80}")
         print(f"Global iteration {iteration_step}/{n_iterations}")
         print(f"{'='*80}")
+        if _population_v4() and int(iteration_step) >= 2:
+            from utils.teh.pics_v4_panels import registered_panel_bank
+
+            try:
+                registered_panel_bank(
+                    dataset=str(dataset),
+                    phase="population",
+                    participant_id=None,
+                    name="parent_conditioned",
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "PICS v4 population parent-safe bank is missing after iteration 1. "
+                    "Resume requires the saved iteration-1 unique elite and its fingerprint."
+                ) from exc
 
         iter_dir: Optional[Path] = None
         if save_artifacts:
@@ -3886,6 +3940,20 @@ def run_global_evolution_phase(
                 else ")"
             )
         )
+        if _population_v4() and int(iteration_step) == 1:
+            _ensure_pics_v4_population_parent_bank(
+                dataset=str(dataset),
+                trials=population_trials,
+                elite_parents=elite_parents,
+                sample_size=int(sample_size),
+                max_parent_chars=int(max_parent_chars),
+                n_slots=int(n_candidates_per_iteration),
+                run_prompts_dir=run_prompts_dir,
+                output_dir=global_dir if save_artifacts else None,
+                fitness_metric="loglik",
+                master_seed=int(_population_run_seed()),
+                cap=int(HARD_PROMPT_TOKEN_CAP),
+            )
         pool_best_test_record = _passive_diagnostic_test_of_program(
             dataset=dataset,
             code=elite_parents[0][0],
@@ -6387,6 +6455,17 @@ def _candidate_prompt_diagnostic(
     ):
         if key in candidate_diag:
             merged[key] = candidate_diag[key]
+    selection = dict((candidate_diag or {}).get("aamas_selection") or {})
+    for key in (
+        "expected_parent_envelope_tokens",
+        "actual_parent_tokens",
+        "nominal_panel_trials",
+        "visible_trial_count",
+        "suffix_trials_hidden",
+        "input_token_count",
+    ):
+        if key in selection:
+            merged[key] = selection[key]
     merged.update(
         _prompt_example_split_diagnostic_fields(
             train_before=int(candidate_diag.get("train_trials_before") or 0),
@@ -6572,6 +6651,16 @@ def _pack_aamas_lossless_prompt(
             )
             prompt = actual_wrap(text) if text else actual_wrap("")
             tokens = estimate_tokens(prompt, estimator="qwen_chat")
+    if using_pics_v4():
+        parent_context = parent_context_builder(
+            prompt_parent_programs=list(parents),
+            **parent_context_kwargs,
+        )
+        stats["actual_parent_tokens"] = _pics_v4_parent_section_tokens(parent_context)
+        stats["nominal_panel_trials"] = int(stats.get("panel_n") or stats.get("nominal_panel_trials") or 0)
+        stats["visible_trial_count"] = int(stats.get("n_supervised") or 0)
+        stats["suffix_trials_hidden"] = int(stats["nominal_panel_trials"]) - int(stats["visible_trial_count"])
+        stats["input_token_count"] = int(tokens)
     if "history_prefix" in prompt:
         raise RuntimeError("AAMAS v0 prompt rendered the forbidden name history_prefix")
     if tokens > int(hard_prompt_token_cap):
@@ -10481,6 +10570,773 @@ def _truncate_parent_program_for_prompt(code: str, max_parent_chars: int) -> Tup
     return f"{head}{join_newline}{marker}{tail}", True
 
 
+def _pics_v4_parent_section_tokens(parent_context: str) -> int:
+    """Qwen chat-template tokens of a formatted parent section."""
+    from utils.teh.prompt_units import qwen_user_prompt_token_count
+
+    full = int(qwen_user_prompt_token_count(parent_context or ""))
+    bare = int(qwen_user_prompt_token_count(""))
+    return max(0, full - bare)
+
+
+def _pics_v4_fixed_parent_wrap(
+    *,
+    base_prompt: str,
+    parent_programs: List[str],
+    parent_train_accuracies: Optional[List[float]],
+    parent_val_logliks: Optional[List[Optional[float]]],
+    code_template_suffix: str,
+    candidate_output_rules: str,
+    runtime_contract: str,
+    dataset: str,
+    fitness_metric: str,
+    parent_context_override: Optional[str] = None,
+):
+    """Prompt wrapper whose parent section is fixed before any panel is cut."""
+    if parent_context_override is None:
+        parent_context = _build_parent_context_for_prompt(
+            prompt_parent_programs=list(parent_programs),
+            num_parents=len(parent_programs),
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+            parent_train_accuracies=parent_train_accuracies,
+            parent_train_mses=None,
+            parent_val_logliks=parent_val_logliks,
+            parent_overall_logliks=None,
+            cpc18_official_mse=False,
+        )
+    else:
+        parent_context = str(parent_context_override)
+
+    def wrap(body: str) -> str:
+        return _build_psych_prompt_text(
+            base_prompt=base_prompt,
+            state_text=body,
+            extra_state_text="",
+            parent_context=parent_context,
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=candidate_output_rules,
+            runtime_contract=runtime_contract,
+            dataset=dataset,
+        )
+
+    return wrap
+
+
+def _pics_v4_mean_parent_envelope(
+    elite_parents: Sequence[Tuple[Any, ...]],
+    elite_val_logliks: Optional[Sequence[Optional[float]]],
+    *,
+    sample_size: int,
+    max_parent_chars: int,
+    dataset: str,
+    fitness_metric: str,
+) -> Dict[str, Any]:
+    """Expected formatted cost of sampling X unique parents from the initial elite.
+
+    The 5000-character value is only the per-program formatting cap. Programs are
+    not padded, and the longest programs are not selected. The reservation is the
+    fixed X-parent wrapper plus X times the mean program contribution, measured
+    with the real parent formatter and the Qwen chat-template tokenizer.
+    """
+    import math
+
+    from utils.teh.elite_sha import source_sha256
+
+    seen = set()
+    rows: List[Dict[str, Any]] = []
+    for index, parent in enumerate(elite_parents):
+        code = str(parent[0] or "")
+        digest = source_sha256(code)
+        if digest in seen:
+            continue
+        seen.add(digest)
+        capped, _was = _truncate_parent_program_for_prompt(code, int(max_parent_chars))
+        train_ll = float(_train_loglik_from_elite_tuple(tuple(parent)))
+        val_ll = None
+        if elite_val_logliks is not None and index < len(elite_val_logliks):
+            raw_val = elite_val_logliks[index]
+            val_ll = None if raw_val is None else float(raw_val)
+        program_id = str(parent[3]) if len(parent) > 3 else ""
+        rows.append(
+            {
+                "code": capped,
+                "program_id": program_id,
+                "train_loglik": train_ll,
+                "val_loglik": val_ll,
+            }
+        )
+    rows.sort(key=lambda row: (row["program_id"], row["code"]))
+    pool_size = len(rows)
+    x_effective = min(max(0, int(sample_size)), pool_size)
+
+    def _section(codes: Sequence[str], trains: Sequence[float], vals: Sequence[Optional[float]]) -> str:
+        return _build_parent_context_for_prompt(
+            prompt_parent_programs=list(codes),
+            num_parents=len(codes),
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+            parent_train_accuracies=list(trains) if codes else None,
+            parent_train_mses=None,
+            parent_val_logliks=list(vals) if codes else None,
+            parent_overall_logliks=None,
+            cpc18_official_mse=False,
+        )
+
+    if x_effective <= 0:
+        return {
+            "reservation": "",
+            "expected_parent_tokens": 0,
+            "x_effective": 0,
+            "pool_size": pool_size,
+            "mean_program_tokens": 0.0,
+            "overhead_tokens": 0,
+            "unique_initial_elite": rows,
+        }
+    empty_codes = [""] * x_effective
+    empty_trains = [0.0] * x_effective
+    empty_vals: List[Optional[float]] = [None] * x_effective
+    overhead_tokens = _pics_v4_parent_section_tokens(
+        _section(empty_codes, empty_trains, empty_vals)
+    )
+    deltas: List[int] = []
+    for row in rows:
+        codes = [str(row["code"])] + [""] * (x_effective - 1)
+        trains = [float(row["train_loglik"])] + [0.0] * (x_effective - 1)
+        vals = [row["val_loglik"]] + [None] * (x_effective - 1)
+        deltas.append(
+            _pics_v4_parent_section_tokens(_section(codes, trains, vals)) - overhead_tokens
+        )
+    mean_program_tokens = float(sum(deltas)) / float(len(deltas))
+    expected = int(math.ceil(overhead_tokens + x_effective * mean_program_tokens - 1e-9))
+    skeleton = _section(empty_codes, empty_trains, empty_vals)
+    reservation = skeleton
+    if _pics_v4_parent_section_tokens(reservation) < expected:
+        lo = 0
+        hi = max(1, expected)
+        while True:
+            filler = " ".join(f"env{i}" for i in range(hi))
+            if _pics_v4_parent_section_tokens(skeleton + "\n" + filler) >= expected:
+                break
+            hi *= 2
+            if hi > expected + 20000:
+                raise RuntimeError(
+                    "PICS v4 mean parent envelope could not reserve the expected parent tokens."
+                )
+        while lo < hi:
+            mid = (lo + hi) // 2
+            filler = " ".join(f"env{i}" for i in range(mid))
+            text = skeleton if mid == 0 else skeleton + "\n" + filler
+            if _pics_v4_parent_section_tokens(text) >= expected:
+                hi = mid
+            else:
+                lo = mid + 1
+        reservation = skeleton if lo == 0 else skeleton + "\n" + " ".join(f"env{i}" for i in range(lo))
+    return {
+        "reservation": reservation,
+        "expected_parent_tokens": expected,
+        "x_effective": int(x_effective),
+        "pool_size": int(pool_size),
+        "mean_program_tokens": mean_program_tokens,
+        "overhead_tokens": int(overhead_tokens),
+        "unique_initial_elite": rows,
+    }
+
+
+def _ensure_pics_v4_evolution_panel_banks(
+    *,
+    dataset: str,
+    participant_id: int,
+    train_trials: Sequence[Dict[str, Any]],
+    val_trials: Optional[Sequence[Dict[str, Any]]],
+    seed_code: str,
+    elite_parents: Sequence[Tuple[Any, ...]],
+    elite_val_logliks: Optional[Sequence[Optional[float]]],
+    sample_size: int,
+    n_candidates: int,
+    max_parent_chars: int,
+    run_prompts_dir: Optional[str],
+    output_path: Optional[Path],
+    fitness_metric: str,
+    master_seed: int,
+    cap: int,
+) -> None:
+    """Build the fresh and parent-safe banks once, after exploration, before evolution."""
+    from utils.prompt_flags import load_single_code_template, single_code_template_prompt_suffix
+    from utils.teh.pics_v4 import HARD_PROMPT_TOKEN_CAP
+    from utils.teh.pics_v4_panels import (
+        assert_panel_bank_file,
+        bank_filename,
+        build_continuation_bank,
+        evolution_bank_dir,
+        register_panel_bank,
+        write_panel_bank,
+    )
+    from utils.teh.prompt_context import RUNTIME_CONTRACT_HEADER
+    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
+    if not run_prompts_dir:
+        raise RuntimeError(
+            "PICS v4 participant evolution requires the registered prompt directory."
+        )
+    prompt_dir = Path(run_prompts_dir)
+    base_prompt = (prompt_dir / "infer_single_choice.txt").read_text(encoding="utf-8")
+    code_template_suffix = single_code_template_prompt_suffix(
+        load_single_code_template(prompt_dir / "single_code_template.txt")
+    )
+    runtime_contract = "" if RUNTIME_CONTRACT_HEADER in base_prompt else _runtime_contract_text(
+        run_prompts_dir
+    )
+    rules = f"\n{CANDIDATE_OUTPUT_RULES}\n"
+    pool: List[Dict[str, Any]] = list(train_trials or [])
+    if val_trials:
+        pool.extend(list(val_trials))
+    y_slots = max(1, int(n_candidates))
+    hard_cap = int(cap or HARD_PROMPT_TOKEN_CAP)
+    phase = "participant_evolution"
+    fresh_wrap = _pics_v4_fixed_parent_wrap(
+        base_prompt=base_prompt,
+        parent_programs=[str(seed_code or "")],
+        parent_train_accuracies=None,
+        parent_val_logliks=None,
+        code_template_suffix=code_template_suffix,
+        candidate_output_rules=rules,
+        runtime_contract=runtime_contract,
+        dataset=dataset,
+        fitness_metric=fitness_metric,
+    )
+    stored_fresh = None
+    stored_parent = None
+    root = Path(output_path) if output_path is not None else None
+    bank_root = evolution_bank_dir(root) if root is not None else None
+    fresh_file = bank_filename(phase, "fresh")
+    parent_file = bank_filename(phase, "parent_conditioned")
+    if bank_root is not None and (
+        (bank_root / fresh_file).is_file() or (bank_root / parent_file).is_file()
+    ):
+        if not (bank_root / fresh_file).is_file() or not (bank_root / parent_file).is_file():
+            raise RuntimeError(
+                f"Refusing to resume {root}: missing a participant-evolution panel bank."
+            )
+        stored_fresh = json.loads((bank_root / fresh_file).read_text(encoding="utf-8"))
+        stored_parent = json.loads((bank_root / parent_file).read_text(encoding="utf-8"))
+        if "seed_program" not in stored_fresh or "unique_initial_elite" not in stored_parent:
+            raise RuntimeError(
+                f"Refusing to resume {root}: missing dual-bank envelope fields."
+            )
+        seed_for_bank = str(stored_fresh.get("seed_program") or "")
+        stored_elite = _pics_v4_elite_from_snapshot(stored_parent.get("unique_initial_elite") or [])
+        stored_vals = [
+            None if row.get("val_loglik") is None else float(row["val_loglik"])
+            for row in stored_parent.get("unique_initial_elite") or []
+        ]
+        if int(stored_parent.get("sample_size") or -1) != int(sample_size):
+            raise RuntimeError(
+                f"Refusing to resume {root}: parent sample_size changed."
+            )
+        envelope = _pics_v4_mean_parent_envelope(
+            stored_elite,
+            stored_vals,
+            sample_size=int(sample_size),
+            max_parent_chars=int(stored_parent.get("max_parent_chars") or max_parent_chars),
+            dataset=str(dataset),
+            fitness_metric=str(fitness_metric),
+        )
+        if int(envelope["expected_parent_tokens"]) != int(stored_parent.get("expected_parent_tokens") or -1):
+            raise RuntimeError(
+                f"Refusing to resume {root}: mean parent envelope tokens do not match."
+            )
+        fresh_wrap = _pics_v4_fixed_parent_wrap(
+            base_prompt=base_prompt,
+            parent_programs=[seed_for_bank],
+            parent_train_accuracies=None,
+            parent_val_logliks=None,
+            code_template_suffix=code_template_suffix,
+            candidate_output_rules=rules,
+            runtime_contract=runtime_contract,
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+        )
+    else:
+        if root is not None and any(root.glob("iteration_*")):
+            raise RuntimeError(
+                f"Refusing to resume {root}: evolution output is missing dual-bank files."
+            )
+        envelope = _pics_v4_mean_parent_envelope(
+            elite_parents,
+            elite_val_logliks,
+            sample_size=int(sample_size),
+            max_parent_chars=int(max_parent_chars),
+            dataset=str(dataset),
+            fitness_metric=str(fitness_metric),
+        )
+        seed_for_bank = str(seed_code or "")
+    parent_wrap = _pics_v4_fixed_parent_wrap(
+        base_prompt=base_prompt,
+        parent_programs=[],
+        parent_train_accuracies=None,
+        parent_val_logliks=None,
+        code_template_suffix=code_template_suffix,
+        candidate_output_rules=rules,
+        runtime_contract=runtime_contract,
+        dataset=dataset,
+        fitness_metric=fitness_metric,
+        parent_context_override=str(envelope["reservation"]),
+    )
+
+    def _build(wrap, bank_name: str):
+        return build_continuation_bank(
+            pool,
+            dataset=str(dataset),
+            master_seed=int(master_seed),
+            phase=phase,
+            participant_id=int(participant_id),
+            n_slots=y_slots,
+            wrap=wrap,
+            cap=hard_cap,
+            bank=bank_name,
+            require_full_coverage=True,
+        )
+
+    fresh = _build(fresh_wrap, "fresh")
+    parent_conditioned = _build(parent_wrap, "parent_conditioned")
+    fresh.expected_parent_tokens = _pics_v4_parent_section_tokens(
+        _build_parent_context_for_prompt(
+            prompt_parent_programs=[seed_for_bank],
+            num_parents=1,
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+            parent_train_accuracies=None,
+            parent_train_mses=None,
+            parent_val_logliks=None,
+            parent_overall_logliks=None,
+            cpc18_official_mse=False,
+        )
+    )
+    parent_conditioned.expected_parent_tokens = int(envelope["expected_parent_tokens"])
+    if root is not None:
+        fresh_path = evolution_bank_dir(root) / bank_filename(phase, "fresh")
+        parent_path = evolution_bank_dir(root) / bank_filename(phase, "parent_conditioned")
+        if stored_fresh is not None and stored_parent is not None:
+            assert_panel_bank_file(fresh_path, fresh, phase=phase, name="fresh")
+            assert_panel_bank_file(
+                parent_path, parent_conditioned, phase=phase, name="parent_conditioned"
+            )
+        else:
+            write_panel_bank(
+                root,
+                fresh,
+                phase=phase,
+                name="fresh",
+                extra={
+                    "seed_program": seed_for_bank,
+                    "expected_parent_tokens": int(fresh.expected_parent_tokens),
+                },
+            )
+            write_panel_bank(
+                root,
+                parent_conditioned,
+                phase=phase,
+                name="parent_conditioned",
+                extra={
+                    "unique_initial_elite": list(envelope["unique_initial_elite"]),
+                    "sample_size": int(sample_size),
+                    "max_parent_chars": int(max_parent_chars),
+                    "n_candidates": int(y_slots),
+                    "expected_parent_tokens": int(envelope["expected_parent_tokens"]),
+                    "x_effective": int(envelope["x_effective"]),
+                },
+            )
+    register_panel_bank(
+        dataset=str(dataset),
+        phase=phase,
+        participant_id=int(participant_id),
+        name="fresh",
+        bank=fresh,
+    )
+    register_panel_bank(
+        dataset=str(dataset),
+        phase=phase,
+        participant_id=int(participant_id),
+        name="parent_conditioned",
+        bank=parent_conditioned,
+    )
+
+
+def _pics_v4_prompt_pieces(run_prompts_dir: str):
+    from utils.prompt_flags import load_single_code_template, single_code_template_prompt_suffix
+    from utils.teh.prompt_context import RUNTIME_CONTRACT_HEADER
+    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
+
+    prompt_dir = Path(run_prompts_dir)
+    base_prompt = (prompt_dir / "infer_single_choice.txt").read_text(encoding="utf-8")
+    suffix = single_code_template_prompt_suffix(
+        load_single_code_template(prompt_dir / "single_code_template.txt")
+    )
+    runtime_contract = "" if RUNTIME_CONTRACT_HEADER in base_prompt else _runtime_contract_text(
+        run_prompts_dir
+    )
+    return base_prompt, suffix, runtime_contract, f"\n{CANDIDATE_OUTPUT_RULES}\n"
+
+
+def _pics_v4_elite_snapshot(elite_parents: Sequence[Tuple[Any, ...]]) -> List[Dict[str, Any]]:
+    rows = []
+    for parent in elite_parents:
+        rows.append(
+            {
+                "code": str(parent[0] or ""),
+                "program_id": str(parent[3]) if len(parent) > 3 else "",
+                "train_loglik": float(_train_loglik_from_elite_tuple(tuple(parent))),
+            }
+        )
+    return rows
+
+
+def _pics_v4_elite_from_snapshot(rows: Sequence[Dict[str, Any]]) -> List[Tuple[Any, ...]]:
+    elites = []
+    for row in rows:
+        train_ll = float(row["train_loglik"])
+        elites.append(
+            (str(row["code"]), train_ll, None, str(row.get("program_id") or ""), None, None, train_ll)
+        )
+    return elites
+
+
+def _pics_v4_install_constructed_bank(
+    *,
+    dataset: str,
+    phase: str,
+    participant_id: Optional[int],
+    trials: Sequence[Dict[str, Any]],
+    wrap,
+    n_slots: int,
+    bank_name: str,
+    master_seed: int,
+    cap: int,
+    output_dir: Optional[Path],
+    require_full_coverage: bool,
+    extra: Optional[Dict[str, Any]] = None,
+    stored_wrap=None,
+    expected_parent_tokens: int = 0,
+    expected_from_payload=None,
+) -> None:
+    """Build a frozen bank, or rebuild it from the saved file and verify the fingerprint."""
+    from utils.teh.pics_v4_panels import (
+        assert_panel_bank_file,
+        bank_filename,
+        build_continuation_bank,
+        evolution_bank_dir,
+        register_panel_bank,
+        write_panel_bank,
+    )
+
+    use_wrap = wrap
+    existing = None
+    if output_dir is not None:
+        path = evolution_bank_dir(output_dir) / bank_filename(phase, bank_name)
+        if path.is_file():
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if stored_wrap is None:
+                raise RuntimeError(
+                    f"Refusing to resume {path}: the saved panel bank cannot be rebuilt."
+                )
+            use_wrap = stored_wrap(existing)
+    bank = build_continuation_bank(
+        trials,
+        dataset=str(dataset),
+        master_seed=int(master_seed),
+        phase=str(phase),
+        participant_id=None if participant_id is None else int(participant_id),
+        n_slots=int(n_slots),
+        wrap=use_wrap,
+        cap=int(cap),
+        bank=str(bank_name),
+        require_full_coverage=bool(require_full_coverage),
+    )
+    if existing is not None and expected_from_payload is not None:
+        bank.expected_parent_tokens = int(expected_from_payload(existing))
+    else:
+        bank.expected_parent_tokens = int(expected_parent_tokens)
+    if existing is not None and existing.get("expected_parent_tokens") is not None:
+        if int(existing["expected_parent_tokens"]) != int(bank.expected_parent_tokens):
+            raise RuntimeError(
+                f"Refusing to resume {path}: expected parent-envelope tokens "
+                f"{existing['expected_parent_tokens']} do not match "
+                f"{bank.expected_parent_tokens}."
+            )
+    if output_dir is not None:
+        path = evolution_bank_dir(output_dir) / bank_filename(phase, bank_name)
+        if existing is not None:
+            assert_panel_bank_file(path, bank, phase=phase, name=bank_name)
+        else:
+            write_panel_bank(
+                output_dir,
+                bank,
+                phase=phase,
+                name=bank_name,
+                extra=extra,
+            )
+    register_panel_bank(
+        dataset=str(dataset),
+        phase=str(phase),
+        participant_id=None if participant_id is None else int(participant_id),
+        name=str(bank_name),
+        bank=bank,
+    )
+
+
+def _ensure_pics_v4_population_fresh_bank(
+    *,
+    dataset: str,
+    trials: Sequence[Dict[str, Any]],
+    seed_code: str,
+    n_slots: int,
+    run_prompts_dir: Optional[str],
+    output_dir: Optional[Path],
+    fitness_metric: str,
+    master_seed: int,
+    cap: int,
+) -> None:
+    from utils.teh.pics_v4_panels import registered_panel_bank
+
+    try:
+        registered_panel_bank(
+            dataset=dataset,
+            phase="population",
+            participant_id=None,
+            name="fresh",
+        )
+        return
+    except RuntimeError:
+        pass
+    if not run_prompts_dir:
+        raise RuntimeError("PICS v4 population panels require the registered prompt directory.")
+    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir)
+
+    def _section_tokens(program: str) -> int:
+        return _pics_v4_parent_section_tokens(
+            _build_parent_context_for_prompt(
+                prompt_parent_programs=[str(program)],
+                num_parents=1,
+                dataset=dataset,
+                fitness_metric=fitness_metric,
+                parent_train_accuracies=None,
+                parent_train_mses=None,
+                parent_val_logliks=None,
+                parent_overall_logliks=None,
+                cpc18_official_mse=False,
+            )
+        )
+
+    def _wrap_for(program: str):
+        return _pics_v4_fixed_parent_wrap(
+            base_prompt=base_prompt,
+            parent_programs=[str(program)],
+            parent_train_accuracies=None,
+            parent_val_logliks=None,
+            code_template_suffix=suffix,
+            candidate_output_rules=rules,
+            runtime_contract=runtime_contract,
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+        )
+
+    seed_tokens = _section_tokens(seed_code)
+    _pics_v4_install_constructed_bank(
+        dataset=dataset,
+        phase="population",
+        participant_id=None,
+        trials=trials,
+        wrap=_wrap_for(seed_code),
+        n_slots=n_slots,
+        bank_name="fresh",
+        master_seed=master_seed,
+        cap=cap,
+        output_dir=output_dir,
+        require_full_coverage=False,
+        extra={"seed_program": str(seed_code), "expected_parent_tokens": seed_tokens},
+        stored_wrap=lambda payload: _wrap_for(str(payload.get("seed_program") or "")),
+        expected_parent_tokens=seed_tokens,
+        expected_from_payload=lambda payload: _section_tokens(str(payload.get("seed_program") or "")),
+    )
+
+
+def _ensure_pics_v4_population_parent_bank(
+    *,
+    dataset: str,
+    trials: Sequence[Dict[str, Any]],
+    elite_parents: Sequence[Tuple[Any, ...]],
+    sample_size: int,
+    max_parent_chars: int,
+    n_slots: int,
+    run_prompts_dir: Optional[str],
+    output_dir: Optional[Path],
+    fitness_metric: str,
+    master_seed: int,
+    cap: int,
+) -> None:
+    from utils.teh.pics_v4_panels import registered_panel_bank
+
+    try:
+        registered_panel_bank(
+            dataset=dataset,
+            phase="population",
+            participant_id=None,
+            name="parent_conditioned",
+        )
+        return
+    except RuntimeError:
+        pass
+    if not run_prompts_dir:
+        raise RuntimeError("PICS v4 population panels require the registered prompt directory.")
+    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir)
+
+    def _wrap_for(reservation: str):
+        return _pics_v4_fixed_parent_wrap(
+            base_prompt=base_prompt,
+            parent_programs=[],
+            parent_train_accuracies=None,
+            parent_val_logliks=None,
+            code_template_suffix=suffix,
+            candidate_output_rules=rules,
+            runtime_contract=runtime_contract,
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+            parent_context_override=reservation,
+        )
+
+    def _envelope_from(elites, chars: int):
+        return _pics_v4_mean_parent_envelope(
+            elites,
+            None,
+            sample_size=int(sample_size),
+            max_parent_chars=int(chars),
+            dataset=str(dataset),
+            fitness_metric=str(fitness_metric),
+        )
+
+    def _from_stored(payload):
+        if "unique_initial_elite" not in payload:
+            raise RuntimeError(
+                "Refusing to resume the population parent-conditioned bank: "
+                "the iteration-1 unique elite is missing."
+            )
+        if int(payload.get("sample_size") or -1) != int(sample_size):
+            raise RuntimeError(
+                "Refusing to resume the population parent-conditioned bank: sample_size changed."
+            )
+        elites = _pics_v4_elite_from_snapshot(payload["unique_initial_elite"])
+        envelope = _envelope_from(elites, int(payload.get("max_parent_chars") or max_parent_chars))
+        if int(envelope["expected_parent_tokens"]) != int(payload.get("expected_parent_tokens") or -1):
+            raise RuntimeError(
+                "Refusing to resume the population parent-conditioned bank: "
+                "mean parent-envelope tokens do not match."
+            )
+        return _wrap_for(str(envelope["reservation"]))
+
+    envelope = _envelope_from(elite_parents, int(max_parent_chars))
+    _pics_v4_install_constructed_bank(
+        dataset=dataset,
+        phase="population",
+        participant_id=None,
+        trials=trials,
+        wrap=_wrap_for(str(envelope["reservation"])),
+        n_slots=n_slots,
+        bank_name="parent_conditioned",
+        master_seed=master_seed,
+        cap=cap,
+        output_dir=output_dir,
+        require_full_coverage=False,
+        extra={
+            "unique_initial_elite": list(envelope["unique_initial_elite"]),
+            "sample_size": int(sample_size),
+            "max_parent_chars": int(max_parent_chars),
+            "n_candidates": int(n_slots),
+            "expected_parent_tokens": int(envelope["expected_parent_tokens"]),
+            "x_effective": int(envelope["x_effective"]),
+        },
+        stored_wrap=_from_stored,
+        expected_parent_tokens=int(envelope["expected_parent_tokens"]),
+        expected_from_payload=lambda payload: int(payload.get("expected_parent_tokens") or 0),
+    )
+
+
+def _ensure_pics_v4_exploration_parent_bank(
+    *,
+    dataset: str,
+    participant_id: int,
+    trials: Sequence[Dict[str, Any]],
+    parent_code: str,
+    n_slots: int,
+    run_prompts_dir: Optional[str],
+    output_dir: Optional[Path],
+    fitness_metric: str,
+    master_seed: int,
+    cap: int,
+) -> None:
+    from utils.teh.pics_v4_panels import registered_panel_bank
+
+    try:
+        registered_panel_bank(
+            dataset=dataset,
+            phase="exploration",
+            participant_id=int(participant_id),
+            name="parent",
+        )
+        return
+    except RuntimeError:
+        pass
+    if not run_prompts_dir:
+        raise RuntimeError("PICS v4 exploration panels require the registered prompt directory.")
+    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir)
+
+    def _wrap_for(program: str):
+        return _pics_v4_fixed_parent_wrap(
+            base_prompt=base_prompt,
+            parent_programs=[str(program)],
+            parent_train_accuracies=None,
+            parent_val_logliks=None,
+            code_template_suffix=suffix,
+            candidate_output_rules=rules,
+            runtime_contract=runtime_contract,
+            dataset=dataset,
+            fitness_metric=fitness_metric,
+        )
+
+    def _section_tokens(program: str) -> int:
+        return _pics_v4_parent_section_tokens(
+            _build_parent_context_for_prompt(
+                prompt_parent_programs=[str(program)],
+                num_parents=1,
+                dataset=dataset,
+                fitness_metric=fitness_metric,
+                parent_train_accuracies=None,
+                parent_train_mses=None,
+                parent_val_logliks=None,
+                parent_overall_logliks=None,
+                cpc18_official_mse=False,
+            )
+        )
+
+    parent_tokens = _section_tokens(parent_code)
+    _pics_v4_install_constructed_bank(
+        dataset=dataset,
+        phase="exploration",
+        participant_id=int(participant_id),
+        trials=trials,
+        wrap=_wrap_for(parent_code),
+        n_slots=n_slots,
+        bank_name="parent",
+        master_seed=master_seed,
+        cap=cap,
+        output_dir=output_dir,
+        require_full_coverage=True,
+        extra={"parent_program": str(parent_code), "expected_parent_tokens": parent_tokens},
+        stored_wrap=lambda payload: _wrap_for(str(payload.get("parent_program") or "")),
+        expected_parent_tokens=parent_tokens,
+        expected_from_payload=lambda payload: _section_tokens(str(payload.get("parent_program") or "")),
+    )
+
+
 def _decayed_fresh_n_for_iteration(
     fresh_n_max: int,
     iter_idx: int,
@@ -11005,8 +11861,13 @@ Provide only the code for choose(...) as a complete function body.
     digest_participant = None if mapped_phase == "population" else participant_id
     from utils.teh.pics_v4 import using_pics_v4 as _using_pics_v4
 
-    heterogeneous_explore = aamas_on and int(n_variants) > 1 and (
-        mapped_phase == PHASE_EXPLORATION or _using_pics_v4()
+    # PICS v4 selects the panel from absolute slot offset+local index for every
+    # batch size, including a single candidate. Historical AAMAS still uses
+    # per-candidate panels only for multi-candidate exploration, and otherwise
+    # keeps base_step = iteration-1.
+    heterogeneous_explore = aamas_on and (
+        _using_pics_v4()
+        or (int(n_variants) > 1 and mapped_phase == PHASE_EXPLORATION)
     )
 
     def _call_truncate(step: int):
@@ -11039,6 +11900,25 @@ Provide only the code for choose(...) as a complete function body.
         )
         if not aamas_on:
             return _truncate_psych_prompt_to_budget(**kwargs)
+        panel_bank = ""
+        if _using_pics_v4():
+            role_name = str(pics_lossless_generation_role or "")
+            if mapped_phase == "exploration":
+                panel_bank = "parent"
+            elif mapped_phase in {"population", "participant_evolution"}:
+                if role_name == "fresh":
+                    panel_bank = "fresh"
+                elif role_name == "parent":
+                    panel_bank = "parent_conditioned"
+                else:
+                    raise RuntimeError(
+                        "PICS v4 selects the fresh or parent-safe panel bank from "
+                        f"the generation role, not {role_name!r} in {mapped_phase}."
+                    )
+            else:
+                raise RuntimeError(
+                    f"PICS v4 has no panel bank for phase {mapped_phase!r}."
+                )
         request = SelectionRequest(
             dataset=str(dataset),
             phase=mapped_phase,
@@ -11046,6 +11926,7 @@ Provide only the code for choose(...) as a complete function body.
             master_seed=int(pics_run_seed),
             participant_id=None if digest_participant is None else int(digest_participant),
             cursor_parent=str(pics_lossless_cursor_parent or ""),
+            panel_bank=panel_bank,
         )
         with selection_scope(request):
             return _truncate_psych_prompt_to_budget(**kwargs)
@@ -11602,6 +12483,31 @@ def _run_pre_evolution_explore_phase(
     candidate_codes: List[str] = []
     candidate_prompt_parent_ids: List[str] = []
     explore_selection_offset = 0
+    from utils.teh.pics_v4 import HARD_PROMPT_TOKEN_CAP, using_pics_v4 as _explore_v4
+
+    if _explore_v4():
+        from utils.teh.aamas_v0_lossless_trials import pics_run_seed as _explore_run_seed
+
+        explore_seed = _explore_run_seed()
+        if explore_seed is None:
+            raise RuntimeError("PICS v4 exploration panels require --pics_run_seed.")
+        explore_trials = list(train_trials)
+        if val_trials:
+            explore_trials.extend(list(val_trials))
+        if not explore_parents:
+            raise RuntimeError("PICS v4 exploration requires the rank-1 parent wrapper.")
+        _ensure_pics_v4_exploration_parent_bank(
+            dataset=str(dataset),
+            participant_id=int(participant_id),
+            trials=explore_trials,
+            parent_code=str(explore_parents[0][0]),
+            n_slots=int(n_explore),
+            run_prompts_dir=run_prompts_dir,
+            output_dir=output_path if save_artifacts else None,
+            fitness_metric=str(fitness_metric),
+            master_seed=int(explore_seed),
+            cap=int(HARD_PROMPT_TOKEN_CAP),
+        )
     for parent_i, ((parent_code, parent_id), n_from_parent) in enumerate(
         zip(explore_parents, parent_counts)
     ):
@@ -12923,6 +13829,33 @@ def run_evolution(
                 track_elite_val_loglik=track_elite_val_loglik,
                 mdl_lambda=mdl_lambda,
             )
+
+    from utils.teh.pics_v4 import using_pics_v4 as _using_pics_v4_evolution
+
+    if _using_pics_v4_evolution() and int(n_iterations) > 0 and run_phase in ("all", "evolution"):
+        from utils.teh.aamas_v0_lossless_trials import pics_run_seed as _pics_run_seed_value
+        from utils.teh.pics_v4 import HARD_PROMPT_TOKEN_CAP
+
+        run_seed = _pics_run_seed_value()
+        if run_seed is None:
+            raise RuntimeError("PICS v4 participant evolution requires --pics_run_seed.")
+        _ensure_pics_v4_evolution_panel_banks(
+            dataset=str(dataset),
+            participant_id=int(participant_id),
+            train_trials=train_trials,
+            val_trials=val_trials,
+            seed_code=str(seed_code),
+            elite_parents=elite_parents,
+            elite_val_logliks=elite_val_logliks,
+            sample_size=int(sample_size),
+            n_candidates=int(n_candidates_per_iteration),
+            max_parent_chars=int(max_parent_chars),
+            run_prompts_dir=run_prompts_dir,
+            output_path=output_path if save_artifacts else None,
+            fitness_metric=str(fitness_metric),
+            master_seed=int(run_seed),
+            cap=int(HARD_PROMPT_TOKEN_CAP),
+        )
 
     # Evolution loop (uses elite_parents pool for parent selection, not a single parent_program)
     simple_iterations_rows: List[Dict[str, Any]] = []

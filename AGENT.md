@@ -760,7 +760,7 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep29 pre-lossless exact coverage (CPU job 308142): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/pre_lossless_exact_coverage/`.
 - Sep29 one-line vs v2 snapshot field loss (15 SA40 trials): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/one_line_vs_snapshot/`.
 - Sep29 compact faithful trial text `compact_faithful_trial_v1` (seeded cursor unchanged): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/compact_faithful_trial_v1/REPORT.md`.
-- Oct3 `pics_v4` final (`structured_snapshot_v2`, `uniform_additional_prompt_v3`, `shuffled_block_slot_stable_v1`, `first_n`, cap 15360, `sha256_unique_v1` cap 5): `utils/teh/pics_v4.py`.
+- Oct3 `pics_v4` final (`structured_snapshot_v2`, `uniform_additional_prompt_v3`, `shuffled_block_slot_stable_v3`, `within_block_carry_forward_v1`, `conditioning_aware_panel_banks_v2`, `initial_unique_elite_mean_x_v1`, `first_n`, cap 15360, `sha256_unique_v1` cap 5): `utils/teh/pics_v4.py`.
 - Oct2 Guan/Bergert integrity replay (310370 vs 305707, 310371 vs 305708): `analysis_2026Sep/Sep30_pics_v4/integrity_replay_audit/REPORT.md`.
 - Oct2 Guan participant-evolution ablation (uniform / order / explore-pool; frozen job 305707, participants 19/15/17, iters 1–3): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/`.
 - Oct2 Guan exploration-only ablation (uniform_only 310645, order_only 310646; participants 19/15/17): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/EXPLORE_RESULTS.md`.

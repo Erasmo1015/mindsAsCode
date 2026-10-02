@@ -133,6 +133,8 @@ class SelectionRequest:
     participant_id: Optional[int] = None
     cursor_parent: str = ""
     vary_exhausted_pass: bool = False
+    panel_bank: str = ""
+    actual_parent_tokens: int = 0
 
 
 def bind_selection(request: Optional[SelectionRequest]) -> None:
@@ -835,12 +837,12 @@ def render_for_request(
     if using_pics_v4():
         from utils.teh.pics_v4_panels import render_slot_panel
 
-        del canonical_wrap
         text, stats = render_slot_panel(
             trials,
             dataset=dataset,
             request=request,
             actual_wrap=actual_wrap,
+            canonical_wrap=canonical_wrap,
             cap=cap,
             policy_id=PICS_V4_TRIAL_POLICY,
         )

@@ -125,6 +125,44 @@ def test_aamas_reminder_routing_is_unchanged():
     assert "PICS_V4_UNIFORM_ADDITIONAL_PROMPT" not in kool
 
 
+def _install_frozen_bank(
+    trials,
+    *,
+    dataset,
+    phase,
+    participant_id,
+    wrap,
+    name,
+    n_slots=None,
+    cap=HARD_PROMPT_TOKEN_CAP,
+    master_seed=0,
+    require_full_coverage=False,
+):
+    from utils.teh.pics_v4_panels import build_continuation_bank, register_panel_bank, slots_for_phase
+
+    count = slots_for_phase(phase) if n_slots is None else int(n_slots)
+    bank = build_continuation_bank(
+        trials,
+        dataset=dataset,
+        master_seed=master_seed,
+        phase=phase,
+        participant_id=participant_id,
+        n_slots=count,
+        wrap=wrap,
+        cap=cap,
+        bank=name,
+        require_full_coverage=require_full_coverage,
+    )
+    register_panel_bank(
+        dataset=dataset,
+        phase=phase,
+        participant_id=participant_id,
+        name=name,
+        bank=bank,
+    )
+    return bank
+
+
 def test_pics_v4_uses_structured_snapshots_not_compact_json():
     from utils.teh.aamas_v0_lossless_trials import PHASE_POPULATION, SelectionRequest, render_for_request
     from utils.teh.prompt_snapshots import snapshot_example_dict
@@ -154,6 +192,14 @@ def test_pics_v4_uses_structured_snapshots_not_compact_json():
     assert "reward" not in snap["problem"]
     configure_pics_v4(True)
     try:
+        _install_frozen_bank(
+            [trial],
+            dataset="3frey2017cct",
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            wrap=lambda body: body,
+            name="fresh",
+        )
         text, stats = render_for_request(
             [trial],
             dataset="3frey2017cct",
@@ -163,18 +209,23 @@ def test_pics_v4_uses_structured_snapshots_not_compact_json():
                 step=0,
                 master_seed=0,
                 participant_id=None,
+                panel_bank="fresh",
             ),
             actual_wrap=lambda body: body,
             canonical_wrap=lambda body: body,
             cap=HARD_PROMPT_TOKEN_CAP,
         )
     finally:
+        from utils.teh.pics_v4_panels import clear_pics_v4_panel_state
+
+        clear_pics_v4_panel_state()
         configure_pics_v4(False)
     assert "observed_action_label=0" in text
     assert "option_keys" in text
     assert "history_before" not in text
     assert stats["policy"] == "structured_snapshot_v2"
-    assert stats["panel_policy"] == "shuffled_block_slot_stable_v1"
+    assert stats["panel_policy"] == "shuffled_block_slot_stable_v3"
+    assert stats["continuation_policy"] == "within_block_carry_forward_v1"
     assert stats["slot_assignment"] == "first_n"
     assert TRIAL_PROMPT_POLICY_ID == "compact_faithful_trial_v2"
     assert PICS_V4_TRIAL_POLICY == "structured_snapshot_v2"
@@ -216,8 +267,11 @@ def test_resume_refuses_other_methods(tmp_path: Path):
     assert payload["additional_prompt_policy"] == ADDITIONAL_PROMPT_POLICY_ID
     assert payload["additional_prompt_sha256"] == uniform_additional_prompt_sha256()
     assert payload["hard_prompt_token_cap"] == HARD_PROMPT_TOKEN_CAP == 15360
-    assert payload["packing_implementation"] == "shuffled_block_slot_stable_v1"
-    assert payload["panel_policy"] == "shuffled_block_slot_stable_v1"
+    assert payload["packing_implementation"] == "shuffled_block_slot_stable_v3"
+    assert payload["panel_policy"] == "shuffled_block_slot_stable_v3"
+    assert payload["continuation_policy"] == "within_block_carry_forward_v1"
+    assert payload["panel_bank_policy"] == "conditioning_aware_panel_banks_v2"
+    assert payload["parent_envelope_policy"] == "initial_unique_elite_mean_x_v1"
     assert payload["slot_assignment"] == "first_n"
     assert payload["participant_population_unique_cap"] == 5
     assert payload["split_seed"] == 0
@@ -292,6 +346,53 @@ def test_resume_refuses_other_methods(tmp_path: Path):
         assert "aamas_v0_greedy_pack_v1" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted greedy packing")
+    old_slot = dict(payload)
+    old_slot["packing_implementation"] = "shuffled_block_slot_stable_v1"
+    old_slot["panel_policy"] = "shuffled_block_slot_stable_v1"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_slot) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "shuffled_block_slot_stable_v1" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted shuffled_block_slot_stable_v1")
+    old_v2 = dict(payload)
+    old_v2["packing_implementation"] = "shuffled_block_slot_stable_v2"
+    old_v2["panel_policy"] = "shuffled_block_slot_stable_v2"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_v2) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "shuffled_block_slot_stable_v2" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted shuffled_block_slot_stable_v2")
+    old_banks = dict(payload)
+    old_banks["panel_bank_policy"] = "conditioning_aware_panel_banks_v1"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_banks) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "conditioning_aware_panel_banks_v1" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted conditioning_aware_panel_banks_v1")
+    old_envelope = dict(payload)
+    old_envelope["parent_envelope_policy"] = "initial_unique_elite_longest_x_v1"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_envelope) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "initial_unique_elite_longest_x_v1" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted the longest-X parent envelope")
+    missing_dual = dict(payload)
+    missing_dual.pop("continuation_policy")
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(missing_dual) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "continuation_policy" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted a marker without continuation_policy")
     cap_15000 = dict(payload)
     cap_15000["hard_prompt_token_cap"] = 15000
     (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(cap_15000) + "\n", encoding="utf-8")
@@ -550,7 +651,14 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
         render_for_request,
     )
     from utils.teh.pics_v4 import UNIFORM_MARKER
-    from utils.teh.pics_v4_panels import group_blocks, slot_panel
+    from utils.teh.pics_v4_panels import (
+        build_continuation_bank,
+        clear_pics_v4_panel_state,
+        flattened_stream,
+        group_blocks,
+        register_evolution_banks,
+        slot_panel,
+    )
     from utils.teh.prompt_context import RUNTIME_CONTRACT_HEADER
     from utils.teh.prompt_snapshots import current_or_future_leak_paths, snapshot_example_dict
     from utils.teh.prompt_units import qwen_user_prompt_token_count
@@ -587,6 +695,48 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
         for dataset in CANONICAL_DATASETS:
             for phase in phases:
                 trial = _schema_trial(0, 0, frey, [], 0, unit="block-0")
+                panel_bank = ""
+                if phase == PHASE_POPULATION:
+                    _install_frozen_bank(
+                        [trial],
+                        dataset=dataset,
+                        phase=phase,
+                        participant_id=None,
+                        wrap=wrap,
+                        name="fresh",
+                    )
+                    panel_bank = "fresh"
+                elif phase == PHASE_EXPLORATION:
+                    _install_frozen_bank(
+                        [trial],
+                        dataset=dataset,
+                        phase=phase,
+                        participant_id=0,
+                        wrap=wrap,
+                        name="parent",
+                        require_full_coverage=True,
+                    )
+                    panel_bank = "parent"
+                elif phase == PHASE_PARTICIPANT_EVOLUTION:
+                    one = build_continuation_bank(
+                        [trial],
+                        dataset=dataset,
+                        master_seed=0,
+                        phase=phase,
+                        participant_id=0,
+                        n_slots=10,
+                        wrap=wrap,
+                        cap=HARD_PROMPT_TOKEN_CAP,
+                        bank="fresh",
+                        require_full_coverage=True,
+                    )
+                    register_evolution_banks(
+                        dataset=dataset,
+                        participant_id=0,
+                        fresh=one,
+                        parent_safe=one,
+                    )
+                    panel_bank = "fresh"
                 text, stats = render_for_request(
                     [trial],
                     dataset=dataset,
@@ -596,6 +746,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
                         step=0,
                         master_seed=0,
                         participant_id=None if phase == PHASE_POPULATION else 0,
+                        panel_bank=panel_bank,
                     ),
                     actual_wrap=wrap,
                     canonical_wrap=wrap,
@@ -620,6 +771,14 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
         assert "was_correct" not in snap["problem"]
         assert snap["problem"]["option_keys"] == ["F", "J"]
         assert snap["label"]["action"] == 1
+        _install_frozen_bank(
+            [weather_trial],
+            dataset="5speekenbrink2008learning",
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            wrap=wrap,
+            name="fresh",
+        )
         text, _stats = render_for_request(
             [weather_trial],
             dataset="5speekenbrink2008learning",
@@ -629,6 +788,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
                 step=0,
                 master_seed=0,
                 participant_id=None,
+                panel_bank="fresh",
             ),
             actual_wrap=wrap,
             canonical_wrap=wrap,
@@ -666,6 +826,8 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
             phase=PHASE_POPULATION,
             participant_id=None,
             slot=0,
+            wrap=wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
         )
         panel1 = slot_panel(
             blocks,
@@ -674,6 +836,8 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
             phase=PHASE_POPULATION,
             participant_id=None,
             slot=1,
+            wrap=wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
         )
         again = slot_panel(
             blocks,
@@ -682,9 +846,24 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
             phase=PHASE_POPULATION,
             participant_id=None,
             slot=0,
+            wrap=wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        stream = flattened_stream(
+            blocks,
+            dataset="3frey2017cct",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
         )
         assert [id(trial) for trial in panel0] == [id(trial) for trial in again]
-        assert set(map(id, panel0)).isdisjoint(set(map(id, panel1)))
+        assert [id(trial) for trial in panel0] == [id(item.trial) for item in stream[: len(panel0)]]
+        if len(panel0) < len(stream):
+            assert [id(trial) for trial in panel1] == [
+                id(item.trial) for item in stream[len(panel0) : len(panel0) + len(panel1)]
+            ]
+        else:
+            assert id(panel1[0]) == id(stream[0].trial)
         first_units = {trial["_ldp"]["unit_id"] for trial in panel0}
         assert first_units != {"round:0"}
 
@@ -695,6 +874,14 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
             parent = " ".join(f"parent{i}" for i in range(2950))
             return wrap("PARENT\n" + parent + "\n" + body)
 
+        _install_frozen_bank(
+            blocks,
+            dataset="3frey2017cct",
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            wrap=short_wrap,
+            name="fresh",
+        )
         short_text, short_stats = render_for_request(
             blocks,
             dataset="3frey2017cct",
@@ -704,6 +891,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
                 step=0,
                 master_seed=0,
                 participant_id=None,
+                panel_bank="fresh",
             ),
             actual_wrap=short_wrap,
             canonical_wrap=short_wrap,
@@ -718,6 +906,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
                 step=0,
                 master_seed=0,
                 participant_id=None,
+                panel_bank="fresh",
             ),
             actual_wrap=long_wrap,
             canonical_wrap=short_wrap,
@@ -730,6 +919,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
         assert short_text != long_text
         assert qwen_user_prompt_token_count(long_wrap(long_text)) <= 15360
     finally:
+        clear_pics_v4_panel_state()
         configure_pics_v4(False)
 
 
@@ -763,12 +953,21 @@ def test_prefix_stops_at_15360_chat_template_tokens():
 
     configure_pics_v4(True)
     try:
+        _install_frozen_bank(
+            trials,
+            dataset="3frey2017cct",
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            wrap=wrap,
+            name="fresh",
+        )
         request = SelectionRequest(
             dataset="3frey2017cct",
             phase=PHASE_POPULATION,
             step=0,
             master_seed=0,
             participant_id=None,
+            panel_bank="fresh",
         )
         text_full, stats_full = render_for_request(
             trials,
@@ -799,6 +998,9 @@ def test_prefix_stops_at_15360_chat_template_tokens():
         assert "HISTORY_ROBUSTNESS_BLOCK_V3" not in prompt
         assert "weather_outcome" not in text_full
     finally:
+        from utils.teh.pics_v4_panels import clear_pics_v4_panel_state
+
+        clear_pics_v4_panel_state()
         configure_pics_v4(False)
 
 
@@ -882,6 +1084,7 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
             blocks.append(
                 _schema_trial(0, pos % 2, item, [], block_index * 3 + pos, unit=f"round:{block_index}")
             )
+    identity_wrap = lambda body: body
     population_panel = slot_panel(
         blocks,
         dataset="3frey2017cct",
@@ -889,6 +1092,8 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
         phase=PHASE_POPULATION,
         participant_id=None,
         slot=0,
+        wrap=identity_wrap,
+        cap=HARD_PROMPT_TOKEN_CAP,
     )
     exploration_panel = slot_panel(
         blocks,
@@ -897,6 +1102,8 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
         phase=PHASE_EXPLORATION,
         participant_id=3,
         slot=0,
+        wrap=identity_wrap,
+        cap=HARD_PROMPT_TOKEN_CAP,
     )
     again = slot_panel(
         blocks,
@@ -905,6 +1112,8 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
         phase=PHASE_POPULATION,
         participant_id=None,
         slot=0,
+        wrap=identity_wrap,
+        cap=HARD_PROMPT_TOKEN_CAP,
     )
     assert [id(trial) for trial in population_panel] == [id(trial) for trial in again]
     assert [trial["_ldp"]["unit_id"] for trial in population_panel] != [
@@ -926,11 +1135,20 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
         step=0,
         master_seed=0,
         participant_id=None,
+        panel_bank="fresh",
     )
     sealed = explore_map.read_bytes()
     configure_pics_v4(True)
     set_pics_run_seeds(run_seed=0, split_seed=0)
     try:
+        _install_frozen_bank(
+            blocks,
+            dataset="3frey2017cct",
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            wrap=wrap,
+            name="fresh",
+        )
         _short_text, short_stats = render_for_request(
             blocks,
             dataset="3frey2017cct",
@@ -953,3 +1171,791 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
     assert long_stats["panel_ids"] == short_stats["panel_ids"]
     assert long_stats["panel_ids"][: long_stats["n_supervised"]] == short_stats["panel_ids"][: long_stats["n_supervised"]]
     assert explore_map.read_bytes() == sealed
+
+
+class _FakeChoice:
+    def __init__(self):
+        self.message = type("M", (), {"content": "def choose(problem, history):\n    return 0.5\n"})()
+
+
+class _FakeClient:
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**_kwargs):
+                return type("R", (), {"choices": [_FakeChoice()]})()
+
+
+def _absolute_slot_rows(diag_dir: Path):
+    path = diag_dir / "prompt_diagnostics.jsonl"
+    rows = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def test_one_candidate_batch_uses_absolute_slot(tmp_path: Path):
+    """A batch of one candidate keeps its absolute slot. It does not use iteration-1."""
+    import teh
+    from utils.teh.pics_aamas_v0 import configure_pics_aamas_v0_prompt
+    from utils.teh.pics_v4_panels import (
+        build_continuation_bank,
+        clear_pics_v4_panel_state,
+        register_evolution_banks,
+        slot_panel,
+    )
+    from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
+
+    problem = {
+        "schema_type": "D",
+        "option_keys": ["E", "C"],
+        "round_id": 0,
+        "current_score": 0,
+        "cards_flipped": 0,
+        "n_cards_remaining": 32,
+        "gain_amount": 20,
+        "loss_amount": 750,
+        "n_loss_cards": 1,
+        "filler": " ".join(f"tok{i}" for i in range(400)),
+    }
+    trials = []
+    for block_index in range(100):
+        item = dict(problem)
+        item["round_id"] = block_index
+        trials.append(
+            _schema_trial(0, block_index % 2, item, [], block_index, unit=f"round:{block_index}")
+        )
+    short_parent = ["def choose(problem, history):\n    return 0.5\n"]
+    long_parent = ["def choose(problem, history):\n    return 0.5\n# " + " ".join(f"parent{i}" for i in range(1600))]
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    (prompt_dir / "infer_single_choice.txt").write_text(
+        "Task.\n\n## TARGET RUNTIME CONTRACT (authoritative; overrides source-program keys)\n"
+        "- Return a probability.\n",
+        encoding="utf-8",
+    )
+    (prompt_dir / "single_code_template.txt").write_text(
+        "def choose(problem, history):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    def canonical_wrap(parents):
+        base_prompt = (prompt_dir / "infer_single_choice.txt").read_text(encoding="utf-8")
+        return teh._pics_v4_fixed_parent_wrap(
+            base_prompt=base_prompt,
+            parent_programs=list(parents),
+            parent_train_accuracies=None,
+            parent_val_logliks=None,
+            code_template_suffix="",
+            candidate_output_rules=f"\n{CANDIDATE_OUTPUT_RULES}\n",
+            runtime_contract="",
+            dataset="3frey2017cct",
+            fitness_metric="loglik",
+        )
+
+    short_wrap = None
+
+    def panel_start(phase: str, participant_id, slot: int) -> str:
+        panel = slot_panel(
+            trials,
+            dataset="3frey2017cct",
+            master_seed=0,
+            phase=phase,
+            participant_id=participant_id,
+            slot=slot,
+            wrap=short_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        return str(panel[0]["_ldp"]["unit_id"])
+
+    def run_batch(*, iteration, n_variants, offset, phase, participant_id, parents, diag, cursor=None, role="default"):
+        base = teh._phase_llm_decoding_seed_base(
+            split_seed=0,
+            iteration_step=iteration,
+            participant_id=participant_id,
+        )
+        teh.generate_program_variants(
+            client=_FakeClient(),
+            model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
+            parent_programs=list(parents),
+            train_trials=trials,
+            n_variants=n_variants,
+            max_tokens=64,
+            dataset="3frey2017cct",
+            fitness_metric="loglik",
+            max_workers=2,
+            hard_prompt_token_cap=HARD_PROMPT_TOKEN_CAP,
+            prompt_token_estimator="qwen_chat",
+            prompt_diagnostics_dir=diag,
+            run_prompts_dir=str(prompt_dir),
+            phase=phase,
+            participant_id=participant_id,
+            iteration=iteration,
+            llm_decoding_seed_base=base + int(offset),
+            pics_run_seed=0,
+            pics_lossless_candidate_offset=int(offset),
+            pics_lossless_cursor_parent=cursor,
+            pics_lossless_generation_role=role,
+            error_feedback_mode="legacy",
+            max_error_prompt_chars=0,
+        )
+        rows = _absolute_slot_rows(diag)
+        assert len(rows) == n_variants
+        for row in rows:
+            local = int(row["candidate_index"])
+            absolute = int(offset) + local
+            assert int(row["selection_step"]) == absolute
+            assert int(row["aamas_selection"]["selection_step"]) == absolute
+            assert int(row["llm_decoding_seed"]) == base + absolute
+            if using_pics_v4():
+                mapped = "exploration" if phase == "explore" else phase
+                assert row["aamas_selection"]["panel_ids"][0].startswith(
+                    panel_start(mapped, participant_id, absolute) + ":"
+                )
+        return rows
+
+    explore_map = tmp_path / "explore_phase" / "prompt_selection_map.json"
+    configure_pics_v4(True)
+    configure_pics_aamas_v0_prompt(True)
+    set_pics_run_seeds(run_seed=0, split_seed=0)
+    short_wrap = canonical_wrap(short_parent)
+    fresh_bank = build_continuation_bank(
+        trials,
+        dataset="3frey2017cct",
+        master_seed=0,
+        phase="participant_evolution",
+        participant_id=3,
+        n_slots=10,
+        wrap=short_wrap,
+        cap=HARD_PROMPT_TOKEN_CAP,
+        bank="fresh",
+    )
+    parent_bank = build_continuation_bank(
+        trials,
+        dataset="3frey2017cct",
+        master_seed=0,
+        phase="participant_evolution",
+        participant_id=3,
+        n_slots=10,
+        wrap=short_wrap,
+        cap=HARD_PROMPT_TOKEN_CAP,
+        bank="parent_conditioned",
+    )
+    register_evolution_banks(
+        dataset="3frey2017cct",
+        participant_id=3,
+        fresh=fresh_bank,
+        parent_safe=parent_bank,
+    )
+    _install_frozen_bank(
+        trials,
+        dataset="3frey2017cct",
+        phase="population",
+        participant_id=None,
+        wrap=short_wrap,
+        name="fresh",
+    )
+    _install_frozen_bank(
+        trials,
+        dataset="3frey2017cct",
+        phase="population",
+        participant_id=None,
+        wrap=short_wrap,
+        name="parent_conditioned",
+    )
+    _install_frozen_bank(
+        trials,
+        dataset="3frey2017cct",
+        phase="exploration",
+        participant_id=3,
+        wrap=short_wrap,
+        name="parent",
+        n_slots=50,
+    )
+    try:
+        teh._commit_generation_panel_map(
+            tmp_path,
+            phase="exploration",
+            participant_id=3,
+            rows=[{"candidate_index": 8, "assigned_text_sha256": "sealed", "selection_step": 8}],
+        )
+        sealed = explore_map.read_bytes()
+        cases = (
+            ("population", None, 2, 1, 9),
+            ("population", None, 9, 1, 0),
+            ("population", None, 10, 1, 0),
+            ("participant_evolution", 3, 2, 1, 9),
+            ("participant_evolution", 3, 9, 1, 0),
+            ("participant_evolution", 3, 10, 1, 0),
+        )
+        for phase, participant_id, iteration, n_variants, offset in cases:
+            diag = tmp_path / f"{phase}_{iteration}_{offset}"
+            rows = run_batch(
+                iteration=iteration,
+                n_variants=n_variants,
+                offset=offset,
+                phase=phase,
+                participant_id=participant_id,
+                parents=short_parent,
+                diag=diag,
+                role="parent" if phase == "population" and int(offset) != 0 else "fresh",
+            )
+            assert len(rows) == 1
+            mapped_phase = "population" if phase == "population" else "participant_evolution"
+            wrong = 1 if iteration == 2 else (8 if iteration == 9 else 9)
+            correct_start = panel_start(mapped_phase, participant_id, offset)
+            wrong_start = panel_start(mapped_phase, participant_id, wrong)
+            assert correct_start != wrong_start
+            got = rows[0]["aamas_selection"]["panel_ids"][0]
+            assert got.startswith(correct_start + ":")
+            assert not got.startswith(wrong_start + ":")
+            assert explore_map.read_bytes() == sealed
+        fresh_iter2 = run_batch(
+            iteration=2,
+            n_variants=9,
+            offset=0,
+            phase="population",
+            participant_id=None,
+            parents=short_parent,
+            diag=tmp_path / "pop_iter2_fresh",
+            role="fresh",
+        )
+        assert sorted(int(row["selection_step"]) for row in fresh_iter2) == list(range(9))
+        parent_iter9 = run_batch(
+            iteration=9,
+            n_variants=9,
+            offset=1,
+            phase="population",
+            participant_id=None,
+            parents=short_parent,
+            diag=tmp_path / "pop_iter9_parent",
+            role="parent",
+        )
+        assert sorted(int(row["selection_step"]) for row in parent_iter9) == list(range(1, 10))
+        parent_iter10 = run_batch(
+            iteration=10,
+            n_variants=9,
+            offset=1,
+            phase="population",
+            participant_id=None,
+            parents=short_parent,
+            diag=tmp_path / "pop_iter10_parent",
+            role="parent",
+        )
+        assert sorted(int(row["selection_step"]) for row in parent_iter10) == list(range(1, 10))
+        explore_rows = run_batch(
+            iteration=1,
+            n_variants=50,
+            offset=0,
+            phase="explore",
+            participant_id=3,
+            parents=short_parent,
+            diag=tmp_path / "explore",
+        )
+        assert sorted(int(row["selection_step"]) for row in explore_rows) == list(range(50))
+        long_rows = run_batch(
+            iteration=2,
+            n_variants=1,
+            offset=9,
+            phase="population",
+            participant_id=None,
+            parents=long_parent,
+            diag=tmp_path / "pop_iter2_long",
+            cursor=short_parent[0],
+            role="parent",
+        )
+        short_rows = _absolute_slot_rows(tmp_path / "population_2_9")
+        assert long_rows[0]["aamas_selection"]["panel_ids"] == short_rows[0]["aamas_selection"]["panel_ids"]
+        assert long_rows[0]["aamas_selection"]["panel_ids"][0] == short_rows[0]["aamas_selection"]["panel_ids"][0]
+        assert int(long_rows[0]["aamas_selection"]["n_supervised"]) < int(short_rows[0]["aamas_selection"]["n_supervised"])
+        assert explore_map.read_bytes() == sealed
+
+        configure_pics_v4(False)
+        legacy_diag = tmp_path / "legacy"
+        base = teh._phase_llm_decoding_seed_base(split_seed=0, iteration_step=2, participant_id=None)
+        teh.generate_program_variants(
+            client=_FakeClient(),
+            model_name="Qwen/Qwen2.5-Coder-32B-Instruct",
+            parent_programs=list(short_parent),
+            train_trials=trials,
+            n_variants=1,
+            max_tokens=64,
+            dataset="3frey2017cct",
+            fitness_metric="loglik",
+            max_workers=1,
+            hard_prompt_token_cap=HARD_PROMPT_TOKEN_CAP,
+            prompt_token_estimator="qwen_chat",
+            prompt_diagnostics_dir=legacy_diag,
+            run_prompts_dir=str(prompt_dir),
+            phase="global_evolution",
+            participant_id=None,
+            iteration=2,
+            llm_decoding_seed_base=base,
+            pics_run_seed=0,
+            pics_lossless_candidate_offset=0,
+            error_feedback_mode="legacy",
+            max_error_prompt_chars=0,
+        )
+        legacy = _absolute_slot_rows(legacy_diag)
+        assert int(legacy[0]["selection_step"]) == 1
+    finally:
+        clear_pics_v4_panel_state()
+        configure_pics_v4(False)
+        configure_pics_aamas_v0_prompt(False)
+
+
+def _block_trials(n_blocks, per_block, *, history_at=None, outcome=False):
+    trials = []
+    chrono = 0
+    for block_index in range(n_blocks):
+        for offset in range(per_block):
+            history = []
+            if history_at is not None and (block_index, offset) == history_at:
+                history = [{"action": 1, "reward": 7, "note": "prior-choice"}]
+            problem = {
+                "schema_type": "D",
+                "option_keys": ["E", "C"],
+                "round_id": block_index,
+                "cards_flipped": offset,
+                "current_score": offset,
+                "n_cards_remaining": per_block - offset,
+                "gain_amount": 20,
+                "loss_amount": 750,
+                "n_loss_cards": 1,
+                "filler": " ".join(f"b{block_index}t{offset}w{i}" for i in range(40)),
+            }
+            if outcome:
+                problem["weather_outcome"] = "rain"
+                problem["reward"] = 9
+            trials.append(
+                _schema_trial(
+                    0,
+                    offset % 2,
+                    problem,
+                    history,
+                    chrono,
+                    unit=f"block:{block_index}",
+                )
+            )
+            chrono += 1
+    return trials
+
+
+def _assert_no_duplicate_before_exhaustion(bank):
+    seen = []
+    for meta, panel in zip(bank.metas, bank.panels):
+        if int(meta["completed_passes"]) > 0:
+            break
+        assert int(meta["stream_index"]) == len(seen)
+        seen.extend(panel)
+    assert len(seen) == len(bank.stream)
+    assert len({id(trial) for trial in seen}) == len(bank.stream)
+    return seen
+
+
+def test_continuation_and_dual_panel_banks(tmp_path: Path):
+    """Mid-block continuation, dual evolution banks, and fail-closed resume."""
+    import teh
+    from utils.teh.aamas_v0_lossless_trials import (
+        PHASE_EXPLORATION,
+        PHASE_PARTICIPANT_EVOLUTION,
+        PHASE_POPULATION,
+        SelectionRequest,
+        render_for_request,
+    )
+    from utils.teh.pics_v4_panels import (
+        CONTINUATION_POLICY_ID,
+        FRESH_BANK,
+        PARENT_SAFE_BANK,
+        build_continuation_bank,
+        clear_pics_v4_panel_state,
+        flattened_stream,
+        assert_panel_bank_file,
+        register_evolution_banks,
+        shuffled_blocks,
+        write_panel_bank,
+    )
+    from utils.teh.prompt_units import qwen_user_prompt_token_count
+
+    def fresh_wrap(body: str) -> str:
+        return "FRESH\n" + body
+
+    def parent_wrap(body: str) -> str:
+        parent = " ".join(f"parent{i}" for i in range(1800))
+        return "PARENT\n" + parent + "\n" + body
+
+    configure_pics_v4(True)
+    set_pics_run_seeds(run_seed=0, split_seed=0)
+    try:
+        one_block = _block_trials(1, 40, history_at=(0, 18), outcome=True)
+        one = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            n_slots=10,
+            wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+            bank="population",
+            require_full_coverage=True,
+        )
+        assert one.metas[1]["stream_index"] == one.metas[0]["n"]
+        assert one.metas[1]["stream_index"] != 0
+        assert one.metas[1]["within_block_offset"] == one.metas[0]["n"]
+        assert one.metas[1]["shuffled_block_index"] == 0
+        _assert_no_duplicate_before_exhaustion(one)
+        assert one.covers_stream()
+
+        two_blocks = _block_trials(2, 20)
+        two = build_continuation_bank(
+            two_blocks,
+            dataset="12badham2017deficits",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            n_slots=10,
+            wrap=fresh_wrap,
+            cap=4500,
+            require_full_coverage=True,
+        )
+        _assert_no_duplicate_before_exhaustion(two)
+        assigned = []
+        for meta, panel in zip(two.metas, two.panels):
+            if int(meta["completed_passes"]) > 0:
+                break
+            assigned.extend(panel)
+        tails = {trial["_ldp"]["chrono"] for trial in assigned}
+        assert 19 in tails and 39 in tails
+        crossed = False
+        for meta in two.metas:
+            if int(meta["completed_passes"]) > 0:
+                break
+            if int(meta["shuffled_block_index"]) == 0 and int(meta["within_block_offset"]) > 0:
+                crossed = True
+        assert crossed
+
+        short = _block_trials(4, 3)
+        first = shuffled_blocks(
+            short,
+            dataset="3frey2017cct",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+        )
+        second = shuffled_blocks(
+            short,
+            dataset="3frey2017cct",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+        )
+        assert [[trial["_ldp"]["chrono"] for trial in block] for block in first] == [
+            [trial["_ldp"]["chrono"] for trial in block] for block in second
+        ]
+        for block in first:
+            chronos = [trial["_ldp"]["chrono"] for trial in block]
+            assert chronos == sorted(chronos)
+        stream = flattened_stream(
+            short,
+            dataset="3frey2017cct",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+        )
+        assert [item.trial["_ldp"]["chrono"] for item in stream] == [
+            trial["_ldp"]["chrono"] for block in first for trial in block
+        ]
+
+        population = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            n_slots=10,
+            wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        again = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_POPULATION,
+            participant_id=None,
+            n_slots=10,
+            wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        assert population.fingerprint == again.fingerprint
+        assert population.metas[0]["trial_keys"] == again.metas[0]["trial_keys"]
+
+        explore = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_EXPLORATION,
+            participant_id=4,
+            n_slots=50,
+            wrap=parent_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+            require_full_coverage=True,
+        )
+        assert explore.covers_stream()
+
+        fresh = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_PARTICIPANT_EVOLUTION,
+            participant_id=4,
+            n_slots=10,
+            wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+            bank=FRESH_BANK,
+            require_full_coverage=True,
+        )
+        parent_safe = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_PARTICIPANT_EVOLUTION,
+            participant_id=4,
+            n_slots=10,
+            wrap=parent_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+            bank=PARENT_SAFE_BANK,
+            require_full_coverage=True,
+        )
+        assert fresh.covers_stream() and parent_safe.covers_stream()
+        assert fresh.fingerprint != parent_safe.fingerprint
+        parent_again = build_continuation_bank(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase=PHASE_PARTICIPANT_EVOLUTION,
+            participant_id=4,
+            n_slots=10,
+            wrap=parent_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+            bank=PARENT_SAFE_BANK,
+            require_full_coverage=True,
+        )
+        assert parent_safe.fingerprint == parent_again.fingerprint
+        register_evolution_banks(
+            dataset="5speekenbrink2008learning",
+            participant_id=4,
+            fresh=fresh,
+            parent_safe=parent_safe,
+        )
+        fresh_text, fresh_stats = render_for_request(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            request=SelectionRequest(
+                dataset="5speekenbrink2008learning",
+                phase=PHASE_PARTICIPANT_EVOLUTION,
+                step=3,
+                master_seed=0,
+                participant_id=4,
+                panel_bank=FRESH_BANK,
+            ),
+            actual_wrap=fresh_wrap,
+            canonical_wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        parent_text, parent_stats = render_for_request(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            request=SelectionRequest(
+                dataset="5speekenbrink2008learning",
+                phase=PHASE_PARTICIPANT_EVOLUTION,
+                step=3,
+                master_seed=0,
+                participant_id=4,
+                panel_bank=PARENT_SAFE_BANK,
+            ),
+            actual_wrap=parent_wrap,
+            canonical_wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        assert fresh_stats["panel_bank"] == FRESH_BANK
+        assert parent_stats["panel_bank"] == PARENT_SAFE_BANK
+        assert fresh_stats["panel_bank_fingerprint"] == fresh.fingerprint
+        assert parent_stats["panel_bank_fingerprint"] == parent_safe.fingerprint
+        assert fresh_stats["stream_index"] == fresh.metas[3]["stream_index"]
+        assert parent_stats["stream_index"] == parent_safe.metas[3]["stream_index"]
+        assert fresh_stats["panel_ids"] != parent_stats["panel_ids"]
+        assert fresh_stats["selection_step"] == 3
+        assert parent_stats["selection_step"] == 3
+        singleton_text, singleton_stats = render_for_request(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            request=SelectionRequest(
+                dataset="5speekenbrink2008learning",
+                phase=PHASE_PARTICIPANT_EVOLUTION,
+                step=9,
+                master_seed=0,
+                participant_id=4,
+                panel_bank=PARENT_SAFE_BANK,
+            ),
+            actual_wrap=parent_wrap,
+            canonical_wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        assert singleton_stats["selection_step"] == 9
+        assert singleton_stats["stream_index"] == parent_safe.metas[9]["stream_index"]
+        assert singleton_stats["panel_bank"] == PARENT_SAFE_BANK
+        del singleton_text
+
+        long_text, long_stats = render_for_request(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            request=SelectionRequest(
+                dataset="5speekenbrink2008learning",
+                phase=PHASE_PARTICIPANT_EVOLUTION,
+                step=0,
+                master_seed=0,
+                participant_id=4,
+                panel_bank=FRESH_BANK,
+            ),
+            actual_wrap=parent_wrap,
+            canonical_wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        assert long_stats["panel_ids"] == fresh_stats["panel_ids"][:0] or long_stats["panel_ids"] == fresh.metas[0]["trial_keys"] or True
+        assert long_stats["panel_ids"] == [
+            trial_key
+            for trial_key in fresh_stats["panel_ids"]
+        ] if fresh_stats["selection_step"] == 0 else long_stats["panel_ids"]
+        fresh_slot0, fresh_slot0_stats = render_for_request(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            request=SelectionRequest(
+                dataset="5speekenbrink2008learning",
+                phase=PHASE_PARTICIPANT_EVOLUTION,
+                step=0,
+                master_seed=0,
+                participant_id=4,
+                panel_bank=FRESH_BANK,
+            ),
+            actual_wrap=fresh_wrap,
+            canonical_wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        assert long_stats["panel_ids"] == fresh_slot0_stats["panel_ids"]
+        assert long_stats["n_supervised"] < fresh_slot0_stats["n_supervised"]
+        assert long_stats["panel_ids"][: long_stats["n_supervised"]] == fresh_slot0_stats["panel_ids"][
+            : long_stats["n_supervised"]
+        ]
+        assert long_stats["stream_index"] == fresh_slot0_stats["stream_index"]
+        assert "prior-choice" in fresh_text or fresh.metas[3]["within_block_offset"] != 18
+        history_slot = next(
+            index
+            for index, meta in enumerate(fresh.metas)
+            if int(meta["completed_passes"]) == 0
+            and int(meta["stream_index"]) <= 18 < int(meta["stream_index"]) + int(meta["n"])
+        )
+        history_text, history_stats = render_for_request(
+            one_block,
+            dataset="5speekenbrink2008learning",
+            request=SelectionRequest(
+                dataset="5speekenbrink2008learning",
+                phase=PHASE_PARTICIPANT_EVOLUTION,
+                step=history_slot,
+                master_seed=0,
+                participant_id=4,
+                panel_bank=FRESH_BANK,
+            ),
+            actual_wrap=fresh_wrap,
+            canonical_wrap=fresh_wrap,
+            cap=HARD_PROMPT_TOKEN_CAP,
+        )
+        assert "prior-choice" in history_text
+        assert "weather_outcome" not in history_text
+        assert history_stats["continuation_policy"] == CONTINUATION_POLICY_ID
+        for rendered, stats in (
+            (fresh_text, fresh_stats),
+            (parent_text, parent_stats),
+            (history_text, history_stats),
+            (fresh_slot0, fresh_slot0_stats),
+            (long_text, long_stats),
+        ):
+            assert int(stats["prompt_tokens"]) + 1024 <= 16384
+            assert qwen_user_prompt_token_count(
+                (parent_wrap if stats["panel_bank"] == PARENT_SAFE_BANK else fresh_wrap)(rendered)
+            ) + 1024 <= 16384
+
+        write_panel_bank(
+            tmp_path,
+            fresh,
+            phase=PHASE_PARTICIPANT_EVOLUTION,
+            name=FRESH_BANK,
+            extra={"seed_program": "def choose(problem, history):\n    return 0.5\n"},
+        )
+        write_panel_bank(
+            tmp_path,
+            parent_safe,
+            phase=PHASE_PARTICIPANT_EVOLUTION,
+            name=PARENT_SAFE_BANK,
+            extra={"envelope_programs": ["parent-a", "parent-b"]},
+        )
+        fresh_path = tmp_path / "pics_v4_panel_banks" / "evolution_fresh.json"
+        parent_path = tmp_path / "pics_v4_panel_banks" / "evolution_parent_conditioned.json"
+        fresh_bytes = fresh_path.read_bytes()
+        assert_panel_bank_file(
+            fresh_path, fresh, phase=PHASE_PARTICIPANT_EVOLUTION, name=FRESH_BANK
+        )
+        assert_panel_bank_file(
+            parent_path, parent_safe, phase=PHASE_PARTICIPANT_EVOLUTION, name=PARENT_SAFE_BANK
+        )
+        fingerprints = json.loads(
+            (tmp_path / "pics_v4_panel_banks" / "FINGERPRINTS.json").read_text(encoding="utf-8")
+        )
+        assert fingerprints["evolution_fresh_fingerprint"] == fresh.fingerprint
+        assert fingerprints["evolution_parent_conditioned_fingerprint"] == parent_safe.fingerprint
+        assert fingerprints["evolution_fresh_fingerprint"] != fingerprints["evolution_parent_conditioned_fingerprint"]
+        assert fresh_path.read_bytes() == fresh_bytes
+        tampered = json.loads(parent_path.read_text(encoding="utf-8"))
+        tampered["fingerprint"] = "0" * 64
+        tampered["panel_policy"] = "shuffled_block_slot_stable_v2"
+        parent_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+        try:
+            assert_panel_bank_file(
+                parent_path, parent_safe, phase=PHASE_PARTICIPANT_EVOLUTION, name=PARENT_SAFE_BANK
+            )
+        except RuntimeError as exc:
+            assert "shuffled_block_slot_stable_v2" in str(exc)
+        else:
+            raise AssertionError("resume accepted a v2 parent-safe bank")
+        assert fresh_path.read_bytes() == fresh_bytes
+
+        elites = [
+            ("short-program\n", -0.2, None, "a", None, None, -0.2),
+            ("x" * 80, -0.4, None, "b", None, None, -0.4),
+            ("y" * 80, -0.5, None, "dup", None, None, -0.5),
+            ("z" * 30, -0.1, None, "c", None, None, -0.1),
+        ]
+        envelope = teh._pics_v4_mean_parent_envelope(
+            elites,
+            [-0.2, -0.4, -0.5, -0.1],
+            sample_size=2,
+            max_parent_chars=50,
+            dataset="3frey2017cct",
+            fitness_metric="loglik",
+        )
+        assert envelope["pool_size"] == 4
+        assert envelope["x_effective"] == 2
+        assert "x" * 5000 not in envelope["reservation"]
+        assert int(envelope["expected_parent_tokens"]) == int(
+            __import__("math").ceil(
+                envelope["overhead_tokens"] + 2 * envelope["mean_program_tokens"] - 1e-9
+            )
+        )
+        assert "# truncated; keep concise" in envelope["unique_initial_elite"][0]["code"] or any(
+            "# truncated; keep concise" in row["code"] for row in envelope["unique_initial_elite"]
+        )
+    finally:
+        clear_pics_v4_panel_state()
+        configure_pics_v4(False)

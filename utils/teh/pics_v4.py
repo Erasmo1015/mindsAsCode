@@ -228,7 +228,14 @@ def pics_v4_marker_payload() -> dict[str, Any]:
         pics_recorded_split_seed,
         pics_run_seed,
     )
-    from utils.teh.pics_v4_panels import PACKING_IMPLEMENTATION_ID, PANEL_POLICY_ID, SLOT_ASSIGNMENT_POLICY_ID
+    from utils.teh.pics_v4_panels import (
+        CONTINUATION_POLICY_ID,
+        PACKING_IMPLEMENTATION_ID,
+        PANEL_BANK_POLICY_ID,
+        PANEL_POLICY_ID,
+        PARENT_ENVELOPE_POLICY_ID,
+        SLOT_ASSIGNMENT_POLICY_ID,
+    )
 
     payload: dict[str, Any] = {
         "method_version": METHOD_VERSION,
@@ -239,6 +246,9 @@ def pics_v4_marker_payload() -> dict[str, Any]:
         "hard_prompt_token_cap": HARD_PROMPT_TOKEN_CAP,
         "packing_implementation": PACKING_IMPLEMENTATION_ID,
         "panel_policy": PANEL_POLICY_ID,
+        "continuation_policy": CONTINUATION_POLICY_ID,
+        "panel_bank_policy": PANEL_BANK_POLICY_ID,
+        "parent_envelope_policy": PARENT_ENVELOPE_POLICY_ID,
         "slot_assignment": SLOT_ASSIGNMENT_POLICY_ID,
         "search_rng": SEARCH_RNG_POLICY,
         "pics_run_seed_scope": PICS_RUN_SEED_SCOPE,
@@ -316,20 +326,61 @@ def assert_pics_v4_resume(output_dir: Any) -> None:
             f"Refusing to resume {root}: hard_prompt_token_cap is {found_cap!r}, "
             f"not {HARD_PROMPT_TOKEN_CAP}."
         )
-    from utils.teh.pics_v4_panels import PACKING_IMPLEMENTATION_ID, PANEL_POLICY_ID, SLOT_ASSIGNMENT_POLICY_ID
+    from utils.teh.pics_v4_panels import (
+        CONTINUATION_POLICY_ID,
+        PACKING_IMPLEMENTATION_ID,
+        PANEL_BANK_POLICY_ID,
+        PANEL_POLICY_ID,
+        PARENT_ENVELOPE_POLICY_ID,
+        REFUSED_PANEL_BANK_POLICY_IDS,
+        REFUSED_PANEL_POLICY_IDS,
+        REFUSED_PARENT_ENVELOPE_POLICY_IDS,
+        SLOT_ASSIGNMENT_POLICY_ID,
+    )
 
     found_pack = str(payload.get("packing_implementation") or "")
+    found_panel = str(payload.get("panel_policy") or "")
+    if found_pack in REFUSED_PANEL_POLICY_IDS or found_panel in REFUSED_PANEL_POLICY_IDS:
+        refused = found_panel if found_panel in REFUSED_PANEL_POLICY_IDS else found_pack
+        raise RuntimeError(
+            f"Refusing to resume {root}: panel policy {refused} "
+            f"does not implement within-block continuation. "
+            f"Required panel policy is {PANEL_POLICY_ID}."
+        )
     if found_pack != PACKING_IMPLEMENTATION_ID:
         raise RuntimeError(
             f"Refusing to resume {root}: packing_implementation is {found_pack!r}, "
             f"not {PACKING_IMPLEMENTATION_ID}."
         )
-    found_panel = str(payload.get("panel_policy") or "")
     if found_panel != PANEL_POLICY_ID:
         raise RuntimeError(
             f"Refusing to resume {root}: panel_policy is {found_panel!r}, "
             f"not {PANEL_POLICY_ID}."
         )
+    found_bank_policy = str(payload.get("panel_bank_policy") or "")
+    found_envelope = str(payload.get("parent_envelope_policy") or "")
+    if found_bank_policy in REFUSED_PANEL_BANK_POLICY_IDS:
+        raise RuntimeError(
+            f"Refusing to resume {root}: panel bank policy {found_bank_policy} "
+            f"is not {PANEL_BANK_POLICY_ID}."
+        )
+    if found_envelope in REFUSED_PARENT_ENVELOPE_POLICY_IDS:
+        raise RuntimeError(
+            f"Refusing to resume {root}: parent envelope {found_envelope} "
+            "uses the longest programs. "
+            f"Required parent envelope is {PARENT_ENVELOPE_POLICY_ID}."
+        )
+    for field_name, expected in (
+        ("continuation_policy", CONTINUATION_POLICY_ID),
+        ("panel_bank_policy", PANEL_BANK_POLICY_ID),
+        ("parent_envelope_policy", PARENT_ENVELOPE_POLICY_ID),
+    ):
+        found_field = str(payload.get(field_name) or "")
+        if found_field != expected:
+            raise RuntimeError(
+                f"Refusing to resume {root}: {field_name} is {found_field!r}, "
+                f"not {expected}."
+            )
     found_slots = str(payload.get("slot_assignment") or "")
     if found_slots != SLOT_ASSIGNMENT_POLICY_ID:
         raise RuntimeError(
