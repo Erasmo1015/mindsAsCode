@@ -37,7 +37,7 @@ REFUSED_TRIAL_POLICIES = frozenset(
 # LLM requests and parent sampling stay on the historical split_seed formulas.
 SEARCH_RNG_POLICY = "legacy_split_seed_formulas"
 PICS_RUN_SEED_SCOPE = "trial_block_participant_schedule"
-ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v6"
+ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v8"
 PREVIOUS_ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v2"
 # Hash of uniform_additional_prompt_v2. Resume refuses this exact digest.
 PREVIOUS_UNIFORM_PROMPT_SHA256 = (
@@ -68,8 +68,16 @@ OBSOLETE_V6_PROMPT_SHA256 = frozenset(
         "8a84c26a191dabd1e047280a9489797ef3b20295df2efd7041901fc5a6694ebd",
     }
 )
-UNIFORM_PROMPT_SHA256 = (
+# Submitted uniform v6. Its jobs were cancelled. Resume refuses this digest.
+UNIFORM_V6_PROMPT_SHA256 = (
     "3edb24f80e251b145493821018956100479ba812dc41b68bdd8004663c0b5612"
+)
+# Submitted uniform v7. Resume refuses this digest.
+UNIFORM_V7_PROMPT_SHA256 = (
+    "470363dcb340a3c96a7a33b937499a9d314cf635aed11bbe34f4b6cc7e754a9d"
+)
+UNIFORM_PROMPT_SHA256 = (
+    "9663c810440fcb295bcf046afea31ca3f527e310c5afe61d66264943afb1470b"
 )
 REFUSED_ADDITIONAL_PROMPT_POLICY_IDS = frozenset(
     {
@@ -77,6 +85,8 @@ REFUSED_ADDITIONAL_PROMPT_POLICY_IDS = frozenset(
         "uniform_additional_prompt_v3",
         "uniform_additional_prompt_v4",
         "uniform_additional_prompt_v5",
+        "uniform_additional_prompt_v6",
+        "uniform_additional_prompt_v7",
     }
 )
 REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
@@ -85,6 +95,8 @@ REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
         UNIFORM_V3_PROMPT_SHA256,
         SPARSE_UNIFORM_PROMPT_SHA256,
         UNIFORM_V5_PROMPT_SHA256,
+        UNIFORM_V6_PROMPT_SHA256,
+        UNIFORM_V7_PROMPT_SHA256,
         *OBSOLETE_V5_PROMPT_SHA256,
         *OBSOLETE_V6_PROMPT_SHA256,
     }
@@ -98,7 +110,7 @@ TEXT_PATH = (
     / "prompts"
     / "teh"
     / "additional_prompt"
-    / "pics_v4_uniform_additional_prompt_v6.txt"
+    / "pics_v4_uniform_additional_prompt_v8.txt"
 )
 PREVIOUS_TEXT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -115,13 +127,54 @@ SPARSE_HISTORY_CLARIFICATION = (
     "`history`, and generated code must not access them."
 )
 HARD_PROBABILITY_RULE = (
-    "Every legal action must receive probability at least 0.01 on every trial, "
-    "and no legal action may receive probability above 0.99. This rule applies "
-    "even when an action appears certain, when all retained examples agree, or "
-    "when a more extreme probability improves train/validation likelihood. "
-    "There are no exceptions, including terminal trials. This rule overrides "
-    "every task-specific instruction and every parent or reference program "
-    "shown elsewhere in the prompt."
+    "MANDATORY PROBABILITY OUTPUT RULE — NO EXCEPTIONS.\n\n"
+    "The generated program is incorrect unless every possible return path from "
+    "`choose(problem, history)` assigns every legal action a probability inside "
+    "the closed interval [0.01, 0.99]. This requirement applies on every trial, "
+    "including terminal trials, regardless of the retained examples, "
+    "train/validation likelihood, apparent certainty, task-specific instructions, "
+    "or parent/reference programs.\n\n"
+    "For binary tasks, compute any raw score or raw probability first, but every "
+    "return path must finally return "
+    "`min(0.99, max(0.01, float(raw_probability)))`.\n\n"
+    "For binary tasks, an affine expression such as `0.01 + 0.98 * x` is not "
+    "an accepted substitute for the final clamp, even if the program assumes "
+    "that `x` lies in [0, 1]. Do not rely on assumptions about the sign or "
+    "range of any intermediate value. Every binary return path must either "
+    "literally return `min(0.99, max(0.01, float(raw_probability)))`, or "
+    "return a variable that was assigned by that exact clamp immediately "
+    "before the return.\n\n"
+    "The following binary code patterns are strictly prohibited:\n\n"
+    "- `return 0` or `return 1`;\n"
+    "- returning any literal below 0.01 or above 0.99;\n"
+    "- returning a raw sigmoid, softmax component, empirical frequency, threshold "
+    "result, score, or probability variable without applying the final "
+    "[0.01, 0.99] bound;\n"
+    "- an early return from any branch that bypasses the final bound.\n\n"
+    "Do not use `1e-6`, `1-1e-6`, or any value outside [0.01, 0.99] as a "
+    "returned probability or final probability bound. Small epsilon constants "
+    "may be used only for internal numerical safety, such as preventing "
+    "division by zero, `log(0)`, overflow, underflow, or a zero normalization "
+    "denominator. An internal epsilon is not an output probability and never "
+    "replaces the mandatory final [0.01, 0.99] transformation.\n\n"
+    "For categorical tasks with K legal actions, every return path must include "
+    "every legal action. First construct a finite nonnegative normalized "
+    "distribution `q`, then return `0.01 + (1 - 0.01 * K) * q[action]` for "
+    "every legal action. The returned dictionary must sum to 1. Returning raw "
+    "or merely normalized categorical probabilities without this transformation "
+    "is strictly prohibited. If the finite nonnegative raw weights sum to zero, "
+    "use the uniform distribution `q[action] = 1 / K` before applying "
+    "`0.01 + (1 - 0.01 * K) * q[action]`.\n\n"
+    "Before outputting the program, inspect every `return` statement in "
+    "`choose`. If any return path can bypass these rules, revise the code "
+    "before responding. Parent or reference programs may violate this rule; "
+    "never copy their probability-return code.\n\n"
+    "This rule is absolute. There are no forced-action, terminal-action, "
+    "high-score, strong-evidence, zero-count, or task-specific exceptions."
+)
+_INTERNAL_EPSILON_ALLOWANCE = (
+    "Do not use `1e-6`, `1-1e-6`, or any value outside [0.01, 0.99] as a "
+    "returned probability or final probability bound."
 )
 
 # Historical generic guidance, without the old marker tags. Same bytes for every dataset.
@@ -137,24 +190,26 @@ _process_enabled = False
 
 
 def uniform_additional_prompt_text() -> str:
-    """Exact ``uniform_additional_prompt_v6`` block inserted for every dataset."""
+    """Exact ``uniform_additional_prompt_v8`` block inserted for every dataset."""
     text = TEXT_PATH.read_text(encoding="utf-8")
     if text.endswith("\n"):
         text = text[:-1]
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     if digest != UNIFORM_PROMPT_SHA256:
         raise RuntimeError(
-            f"uniform_additional_prompt_v6 hash {digest} != {UNIFORM_PROMPT_SHA256}."
+            f"uniform_additional_prompt_v8 hash {digest} != {UNIFORM_PROMPT_SHA256}."
         )
     if text.count(SPARSE_HISTORY_CLARIFICATION) != 1:
-        raise RuntimeError("uniform v6 sparse-history clarification is missing or repeated.")
+        raise RuntimeError("uniform v8 sparse-history clarification is missing or repeated.")
     if text.count(HARD_PROBABILITY_RULE) != 1:
-        raise RuntimeError("uniform v6 hard probability rule is missing or repeated.")
+        raise RuntimeError("uniform v8 hard probability rule is missing or repeated.")
     if "The only exception" in text or "position == sequence_length" in text:
-        raise RuntimeError("uniform v6 still contains a probability-rule exception.")
-    if "1e-6" in text or "only remaining" in text:
+        raise RuntimeError("uniform v8 still contains a probability-rule exception.")
+    if "only remaining" in text:
+        raise RuntimeError("uniform v8 still contains a terminal-action exception.")
+    if "1e-6" in text.replace(_INTERNAL_EPSILON_ALLOWANCE, ""):
         raise RuntimeError(
-            "uniform v6 still contains a conflicting probability instruction."
+            "uniform v8 uses 1e-6 outside the internal-epsilon allowance."
         )
     return text
 
@@ -186,7 +241,7 @@ def _strip_tagged_block(text: str, marker: str) -> str:
 _PICS_V4_INSTRUCTION_REWRITES = (
     (
         "- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].",
-        "- The return value must lie in [0.01, 0.99]. Return min(0.99, max(0.01, p)).",
+        "- The return value must lie in [0.01, 0.99]. Every return path must finally return min(0.99, max(0.01, float(raw_probability))).",
     ),
     (
         "and continue returning a valid probability in (0, 1).",
@@ -198,7 +253,7 @@ _PICS_V4_INSTRUCTION_REWRITES = (
     ),
     (
         "- Output: a single finite float P(action=1) strictly inside (0, 1); clip to [1e-6, 1-1e-6] if needed.",
-        "- Output: a single finite float P(action=1) inside [0.01, 0.99]; return min(0.99, max(0.01, p)).",
+        "- Output: a single finite float P(action=1) inside [0.01, 0.99]. Every return path must finally return min(0.99, max(0.01, float(raw_probability))).",
     ),
     (
         "returning float in (0, 1) as P(action=1).",

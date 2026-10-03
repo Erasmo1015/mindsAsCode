@@ -672,7 +672,9 @@ def build_deterministic_runtime_contract(
             f"- Output: dict[int, float] over every legal action 0, …, {k - 1}. "
             "Each probability must lie in [0.01, 0.99]. First normalize to q, then "
             "return 0.01 + (1 - 0.01 * K) * q[action] for every legal action. "
-            "The dictionary must include every legal action and sum to 1."
+            "If the finite nonnegative raw weights sum to zero, use q[action] = 1 / K "
+            "before that transformation. The dictionary must include every legal "
+            "action and sum to 1."
         )
     elif categorical:
         output_line = (
@@ -682,8 +684,9 @@ def build_deterministic_runtime_contract(
         )
     elif pics_v4:
         output_line = (
-            "- Output: a single finite float P(action=1) inside [0.01, 0.99]; "
-            "return min(0.99, max(0.01, p))."
+            "- Output: a single finite float P(action=1) inside [0.01, 0.99]. "
+            "Every return path must finally return "
+            "min(0.99, max(0.01, float(raw_probability)))."
         )
     else:
         output_line = (

@@ -55,9 +55,9 @@ def test_uniform_block_matches_saved_file_and_has_no_dataset_names():
 
 def test_approved_bodies_appear_once():
     text = uniform_additional_prompt_text()
-    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v6"
+    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v8"
     assert uniform_additional_prompt_sha256() == (
-        "3edb24f80e251b145493821018956100479ba812dc41b68bdd8004663c0b5612"
+        "9663c810440fcb295bcf046afea31ca3f527e310c5afe61d66264943afb1470b"
     )
     for name in (
         "PROMPT_ONLY_METADATA",
@@ -66,20 +66,26 @@ def test_approved_bodies_appear_once():
         "displayed_history_entries",
     ):
         assert text.count(name) == 1
+    assert text.count("MANDATORY PROBABILITY OUTPUT RULE — NO EXCEPTIONS.") == 1
     assert text.count(
-        "Every legal action must receive probability at least 0.01 on every trial"
+        "every possible return path from `choose(problem, history)` assigns every "
+        "legal action a probability inside the closed interval [0.01, 0.99]"
     ) == 1
-    assert text.count("There are no exceptions, including terminal trials") == 1
+    assert text.count("`min(0.99, max(0.01, float(raw_probability)))`") == 2
+    assert text.count("`0.01 + 0.98 * x`") == 1
+    assert text.count("`q[action] = 1 / K`") == 1
+    assert text.count(
+        "An internal epsilon is not an output probability and never replaces "
+        "the mandatory final [0.01, 0.99] transformation."
+    ) == 1
     assert "The only exception" not in text
     assert "position == sequence_length" not in text
     assert "near-zero or near-one" not in text
     assert "logically forced" not in text
-    assert text.count("`min(0.99, max(0.01, p))`") == 1
-    assert "1e-6" not in text
     assert "only remaining" not in text
     assert text.count(
-        "This rule overrides every task-specific instruction and every parent "
-        "or reference program shown elsewhere in the prompt."
+        "There are no forced-action, terminal-action, high-score, "
+        "strong-evidence, zero-count, or task-specific exceptions."
     ) == 1
     assert text.count(GENERIC_HISTORY_GUIDANCE) == 1
     assert "HISTORY_ROBUSTNESS_BLOCK_V3" not in text
@@ -99,6 +105,10 @@ def test_approved_bodies_appear_once():
         .replace(
             "Use smoothed/bounded scores; do not accumulate unbounded feature-count logits.",
             "Use scores smoothed into the universal [0.01, 0.99] bound; do not accumulate unbounded feature-count logits.",
+        )
+        .replace(
+            "Return calibrated P(action=1).",
+            "Every return path must follow the mandatory probability output rule.",
         ),
         "guan_2020_stopping": _DATASET_KEYED_REMINDER_BODIES["guan_2020_stopping"]
         .replace(
@@ -974,7 +984,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
             return wrap(body)
 
         def long_wrap(body: str) -> str:
-            parent = " ".join(f"parent{i}" for i in range(2950))
+            parent = " ".join(f"parent{i}" for i in range(2700))
             return wrap("PARENT\n" + parent + "\n" + body)
 
         _install_frozen_bank(
@@ -1229,7 +1239,7 @@ def test_population_panel_map_does_not_validate_exploration_map(tmp_path: Path):
         return apply_pics_v4_prompt_body("Task description.") + "\n" + contract + body
 
     def long_wrap(body: str) -> str:
-        parent = " ".join(f"parent{i}" for i in range(2950))
+        parent = " ".join(f"parent{i}" for i in range(2700))
         return wrap("PARENT\n" + parent + "\n" + body)
 
     request = SelectionRequest(

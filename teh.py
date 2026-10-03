@@ -10972,9 +10972,9 @@ def _pics_v4_prompt_pieces(run_prompts_dir: str):
     suffix = single_code_template_prompt_suffix(
         load_single_code_template(prompt_dir / "single_code_template.txt")
     )
-    # The infer file stores the contract before any parent is known. Lift that
-    # exact block out and return it separately so the wrapper appends it after
-    # every displayed parent program.
+    # Historical AAMAS, full-history v4, v5, and v6 prompts keep the contract
+    # in the infer text, before the panel examples and the parent programs.
+    # Do not lift it to the end.
     contract_path = prompt_dir / "runtime_contract.txt"
     runtime_contract = (
         contract_path.read_text(encoding="utf-8").strip() if contract_path.is_file() else ""
@@ -10984,12 +10984,11 @@ def _pics_v4_prompt_pieces(run_prompts_dir: str):
             raise RuntimeError(
                 f"PICS v4 infer prompt is missing the saved runtime contract: {contract_path}"
             )
-        base_prompt = base_prompt.replace(runtime_contract, "", 1).rstrip() + "\n"
     elif RUNTIME_CONTRACT_HEADER in base_prompt:
         raise RuntimeError(
             f"PICS v4 infer prompt contains a runtime contract with no runtime_contract.txt: {prompt_dir}"
         )
-    return base_prompt, suffix, runtime_contract, f"\n{CANDIDATE_OUTPUT_RULES}\n"
+    return base_prompt, suffix, "", f"\n{CANDIDATE_OUTPUT_RULES}\n"
 
 
 def _pics_v4_elite_snapshot(elite_parents: Sequence[Tuple[Any, ...]]) -> List[Dict[str, Any]]:
@@ -17781,6 +17780,20 @@ def main():
             "and structure_aware_v3 with limited_train_val=40."
         )
         return
+    if os.environ.get("PICS_V4_COMPLIANCE_PILOT") == "1":
+        if not pics_v4_on or aamas_v0_mode != "target_only":
+            print(
+                "Error: PICS_V4_COMPLIANCE_PILOT requires --pics_v4 and "
+                "--pics_aamas_v0_track_mode target_only."
+            )
+            return
+        args.global_iters = 1
+        args.n_iterations = 0
+        args.explore_candidates = 0
+        print(
+            "[PICS v4 compliance pilot] one population iteration, 10 candidates, "
+            "no exploration or participant evolution."
+        )
     mat_target = str(getattr(args, "pics_aamas_v0_materialize_target_only_run", "") or "").strip()
     mat_transfer = str(getattr(args, "pics_aamas_v0_materialize_transfer_run", "") or "").strip()
     if (mat_target or mat_transfer) and aamas_v0_mode != "official_gate":
@@ -19082,7 +19095,9 @@ def main():
                     except Exception:
                         wandb.finish()
             raise
-        if bool(getattr(args, "pics_aamas_v0_population_bank_only", False)):
+        if bool(getattr(args, "pics_aamas_v0_population_bank_only", False)) or (
+            os.environ.get("PICS_V4_COMPLIANCE_PILOT") == "1"
+        ):
             marker = (
                 Path(base_run_dir)
                 / "target_population"

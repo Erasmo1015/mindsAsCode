@@ -596,7 +596,7 @@ def build_prompt_generation_llm_user_content(
             )
             safety_line = (
                 "- Preserve generic safety: pure Python, no imports, deterministic, "
-                "return min(0.99, max(0.01, p)), no randomness, no pow() (use **), "
+                "every return path returns min(0.99, max(0.01, float(raw_probability))), no randomness, no pow() (use **), "
                 "helpers inside choose(), variables defined on all branches. Runtime "
                 "builtins include set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
             )
