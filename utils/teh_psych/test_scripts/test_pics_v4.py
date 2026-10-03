@@ -20,6 +20,7 @@ from utils.teh.pics_v4 import (
     ADDITIONAL_PROMPT_POLICY_ID,
     CANONICAL_DATASETS,
     GENERIC_HISTORY_GUIDANCE,
+    SPARSE_HISTORY_METADATA_GUIDANCE,
     HARD_PROMPT_TOKEN_CAP,
     KIND_TARGET_ONLY,
     METHOD_VERSION,
@@ -55,7 +56,10 @@ def test_uniform_block_matches_saved_file_and_has_no_dataset_names():
 
 def test_approved_bodies_appear_once():
     text = uniform_additional_prompt_text()
-    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v3"
+    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v4"
+    assert text.count(SPARSE_HISTORY_METADATA_GUIDANCE) == 1
+    assert "PROMPT-ONLY METADATA IS NOT RUNTIME STATE" in text
+    assert "must never be accessed by generated code" in text
     assert text.count(GENERIC_HISTORY_GUIDANCE) == 1
     assert "HISTORY_ROBUSTNESS_BLOCK_V3" not in text
     previous = PREVIOUS_TEXT_PATH.read_text(encoding="utf-8").rstrip("\n")
@@ -66,7 +70,10 @@ def test_approved_bodies_appear_once():
     marker = "[PICS_V4_UNIFORM_ADDITIONAL_PROMPT]\n"
     assert previous.startswith(marker + preface)
     task_sections = previous[len(marker + preface) :]
-    assert text == f"{marker}{preface}{GENERIC_HISTORY_GUIDANCE}\n\n{task_sections}"
+    assert text == (
+        f"{marker}{preface}{SPARSE_HISTORY_METADATA_GUIDANCE}\n\n"
+        f"{GENERIC_HISTORY_GUIDANCE}\n\n{task_sections}"
+    )
     assert "apply this section" not in text
     assert "Otherwise ignore it" not in text
     assert text.count(
@@ -138,10 +145,10 @@ def _install_frozen_bank(
     master_seed=0,
     require_full_coverage=False,
 ):
-    from utils.teh.pics_v4_panels import build_continuation_bank, register_panel_bank, slots_for_phase
+    from utils.teh.pics_v4_panels import build_wrap_fill_bank, register_panel_bank, slots_for_phase
 
     count = slots_for_phase(phase) if n_slots is None else int(n_slots)
-    bank = build_continuation_bank(
+    bank = build_wrap_fill_bank(
         trials,
         dataset=dataset,
         master_seed=master_seed,
@@ -223,12 +230,12 @@ def test_pics_v4_uses_structured_snapshots_not_compact_json():
     assert "observed_action_label=0" in text
     assert "option_keys" in text
     assert "history_before" not in text
-    assert stats["policy"] == "structured_snapshot_v2"
-    assert stats["panel_policy"] == "shuffled_block_slot_stable_v3"
-    assert stats["continuation_policy"] == "within_block_carry_forward_v1"
+    assert stats["policy"] == "structured_snapshot_sparse_history_v1"
+    assert stats["panel_policy"] == "shuffled_block_slot_stable_v4"
+    assert stats["continuation_policy"] == "within_block_carry_forward_wrap_fill_v2"
     assert stats["slot_assignment"] == "first_n"
     assert TRIAL_PROMPT_POLICY_ID == "compact_faithful_trial_v2"
-    assert PICS_V4_TRIAL_POLICY == "structured_snapshot_v2"
+    assert PICS_V4_TRIAL_POLICY == "structured_snapshot_sparse_history_v1"
 
 
 def test_audited_prompts_stay_within_14000():
@@ -263,13 +270,13 @@ def test_resume_refuses_other_methods(tmp_path: Path):
     write_pics_v4_marker(v4)
     payload = json.loads((v4 / "TRIAL_PROMPT_POLICY.json").read_text(encoding="utf-8"))
     assert payload["method_version"] == METHOD_VERSION
-    assert payload["trial_prompt_policy"] == "structured_snapshot_v2"
+    assert payload["trial_prompt_policy"] == "structured_snapshot_sparse_history_v1"
     assert payload["additional_prompt_policy"] == ADDITIONAL_PROMPT_POLICY_ID
     assert payload["additional_prompt_sha256"] == uniform_additional_prompt_sha256()
     assert payload["hard_prompt_token_cap"] == HARD_PROMPT_TOKEN_CAP == 15360
-    assert payload["packing_implementation"] == "shuffled_block_slot_stable_v3"
-    assert payload["panel_policy"] == "shuffled_block_slot_stable_v3"
-    assert payload["continuation_policy"] == "within_block_carry_forward_v1"
+    assert payload["packing_implementation"] == "shuffled_block_slot_stable_v4"
+    assert payload["panel_policy"] == "shuffled_block_slot_stable_v4"
+    assert payload["continuation_policy"] == "within_block_carry_forward_wrap_fill_v2"
     assert payload["panel_bank_policy"] == "conditioning_aware_panel_banks_v2"
     assert payload["parent_envelope_policy"] == "initial_unique_elite_mean_x_v1"
     assert payload["slot_assignment"] == "first_n"
@@ -366,6 +373,18 @@ def test_resume_refuses_other_methods(tmp_path: Path):
         assert "shuffled_block_slot_stable_v2" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted shuffled_block_slot_stable_v2")
+    old_v3 = dict(payload)
+    old_v3["packing_implementation"] = "shuffled_block_slot_stable_v3"
+    old_v3["panel_policy"] = "shuffled_block_slot_stable_v3"
+    old_v3["continuation_policy"] = "within_block_carry_forward_v1"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_v3) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "completed pass" in str(exc)
+        assert "shuffled_block_slot_stable_v3" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted the v3 end-of-pass stop")
     old_banks = dict(payload)
     old_banks["panel_bank_policy"] = "conditioning_aware_panel_banks_v1"
     (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_banks) + "\n", encoding="utf-8")
@@ -421,7 +440,7 @@ def test_resume_refuses_other_methods(tmp_path: Path):
         assert_pics_v4_resume(v4)
     except RuntimeError as exc:
         assert "compact_faithful_trial_v1" in str(exc)
-        assert "structured_snapshot_v2" in str(exc)
+        assert "structured_snapshot_sparse_history_v1" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted compact_faithful_trial_v1")
     v2 = dict(payload)
@@ -434,6 +453,28 @@ def test_resume_refuses_other_methods(tmp_path: Path):
         assert "compact_faithful_trial_v2" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted compact_faithful_trial_v2")
+    old_snapshot = dict(payload)
+    old_snapshot["trial_prompt_policy"] = "structured_snapshot_v2"
+    old_snapshot["prompt_policy"] = "structured_snapshot_v2"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_snapshot) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "structured_snapshot_v2" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted structured_snapshot_v2")
+    old_uniform = dict(payload)
+    old_uniform["additional_prompt_policy"] = "uniform_additional_prompt_v3"
+    old_uniform["additional_prompt_sha256"] = (
+        "12d8a94bf524ce1b985e4bf4b08c08c8d78e5a7f8a7437026516486433416e5b"
+    )
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_uniform) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "uniform_additional_prompt_v3" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted uniform_additional_prompt_v3")
     hashed = dict(payload)
     hashed["search_rng"] = "hashed_pics_run_seed"
     (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(hashed) + "\n", encoding="utf-8")
@@ -652,7 +693,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
     )
     from utils.teh.pics_v4 import UNIFORM_MARKER
     from utils.teh.pics_v4_panels import (
-        build_continuation_bank,
+        build_wrap_fill_bank,
         clear_pics_v4_panel_state,
         flattened_stream,
         group_blocks,
@@ -663,7 +704,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
     from utils.teh.prompt_snapshots import current_or_future_leak_paths, snapshot_example_dict
     from utils.teh.prompt_units import qwen_user_prompt_token_count
 
-    assert PICS_V4_TRIAL_POLICY == "structured_snapshot_v2"
+    assert PICS_V4_TRIAL_POLICY == "structured_snapshot_sparse_history_v1"
     contract = f"{RUNTIME_CONTRACT_HEADER}\n- Target problem keys: option_keys\n"
 
     def wrap(body: str) -> str:
@@ -718,7 +759,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
                     )
                     panel_bank = "parent"
                 elif phase == PHASE_PARTICIPANT_EVOLUTION:
-                    one = build_continuation_bank(
+                    one = build_wrap_fill_bank(
                         [trial],
                         dataset=dataset,
                         master_seed=0,
@@ -752,7 +793,7 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
                     canonical_wrap=wrap,
                     cap=HARD_PROMPT_TOKEN_CAP,
                 )
-                assert stats["policy"] == "structured_snapshot_v2"
+                assert stats["policy"] == "structured_snapshot_sparse_history_v1"
                 assert stats["slot_assignment"] == "first_n"
                 prompt = wrap(text)
                 assert prompt.count(f"[{UNIFORM_MARKER}]") == 1
@@ -859,9 +900,13 @@ def test_slot_stable_snapshots_cover_phases_and_panels():
         assert [id(trial) for trial in panel0] == [id(trial) for trial in again]
         assert [id(trial) for trial in panel0] == [id(item.trial) for item in stream[: len(panel0)]]
         if len(panel0) < len(stream):
-            assert [id(trial) for trial in panel1] == [
-                id(item.trial) for item in stream[len(panel0) : len(panel0) + len(panel1)]
+            rest = [item.trial for item in stream[len(panel0) :]]
+            assert [id(trial) for trial in panel1[: len(rest)]] == [id(trial) for trial in rest]
+            wrapped = panel1[len(rest) :]
+            assert [id(trial) for trial in wrapped] == [
+                id(item.trial) for item in stream[: len(wrapped)]
             ]
+            assert len({id(trial) for trial in panel1}) == len(panel1)
         else:
             assert id(panel1[0]) == id(stream[0].trial)
         first_units = {trial["_ldp"]["unit_id"] for trial in panel0}
@@ -1201,7 +1246,7 @@ def test_one_candidate_batch_uses_absolute_slot(tmp_path: Path):
     import teh
     from utils.teh.pics_aamas_v0 import configure_pics_aamas_v0_prompt
     from utils.teh.pics_v4_panels import (
-        build_continuation_bank,
+        build_wrap_fill_bank,
         clear_pics_v4_panel_state,
         register_evolution_banks,
         slot_panel,
@@ -1321,7 +1366,7 @@ def test_one_candidate_batch_uses_absolute_slot(tmp_path: Path):
     configure_pics_aamas_v0_prompt(True)
     set_pics_run_seeds(run_seed=0, split_seed=0)
     short_wrap = canonical_wrap(short_parent)
-    fresh_bank = build_continuation_bank(
+    fresh_bank = build_wrap_fill_bank(
         trials,
         dataset="3frey2017cct",
         master_seed=0,
@@ -1332,7 +1377,7 @@ def test_one_candidate_batch_uses_absolute_slot(tmp_path: Path):
         cap=HARD_PROMPT_TOKEN_CAP,
         bank="fresh",
     )
-    parent_bank = build_continuation_bank(
+    parent_bank = build_wrap_fill_bank(
         trials,
         dataset="3frey2017cct",
         master_seed=0,
@@ -1544,9 +1589,17 @@ def _block_trials(n_blocks, per_block, *, history_at=None, outcome=False):
 
 
 def _assert_no_duplicate_before_exhaustion(bank):
+    """The first pass assigns every stream trial once, including a same-panel wrap."""
     seen = []
     for meta, panel in zip(bank.metas, bank.panels):
         if int(meta["completed_passes"]) > 0:
+            break
+        if meta.get("wrapped_within_panel"):
+            assert int(meta["stream_index"]) == len(seen)
+            for trial in panel:
+                if trial in seen:
+                    break
+                seen.append(trial)
             break
         assert int(meta["stream_index"]) == len(seen)
         seen.extend(panel)
@@ -1569,7 +1622,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
         CONTINUATION_POLICY_ID,
         FRESH_BANK,
         PARENT_SAFE_BANK,
-        build_continuation_bank,
+        build_wrap_fill_bank,
         clear_pics_v4_panel_state,
         flattened_stream,
         assert_panel_bank_file,
@@ -1590,7 +1643,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
     set_pics_run_seeds(run_seed=0, split_seed=0)
     try:
         one_block = _block_trials(1, 40, history_at=(0, 18), outcome=True)
-        one = build_continuation_bank(
+        one = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1602,15 +1655,22 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
             bank="population",
             require_full_coverage=True,
         )
-        assert one.metas[1]["stream_index"] == one.metas[0]["n"]
-        assert one.metas[1]["stream_index"] != 0
-        assert one.metas[1]["within_block_offset"] == one.metas[0]["n"]
-        assert one.metas[1]["shuffled_block_index"] == 0
+        if one.metas[0]["n"] < len(one.stream):
+            assert one.metas[1]["stream_index"] == one.metas[0]["n"]
+            assert one.metas[1]["stream_index"] != 0
+            assert one.metas[1]["within_block_offset"] == one.metas[0]["n"]
+            assert one.metas[1]["shuffled_block_index"] == 0
+            assert one.metas[1]["completed_passes"] == 0
+        else:
+            assert one.metas[0]["wrapped_within_panel"] is False
+            assert len(set(_chronos(one.panels[0]))) == len(one.stream)
+            assert one.metas[1]["stream_index"] == 0
+            assert one.metas[1]["completed_passes"] == 1
         _assert_no_duplicate_before_exhaustion(one)
         assert one.covers_stream()
 
         two_blocks = _block_trials(2, 20)
-        two = build_continuation_bank(
+        two = build_wrap_fill_bank(
             two_blocks,
             dataset="12badham2017deficits",
             master_seed=0,
@@ -1669,7 +1729,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
             trial["_ldp"]["chrono"] for block in first for trial in block
         ]
 
-        population = build_continuation_bank(
+        population = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1679,7 +1739,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
             wrap=fresh_wrap,
             cap=HARD_PROMPT_TOKEN_CAP,
         )
-        again = build_continuation_bank(
+        again = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1692,7 +1752,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
         assert population.fingerprint == again.fingerprint
         assert population.metas[0]["trial_keys"] == again.metas[0]["trial_keys"]
 
-        explore = build_continuation_bank(
+        explore = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1705,7 +1765,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
         )
         assert explore.covers_stream()
 
-        fresh = build_continuation_bank(
+        fresh = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1717,7 +1777,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
             bank=FRESH_BANK,
             require_full_coverage=True,
         )
-        parent_safe = build_continuation_bank(
+        parent_safe = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1731,7 +1791,7 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
         )
         assert fresh.covers_stream() and parent_safe.covers_stream()
         assert fresh.fingerprint != parent_safe.fingerprint
-        parent_again = build_continuation_bank(
+        parent_again = build_wrap_fill_bank(
             one_block,
             dataset="5speekenbrink2008learning",
             master_seed=0,
@@ -1872,8 +1932,15 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
             canonical_wrap=fresh_wrap,
             cap=HARD_PROMPT_TOKEN_CAP,
         )
-        assert "prior-choice" in history_text
         assert "weather_outcome" not in history_text
+        example_18 = next(
+            part for part in history_text.split("### example ") if '"chrono": 18' in part
+        )
+        before_json = example_18.split("{", 1)[0]
+        if "history_entries_omitted=true" in before_json:
+            assert "prior-choice" not in example_18
+        else:
+            assert "prior-choice" in example_18
         assert history_stats["continuation_policy"] == CONTINUATION_POLICY_ID
         for rendered, stats in (
             (fresh_text, fresh_stats),
@@ -1959,3 +2026,247 @@ def test_continuation_and_dual_panel_banks(tmp_path: Path):
     finally:
         clear_pics_v4_panel_state()
         configure_pics_v4(False)
+
+
+def _example_token_count(text: str) -> int:
+    return text.count("### example")
+
+
+def _chronos(panel):
+    return [int(trial["_ldp"]["chrono"]) for trial in panel]
+
+
+def test_wrap_fill_v4_does_not_stop_at_pass_end():
+    """32 trials at capacity 30 fill across the pass boundary inside one panel."""
+    import utils.teh.pics_v4_panels as panels
+    from utils.teh.pics_v4_panels import (
+        CONTINUATION_POLICY_V4_ID,
+        PANEL_POLICY_V4_ID,
+        build_continuation_bank,
+        build_wrap_fill_bank,
+    )
+    from utils.teh.prompt_snapshots import format_snapshot_examples
+
+    original = panels.qwen_user_prompt_token_count
+    panels.qwen_user_prompt_token_count = _example_token_count
+    wrap = lambda body: body
+    expected = [
+        list(range(0, 30)),
+        list(range(30, 32)) + list(range(0, 28)),
+        list(range(28, 32)) + list(range(0, 26)),
+    ]
+    try:
+        trials = _block_trials(1, 32)
+        legacy = build_continuation_bank(
+            trials,
+            dataset="5speekenbrink2008learning",
+            master_seed=0,
+            phase="population",
+            participant_id=None,
+            n_slots=4,
+            wrap=wrap,
+            cap=30,
+        )
+        assert [meta["n"] for meta in legacy.metas[:3]] == [30, 2, 30]
+        assert legacy.metas[1]["stream_index"] == 30
+
+        def run(phase, participant_id, n_slots):
+            return build_wrap_fill_bank(
+                trials,
+                dataset="5speekenbrink2008learning",
+                master_seed=0,
+                phase=phase,
+                participant_id=participant_id,
+                n_slots=n_slots,
+                wrap=wrap,
+                cap=30,
+                require_full_coverage=True,
+            )
+
+        banks = [
+            run("population", None, 10),
+            run("exploration", 20, 50),
+            run("participant_evolution", 29, 10),
+        ]
+        again = run("population", None, 10)
+        assert banks[0].fingerprint == again.fingerprint
+        assert banks[0].metas[1]["trial_keys"] == again.metas[1]["trial_keys"]
+        assert banks[0].metas[0]["panel_policy"] == PANEL_POLICY_V4_ID
+        assert banks[0].metas[0]["continuation_policy"] == CONTINUATION_POLICY_V4_ID
+        for bank in banks:
+            assert bank.covers_stream()
+            assert [_chronos(panel) for panel in bank.panels[:3]] == expected
+            for panel in bank.panels:
+                chronos = _chronos(panel)
+                assert len(chronos) == len(set(chronos))
+                assert len(panel) <= 30
+                assert _example_token_count(wrap(format_snapshot_examples(panel))) <= 30
+            assert bank.metas[1]["wrapped_within_panel"] is True
+            assert bank.metas[1]["stream_index"] == 30
+            assert bank.metas[1]["completed_passes"] == 0
+            assert bank.metas[2]["stream_index"] == 28
+            assert bank.metas[2]["completed_passes"] == 1
+        rendered = format_snapshot_examples(banks[0].panels[1])
+        rendered_chronos = [
+            int(line.split(":", 1)[1].strip().rstrip(","))
+            for line in rendered.splitlines()
+            if '"chrono":' in line
+        ]
+        assert rendered_chronos == expected[1]
+        assert len(rendered_chronos) == len(set(rendered_chronos))
+        assert len(banks[0].metas[1]["trial_keys"]) == len(set(banks[0].metas[1]["trial_keys"]))
+
+        blocks = _block_trials(2, 10)
+        mid = build_wrap_fill_bank(
+            blocks,
+            dataset="12badham2017deficits",
+            master_seed=0,
+            phase="participant_evolution",
+            participant_id=3,
+            n_slots=6,
+            wrap=wrap,
+            cap=7,
+            require_full_coverage=True,
+        )
+        assert mid.metas[1]["shuffled_block_index"] == mid.metas[0]["shuffled_block_index"]
+        assert mid.metas[1]["within_block_offset"] == 7
+        wrapped = next(meta for meta in mid.metas if meta["wrapped_within_panel"])
+        assert wrapped["n"] == 7
+        for panel in mid.panels:
+            assert len(_chronos(panel)) == len(set(_chronos(panel)))
+            assert _example_token_count(wrap(format_snapshot_examples(panel))) <= 7
+
+        small = _block_trials(1, 5)
+        fit = build_wrap_fill_bank(
+            small,
+            dataset="3frey2017cct",
+            master_seed=0,
+            phase="exploration",
+            participant_id=1,
+            n_slots=2,
+            wrap=wrap,
+            cap=30,
+            require_full_coverage=True,
+        )
+        assert len(fit.panels[0]) == 5
+        assert fit.metas[0]["wrapped_within_panel"] is False
+        assert fit.metas[0]["completed_passes"] == 0
+        assert len(fit.panels[1]) == 5
+        assert fit.metas[1]["completed_passes"] == 1
+        assert len(set(_chronos(fit.panels[0]))) == 5
+    finally:
+        panels.qwen_user_prompt_token_count = original
+
+
+def _example_payloads(text: str):
+    payloads = []
+    for chunk in text.split("### example ")[1:]:
+        start = chunk.find("{")
+        end = chunk.rfind("}")
+        payloads.append(json.loads(chunk[start : end + 1]))
+    return payloads
+
+
+def test_sparse_history_omits_ordinary_trials_and_packs_deterministically():
+    """Empty history stays explicit. Nonempty history is a segment-end checkpoint."""
+    import utils.teh.pics_v4_panels as panels
+    from utils.teh.pics_v4_panels import build_wrap_fill_bank, clear_pics_v4_panel_state
+    from utils.teh.prompt_snapshots import (
+        PROMPT_ONLY_METADATA_PREFIX,
+        format_sparse_history_examples,
+        remember_trial_block_position,
+    )
+
+    def one(offset, history, unit="block:0"):
+        trial = _schema_trial(
+            0,
+            offset % 2,
+            {"schema_type": "B", "option_keys": ["E", "J"], "cards": [offset]},
+            [] if history is None else history,
+            offset,
+            unit=unit,
+        )
+        trial["history"] = history
+        remember_trial_block_position(trial, unit=unit, offset=offset)
+        return trial
+
+    long_history = [{"action": i, "feedback": i % 2} for i in range(10)]
+    short_history = [{"action": 1, "feedback": 0}]
+    empty = one(0, [])
+    missing = one(1, None)
+    ordinary = one(2, short_history)
+    checkpoint = one(3, long_history)
+    text = format_sparse_history_examples([empty, missing, ordinary, checkpoint])
+    payloads = _example_payloads(text)
+    assert payloads[0]["history"] == []
+    assert payloads[1]["history"] is None
+    assert "history" not in payloads[2]
+    assert len(payloads[3]["history"]) == 8
+    assert payloads[3]["history"][0]["action"] == 0
+    assert payloads[3]["history"][-1]["action"] == 9
+    assert "history_truncated" not in payloads[3]
+    assert "history_original_len" not in payloads[3]
+    omitted = (
+        f"{PROMPT_ONLY_METADATA_PREFIX} history_entries_omitted=true "
+        "actual_runtime_history_length=1"
+    )
+    truncated = (
+        f"{PROMPT_ONLY_METADATA_PREFIX} history_entries_omitted=false "
+        "actual_runtime_history_length=10 displayed_history_entries=8"
+    )
+    assert omitted in text
+    assert truncated in text
+    assert text.count(PROMPT_ONLY_METADATA_PREFIX) == 2
+    for payload in payloads:
+        dumped = json.dumps(payload)
+        assert "PROMPT_ONLY_METADATA" not in dumped
+        assert "history_entries_omitted" not in dumped
+        assert "actual_runtime_history_length" not in dumped
+        assert "displayed_history_entries" not in dumped
+        assert "PROMPT_ONLY" not in json.dumps(payload["problem"])
+
+    wrapped_trials = [one(offset, short_history) for offset in range(4)]
+    wrapped = format_sparse_history_examples(
+        [wrapped_trials[2], wrapped_trials[3], wrapped_trials[0], wrapped_trials[1]]
+    )
+    wrapped_payloads = _example_payloads(wrapped)
+    assert "history" not in wrapped_payloads[0]
+    assert wrapped_payloads[1]["history"] == short_history
+    assert "history" not in wrapped_payloads[2]
+    assert wrapped_payloads[3]["history"] == short_history
+    assert wrapped.count("history_entries_omitted=true") == 2
+    assert "history_entries_omitted=false" not in wrapped
+
+    original = panels.qwen_user_prompt_token_count
+    panels.qwen_user_prompt_token_count = _example_token_count
+    try:
+        trials = [one(offset, short_history) for offset in range(32)]
+
+        def run():
+            return build_wrap_fill_bank(
+                trials,
+                dataset="5speekenbrink2008learning",
+                master_seed=0,
+                phase="participant_evolution",
+                participant_id=4,
+                n_slots=3,
+                wrap=lambda body: body,
+                cap=30,
+                bank="fresh",
+                require_full_coverage=True,
+            )
+
+        first = run()
+        second = run()
+        assert first.fingerprint == second.fingerprint
+        assert [_chronos(panel) for panel in first.panels] == [
+            _chronos(panel) for panel in second.panels
+        ]
+        rendered_a = format_sparse_history_examples(first.panels[1])
+        rendered_b = format_sparse_history_examples(second.panels[1])
+        assert rendered_a == rendered_b
+        assert _chronos(first.panels[1]) == list(range(30, 32)) + list(range(0, 28))
+        assert rendered_a.count("history_entries_omitted=true") >= 2
+    finally:
+        panels.qwen_user_prompt_token_count = original
+        clear_pics_v4_panel_state()

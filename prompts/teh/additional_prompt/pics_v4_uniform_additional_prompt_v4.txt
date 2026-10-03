@@ -1,0 +1,29 @@
+[PICS_V4_UNIFORM_ADDITIONAL_PROMPT]
+Apply only the section whose task type matches the task described above. Ignore every section that does not match.
+
+PROMPT-ONLY METADATA IS NOT RUNTIME STATE. The names `PROMPT_ONLY_METADATA`, `history_entries_omitted`, `actual_runtime_history_length`, and `displayed_history_entries`, and any omission marker that carries those names, never exist at runtime and must never be accessed by generated code. The real `history` argument to `choose(problem, history)` remains a list or value conforming to the runtime contract.
+
+`history` may be empty, and different history entries may contain different fields. Never assume optional fields such as `feedback`, `reward`, or outcome fields exist or are non-null. Check for a key or use `.get(...)` before reading it. Only fields explicitly required by the current task/API contract may be accessed directly.
+
+Sequential multi-armed bandit with repeated choices and reward feedback.
+This program predicts human choices; it does not compute an optimal reward-maximizing policy. `history` may be empty; when present it has `action` and `reward` (use `.get`—reward may be absent or None). Treat missing or None reward as no observed outcome; never add None to a numeric accumulator. Return a finite probability for every legal arm (full K-way dict over every `option['action']` in `problem['options']`). Use positive smoothing; normalize safely so probabilities stay finite.
+
+Four-armed bandit (K=4).
+Across a finite horizon, participants may trade immediate reward against information useful for later choices. Exploration strength may vary by participant and trial position—do not impose a fixed schedule such as always explore early then exploit. Allowed simple participant mechanisms (use a small combination supported by observed behavior; do not implement every mechanism): smoothed reward learning; uncertainty-sensitive exploration; recency; perseveration/switching; stochastic choice. Avoid extreme probabilities and unnecessary complexity. Skip a missing or None reward or handle it safely; `.get('reward', 0)` is insufficient when the key exists with value None. Map actions through current valid option keys/`problem['options']`—do not treat action ids as raw list indices into a fixed array. Initialize every legal arm explicitly. Use a uniform fallback only when history is empty or yields no usable reward signal—non-empty usable history must not collapse to uniform.
+
+Eight-armed bandit (K=8).
+Across a finite horizon, participants may briefly trade reward for information; prefer a simple calibrated rule supported by observed behavior rather than stacking many weakly supported mechanisms. Prefer smooth probabilities over highly confident action selection. Participant stochasticity, recency, or perseveration may be used only when supported. Do not invent spatial coordinates, arm relationships, or other features absent from `problem` and `history`. Do not force nonuniform predictions merely because history is nonempty—weak or uninformative evidence may appropriately remain close to uniform.
+
+Two-stage task involving spaceships, planets, aliens, transitions, and rewards.
+`history` may be empty; use `.get` for stage-conditional fields. Never read current-trial `reward`/`treasure` from `problem`.
+Stage 1 (`stage==1`): integer action 0/1 over spaceship `option_keys`/`spaceship_options`; learn from `stage==1` history only.
+Stage 2 (`stage==2`): condition on `planet`, `alien_options`/`option_keys`, and available `spaceship`/`stage1_action`; learn from `stage==2` history using `feedback`/`reward` when present. Never `option_keys.index(letter)` for actions. Clip probs; avoid extremes from raw counts.
+
+Feedback-based category learning involving stimulus features, category keys, rule blocks, and correctness feedback.
+`history` may be empty; use `.get` for nested feedback.
+Use current `stimulus_features`; learn within the current `rule_block_id` (reset/separate learning across blocks). Binary feedback: when `feedback.is_correct` is True the chosen action is the correct category; when False the other binary category is correct—both correct and incorrect past trials provide learning information. Past `feedback.correct_category` may appear in history only—never read a current-trial correct category from `problem`. Use smoothed/bounded scores; do not accumulate unbounded feature-count logits. Return calibrated P(action=1).
+
+Sequential sampling or stopping involving observed values, conditions or environments, and continue-versus-stop choices.
+`history` may be empty. No `feedback`/`reward` interface.
+Use `position`, `values_observed` (prefix through current position), `sequence_length`, `environment`. Actions: 0=continue, 1=stop; return P(stop). At the final position, stop is the only remaining decision. Optional history: prior continues as `{action,position,value}`. Do not invent outcome fields.
+[/PICS_V4_UNIFORM_ADDITIONAL_PROMPT]

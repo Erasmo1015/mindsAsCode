@@ -1,6 +1,6 @@
-"""PICS v4: structured snapshots, one uniform prompt, slot-stable panels.
+"""PICS v4: sparse-history snapshots, one uniform prompt, slot-stable panels.
 
-Trial text is ``format_snapshot_examples``. Dataset-keyed reminders are not
+Trial text is ``format_sparse_history_examples``. Dataset-keyed reminders are not
 inserted. Each absolute candidate slot keeps one shuffled-block panel.
 """
 from __future__ import annotations
@@ -24,23 +24,37 @@ from utils.teh.pics_v3_prompt_robustness import (
 )
 
 METHOD_VERSION = "pics_v4"
-PICS_V4_TRIAL_POLICY = "structured_snapshot_v2"
+PICS_V4_TRIAL_POLICY = "structured_snapshot_sparse_history_v1"
 REFUSED_TRIAL_POLICIES = frozenset(
     {
         "format_trial_for_prompt",
         "compact_faithful_trial_v1",
         "compact_faithful_trial_v2",
+        "structured_snapshot_v2",
     }
 )
 # pics_run_seed orders retained trials, blocks, and participants.
 # LLM requests and parent sampling stay on the historical split_seed formulas.
 SEARCH_RNG_POLICY = "legacy_split_seed_formulas"
 PICS_RUN_SEED_SCOPE = "trial_block_participant_schedule"
-ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v3"
+ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v4"
 PREVIOUS_ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v2"
 # Hash of uniform_additional_prompt_v2. Resume refuses this exact digest.
 PREVIOUS_UNIFORM_PROMPT_SHA256 = (
     "764647b048fe35a9f05596e3e044b5861d46591c36756cacc4adee25f2240170"
+)
+# uniform_additional_prompt_v3, before the sparse-history instruction.
+REFUSED_ADDITIONAL_PROMPT_POLICY_IDS = frozenset(
+    {
+        "uniform_additional_prompt_v2",
+        "uniform_additional_prompt_v3",
+    }
+)
+REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
+    {
+        PREVIOUS_UNIFORM_PROMPT_SHA256,
+        "12d8a94bf524ce1b985e4bf4b08c08c8d78e5a7f8a7437026516486433416e5b",
+    }
 )
 # 15360 + llm_max_tokens 1024 = 16384, the real Qwen context limit.
 HARD_PROMPT_TOKEN_CAP = 15_360
@@ -51,7 +65,7 @@ TEXT_PATH = (
     / "prompts"
     / "teh"
     / "additional_prompt"
-    / "pics_v4_uniform_additional_prompt_v3.txt"
+    / "pics_v4_uniform_additional_prompt_v4.txt"
 )
 PREVIOUS_TEXT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -64,6 +78,16 @@ PREVIOUS_TEXT_PATH = (
 _PREFACE = (
     "Apply only the section whose task type matches the task described above. "
     "Ignore every section that does not match."
+)
+
+# Names that appear only as prompt formatting. Generated code must not read them.
+SPARSE_HISTORY_METADATA_GUIDANCE = (
+    "PROMPT-ONLY METADATA IS NOT RUNTIME STATE. The names `PROMPT_ONLY_METADATA`, "
+    "`history_entries_omitted`, `actual_runtime_history_length`, and "
+    "`displayed_history_entries`, and any omission marker that carries those names, "
+    "never exist at runtime and must never be accessed by generated code. "
+    "The real `history` argument to `choose(problem, history)` remains a list or "
+    "value conforming to the runtime contract."
 )
 
 # Historical generic guidance, without the old marker tags. Same bytes for every dataset.
@@ -91,8 +115,8 @@ _process_enabled = False
 def uniform_additional_prompt_text() -> str:
     """Exact block inserted for every dataset.
 
-    ``uniform_additional_prompt_v3`` keeps the v2 task sections byte-for-byte
-    and places the historical generic history paragraph once before them.
+    ``uniform_additional_prompt_v4`` keeps the v3 task sections byte-for-byte
+    and states that sparse-history prompt metadata is not runtime state.
     """
     kool = _DATASET_KEYED_REMINDER_BODIES["14kool2016when"].strip()
     badham = _DATASET_KEYED_REMINDER_BODIES["12badham2017deficits"].strip()
@@ -113,6 +137,8 @@ def uniform_additional_prompt_text() -> str:
     return (
         f"[{UNIFORM_MARKER}]\n"
         f"{_PREFACE}\n"
+        f"\n"
+        f"{SPARSE_HISTORY_METADATA_GUIDANCE}\n"
         f"\n"
         f"{GENERIC_HISTORY_GUIDANCE}\n"
         f"\n"
@@ -303,8 +329,8 @@ def assert_pics_v4_resume(output_dir: Any) -> None:
     found_policy = str(payload.get("additional_prompt_policy") or "")
     found = str(payload.get("additional_prompt_sha256") or "")
     if (
-        found_policy == PREVIOUS_ADDITIONAL_PROMPT_POLICY_ID
-        or found == PREVIOUS_UNIFORM_PROMPT_SHA256
+        found_policy in REFUSED_ADDITIONAL_PROMPT_POLICY_IDS
+        or found in REFUSED_UNIFORM_PROMPT_SHA256
     ):
         raise RuntimeError(
             f"Refusing to resume {root}: previous uniform prompt "
@@ -333,20 +359,20 @@ def assert_pics_v4_resume(output_dir: Any) -> None:
         PANEL_POLICY_ID,
         PARENT_ENVELOPE_POLICY_ID,
         REFUSED_PANEL_BANK_POLICY_IDS,
-        REFUSED_PANEL_POLICY_IDS,
         REFUSED_PARENT_ENVELOPE_POLICY_IDS,
         SLOT_ASSIGNMENT_POLICY_ID,
+        refuse_historical_panel_policy,
     )
 
     found_pack = str(payload.get("packing_implementation") or "")
     found_panel = str(payload.get("panel_policy") or "")
-    if found_pack in REFUSED_PANEL_POLICY_IDS or found_panel in REFUSED_PANEL_POLICY_IDS:
-        refused = found_panel if found_panel in REFUSED_PANEL_POLICY_IDS else found_pack
-        raise RuntimeError(
-            f"Refusing to resume {root}: panel policy {refused} "
-            f"does not implement within-block continuation. "
-            f"Required panel policy is {PANEL_POLICY_ID}."
-        )
+    found_continuation = str(payload.get("continuation_policy") or "")
+    refuse_historical_panel_policy(
+        found_panel,
+        found_pack,
+        found_continuation,
+        where=str(root),
+    )
     if found_pack != PACKING_IMPLEMENTATION_ID:
         raise RuntimeError(
             f"Refusing to resume {root}: packing_implementation is {found_pack!r}, "

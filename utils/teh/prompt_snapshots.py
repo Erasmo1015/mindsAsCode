@@ -208,6 +208,211 @@ def format_snapshot_example(
     )
 
 
+SPARSE_HISTORY_POLICY_ID = "structured_snapshot_sparse_history_v1"
+PROMPT_ONLY_METADATA_PREFIX = (
+    "[PROMPT_ONLY_METADATA — NOT AVAILABLE TO choose(problem, history)]"
+)
+_PROMPT_ONLY_KEYS = frozenset(
+    {
+        "PROMPT_ONLY_METADATA",
+        "history_entries_omitted",
+        "actual_runtime_history_length",
+        "displayed_history_entries",
+        "history_truncated",
+        "history_original_len",
+        "history_entries_retained",
+        "history_truncation_note",
+    }
+)
+_BLOCK_POS: Dict[int, Tuple[Any, int]] = {}
+
+
+def remember_trial_block_position(trial: Dict[str, Any], *, unit: Any, offset: int) -> None:
+    """Record the chronological offset of this trial object inside its block."""
+    _BLOCK_POS[id(trial)] = (unit, int(offset))
+
+
+def clear_trial_block_positions() -> None:
+    _BLOCK_POS.clear()
+
+
+def _block_position(trial: Dict[str, Any], index: int) -> Tuple[Any, int]:
+    found = _BLOCK_POS.get(id(trial))
+    if found is not None:
+        return found
+    return (id(trial), int(index))
+
+
+def contiguous_block_segment_ends(trials: Sequence[Dict[str, Any]]) -> List[int]:
+    """Last index of each run of consecutive within-block offsets."""
+    if not trials:
+        return []
+    ends: List[int] = []
+    prev: Optional[Tuple[Any, int]] = None
+    for index, trial in enumerate(trials):
+        pos = _block_position(trial, index)
+        if prev is not None and not (pos[0] == prev[0] and pos[1] == prev[1] + 1):
+            ends.append(index - 1)
+        prev = pos
+    ends.append(len(trials) - 1)
+    return ends
+
+
+def _runtime_history(
+    trial: Dict[str, Any],
+    *,
+    history_max_entries: int,
+) -> Tuple[Any, bool, int, str]:
+    """Return display history, whether it was capped, the real length, and kind."""
+    if "history" not in trial or trial.get("history") is None:
+        return None, False, 0, "none"
+    raw = trial.get("history")
+    if raw == []:
+        return [], False, 0, "empty"
+    if isinstance(raw, list):
+        shown, was_trunc, orig_len = _truncate_history_entries(
+            raw, max_entries=history_max_entries
+        )
+        return shown, bool(was_trunc), int(orig_len), "nonempty"
+    length = len(raw) if hasattr(raw, "__len__") else 1
+    return raw, False, int(length), "nonempty"
+
+
+def _assert_runtime_object_has_no_prompt_metadata(payload: Dict[str, Any]) -> None:
+    dumped = json.dumps(payload, ensure_ascii=False, default=str)
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if str(key) in _PROMPT_ONLY_KEYS or "PROMPT_ONLY" in str(key):
+                    raise RuntimeError(
+                        f"prompt-only metadata {key!r} is inside a runtime JSON object"
+                    )
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(payload)
+    if "PROMPT_ONLY_METADATA" in dumped or "history_entries_omitted" in dumped:
+        raise RuntimeError("prompt-only metadata text is inside a runtime JSON object")
+
+
+def _sparse_payload(
+    trial: Dict[str, Any],
+    index: int,
+    history: Any,
+    *,
+    include_history: bool,
+) -> Dict[str, Any]:
+    sanitized = sanitize_trial_snapshot(trial)
+    problem = sanitized.get("problem") or {}
+    ldp = trial.get("_ldp") or {}
+    pid = prompt_participant_id(trial)
+    identity = {
+        "participant_id": pid,
+        "unit_id": ldp.get("unit_id"),
+        "chrono": ldp.get("chrono", ldp.get("session_index")),
+        "origin_split": ldp.get("origin_split"),
+        "origin_index": ldp.get("origin_index"),
+        "block_index": problem.get("block_index"),
+        "presented_day": problem.get("presented_day"),
+        "balloon_id": problem.get("balloon_id"),
+        "rule_block_id": problem.get("rule_block_id"),
+        "game": problem.get("game"),
+        "round": problem.get("round") or problem.get("round_id"),
+        "problem_id": problem.get("problem_id"),
+        "stage": problem.get("stage"),
+    }
+    identity = {key: value for key, value in identity.items() if value is not None}
+    out: Dict[str, Any] = {
+        "index": index,
+        "session_boundary": {
+            "participant_id": pid,
+            "dataset_alias": problem.get("dataset_alias"),
+        },
+        "identity": identity,
+        "problem": problem,
+    }
+    if include_history:
+        out["history"] = history
+    out["label"] = {"action": trial.get("action")}
+    _assert_runtime_object_has_no_prompt_metadata(out)
+    return out
+
+
+def format_sparse_history_example(
+    trial: Dict[str, Any],
+    index: int,
+    *,
+    show_history: bool,
+    history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
+) -> str:
+    """One example. Nonempty history is omitted except on a segment checkpoint."""
+    shown, was_trunc, actual_len, kind = _runtime_history(
+        trial, history_max_entries=history_max_entries
+    )
+    include_history = kind != "nonempty" or show_history
+    payload = _sparse_payload(
+        trial, index, shown, include_history=include_history
+    )
+    meta = ""
+    if kind == "nonempty" and not show_history:
+        meta = (
+            f"{PROMPT_ONLY_METADATA_PREFIX} history_entries_omitted=true "
+            f"actual_runtime_history_length={actual_len}"
+        )
+    elif show_history and was_trunc:
+        displayed = len(shown) if isinstance(shown, list) else 0
+        meta = (
+            f"{PROMPT_ONLY_METADATA_PREFIX} history_entries_omitted=false "
+            f"actual_runtime_history_length={actual_len} "
+            f"displayed_history_entries={displayed}"
+        )
+    body = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    pid = prompt_participant_id(trial)
+    header = f"### example {index}"
+    if pid is not None:
+        header += f" | participant={pid}"
+    label = payload.get("label") or {}
+    parts = [header]
+    if meta:
+        parts.append(meta)
+    parts.append(body)
+    parts.append(
+        f"observed_action_label={label.get('action')!r} "
+        "(target for this example; not passed into choose())"
+    )
+    return "\n".join(parts)
+
+
+def format_sparse_history_examples(
+    trials: Sequence[Dict[str, Any]],
+    *,
+    history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
+) -> str:
+    """Live PICS v4 serializer. Empty history stays explicit. Segment ends keep history."""
+    if not trials:
+        return ""
+    checkpoints = set(contiguous_block_segment_ends(trials))
+    blocks: List[str] = []
+    prev_pid: Optional[int] = object()  # type: ignore[assignment]
+    for index, trial in enumerate(trials, start=1):
+        pid = prompt_participant_id(trial)
+        if pid != prev_pid:
+            blocks.append(f"===== participant {pid} =====")
+            prev_pid = pid
+        blocks.append(
+            format_sparse_history_example(
+                trial,
+                index,
+                show_history=(index - 1) in checkpoints,
+                history_max_entries=history_max_entries,
+            )
+        )
+    return "\n\n".join(blocks)
+
+
 def format_snapshot_examples(
     trials: Sequence[Dict[str, Any]],
     *,

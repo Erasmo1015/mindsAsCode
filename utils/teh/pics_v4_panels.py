@@ -1,10 +1,11 @@
 """Slot-stable shuffled-block panels for PICS v4.
 
 Whole blocks are shuffled with the method seed. Trials stay chronological
-inside each block. Panels are cut sequentially from that stream: the next
-panel starts at the first snapshot the previous panel did not take. A panel
-wraps to the start of the same stream only after every retained snapshot has
-been assigned once. After construction, a longer parent may keep only a prefix.
+inside each block. The live builder is ``build_wrap_fill_bank``
+(``shuffled_block_slot_stable_v4``). When a pass ends and the current panel
+still has room, that same panel continues from the start of the stream.
+``build_continuation_bank`` remains only so a v3 resume can be recognized and
+refused: it stops at the end of a pass.
 """
 
 from __future__ import annotations
@@ -18,12 +19,21 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from utils.teh.limited_data_registry import INDEPENDENT_TRIAL, limited_data_spec
-from utils.teh.prompt_snapshots import current_or_future_leak_paths, format_snapshot_examples
+from utils.teh.prompt_snapshots import (
+    clear_trial_block_positions,
+    current_or_future_leak_paths,
+    format_sparse_history_examples,
+    remember_trial_block_position,
+)
 from utils.teh.prompt_units import prompt_participant_id, qwen_user_prompt_token_count, trial_unit_id
 
-PANEL_POLICY_ID = "shuffled_block_slot_stable_v3"
 # v1 selected iteration-1 for a one-candidate batch.
 # v2 restarted a long block at its first trial for every slot.
+# v3 carried forward inside a block, then stopped when the pass ended.
+PANEL_POLICY_V3_ID = "shuffled_block_slot_stable_v3"
+CONTINUATION_POLICY_V1_ID = "within_block_carry_forward_v1"
+PANEL_POLICY_ID = "shuffled_block_slot_stable_v4"
+PANEL_POLICY_V4_ID = PANEL_POLICY_ID
 REFUSED_PANEL_POLICY_ID = "shuffled_block_slot_stable_v1"
 REFUSED_PANEL_POLICY_IDS = frozenset(
     {
@@ -31,9 +41,17 @@ REFUSED_PANEL_POLICY_IDS = frozenset(
         "shuffled_block_slot_stable_v2",
     }
 )
+# v3 markers stay on disk for running jobs. Resume must not rebuild them as v4.
+END_OF_PASS_STOP_POLICY_IDS = frozenset(
+    {
+        PANEL_POLICY_V3_ID,
+        CONTINUATION_POLICY_V1_ID,
+    }
+)
 SLOT_ASSIGNMENT_POLICY_ID = "first_n"
-PACKING_IMPLEMENTATION_ID = "shuffled_block_slot_stable_v3"
-CONTINUATION_POLICY_ID = "within_block_carry_forward_v1"
+PACKING_IMPLEMENTATION_ID = PANEL_POLICY_ID
+CONTINUATION_POLICY_ID = "within_block_carry_forward_wrap_fill_v2"
+CONTINUATION_POLICY_V4_ID = CONTINUATION_POLICY_ID
 PANEL_BANK_POLICY_ID = "conditioning_aware_panel_banks_v2"
 PARENT_ENVELOPE_POLICY_ID = "initial_unique_elite_mean_x_v1"
 REFUSED_PANEL_BANK_POLICY_IDS = frozenset(
@@ -198,7 +216,13 @@ def flattened_stream(
     )
     items: List[StreamItem] = []
     for block_index, block in enumerate(blocks):
+        unit = trial_unit_id(block[0], dataset=dataset, fallback=int(block_index))
         for offset, trial in enumerate(block):
+            remember_trial_block_position(
+                trial,
+                unit=(int(block_index), unit),
+                offset=int(offset),
+            )
             items.append(
                 StreamItem(
                     trial=trial,
@@ -215,15 +239,40 @@ def flattened_stream(
     return items
 
 
-def bank_fingerprint(slot_keys: Sequence[Sequence[str]], *, bank: str) -> str:
-    payload = {
-        "panel_policy": PANEL_POLICY_ID,
-        "continuation_policy": CONTINUATION_POLICY_ID,
+def _fingerprint_payload(
+    slot_keys: Sequence[Sequence[str]],
+    *,
+    bank: str,
+    panel_policy: str,
+    continuation_policy: str,
+) -> Dict[str, Any]:
+    return {
+        "panel_policy": str(panel_policy),
+        "continuation_policy": str(continuation_policy),
         "bank": str(bank),
         "slots": [list(keys) for keys in slot_keys],
     }
+
+
+def bank_fingerprint(
+    slot_keys: Sequence[Sequence[str]],
+    *,
+    bank: str,
+    panel_policy: Optional[str] = None,
+    continuation_policy: Optional[str] = None,
+) -> str:
+    payload = _fingerprint_payload(
+        slot_keys,
+        bank=bank,
+        panel_policy=panel_policy or PANEL_POLICY_ID,
+        continuation_policy=continuation_policy or CONTINUATION_POLICY_ID,
+    )
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def bank_fingerprint_v4(slot_keys: Sequence[Sequence[str]], *, bank: str) -> str:
+    return bank_fingerprint(slot_keys, bank=bank)
 
 
 def longest_prefix(
@@ -238,7 +287,7 @@ def longest_prefix(
     def fits(count: int) -> bool:
         if count <= 0:
             return True
-        body = format_snapshot_examples(list(panel[:count]))
+        body = format_sparse_history_examples(list(panel[:count]))
         return int(qwen_user_prompt_token_count(wrap(body))) <= int(cap)
 
     if not fits(1):
@@ -267,7 +316,12 @@ def build_continuation_bank(
     bank: str = "",
     require_full_coverage: bool = False,
 ) -> ContinuationBank:
-    """Cut panels in order from one shuffled stream. Do not wrap inside a panel."""
+    """Historical v3 panels. Do not wrap inside a panel.
+
+    ``remaining`` is only ``stream[cursor:]``. When that suffix is shorter than
+    the token budget, the panel ends. Reaching the end of a pass is therefore a
+    panel-stop. The live builder is ``build_wrap_fill_bank``.
+    """
     from utils.teh.aamas_v0_lossless_trials import TrialWindowDoesNotFitError
 
     n_slots = max(1, int(n_slots))
@@ -293,6 +347,8 @@ def build_continuation_bank(
             item = stream[cursor]
             block_index = item.block_index
             within_offset = item.within_block_offset
+            # End-of-pass stop: the candidate list does not continue into the
+            # next pass, so leftover token capacity cannot pull in earlier trials.
             remaining = [entry.trial for entry in stream[cursor:]]
         else:
             block_index = 0
@@ -321,7 +377,12 @@ def build_continuation_bank(
             }
         )
         cursor += len(panel)
-    fingerprint = bank_fingerprint(slot_keys, bank=bank or str(phase))
+    fingerprint = bank_fingerprint(
+        slot_keys,
+        bank=bank or str(phase),
+        panel_policy=PANEL_POLICY_V3_ID,
+        continuation_policy=CONTINUATION_POLICY_V1_ID,
+    )
     built = ContinuationBank(
         panels=panels,
         metas=metas,
@@ -338,6 +399,140 @@ def build_continuation_bank(
     return built
 
 
+def build_wrap_fill_bank(
+    trials: Sequence[Dict[str, Any]],
+    *,
+    dataset: str,
+    master_seed: int,
+    phase: str,
+    participant_id: Optional[int],
+    n_slots: int,
+    wrap: Wrap,
+    cap: int,
+    bank: str = "",
+    require_full_coverage: bool = False,
+) -> ContinuationBank:
+    """Live v4 panels: wrap inside the same panel when a pass ends with room left.
+
+    A panel stops only when the next distinct trial would exceed ``cap``, or
+    when it already holds every stream trial once.
+    """
+    from utils.teh.aamas_v0_lossless_trials import TrialWindowDoesNotFitError
+
+    n_slots = max(1, int(n_slots))
+    stream = flattened_stream(
+        trials,
+        dataset=dataset,
+        master_seed=master_seed,
+        phase=phase,
+        participant_id=participant_id,
+    )
+    n_stream = len(stream)
+    cursor = 0
+    passes = 0
+    covered_indices: set[int] = set()
+    panels: List[List[Dict[str, Any]]] = []
+    metas: List[Dict[str, Any]] = []
+    slot_keys: List[List[str]] = []
+    for slot in range(n_slots):
+        if n_stream and cursor >= n_stream:
+            cursor = 0
+            passes += 1
+        start_cursor = int(cursor) if n_stream else 0
+        start_passes = int(passes)
+        if n_stream:
+            start_item = stream[start_cursor]
+            block_index = start_item.block_index
+            within_offset = start_item.within_block_offset
+        else:
+            block_index = 0
+            within_offset = 0
+        panel_items: List[StreamItem] = []
+        seen: set[int] = set()
+        wrapped_within_panel = False
+        while n_stream and len(seen) < n_stream:
+            if cursor >= n_stream:
+                cursor = 0
+                passes += 1
+                wrapped_within_panel = True
+                continue
+            if cursor in seen:
+                break
+            chunk: List[StreamItem] = []
+            idx = int(cursor)
+            while idx < n_stream and idx not in seen and len(seen) + len(chunk) < n_stream:
+                chunk.append(stream[idx])
+                idx += 1
+            if not chunk:
+                break
+            existing = [item.trial for item in panel_items]
+
+            def fits(count: int, existing: List[Dict[str, Any]] = existing, chunk: List[StreamItem] = chunk) -> bool:
+                if count <= 0:
+                    return True
+                body = format_sparse_history_examples(
+                    existing + [item.trial for item in chunk[:count]]
+                )
+                return int(qwen_user_prompt_token_count(wrap(body))) <= int(cap)
+
+            if not fits(1):
+                if not panel_items:
+                    raise TrialWindowDoesNotFitError(
+                        f"PICS v4 slot {slot} cannot fit one complete snapshot under cap {cap}."
+                    )
+                break
+            lo = 1
+            hi = len(chunk)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if fits(mid):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            take = int(lo)
+            for offset, item in enumerate(chunk[:take]):
+                panel_items.append(item)
+                seen.add(int(cursor) + offset)
+                if passes == 0:
+                    covered_indices.add(int(cursor) + offset)
+            cursor += take
+            if take < len(chunk):
+                break
+        panel = [item.trial for item in panel_items]
+        keys = [item.key for item in panel_items]
+        panels.append(panel)
+        slot_keys.append(keys)
+        metas.append(
+            {
+                "slot": int(slot),
+                "stream_index": int(start_cursor),
+                "shuffled_block_index": int(block_index),
+                "within_block_offset": int(within_offset),
+                "completed_passes": int(start_passes),
+                "n": len(panel),
+                "trial_keys": keys,
+                "wrapped_within_panel": bool(wrapped_within_panel),
+                "panel_policy": PANEL_POLICY_ID,
+                "continuation_policy": CONTINUATION_POLICY_ID,
+            }
+        )
+    fingerprint = bank_fingerprint(slot_keys, bank=bank or str(phase))
+    built = ContinuationBank(
+        panels=panels,
+        metas=metas,
+        stream=stream,
+        fingerprint=fingerprint,
+        covered_before_wrap=len(covered_indices),
+    )
+    if require_full_coverage and not built.covers_stream():
+        raise RuntimeError(
+            f"PICS v4 wrap-fill {phase} panels cover {built.covered_before_wrap} of "
+            f"{n_stream} retained snapshots before wrapping "
+            f"(bank={bank or phase})."
+        )
+    return built
+
+
 _BANK_CACHE: Dict[Tuple[Any, ...], ContinuationBank] = {}
 _BANKS: Dict[Tuple[str, str, Optional[int]], Dict[str, ContinuationBank]] = {}
 
@@ -345,6 +540,7 @@ _BANKS: Dict[Tuple[str, str, Optional[int]], Dict[str, ContinuationBank]] = {}
 def clear_pics_v4_panel_state() -> None:
     _BANK_CACHE.clear()
     _BANKS.clear()
+    clear_trial_block_positions()
 
 
 def _wrap_fingerprint(wrap: Wrap) -> str:
@@ -387,7 +583,7 @@ def cached_continuation_bank(
     cached = _BANK_CACHE.get(key)
     if cached is not None:
         return cached
-    built = build_continuation_bank(
+    built = build_wrap_fill_bank(
         trials,
         dataset=dataset,
         master_seed=master_seed,
@@ -591,6 +787,33 @@ def record_panel_fingerprint(
     return path
 
 
+def refuse_historical_panel_policy(
+    found_panel: str,
+    found_pack: str,
+    found_continuation: str,
+    *,
+    where: str,
+) -> None:
+    """Fail closed on v1, v2, and the v3 end-of-pass stop."""
+    if found_panel in REFUSED_PANEL_POLICY_IDS or found_pack in REFUSED_PANEL_POLICY_IDS:
+        raise RuntimeError(
+            f"Refusing to resume {where}: panel policy {found_panel or found_pack} "
+            f"does not implement within-block continuation. "
+            f"Required panel policy is {PANEL_POLICY_ID}."
+        )
+    if (
+        found_panel in END_OF_PASS_STOP_POLICY_IDS
+        or found_pack in END_OF_PASS_STOP_POLICY_IDS
+        or found_continuation in END_OF_PASS_STOP_POLICY_IDS
+    ):
+        raise RuntimeError(
+            f"Refusing to resume {where}: panel policy {found_panel or found_pack} "
+            f"continuation {found_continuation} stops at the end of a completed pass "
+            "and does not wrap-fill the same panel. "
+            f"Required panel policy is {PANEL_POLICY_ID} with {CONTINUATION_POLICY_ID}."
+        )
+
+
 def assert_panel_bank_file(path: Path, bank: ContinuationBank, *, phase: str, name: str) -> None:
     """Refuse a saved bank whose policy or fingerprint does not match the rebuild."""
     path = Path(path)
@@ -599,12 +822,13 @@ def assert_panel_bank_file(path: Path, bank: ContinuationBank, *, phase: str, na
     payload = json.loads(path.read_text(encoding="utf-8"))
     found_panel = str(payload.get("panel_policy") or "")
     found_pack = str(payload.get("packing_implementation") or "")
-    if found_panel in REFUSED_PANEL_POLICY_IDS or found_pack in REFUSED_PANEL_POLICY_IDS:
-        raise RuntimeError(
-            f"Refusing to resume {path}: panel policy {found_panel or found_pack} "
-            f"does not implement within-block continuation. "
-            f"Required panel policy is {PANEL_POLICY_ID}."
-        )
+    found_continuation = str(payload.get("continuation_policy") or "")
+    refuse_historical_panel_policy(
+        found_panel,
+        found_pack,
+        found_continuation,
+        where=str(path),
+    )
     found_bank_policy = str(payload.get("panel_bank_policy") or "")
     found_envelope = str(payload.get("parent_envelope_policy") or "")
     if found_bank_policy in REFUSED_PANEL_BANK_POLICY_IDS:
@@ -731,7 +955,7 @@ def render_slot_panel(
                 "PICS v4 snapshot would put a current outcome in problem: "
                 + ", ".join(leaks)
             )
-    text = format_snapshot_examples(visible) if visible else ""
+    text = format_sparse_history_examples(visible) if visible else ""
     wrapped_tokens = int(qwen_user_prompt_token_count(actual_wrap(text)))
     rows = []
     for pos, trial in enumerate(visible):

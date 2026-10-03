@@ -105,10 +105,10 @@ AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 )
 
 _REQUIRED_DOC_TOKENS = (
-    "structured_snapshot_v2",
-    "uniform_additional_prompt_v3",
-    "shuffled_block_slot_stable_v3",
-    "within_block_carry_forward_v1",
+    "structured_snapshot_sparse_history_v1",
+    "uniform_additional_prompt_v4",
+    "shuffled_block_slot_stable_v4",
+    "within_block_carry_forward_wrap_fill_v2",
     "conditioning_aware_panel_banks_v2",
     "initial_unique_elite_mean_x_v1",
     "sha256_unique_v1",

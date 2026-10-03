@@ -760,7 +760,10 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Sep29 pre-lossless exact coverage (CPU job 308142): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/pre_lossless_exact_coverage/`.
 - Sep29 one-line vs v2 snapshot field loss (15 SA40 trials): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/one_line_vs_snapshot/`.
 - Sep29 compact faithful trial text `compact_faithful_trial_v1` (seeded cursor unchanged): `analysis_2026Sep/Sep27_aamas_v0/others/trial_truncation/compact_faithful_trial_v1/REPORT.md`.
-- Oct3 `pics_v4` final (`structured_snapshot_v2`, `uniform_additional_prompt_v3`, `shuffled_block_slot_stable_v3`, `within_block_carry_forward_v1`, `conditioning_aware_panel_banks_v2`, `initial_unique_elite_mean_x_v1`, `first_n`, cap 15360, `sha256_unique_v1` cap 5): `utils/teh/pics_v4.py`.
+- Oct3 `pics_v4` live (`structured_snapshot_sparse_history_v1`, `uniform_additional_prompt_v4`, `shuffled_block_slot_stable_v4`, `within_block_carry_forward_wrap_fill_v2`, `conditioning_aware_panel_banks_v2`, `initial_unique_elite_mean_x_v1`, `first_n`, cap 15360, `sha256_unique_v1` cap 5): `utils/teh/pics_v4.py`. `structured_snapshot_v2` and `uniform_additional_prompt_v3` are refused.
+- Oct3 sparse-history prototype, not wired: `analysis_2026Sep/Sep30_pics_v4/others/sparse_history_prototype/HISTORY.md`.
+- Oct3 sparse-history isolated A/B pilot (job 311193, participant 0 only, no dataset rerun): `analysis_2026Sep/Sep30_pics_v4/others/sparse_history_ab/REPORT.md`.
+- Oct3 frozen PICS v4 target-only jobs 311207, 311208, 311199, 311200, 311209, 311210, 311203, 311204 (3090/A5000/H100NVL/L40S; 311197/311198/311201/311202 cancelled, not resumed): `analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md`.
 - Oct3 PICS-v4 population MEM annotation inventory (schema v5, rendered-prompt label cache, not submitted): `analysis/mem/pics_v4_population_annotation.py`. Report: `analysis_2026Sep/Sep30_pics_v4/mem/population/INVENTORY.md`.
 - Oct3 population transition-v5 seed-baseline finalization (`SEED_BASELINE_REF_ABSENT`, verified constant seed only): `utils/mem/population_transition_finalize_v5.py`.
 - Oct2 Guan/Bergert integrity replay (310370 vs 305707, 310371 vs 305708): `analysis_2026Sep/Sep30_pics_v4/integrity_replay_audit/REPORT.md`.

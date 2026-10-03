@@ -6272,6 +6272,11 @@ def _serialize_trials_for_prompt(
     if using_v2_prompt_contract():
         # Keep snapshot JSON. v2 over-budget handling is trial-count caps in
         # _truncate_psych_prompt_to_budget, not rewriting examples as one-liners.
+        from utils.teh.pics_v4 import using_pics_v4
+        from utils.teh.prompt_snapshots import format_sparse_history_examples
+
+        if using_pics_v4():
+            return format_sparse_history_examples(trials)
         return format_snapshot_examples(trials)
     if compact:
         return format_trials_to_text_compact(trials, dataset=dataset)
@@ -10767,7 +10772,7 @@ def _ensure_pics_v4_evolution_panel_banks(
     from utils.teh.pics_v4_panels import (
         assert_panel_bank_file,
         bank_filename,
-        build_continuation_bank,
+        build_wrap_fill_bank,
         evolution_bank_dir,
         register_panel_bank,
         write_panel_bank,
@@ -10884,7 +10889,7 @@ def _ensure_pics_v4_evolution_panel_banks(
     )
 
     def _build(wrap, bank_name: str):
-        return build_continuation_bank(
+        return build_wrap_fill_bank(
             pool,
             dataset=str(dataset),
             master_seed=int(master_seed),
@@ -11023,7 +11028,7 @@ def _pics_v4_install_constructed_bank(
     from utils.teh.pics_v4_panels import (
         assert_panel_bank_file,
         bank_filename,
-        build_continuation_bank,
+        build_wrap_fill_bank,
         evolution_bank_dir,
         register_panel_bank,
         write_panel_bank,
@@ -11040,7 +11045,7 @@ def _pics_v4_install_constructed_bank(
                     f"Refusing to resume {path}: the saved panel bank cannot be rebuilt."
                 )
             use_wrap = stored_wrap(existing)
-    bank = build_continuation_bank(
+    bank = build_wrap_fill_bank(
         trials,
         dataset=str(dataset),
         master_seed=int(master_seed),
