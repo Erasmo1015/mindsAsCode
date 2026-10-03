@@ -764,7 +764,8 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Oct3 sparse-history prototype, not wired: `analysis_2026Sep/Sep30_pics_v4/others/sparse_history_prototype/HISTORY.md`.
 - Oct3 sparse-history isolated A/B pilot (job 311193, participant 0 only, no dataset rerun): `analysis_2026Sep/Sep30_pics_v4/others/sparse_history_ab/REPORT.md`.
 - Oct3 frozen PICS v4 target-only jobs 311207, 311208, 311199, 311200, 311209, 311210, 311203, 311204 (3090/A5000/H100NVL/L40S; 311197/311198/311201/311202 cancelled, not resumed): `analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md`.
-- Oct3 PICS-v4 population MEM annotation inventory (schema v5, rendered-prompt label cache, not submitted): `analysis/mem/pics_v4_population_annotation.py`. Report: `analysis_2026Sep/Sep30_pics_v4/mem/population/INVENTORY.md`.
+- Oct3 final sparse-history population annotation inventory (8 datasets, 800 candidates, not submitted): `analysis_2026Sep/Sep30_pics_v4/mem/population_final/INVENTORY.md`.
+- Oct3 final population annotation default is jobs 311199–311210 and `mem/population_final/` (`analysis/mem/pics_v4_population_annotation.py`; `cluster/v0/ours/main/pics_v4/annotation/submit_pop_annot.sh`). Historical `mem/population/` is refused. Participant discovery fails closed: `analysis/mem/pics_v4_participant_discovery.py`.
 - Oct3 population transition-v5 seed-baseline finalization (`SEED_BASELINE_REF_ABSENT`, verified constant seed only): `utils/mem/population_transition_finalize_v5.py`.
 - Oct2 Guan/Bergert integrity replay (310370 vs 305707, 310371 vs 305708): `analysis_2026Sep/Sep30_pics_v4/integrity_replay_audit/REPORT.md`.
 - Oct2 Guan participant-evolution ablation (uniform / order / explore-pool; frozen job 305707, participants 19/15/17, iters 1–3): `analysis_2026Sep/Sep30_pics_v4/guan_order_ablation/`.

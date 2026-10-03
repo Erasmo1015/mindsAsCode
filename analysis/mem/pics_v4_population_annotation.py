@@ -54,8 +54,15 @@ MANIFEST_SCHEMA = "pics_v4_population_annotation_manifest_v1"
 POPULATION_PHASE = "global_evolution"
 POPULATION_PARTICIPANT = "global"
 DOC_REL = "analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md"
-OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population"
+HISTORICAL_OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population"
+OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population_final"
 ANNOTATION_METHOD = "analysis/mem/annotate_population_programs.py"
+REQUIRED_POLICY_MARKERS = {
+    "trial_prompt_policy": "structured_snapshot_sparse_history_v1",
+    "additional_prompt_policy": "uniform_additional_prompt_v4",
+    "panel_policy": "shuffled_block_slot_stable_v4",
+    "continuation_policy": "within_block_carry_forward_wrap_fill_v2",
+}
 
 # Former pack plus latter pack. A group is submitted only for datasets that are ready.
 ANNOTATION_GROUPS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
@@ -92,17 +99,30 @@ ANNOTATION_GROUPS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ),
 )
 
-# Authoritative current evaluation. Superseded job ids are not listed.
+# Final sparse-history rerun. Jobs 310886–310933 are historical and refused.
 AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
-    ("310886", ("guan_2020_stopping", "11enkavi2019recentprobes")),
-    ("310887", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
-    ("310931", ("3frey2017cct",)),
-    ("310932", ("2plonsky2018when",)),
-    ("310888", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
-    ("310889", ("14kool2016when", "steyvers_2009_bandit")),
-    ("310899", ("10frey2017risk", "1peterson2021using")),
-    ("310933", ("mixed_gambles", "13schulz2020finding")),
+    ("311207", ("guan_2020_stopping", "11enkavi2019recentprobes")),
+    ("311208", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
+    ("311199", ("3frey2017cct",)),
+    ("311200", ("2plonsky2018when",)),
+    ("311209", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
+    ("311210", ("14kool2016when", "steyvers_2009_bandit")),
+    ("311203", ("10frey2017risk", "1peterson2021using")),
+    ("311204", ("mixed_gambles", "13schulz2020finding")),
 )
+HISTORICAL_JOB_IDS = frozenset(
+    {
+        "310886",
+        "310887",
+        "310888",
+        "310889",
+        "310899",
+        "310931",
+        "310932",
+        "310933",
+    }
+)
+FINAL_JOB_IDS = frozenset(job_id for job_id, _names in AUTHORITATIVE_JOBS)
 
 _REQUIRED_DOC_TOKENS = (
     "structured_snapshot_sparse_history_v1",
@@ -117,19 +137,68 @@ _REQUIRED_DOC_TOKENS = (
     "16,384",
     "duplicate_backfill",
     "first unseen",
-    "310886",
-    "310887",
-    "310931",
-    "310932",
-    "310888",
-    "310889",
-    "310899",
-    "310933",
+    "311207",
+    "311208",
+    "311199",
+    "311200",
+    "311209",
+    "311210",
+    "311203",
+    "311204",
 )
 
 
 class PicsV4AnnotationError(RuntimeError):
     pass
+
+
+def assert_final_job_mapping(jobs: Sequence[Tuple[str, Sequence[str]]]) -> None:
+    """Accept only final-rerun job ids and their own datasets."""
+    allowed = {job_id: set(names) for job_id, names in AUTHORITATIVE_JOBS}
+    for job_id, names in jobs:
+        jid = str(job_id)
+        if jid in HISTORICAL_JOB_IDS or jid not in allowed:
+            raise PicsV4AnnotationError(f"refusing non-final population job {jid}")
+        unknown = [name for name in names if name not in allowed[jid]]
+        if unknown:
+            raise PicsV4AnnotationError(
+                f"job {jid} does not own datasets {unknown}"
+            )
+
+
+def assert_annotation_output_root(path: Path) -> None:
+    """Final annotations stay under population_final. The historical root is refused."""
+    text = Path(path).as_posix().rstrip("/")
+    historical = HISTORICAL_OUTPUT_REL.rstrip("/")
+    final = OUTPUT_REL.rstrip("/")
+    if text == historical or text.endswith("/" + historical) or f"/{historical}/" in f"/{text}/":
+        raise PicsV4AnnotationError(f"refusing historical population annotation root: {path}")
+    if text != final and not text.endswith("/" + final) and f"/{final}/" not in f"/{text}/":
+        raise PicsV4AnnotationError(
+            f"population annotation output must stay under {OUTPUT_REL}: {path}"
+        )
+
+
+def assert_manifest_job_ids(programs: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse programs whose source job is historical or outside the final mapping."""
+    ids = {str(row.get("source_job_id") or "") for row in programs}
+    historical = sorted(job_id for job_id in ids if job_id in HISTORICAL_JOB_IDS)
+    if historical:
+        raise PicsV4AnnotationError(f"manifest contains historical jobs: {historical}")
+    unknown = sorted(job_id for job_id in ids if job_id not in FINAL_JOB_IDS)
+    if unknown:
+        raise PicsV4AnnotationError(f"manifest contains non-final jobs: {unknown}")
+
+
+def assert_manifest_is_final(path: Path) -> None:
+    """Refuse a manifest file that names a historical job or a non-final job."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert_annotation_output_root(path)
+    assert_manifest_job_ids(payload.get("programs") or [])
+
+
+def assert_manifest_is_final_payload(payload: Mapping[str, Any]) -> None:
+    assert_manifest_job_ids(payload.get("programs") or [])
 
 
 def expected_policy_fields() -> Dict[str, Any]:
@@ -153,6 +222,11 @@ def expected_policy_fields() -> Dict[str, Any]:
         "pics_run_seed": 0,
     }
     fields.update(elite_policy_provenance())
+    for key, required in REQUIRED_POLICY_MARKERS.items():
+        if fields.get(key) != required:
+            raise PicsV4AnnotationError(
+                f"live policy {key} is {fields.get(key)!r}, not {required!r}"
+            )
     return fields
 
 
@@ -313,6 +387,8 @@ def _load_candidates(arm: Path, dataset: str, job_id: str, repo: Path) -> Tuple[
         raise PicsV4AnnotationError(
             f"candidate files and mem_trace differ (files={len(on_disk)} trace={len(traced)})"
         )
+    if len(raw) != 100:
+        raise PicsV4AnnotationError(f"population trace has {len(raw)} candidates, not 100")
     counts = Counter(int(rec["iteration"]) for rec in raw)
     for iteration in range(1, 11):
         if counts[iteration] != 10:
@@ -428,6 +504,7 @@ def inventory_populations(
     jobs: Sequence[Tuple[str, Sequence[str]]] = AUTHORITATIVE_JOBS,
 ) -> Dict[str, Any]:
     """Resolve each authoritative dataset. Incomplete traces are not parsed."""
+    assert_final_job_mapping(jobs)
     repo = Path(repo)
     ready: List[Dict[str, Any]] = []
     datasets: List[Dict[str, Any]] = []
@@ -677,8 +754,10 @@ def write_inventory(repo: Path, jobs: Sequence[Tuple[str, Sequence[str]]] = AUTH
             "Documentation_v4.md is missing self-contained policy text: " + ", ".join(gaps)
         )
     payload = inventory_populations(repo, jobs)
+    assert_manifest_is_final_payload(payload)
     payload["sha_label_cache"] = sha_label_cache_summary(payload["programs"])
     out_dir = repo / OUTPUT_REL
+    assert_annotation_output_root(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "schema": payload["schema"],
