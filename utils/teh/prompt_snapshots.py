@@ -391,7 +391,7 @@ def format_sparse_history_examples(
     *,
     history_max_entries: int = DEFAULT_HISTORY_MAX_ENTRIES,
 ) -> str:
-    """Live PICS v4 serializer. Empty history stays explicit. Segment ends keep history."""
+    """Live PICS v4 serializer. Omission metadata stays outside runtime JSON."""
     if not trials:
         return ""
     checkpoints = set(contiguous_block_segment_ends(trials))

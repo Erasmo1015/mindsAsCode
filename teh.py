@@ -6272,11 +6272,6 @@ def _serialize_trials_for_prompt(
     if using_v2_prompt_contract():
         # Keep snapshot JSON. v2 over-budget handling is trial-count caps in
         # _truncate_psych_prompt_to_budget, not rewriting examples as one-liners.
-        from utils.teh.pics_v4 import using_pics_v4
-        from utils.teh.prompt_snapshots import format_sparse_history_examples
-
-        if using_pics_v4():
-            return format_sparse_history_examples(trials)
         return format_snapshot_examples(trials)
     if compact:
         return format_trials_to_text_compact(trials, dataset=dataset)

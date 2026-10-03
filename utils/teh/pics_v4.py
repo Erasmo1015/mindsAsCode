@@ -1,6 +1,7 @@
 """PICS v4: sparse-history snapshots, one uniform prompt, slot-stable panels.
 
-Trial text is ``format_sparse_history_examples``. Dataset-keyed reminders are not
+Trial text is ``format_sparse_history_examples``
+(``structured_snapshot_sparse_history_v1``). Dataset-keyed reminders are not
 inserted. Each absolute candidate slot keeps one shuffled-block panel.
 """
 from __future__ import annotations
@@ -20,7 +21,6 @@ from utils.teh.pics_v3_prompt_robustness import (
     SEQUENTIAL_RL_REMINDER_V3_KOOL_MARKER,
     SEQUENTIAL_RL_REMINDER_V3_MARKER,
     SEQUENTIAL_RL_REMINDER_V4_KOOL_MARKER,
-    _DATASET_KEYED_REMINDER_BODIES,
 )
 
 METHOD_VERSION = "pics_v4"
@@ -37,23 +37,43 @@ REFUSED_TRIAL_POLICIES = frozenset(
 # LLM requests and parent sampling stay on the historical split_seed formulas.
 SEARCH_RNG_POLICY = "legacy_split_seed_formulas"
 PICS_RUN_SEED_SCOPE = "trial_block_participant_schedule"
-ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v4"
+ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v5"
 PREVIOUS_ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v2"
 # Hash of uniform_additional_prompt_v2. Resume refuses this exact digest.
 PREVIOUS_UNIFORM_PROMPT_SHA256 = (
     "764647b048fe35a9f05596e3e044b5861d46591c36756cacc4adee25f2240170"
 )
-# uniform_additional_prompt_v3, before the sparse-history instruction.
+# Hash of uniform_additional_prompt_v3, the full-history block without calibration text.
+UNIFORM_V3_PROMPT_SHA256 = (
+    "12d8a94bf524ce1b985e4bf4b08c08c8d78e5a7f8a7437026516486433416e5b"
+)
+# Hash of uniform_additional_prompt_v4, which added the sparse-history paragraph.
+SPARSE_UNIFORM_PROMPT_SHA256 = (
+    "342297e3d814b8dcb565d31ac2b71a63f29d0b79e37e8aceb16c2df2240a9930"
+)
+# Draft v5 hashes from the calibration audit. They were never submitted.
+OBSOLETE_V5_PROMPT_SHA256 = frozenset(
+    {
+        "c045321e6222ee7f968b9ca71e01da30f80db8b69c333128212a1839bfd38964",
+        "52bc0a340b5f17760f061ae64c290d8ac76aee7ab3d68cd228ab6857bed609f1",
+    }
+)
+UNIFORM_PROMPT_SHA256 = (
+    "6df73ea2757bfbf4c4f80e0fc8a6098b3d9a5a8466180917421ddeef7905dabc"
+)
 REFUSED_ADDITIONAL_PROMPT_POLICY_IDS = frozenset(
     {
         "uniform_additional_prompt_v2",
         "uniform_additional_prompt_v3",
+        "uniform_additional_prompt_v4",
     }
 )
 REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
     {
         PREVIOUS_UNIFORM_PROMPT_SHA256,
-        "12d8a94bf524ce1b985e4bf4b08c08c8d78e5a7f8a7437026516486433416e5b",
+        UNIFORM_V3_PROMPT_SHA256,
+        SPARSE_UNIFORM_PROMPT_SHA256,
+        *OBSOLETE_V5_PROMPT_SHA256,
     }
 )
 # 15360 + llm_max_tokens 1024 = 16384, the real Qwen context limit.
@@ -65,7 +85,7 @@ TEXT_PATH = (
     / "prompts"
     / "teh"
     / "additional_prompt"
-    / "pics_v4_uniform_additional_prompt_v4.txt"
+    / "pics_v4_uniform_additional_prompt_v5.txt"
 )
 PREVIOUS_TEXT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -75,19 +95,11 @@ PREVIOUS_TEXT_PATH = (
     / "pics_v4_uniform_additional_prompt_v2.txt"
 )
 
-_PREFACE = (
-    "Apply only the section whose task type matches the task described above. "
-    "Ignore every section that does not match."
-)
-
-# Names that appear only as prompt formatting. Generated code must not read them.
-SPARSE_HISTORY_METADATA_GUIDANCE = (
-    "PROMPT-ONLY METADATA IS NOT RUNTIME STATE. The names `PROMPT_ONLY_METADATA`, "
-    "`history_entries_omitted`, `actual_runtime_history_length`, and "
-    "`displayed_history_entries`, and any omission marker that carries those names, "
-    "never exist at runtime and must never be accessed by generated code. "
-    "The real `history` argument to `choose(problem, history)` remains a list or "
-    "value conforming to the runtime contract."
+SPARSE_HISTORY_CLARIFICATION = (
+    "`PROMPT_ONLY_METADATA`, `history_entries_omitted`, "
+    "`actual_runtime_history_length`, and `displayed_history_entries` are "
+    "prompt annotations only. They never exist in the runtime `problem` or "
+    "`history`, and generated code must not access them."
 )
 
 # Historical generic guidance, without the old marker tags. Same bytes for every dataset.
@@ -99,52 +111,22 @@ GENERIC_HISTORY_GUIDANCE = (
     "task/API contract may be accessed directly."
 )
 
-_BANDIT_SHARED = """\
-Sequential multi-armed bandit with repeated choices and reward feedback.
-This program predicts human choices; it does not compute an optimal reward-maximizing policy. `history` may be empty; when present it has `action` and `reward` (use `.get`—reward may be absent or None). Treat missing or None reward as no observed outcome; never add None to a numeric accumulator. Return a finite probability for every legal arm (full K-way dict over every `option['action']` in `problem['options']`). Use positive smoothing; normalize safely so probabilities stay finite.
-
-Four-armed bandit (K=4).
-Across a finite horizon, participants may trade immediate reward against information useful for later choices. Exploration strength may vary by participant and trial position—do not impose a fixed schedule such as always explore early then exploit. Allowed simple participant mechanisms (use a small combination supported by observed behavior; do not implement every mechanism): smoothed reward learning; uncertainty-sensitive exploration; recency; perseveration/switching; stochastic choice. Avoid extreme probabilities and unnecessary complexity. Skip a missing or None reward or handle it safely; `.get('reward', 0)` is insufficient when the key exists with value None. Map actions through current valid option keys/`problem['options']`—do not treat action ids as raw list indices into a fixed array. Initialize every legal arm explicitly. Use a uniform fallback only when history is empty or yields no usable reward signal—non-empty usable history must not collapse to uniform.
-
-Eight-armed bandit (K=8).
-Across a finite horizon, participants may briefly trade reward for information; prefer a simple calibrated rule supported by observed behavior rather than stacking many weakly supported mechanisms. Prefer smooth probabilities over highly confident action selection. Participant stochasticity, recency, or perseveration may be used only when supported. Do not invent spatial coordinates, arm relationships, or other features absent from `problem` and `history`. Do not force nonuniform predictions merely because history is nonempty—weak or uninformative evidence may appropriately remain close to uniform."""
-
 _process_enabled = False
 
 
 def uniform_additional_prompt_text() -> str:
-    """Exact block inserted for every dataset.
-
-    ``uniform_additional_prompt_v4`` keeps the v3 task sections byte-for-byte
-    and states that sparse-history prompt metadata is not runtime state.
-    """
-    kool = _DATASET_KEYED_REMINDER_BODIES["14kool2016when"].strip()
-    badham = _DATASET_KEYED_REMINDER_BODIES["12badham2017deficits"].strip()
-    guan = _DATASET_KEYED_REMINDER_BODIES["guan_2020_stopping"].strip()
-    body = "\n\n".join(
-        (
-            _BANDIT_SHARED,
-            "Two-stage task involving spaceships, planets, aliens, transitions, and rewards.\n"
-            + kool,
-            "Feedback-based category learning involving stimulus features, category keys, "
-            "rule blocks, and correctness feedback.\n"
-            + badham,
-            "Sequential sampling or stopping involving observed values, conditions or "
-            "environments, and continue-versus-stop choices.\n"
-            + guan,
+    """Exact ``uniform_additional_prompt_v5`` block inserted for every dataset."""
+    text = TEXT_PATH.read_text(encoding="utf-8")
+    if text.endswith("\n"):
+        text = text[:-1]
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != UNIFORM_PROMPT_SHA256:
+        raise RuntimeError(
+            f"uniform_additional_prompt_v5 hash {digest} != {UNIFORM_PROMPT_SHA256}."
         )
-    )
-    return (
-        f"[{UNIFORM_MARKER}]\n"
-        f"{_PREFACE}\n"
-        f"\n"
-        f"{SPARSE_HISTORY_METADATA_GUIDANCE}\n"
-        f"\n"
-        f"{GENERIC_HISTORY_GUIDANCE}\n"
-        f"\n"
-        f"{body}\n"
-        f"[/{UNIFORM_MARKER}]"
-    )
+    if text.count(SPARSE_HISTORY_CLARIFICATION) != 1:
+        raise RuntimeError("uniform v5 sparse-history clarification is missing or repeated.")
+    return text
 
 
 def uniform_additional_prompt_sha256() -> str:

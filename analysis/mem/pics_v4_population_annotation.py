@@ -59,7 +59,7 @@ OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population_final"
 ANNOTATION_METHOD = "analysis/mem/annotate_population_programs.py"
 REQUIRED_POLICY_MARKERS = {
     "trial_prompt_policy": "structured_snapshot_sparse_history_v1",
-    "additional_prompt_policy": "uniform_additional_prompt_v4",
+    "additional_prompt_policy": "uniform_additional_prompt_v5",
     "panel_policy": "shuffled_block_slot_stable_v4",
     "continuation_policy": "within_block_carry_forward_wrap_fill_v2",
 }
@@ -99,16 +99,16 @@ ANNOTATION_GROUPS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ),
 )
 
-# Final sparse-history rerun. Jobs 310886–310933 are historical and refused.
+# Cancelled sparse-history rerun plus earlier full-history jobs. Both sets are refused.
 AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
-    ("311207", ("guan_2020_stopping", "11enkavi2019recentprobes")),
-    ("311208", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
-    ("311199", ("3frey2017cct",)),
-    ("311200", ("2plonsky2018when",)),
-    ("311209", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
-    ("311210", ("14kool2016when", "steyvers_2009_bandit")),
-    ("311203", ("10frey2017risk", "1peterson2021using")),
-    ("311204", ("mixed_gambles", "13schulz2020finding")),
+    ("311526", ("guan_2020_stopping", "11enkavi2019recentprobes")),
+    ("311528", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
+    ("311472", ("3frey2017cct",)),
+    ("311473", ("2plonsky2018when",)),
+    ("311529", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
+    ("311531", ("14kool2016when", "steyvers_2009_bandit")),
+    ("311532", ("10frey2017risk", "1peterson2021using")),
+    ("311533", ("mixed_gambles", "13schulz2020finding")),
 )
 HISTORICAL_JOB_IDS = frozenset(
     {
@@ -120,13 +120,27 @@ HISTORICAL_JOB_IDS = frozenset(
         "310931",
         "310932",
         "310933",
+        "311207",
+        "311208",
+        "311199",
+        "311200",
+        "311209",
+        "311210",
+        "311203",
+        "311204",
+        "311470",
+        "311471",
+        "311474",
+        "311475",
+        "311476",
+        "311478",
     }
 )
 FINAL_JOB_IDS = frozenset(job_id for job_id, _names in AUTHORITATIVE_JOBS)
 
 _REQUIRED_DOC_TOKENS = (
     "structured_snapshot_sparse_history_v1",
-    "uniform_additional_prompt_v4",
+    "uniform_additional_prompt_v5",
     "shuffled_block_slot_stable_v4",
     "within_block_carry_forward_wrap_fill_v2",
     "conditioning_aware_panel_banks_v2",
@@ -145,6 +159,20 @@ _REQUIRED_DOC_TOKENS = (
     "311210",
     "311203",
     "311204",
+    "311470",
+    "311471",
+    "311472",
+    "311473",
+    "311474",
+    "311475",
+    "311476",
+    "311478",
+    "311526",
+    "311528",
+    "311529",
+    "311531",
+    "311532",
+    "311533",
 )
 
 

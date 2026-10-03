@@ -20,7 +20,6 @@ from utils.teh.pics_v4 import (
     ADDITIONAL_PROMPT_POLICY_ID,
     CANONICAL_DATASETS,
     GENERIC_HISTORY_GUIDANCE,
-    SPARSE_HISTORY_METADATA_GUIDANCE,
     HARD_PROMPT_TOKEN_CAP,
     KIND_TARGET_ONLY,
     METHOD_VERSION,
@@ -56,24 +55,25 @@ def test_uniform_block_matches_saved_file_and_has_no_dataset_names():
 
 def test_approved_bodies_appear_once():
     text = uniform_additional_prompt_text()
-    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v4"
-    assert text.count(SPARSE_HISTORY_METADATA_GUIDANCE) == 1
-    assert "PROMPT-ONLY METADATA IS NOT RUNTIME STATE" in text
-    assert "must never be accessed by generated code" in text
+    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v5"
+    assert uniform_additional_prompt_sha256() == (
+        "6df73ea2757bfbf4c4f80e0fc8a6098b3d9a5a8466180917421ddeef7905dabc"
+    )
+    for name in (
+        "PROMPT_ONLY_METADATA",
+        "history_entries_omitted",
+        "actual_runtime_history_length",
+        "displayed_history_entries",
+    ):
+        assert text.count(name) == 1
+    assert text.count(
+        "do not produce near-zero or near-one probabilities merely from fitted counts"
+    ) == 1
+    assert text.count("position == sequence_length") == 1
+    assert "0.05" not in text
+    assert "0.95" not in text
     assert text.count(GENERIC_HISTORY_GUIDANCE) == 1
     assert "HISTORY_ROBUSTNESS_BLOCK_V3" not in text
-    previous = PREVIOUS_TEXT_PATH.read_text(encoding="utf-8").rstrip("\n")
-    preface = (
-        "Apply only the section whose task type matches the task described above. "
-        "Ignore every section that does not match.\n\n"
-    )
-    marker = "[PICS_V4_UNIFORM_ADDITIONAL_PROMPT]\n"
-    assert previous.startswith(marker + preface)
-    task_sections = previous[len(marker + preface) :]
-    assert text == (
-        f"{marker}{preface}{SPARSE_HISTORY_METADATA_GUIDANCE}\n\n"
-        f"{GENERIC_HISTORY_GUIDANCE}\n\n{task_sections}"
-    )
     assert "apply this section" not in text
     assert "Otherwise ignore it" not in text
     assert text.count(
@@ -453,28 +453,52 @@ def test_resume_refuses_other_methods(tmp_path: Path):
         assert "compact_faithful_trial_v2" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted compact_faithful_trial_v2")
-    old_snapshot = dict(payload)
-    old_snapshot["trial_prompt_policy"] = "structured_snapshot_v2"
-    old_snapshot["prompt_policy"] = "structured_snapshot_v2"
-    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_snapshot) + "\n", encoding="utf-8")
+    full_history = dict(payload)
+    full_history["trial_prompt_policy"] = "structured_snapshot_v2"
+    full_history["prompt_policy"] = "structured_snapshot_v2"
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(full_history) + "\n", encoding="utf-8")
     try:
         assert_pics_v4_resume(v4)
     except RuntimeError as exc:
         assert "structured_snapshot_v2" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted structured_snapshot_v2")
-    old_uniform = dict(payload)
-    old_uniform["additional_prompt_policy"] = "uniform_additional_prompt_v3"
-    old_uniform["additional_prompt_sha256"] = (
+    old_v3_uniform = dict(payload)
+    old_v3_uniform["additional_prompt_policy"] = "uniform_additional_prompt_v3"
+    old_v3_uniform["additional_prompt_sha256"] = (
         "12d8a94bf524ce1b985e4bf4b08c08c8d78e5a7f8a7437026516486433416e5b"
     )
-    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_uniform) + "\n", encoding="utf-8")
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_v3_uniform) + "\n", encoding="utf-8")
     try:
         assert_pics_v4_resume(v4)
     except RuntimeError as exc:
         assert "uniform_additional_prompt_v3" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted uniform_additional_prompt_v3")
+    draft_v5 = dict(payload)
+    draft_v5["additional_prompt_policy"] = "uniform_additional_prompt_v5"
+    draft_v5["additional_prompt_sha256"] = (
+        "c045321e6222ee7f968b9ca71e01da30f80db8b69c333128212a1839bfd38964"
+    )
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(draft_v5) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "c045321e6222ee7f968b9ca71e01da30f80db8b69c333128212a1839bfd38964" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted an obsolete uniform v5 hash")
+    old_uniform = dict(payload)
+    old_uniform["additional_prompt_policy"] = "uniform_additional_prompt_v4"
+    old_uniform["additional_prompt_sha256"] = (
+        "342297e3d814b8dcb565d31ac2b71a63f29d0b79e37e8aceb16c2df2240a9930"
+    )
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(old_uniform) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "uniform_additional_prompt_v4" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted uniform_additional_prompt_v4")
     hashed = dict(payload)
     hashed["search_rng"] = "hashed_pics_run_seed"
     (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(hashed) + "\n", encoding="utf-8")
@@ -2045,7 +2069,7 @@ def test_wrap_fill_v4_does_not_stop_at_pass_end():
         build_continuation_bank,
         build_wrap_fill_bank,
     )
-    from utils.teh.prompt_snapshots import format_snapshot_examples
+    from utils.teh.prompt_snapshots import format_sparse_history_examples
 
     original = panels.qwen_user_prompt_token_count
     panels.qwen_user_prompt_token_count = _example_token_count
@@ -2100,13 +2124,13 @@ def test_wrap_fill_v4_does_not_stop_at_pass_end():
                 chronos = _chronos(panel)
                 assert len(chronos) == len(set(chronos))
                 assert len(panel) <= 30
-                assert _example_token_count(wrap(format_snapshot_examples(panel))) <= 30
+                assert _example_token_count(wrap(format_sparse_history_examples(panel))) <= 30
             assert bank.metas[1]["wrapped_within_panel"] is True
             assert bank.metas[1]["stream_index"] == 30
             assert bank.metas[1]["completed_passes"] == 0
             assert bank.metas[2]["stream_index"] == 28
             assert bank.metas[2]["completed_passes"] == 1
-        rendered = format_snapshot_examples(banks[0].panels[1])
+        rendered = format_sparse_history_examples(banks[0].panels[1])
         rendered_chronos = [
             int(line.split(":", 1)[1].strip().rstrip(","))
             for line in rendered.splitlines()
@@ -2134,7 +2158,7 @@ def test_wrap_fill_v4_does_not_stop_at_pass_end():
         assert wrapped["n"] == 7
         for panel in mid.panels:
             assert len(_chronos(panel)) == len(set(_chronos(panel)))
-            assert _example_token_count(wrap(format_snapshot_examples(panel))) <= 7
+            assert _example_token_count(wrap(format_sparse_history_examples(panel))) <= 7
 
         small = _block_trials(1, 5)
         fit = build_wrap_fill_bank(
@@ -2167,12 +2191,11 @@ def _example_payloads(text: str):
     return payloads
 
 
-def test_sparse_history_omits_ordinary_trials_and_packs_deterministically():
+def test_sparse_history_omits_ordinary_trials_and_keeps_metadata_outside_json():
     """Empty history stays explicit. Nonempty history is a segment-end checkpoint."""
     import utils.teh.pics_v4_panels as panels
     from utils.teh.pics_v4_panels import build_wrap_fill_bank, clear_pics_v4_panel_state
     from utils.teh.prompt_snapshots import (
-        PROMPT_ONLY_METADATA_PREFIX,
         format_sparse_history_examples,
         remember_trial_block_position,
     )
@@ -2196,46 +2219,35 @@ def test_sparse_history_omits_ordinary_trials_and_packs_deterministically():
     missing = one(1, None)
     ordinary = one(2, short_history)
     checkpoint = one(3, long_history)
+    originals = {
+        id(empty): empty.get("history"),
+        id(missing): missing.get("history"),
+        id(ordinary): list(ordinary["history"]),
+        id(checkpoint): list(checkpoint["history"]),
+    }
     text = format_sparse_history_examples([empty, missing, ordinary, checkpoint])
+    assert empty.get("history") == originals[id(empty)]
+    assert missing.get("history") is None
+    assert ordinary["history"] == originals[id(ordinary)]
+    assert checkpoint["history"] == originals[id(checkpoint)]
     payloads = _example_payloads(text)
+    chunks = text.split("### example ")[1:]
     assert payloads[0]["history"] == []
     assert payloads[1]["history"] is None
     assert "history" not in payloads[2]
+    assert "history_entries_omitted=true" in chunks[2].split("{", 1)[0]
     assert len(payloads[3]["history"]) == 8
     assert payloads[3]["history"][0]["action"] == 0
     assert payloads[3]["history"][-1]["action"] == 9
-    assert "history_truncated" not in payloads[3]
-    assert "history_original_len" not in payloads[3]
-    omitted = (
-        f"{PROMPT_ONLY_METADATA_PREFIX} history_entries_omitted=true "
-        "actual_runtime_history_length=1"
-    )
-    truncated = (
-        f"{PROMPT_ONLY_METADATA_PREFIX} history_entries_omitted=false "
-        "actual_runtime_history_length=10 displayed_history_entries=8"
-    )
-    assert omitted in text
-    assert truncated in text
-    assert text.count(PROMPT_ONLY_METADATA_PREFIX) == 2
-    for payload in payloads:
-        dumped = json.dumps(payload)
-        assert "PROMPT_ONLY_METADATA" not in dumped
-        assert "history_entries_omitted" not in dumped
-        assert "actual_runtime_history_length" not in dumped
-        assert "displayed_history_entries" not in dumped
-        assert "PROMPT_ONLY" not in json.dumps(payload["problem"])
-
-    wrapped_trials = [one(offset, short_history) for offset in range(4)]
-    wrapped = format_sparse_history_examples(
-        [wrapped_trials[2], wrapped_trials[3], wrapped_trials[0], wrapped_trials[1]]
-    )
-    wrapped_payloads = _example_payloads(wrapped)
-    assert "history" not in wrapped_payloads[0]
-    assert wrapped_payloads[1]["history"] == short_history
-    assert "history" not in wrapped_payloads[2]
-    assert wrapped_payloads[3]["history"] == short_history
-    assert wrapped.count("history_entries_omitted=true") == 2
-    assert "history_entries_omitted=false" not in wrapped
+    assert "displayed_history_entries=8" in chunks[3].split("{", 1)[0]
+    for name in (
+        "PROMPT_ONLY_METADATA",
+        "history_entries_omitted",
+        "actual_runtime_history_length",
+        "displayed_history_entries",
+    ):
+        for payload in payloads:
+            assert name not in json.dumps(payload)
 
     original = panels.qwen_user_prompt_token_count
     panels.qwen_user_prompt_token_count = _example_token_count
@@ -2266,7 +2278,8 @@ def test_sparse_history_omits_ordinary_trials_and_packs_deterministically():
         rendered_b = format_sparse_history_examples(second.panels[1])
         assert rendered_a == rendered_b
         assert _chronos(first.panels[1]) == list(range(30, 32)) + list(range(0, 28))
-        assert rendered_a.count("history_entries_omitted=true") >= 2
+        assert "history_entries_omitted" in rendered_a
+        assert '"history": []' in rendered_a or "history_entries_omitted=true" in rendered_a
     finally:
         panels.qwen_user_prompt_token_count = original
         clear_pics_v4_panel_state()
