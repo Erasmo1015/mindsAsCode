@@ -661,11 +661,29 @@ def build_deterministic_runtime_contract(
         and int((t.get("problem") or {}).get("n_arms") or 0) > 2
         for t in trials
     ) or k > 2
-    if categorical:
+    try:
+        from utils.teh.pics_v4 import using_pics_v4
+
+        pics_v4 = using_pics_v4()
+    except Exception:
+        pics_v4 = False
+    if categorical and pics_v4:
+        output_line = (
+            f"- Output: dict[int, float] over every legal action 0, …, {k - 1}. "
+            "Each probability must lie in [0.01, 0.99]. First normalize to q, then "
+            "return 0.01 + (1 - 0.01 * K) * q[action] for every legal action. "
+            "The dictionary must include every legal action and sum to 1."
+        )
+    elif categorical:
         output_line = (
             f"- Output: dict[int, float] over actions 0, …, {k - 1} with finite "
             "non-negative values (renormalized if needed). Do not return a scalar "
             "P(action=1) unless K=2."
+        )
+    elif pics_v4:
+        output_line = (
+            "- Output: a single finite float P(action=1) inside [0.01, 0.99]; "
+            "return min(0.99, max(0.01, p))."
         )
     else:
         output_line = (
@@ -680,7 +698,12 @@ def build_deterministic_runtime_contract(
     return "\n".join(
         [
             RUNTIME_CONTRACT_HEADER,
-            "- This block is deterministic and overrides any transferred source program.",
+            (
+                "- This block states the target schema. The uniform probability rule "
+                "overrides every parent or reference program."
+                if pics_v4
+                else "- This block is deterministic and overrides any transferred source program."
+            ),
             "- Use only TARGET problem/history keys below. Do not copy source-task keys.",
             binary_line,
             "- If option_keys exists, index j corresponds to option_keys[j].",

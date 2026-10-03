@@ -1,0 +1,33 @@
+[PICS_V4_UNIFORM_ADDITIONAL_PROMPT]
+Apply only the section whose task type matches the task described above. Ignore every section that does not match.
+
+`history` may be empty, and different history entries may contain different fields. Never assume optional fields such as `feedback`, `reward`, or outcome fields exist or are non-null. Check for a key or use `.get(...)` before reading it. Only fields explicitly required by the current task/API contract may be accessed directly.
+
+`PROMPT_ONLY_METADATA`, `history_entries_omitted`, `actual_runtime_history_length`, and `displayed_history_entries` are prompt annotations only. They never exist in the runtime `problem` or `history`, and generated code must not access them.
+
+Every legal action must receive probability at least 0.01 on every trial, and no legal action may receive probability above 0.99. This rule applies even when an action appears certain, when all retained examples agree, or when a more extreme probability improves train/validation likelihood. There are no exceptions, including terminal trials. This rule overrides every task-specific instruction and every parent or reference program shown elsewhere in the prompt.
+
+For a binary `choose` that returns P(action=1), return `min(0.99, max(0.01, p))`. For a categorical `choose` with K legal actions, first normalize the probabilities to `q`, then return `0.01 + (1 - 0.01 * K) * q[action]` for every legal action. The returned dictionary must include every legal action and sum to 1.
+
+Sequential multi-armed bandit with repeated choices and reward feedback.
+This program predicts human choices; it does not compute an optimal reward-maximizing policy. `history` may be empty; when present it has `action` and `reward` (use `.get`—reward may be absent or None). Treat missing or None reward as no observed outcome; never add None to a numeric accumulator. Return a probability inside [0.01, 0.99] for every legal arm (full K-way dict over every `option['action']` in `problem['options']`). Use positive smoothing; normalize safely so every legal-action probability stays inside [0.01, 0.99].
+
+Four-armed bandit (K=4).
+Across a finite horizon, participants may trade immediate reward against information useful for later choices. Exploration strength may vary by participant and trial position—do not impose a fixed schedule such as always explore early then exploit. Allowed simple participant mechanisms (use a small combination supported by observed behavior; do not implement every mechanism): smoothed reward learning; uncertainty-sensitive exploration; recency; perseveration/switching; stochastic choice. Avoid extreme probabilities and unnecessary complexity. Skip a missing or None reward or handle it safely; `.get('reward', 0)` is insufficient when the key exists with value None. Map actions through current valid option keys/`problem['options']`—do not treat action ids as raw list indices into a fixed array. Initialize every legal arm explicitly. Use a uniform fallback only when history is empty or yields no usable reward signal—non-empty usable history must not collapse to uniform.
+
+Eight-armed bandit (K=8).
+Across a finite horizon, participants may briefly trade reward for information; prefer a simple calibrated rule supported by observed behavior rather than stacking many weakly supported mechanisms. Prefer smooth probabilities over highly confident action selection. Participant stochasticity, recency, or perseveration may be used only when supported. Do not invent spatial coordinates, arm relationships, or other features absent from `problem` and `history`. Do not force nonuniform predictions merely because history is nonempty—weak or uninformative evidence may appropriately remain close to uniform.
+
+Two-stage task involving spaceships, planets, aliens, transitions, and rewards.
+`history` may be empty; use `.get` for stage-conditional fields. Never read current-trial `reward`/`treasure` from `problem`.
+Stage 1 (`stage==1`): integer action 0/1 over spaceship `option_keys`/`spaceship_options`; learn from `stage==1` history only.
+Stage 2 (`stage==2`): condition on `planet`, `alien_options`/`option_keys`, and available `spaceship`/`stage1_action`; learn from `stage==2` history using `feedback`/`reward` when present. Never `option_keys.index(letter)` for actions. Apply the universal [0.01, 0.99] bound; avoid extremes from raw counts.
+
+Feedback-based category learning involving stimulus features, category keys, rule blocks, and correctness feedback.
+`history` may be empty; use `.get` for nested feedback.
+Use current `stimulus_features`; learn within the current `rule_block_id` (reset/separate learning across blocks). Binary feedback: when `feedback.is_correct` is True the chosen action is the correct category; when False the other binary category is correct—both correct and incorrect past trials provide learning information. Past `feedback.correct_category` may appear in history only—never read a current-trial correct category from `problem`. Use scores smoothed into the universal [0.01, 0.99] bound; do not accumulate unbounded feature-count logits. Return calibrated P(action=1).
+
+Sequential sampling or stopping involving observed values, conditions or environments, and continue-versus-stop choices.
+`history` may be empty. No `feedback`/`reward` interface.
+Use `position`, `values_observed` (prefix through current position), `sequence_length`, `environment`. Actions: 0=continue, 1=stop; return P(stop). At the final position, continue is unavailable, and P(stop) must still lie in [0.01, 0.99]. Optional history: prior continues as `{action,position,value}`. Do not invent outcome fields.
+[/PICS_V4_UNIFORM_ADDITIONAL_PROMPT]

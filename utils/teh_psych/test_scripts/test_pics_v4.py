@@ -55,9 +55,9 @@ def test_uniform_block_matches_saved_file_and_has_no_dataset_names():
 
 def test_approved_bodies_appear_once():
     text = uniform_additional_prompt_text()
-    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v5"
+    assert ADDITIONAL_PROMPT_POLICY_ID == "uniform_additional_prompt_v6"
     assert uniform_additional_prompt_sha256() == (
-        "6df73ea2757bfbf4c4f80e0fc8a6098b3d9a5a8466180917421ddeef7905dabc"
+        "3edb24f80e251b145493821018956100479ba812dc41b68bdd8004663c0b5612"
     )
     for name in (
         "PROMPT_ONLY_METADATA",
@@ -67,11 +67,20 @@ def test_approved_bodies_appear_once():
     ):
         assert text.count(name) == 1
     assert text.count(
-        "do not produce near-zero or near-one probabilities merely from fitted counts"
+        "Every legal action must receive probability at least 0.01 on every trial"
     ) == 1
-    assert text.count("position == sequence_length") == 1
-    assert "0.05" not in text
-    assert "0.95" not in text
+    assert text.count("There are no exceptions, including terminal trials") == 1
+    assert "The only exception" not in text
+    assert "position == sequence_length" not in text
+    assert "near-zero or near-one" not in text
+    assert "logically forced" not in text
+    assert text.count("`min(0.99, max(0.01, p))`") == 1
+    assert "1e-6" not in text
+    assert "only remaining" not in text
+    assert text.count(
+        "This rule overrides every task-specific instruction and every parent "
+        "or reference program shown elsewhere in the prompt."
+    ) == 1
     assert text.count(GENERIC_HISTORY_GUIDANCE) == 1
     assert "HISTORY_ROBUSTNESS_BLOCK_V3" not in text
     assert "apply this section" not in text
@@ -80,11 +89,24 @@ def test_approved_bodies_appear_once():
         "Apply only the section whose task type matches the task described above. "
         "Ignore every section that does not match."
     ) == 1
-    for body in (
-        _DATASET_KEYED_REMINDER_BODIES["14kool2016when"],
-        _DATASET_KEYED_REMINDER_BODIES["12badham2017deficits"],
-        _DATASET_KEYED_REMINDER_BODIES["guan_2020_stopping"],
-    ):
+    revised_bodies = {
+        "14kool2016when": _DATASET_KEYED_REMINDER_BODIES["14kool2016when"]
+        .replace(
+            "Clip probs; avoid extremes from raw counts.",
+            "Apply the universal [0.01, 0.99] bound; avoid extremes from raw counts.",
+        ),
+        "12badham2017deficits": _DATASET_KEYED_REMINDER_BODIES["12badham2017deficits"]
+        .replace(
+            "Use smoothed/bounded scores; do not accumulate unbounded feature-count logits.",
+            "Use scores smoothed into the universal [0.01, 0.99] bound; do not accumulate unbounded feature-count logits.",
+        ),
+        "guan_2020_stopping": _DATASET_KEYED_REMINDER_BODIES["guan_2020_stopping"]
+        .replace(
+            "At the final position, stop is the only remaining decision.",
+            "At the final position, continue is unavailable, and P(stop) must still lie in [0.01, 0.99].",
+        ),
+    }
+    for body in revised_bodies.values():
         assert text.count(body.strip()) == 1
     assert _SEQUENTIAL_RL_STEYVERS_BODY_V4.strip() not in text
     assert _SEQUENTIAL_RL_SCHULZ_BODY_V4.strip() not in text
@@ -487,6 +509,18 @@ def test_resume_refuses_other_methods(tmp_path: Path):
         assert "c045321e6222ee7f968b9ca71e01da30f80db8b69c333128212a1839bfd38964" in str(exc)
     else:
         raise AssertionError("PICS v4 resume accepted an obsolete uniform v5 hash")
+    submitted_v5 = dict(payload)
+    submitted_v5["additional_prompt_policy"] = "uniform_additional_prompt_v5"
+    submitted_v5["additional_prompt_sha256"] = (
+        "6df73ea2757bfbf4c4f80e0fc8a6098b3d9a5a8466180917421ddeef7905dabc"
+    )
+    (v4 / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(submitted_v5) + "\n", encoding="utf-8")
+    try:
+        assert_pics_v4_resume(v4)
+    except RuntimeError as exc:
+        assert "uniform_additional_prompt_v5" in str(exc)
+    else:
+        raise AssertionError("PICS v4 resume accepted uniform_additional_prompt_v5")
     old_uniform = dict(payload)
     old_uniform["additional_prompt_policy"] = "uniform_additional_prompt_v4"
     old_uniform["additional_prompt_sha256"] = (

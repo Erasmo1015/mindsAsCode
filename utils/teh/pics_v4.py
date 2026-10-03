@@ -37,7 +37,7 @@ REFUSED_TRIAL_POLICIES = frozenset(
 # LLM requests and parent sampling stay on the historical split_seed formulas.
 SEARCH_RNG_POLICY = "legacy_split_seed_formulas"
 PICS_RUN_SEED_SCOPE = "trial_block_participant_schedule"
-ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v5"
+ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v6"
 PREVIOUS_ADDITIONAL_PROMPT_POLICY_ID = "uniform_additional_prompt_v2"
 # Hash of uniform_additional_prompt_v2. Resume refuses this exact digest.
 PREVIOUS_UNIFORM_PROMPT_SHA256 = (
@@ -58,14 +58,25 @@ OBSOLETE_V5_PROMPT_SHA256 = frozenset(
         "52bc0a340b5f17760f061ae64c290d8ac76aee7ab3d68cd228ab6857bed609f1",
     }
 )
-UNIFORM_PROMPT_SHA256 = (
+# Submitted uniform v5. Its jobs were cancelled. Resume refuses this digest.
+UNIFORM_V5_PROMPT_SHA256 = (
     "6df73ea2757bfbf4c4f80e0fc8a6098b3d9a5a8466180917421ddeef7905dabc"
+)
+# Draft v6 hash registered before the override-sentence audit. Never submitted.
+OBSOLETE_V6_PROMPT_SHA256 = frozenset(
+    {
+        "8a84c26a191dabd1e047280a9489797ef3b20295df2efd7041901fc5a6694ebd",
+    }
+)
+UNIFORM_PROMPT_SHA256 = (
+    "3edb24f80e251b145493821018956100479ba812dc41b68bdd8004663c0b5612"
 )
 REFUSED_ADDITIONAL_PROMPT_POLICY_IDS = frozenset(
     {
         "uniform_additional_prompt_v2",
         "uniform_additional_prompt_v3",
         "uniform_additional_prompt_v4",
+        "uniform_additional_prompt_v5",
     }
 )
 REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
@@ -73,7 +84,9 @@ REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
         PREVIOUS_UNIFORM_PROMPT_SHA256,
         UNIFORM_V3_PROMPT_SHA256,
         SPARSE_UNIFORM_PROMPT_SHA256,
+        UNIFORM_V5_PROMPT_SHA256,
         *OBSOLETE_V5_PROMPT_SHA256,
+        *OBSOLETE_V6_PROMPT_SHA256,
     }
 )
 # 15360 + llm_max_tokens 1024 = 16384, the real Qwen context limit.
@@ -85,7 +98,7 @@ TEXT_PATH = (
     / "prompts"
     / "teh"
     / "additional_prompt"
-    / "pics_v4_uniform_additional_prompt_v5.txt"
+    / "pics_v4_uniform_additional_prompt_v6.txt"
 )
 PREVIOUS_TEXT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -101,6 +114,15 @@ SPARSE_HISTORY_CLARIFICATION = (
     "prompt annotations only. They never exist in the runtime `problem` or "
     "`history`, and generated code must not access them."
 )
+HARD_PROBABILITY_RULE = (
+    "Every legal action must receive probability at least 0.01 on every trial, "
+    "and no legal action may receive probability above 0.99. This rule applies "
+    "even when an action appears certain, when all retained examples agree, or "
+    "when a more extreme probability improves train/validation likelihood. "
+    "There are no exceptions, including terminal trials. This rule overrides "
+    "every task-specific instruction and every parent or reference program "
+    "shown elsewhere in the prompt."
+)
 
 # Historical generic guidance, without the old marker tags. Same bytes for every dataset.
 GENERIC_HISTORY_GUIDANCE = (
@@ -115,17 +137,25 @@ _process_enabled = False
 
 
 def uniform_additional_prompt_text() -> str:
-    """Exact ``uniform_additional_prompt_v5`` block inserted for every dataset."""
+    """Exact ``uniform_additional_prompt_v6`` block inserted for every dataset."""
     text = TEXT_PATH.read_text(encoding="utf-8")
     if text.endswith("\n"):
         text = text[:-1]
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     if digest != UNIFORM_PROMPT_SHA256:
         raise RuntimeError(
-            f"uniform_additional_prompt_v5 hash {digest} != {UNIFORM_PROMPT_SHA256}."
+            f"uniform_additional_prompt_v6 hash {digest} != {UNIFORM_PROMPT_SHA256}."
         )
     if text.count(SPARSE_HISTORY_CLARIFICATION) != 1:
-        raise RuntimeError("uniform v5 sparse-history clarification is missing or repeated.")
+        raise RuntimeError("uniform v6 sparse-history clarification is missing or repeated.")
+    if text.count(HARD_PROBABILITY_RULE) != 1:
+        raise RuntimeError("uniform v6 hard probability rule is missing or repeated.")
+    if "The only exception" in text or "position == sequence_length" in text:
+        raise RuntimeError("uniform v6 still contains a probability-rule exception.")
+    if "1e-6" in text or "only remaining" in text:
+        raise RuntimeError(
+            "uniform v6 still contains a conflicting probability instruction."
+        )
     return text
 
 
@@ -153,6 +183,38 @@ def _strip_tagged_block(text: str, marker: str) -> str:
     return out
 
 
+_PICS_V4_INSTRUCTION_REWRITES = (
+    (
+        "- The return value must be strictly inside (0, 1). If needed, clip to a safe range such as [1e-6, 1 - 1e-6].",
+        "- The return value must lie in [0.01, 0.99]. Return min(0.99, max(0.01, p)).",
+    ),
+    (
+        "and continue returning a valid probability in (0, 1).",
+        "and continue returning a valid probability in [0.01, 0.99].",
+    ),
+    (
+        "- Probabilities must be finite and non-negative (prefer summing to 1.0).",
+        "- Each legal-action probability must lie in [0.01, 0.99], and the returned dictionary must sum to 1.",
+    ),
+    (
+        "- Output: a single finite float P(action=1) strictly inside (0, 1); clip to [1e-6, 1-1e-6] if needed.",
+        "- Output: a single finite float P(action=1) inside [0.01, 0.99]; return min(0.99, max(0.01, p)).",
+    ),
+    (
+        "returning float in (0, 1) as P(action=1).",
+        "returning float in [0.01, 0.99] as P(action=1).",
+    ),
+)
+
+
+def _rewrite_pics_v4_probability_instructions(text: str) -> str:
+    """Replace active clip instructions. Parent source is appended after this step."""
+    out = text or ""
+    for old, new in _PICS_V4_INSTRUCTION_REWRITES:
+        out = out.replace(old, new)
+    return out
+
+
 def apply_pics_v4_prompt_body(text: str) -> str:
     """Append the unchanged objective and the uniform block. Dataset is ignored."""
     body = text or ""
@@ -167,6 +229,7 @@ def apply_pics_v4_prompt_body(text: str) -> str:
         UNIFORM_MARKER,
     ):
         body = _strip_tagged_block(body, marker)
+    body = _rewrite_pics_v4_probability_instructions(body)
     block = uniform_additional_prompt_text()
     return (
         body.rstrip()

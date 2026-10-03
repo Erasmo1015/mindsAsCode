@@ -10972,9 +10972,23 @@ def _pics_v4_prompt_pieces(run_prompts_dir: str):
     suffix = single_code_template_prompt_suffix(
         load_single_code_template(prompt_dir / "single_code_template.txt")
     )
-    runtime_contract = "" if RUNTIME_CONTRACT_HEADER in base_prompt else _runtime_contract_text(
-        run_prompts_dir
+    # The infer file stores the contract before any parent is known. Lift that
+    # exact block out and return it separately so the wrapper appends it after
+    # every displayed parent program.
+    contract_path = prompt_dir / "runtime_contract.txt"
+    runtime_contract = (
+        contract_path.read_text(encoding="utf-8").strip() if contract_path.is_file() else ""
     )
+    if runtime_contract:
+        if runtime_contract not in base_prompt:
+            raise RuntimeError(
+                f"PICS v4 infer prompt is missing the saved runtime contract: {contract_path}"
+            )
+        base_prompt = base_prompt.replace(runtime_contract, "", 1).rstrip() + "\n"
+    elif RUNTIME_CONTRACT_HEADER in base_prompt:
+        raise RuntimeError(
+            f"PICS v4 infer prompt contains a runtime contract with no runtime_contract.txt: {prompt_dir}"
+        )
     return base_prompt, suffix, runtime_contract, f"\n{CANDIDATE_OUTPUT_RULES}\n"
 
 

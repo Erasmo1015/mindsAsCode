@@ -574,6 +574,33 @@ def build_prompt_generation_llm_user_content(
             "set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
         )
 
+    from utils.teh.pics_v4 import using_pics_v4
+
+    if using_pics_v4():
+        if is_categorical_output_dataset(dataset_alias):
+            api_line = (
+                "- Executable API: `def choose(problem, history)` returning dict[int, float] "
+                "over every legal action, each probability inside [0.01, 0.99], summing to 1.\n"
+            )
+            safety_line = (
+                "- Preserve generic safety: pure Python, no imports, deterministic, "
+                "every legal-action probability inside [0.01, 0.99], no randomness, "
+                "no pow() (use **), helpers inside choose(), variables defined on all "
+                "branches. Runtime builtins include "
+                "set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
+            )
+        else:
+            api_line = (
+                "- Executable API: `def choose(problem, history)` returning float in "
+                "[0.01, 0.99] as P(action=1).\n"
+            )
+            safety_line = (
+                "- Preserve generic safety: pure Python, no imports, deterministic, "
+                "return min(0.99, max(0.01, p)), no randomness, no pow() (use **), "
+                "helpers inside choose(), variables defined on all branches. Runtime "
+                "builtins include set/frozenset/sorted/any/all/ord/next/map/filter/round.\n"
+            )
+
     return (
         f"Write the evolution system prompt for dataset `{dataset_alias}` ({display}).\n\n"
         "Requirements:\n"
