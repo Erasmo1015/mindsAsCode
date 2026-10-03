@@ -10,10 +10,15 @@ Candidate presence inventories are derived from complete motif_details.
 
 Resume keys: ``dataset|run_id|iteration|candidate|parent``.
 Existing successful annotations are skipped (append-only resume).
+
+``--sha_label_cache`` sends one request per distinct rendered annotation prompt.
+A label is copied only onto rows whose system and user prompt are byte-identical.
+Rows keep their own resume keys. The output table is not collapsed.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -120,6 +125,8 @@ Distinguish carefully:
 - probability_used means reading/using problem probability fields (including linear p*x);
   empirical rates from feedback history alone are feedback/learning, not probability_used
 - feedback vs learning (learning requires an across-trial update rule)
+Unused formal arguments do NOT establish construct presence (e.g. an unused `history` parameter is not History).
+The official seed baseline whose choose body is `return 0.5` ignores problem and history and contains none of the five constructs.
 Return ONLY a JSON array matching the requested schema."""
 
 
@@ -186,7 +193,15 @@ def _build_user_prompt_v4(batch: Sequence[Dict[str, Any]], *, schema_mod: Any) -
         f"{schema_mod.motif_definitions_block()}\n\n"
         f"{schema_mod.applicability_block()}\n\n"
         "Label mechanisms implemented in the program code, not dataset subject matter.\n"
-        "For each pair, return an object with:\n"
+        + (
+            "Unused formal arguments do NOT establish construct presence "
+            "(e.g. an unused `history` parameter is not History).\n"
+            "The official seed baseline whose choose body is `return 0.5` ignores "
+            "problem and history and contains none of the five constructs.\n"
+            if getattr(schema_mod, "SCHEMA_VERSION", None) == 5
+            else ""
+        )
+        + "For each pair, return an object with:\n"
         "- candidate_id (exact)\n"
         "- reference_motif_state: motifs present in the parent\n"
         "- modified_motifs: subset of motifs present in BOTH parent and candidate "
@@ -199,8 +214,20 @@ def _build_user_prompt_v4(batch: Sequence[Dict[str, Any]], *, schema_mod: Any) -
     )
 
 
-def _load_completed(path: Path, *, schema_version: int) -> Set[str]:
-    done: Set[str] = set()
+def _annotation_row_is_current(row: Dict[str, Any], schema_version: int) -> bool:
+    if int(row.get("schema_version", -1) or -1) != int(schema_version):
+        return False
+    kind = row.get("annotation_kind")
+    if _is_transition_schema(schema_version):
+        return kind in (
+            "population_program_motif_transition",
+            "population_program_motif_state",
+        )
+    return kind == "population_program_motif_state"
+
+
+def _load_completed_records(path: Path, *, schema_version: int) -> Dict[str, Dict[str, Any]]:
+    done: Dict[str, Dict[str, Any]] = {}
     if not path.exists():
         return done
     with path.open(encoding="utf-8") as f:
@@ -212,21 +239,173 @@ def _load_completed(path: Path, *, schema_version: int) -> Set[str]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if int(row.get("schema_version", -1) or -1) != int(schema_version):
-                continue
-            kind = row.get("annotation_kind")
-            if _is_transition_schema(schema_version):
-                if kind not in (
-                    "population_program_motif_transition",
-                    "population_program_motif_state",
-                ):
-                    continue
-            elif kind != "population_program_motif_state":
+            if not isinstance(row, dict) or not _annotation_row_is_current(row, schema_version):
                 continue
             key = row.get("resume_key")
             if key:
-                done.add(str(key))
+                done[str(key)] = row
     return done
+
+
+def _load_completed(path: Path, *, schema_version: int) -> Set[str]:
+    return set(_load_completed_records(path, schema_version=schema_version))
+
+
+def rendered_annotation_messages(
+    program: Dict[str, Any],
+    schema_mod: Any,
+    repo: Path,
+) -> Tuple[str, str]:
+    """System and user messages for this row, as a one-item annotation request."""
+    code = (repo / str(program["code_path"])).read_text(encoding="utf-8")
+    if _is_transition_schema(schema_mod.SCHEMA_VERSION):
+        parent_rel = program.get("parent_code_path")
+        if not parent_rel:
+            raise ValueError(
+                f"missing parent_code_path for {program.get('resume_key')!r}"
+            )
+        item = {
+            "candidate_id": program.get("candidate_id") or program.get("program_id"),
+            "parent_id": program.get("parent_id"),
+            "source": program.get("source"),
+            "reference_kind": program.get("reference_kind"),
+            "parent_code": (repo / str(parent_rel)).read_text(encoding="utf-8"),
+            "code": code,
+        }
+        user = _build_user_prompt_v4([item], schema_mod=schema_mod)
+        system = _SYSTEM_V5 if schema_mod.SCHEMA_VERSION == 5 else _SYSTEM_V4
+        return system, user
+    item = {
+        "program_id": program.get("program_id") or program.get("candidate_id"),
+        "code": code,
+    }
+    return _SYSTEM_V3, _build_user_prompt_v3([item], schema_mod=schema_mod)
+
+
+def annotation_prompt_sha256(
+    program: Dict[str, Any],
+    schema_mod: Any,
+    repo: Path,
+) -> str:
+    """SHA-256 of the complete rendered system and user prompt."""
+    system, user = rendered_annotation_messages(program, schema_mod, repo)
+    blob = json.dumps(
+        {"system": system, "user": user},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def stamp_annotation_prompt_sha(
+    programs: Sequence[Dict[str, Any]],
+    schema_mod: Any,
+    repo: Path,
+) -> List[Dict[str, Any]]:
+    stamped: List[Dict[str, Any]] = []
+    for program in programs:
+        row = dict(program)
+        row["annotation_prompt_sha256"] = annotation_prompt_sha256(row, schema_mod, repo)
+        stamped.append(row)
+    return stamped
+
+
+def plan_sha_label_representatives(
+    programs: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """One LLM item per rendered annotation-prompt SHA, in first-seen order.
+
+    A later row is an alias only when its rendered prompt matches exactly.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for program in programs:
+        key = str(program.get("annotation_prompt_sha256") or "")
+        if not key:
+            raise ValueError(
+                "annotation_prompt_sha256 is required "
+                f"(resume_key={program.get('resume_key')!r})"
+            )
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(dict(program))
+    planned: List[Dict[str, Any]] = []
+    for key in order:
+        members = groups[key]
+        representative = dict(members[0])
+        representative["sha_cache_aliases"] = [dict(member) for member in members[1:]]
+        representative["sha_label_cache_key"] = key
+        planned.append(representative)
+    return planned
+
+
+def expected_population_llm_calls(
+    n_rows: int,
+    n_unique: int,
+    batch_size: int,
+) -> Dict[str, int]:
+    """Full-batch call counts. Singleton retries are not included."""
+    width = max(1, int(batch_size))
+    rows = int(n_rows)
+    unique = int(n_unique)
+    return {
+        "batch_size": width,
+        "llm_items_before": rows,
+        "llm_calls_before": (rows + width - 1) // width,
+        "llm_items_after": unique,
+        "llm_calls_after": (unique + width - 1) // width,
+    }
+
+
+def _cache_targets(program: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [program, *list(program.get("sha_cache_aliases") or [])]
+
+
+def _row_from_cached_annotation(
+    motif_row: Dict[str, Any],
+    target: Dict[str, Any],
+    *,
+    schema_mod: Any,
+    source_resume_key: str,
+) -> Dict[str, Any]:
+    """Copy motif labels onto one candidate row. Identity stays with the target."""
+    rec = dict(motif_row)
+    present = set(rec.get("candidate_motif_state") or rec.get("program_motif_state") or [])
+    source_parent = rec.get("sha_label_source_parent_sha256") or rec.get("parent_code_sha256")
+    rec.update(
+        {
+            "dataset": target["dataset"],
+            "run_id": target["run_id"],
+            "family": target.get("family"),
+            "code_path": target["code_path"],
+            "parent_code_path": target.get("parent_code_path"),
+            "code_sha256": target.get("code_sha256"),
+            "parent_code_sha256": target.get("parent_code_sha256"),
+            "global_fitness": target.get("global_fitness"),
+            "selection_score": target.get("selection_score"),
+            "iteration": target.get("iteration"),
+            "candidate": target.get("candidate"),
+            "candidate_idx": target.get("candidate_idx"),
+            "parent_id": target.get("parent_id"),
+            "parent": target.get("parent") or target.get("parent_id"),
+            "source": target.get("source"),
+            "reference_kind": target.get("reference_kind"),
+            "reference_type": target.get("reference_type") or target.get("reference_kind"),
+            "reference_is_exact": target.get("reference_is_exact"),
+            "reference_is_proxy": target.get("reference_is_proxy"),
+            "resume_key": target["resume_key"],
+            "lineage_reconstructed": target.get("lineage_reconstructed"),
+            "has_motifs": {m: (m in present) for m in schema_mod.BEHAVIORAL_MOTIFS},
+            "candidate_id": target.get("candidate_id") or target.get("program_id"),
+            "sha_label_cached": str(target["resume_key"]) != str(source_resume_key),
+            "sha_label_source_resume_key": str(source_resume_key),
+            "sha_label_source_parent_sha256": source_parent,
+            "sha_label_parent_matches": target.get("parent_code_sha256") == source_parent,
+            "annotation_prompt_sha256": target.get("annotation_prompt_sha256"),
+        }
+    )
+    return rec
 
 
 def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
@@ -336,36 +515,52 @@ def _write_success_rows(
     n_ok = 0
     for p in batch:
         lookup = p.get("candidate_id") or p["program_id"]
-        rec = dict(by_id[lookup])
-        present = set(rec.get("candidate_motif_state") or rec.get("program_motif_state") or [])
-        rec.update(
-            {
-                "dataset": p["dataset"],
-                "run_id": p["run_id"],
-                "family": p.get("family"),
-                "code_path": p["code_path"],
-                "parent_code_path": p.get("parent_code_path"),
-                "code_sha256": p.get("code_sha256"),
-                "parent_code_sha256": p.get("parent_code_sha256"),
-                "global_fitness": p.get("global_fitness"),
-                "selection_score": p.get("selection_score"),
-                "iteration": p.get("iteration"),
-                "candidate": p.get("candidate"),
-                "candidate_idx": p.get("candidate_idx"),
-                "parent_id": p.get("parent_id"),
-                "parent": p.get("parent") or p.get("parent_id"),
-                "source": p.get("source"),
-                "reference_kind": p.get("reference_kind"),
-                "reference_type": p.get("reference_type") or p.get("reference_kind"),
-                "reference_is_exact": p.get("reference_is_exact"),
-                "reference_is_proxy": p.get("reference_is_proxy"),
-                "resume_key": p["resume_key"],
-                "lineage_reconstructed": p.get("lineage_reconstructed"),
-                "has_motifs": {m: (m in present) for m in schema_mod.BEHAVIORAL_MOTIFS},
-            }
-        )
-        _append_jsonl(out_jsonl, rec)
-        n_ok += 1
+        motif = dict(by_id[lookup])
+        if "sha_cache_aliases" not in p:
+            present = set(
+                motif.get("candidate_motif_state") or motif.get("program_motif_state") or []
+            )
+            motif.update(
+                {
+                    "dataset": p["dataset"],
+                    "run_id": p["run_id"],
+                    "family": p.get("family"),
+                    "code_path": p["code_path"],
+                    "parent_code_path": p.get("parent_code_path"),
+                    "code_sha256": p.get("code_sha256"),
+                    "parent_code_sha256": p.get("parent_code_sha256"),
+                    "global_fitness": p.get("global_fitness"),
+                    "selection_score": p.get("selection_score"),
+                    "iteration": p.get("iteration"),
+                    "candidate": p.get("candidate"),
+                    "candidate_idx": p.get("candidate_idx"),
+                    "parent_id": p.get("parent_id"),
+                    "parent": p.get("parent") or p.get("parent_id"),
+                    "source": p.get("source"),
+                    "reference_kind": p.get("reference_kind"),
+                    "reference_type": p.get("reference_type") or p.get("reference_kind"),
+                    "reference_is_exact": p.get("reference_is_exact"),
+                    "reference_is_proxy": p.get("reference_is_proxy"),
+                    "resume_key": p["resume_key"],
+                    "lineage_reconstructed": p.get("lineage_reconstructed"),
+                    "has_motifs": {m: (m in present) for m in schema_mod.BEHAVIORAL_MOTIFS},
+                }
+            )
+            _append_jsonl(out_jsonl, motif)
+            n_ok += 1
+            continue
+        # The model saw the representative parent. Stamp that parent SHA so a
+        # copied row can record whether its own parent is the same program.
+        motif["parent_code_sha256"] = p.get("parent_code_sha256")
+        for target in _cache_targets(p):
+            rec = _row_from_cached_annotation(
+                motif,
+                target,
+                schema_mod=schema_mod,
+                source_resume_key=str(p["resume_key"]),
+            )
+            _append_jsonl(out_jsonl, rec)
+            n_ok += 1
     return n_ok
 
 
@@ -443,18 +638,20 @@ def _annotate_one_unit(
         return ok_c, fail_c
 
     for p in batch:
-        _append_jsonl(
-            failures_path,
-            {
-                "resume_key": p["resume_key"],
-                "dataset": p["dataset"],
-                "run_id": p["run_id"],
-                "program_id": p["program_id"],
-                "parent_id": p.get("parent_id"),
-                "error": err,
-            },
-        )
-    return 0, len(batch)
+        targets = _cache_targets(p) if "sha_cache_aliases" in p else [p]
+        for target in targets:
+            _append_jsonl(
+                failures_path,
+                {
+                    "resume_key": target["resume_key"],
+                    "dataset": target["dataset"],
+                    "run_id": target["run_id"],
+                    "program_id": target["program_id"],
+                    "parent_id": target.get("parent_id"),
+                    "error": err,
+                },
+            )
+    return 0, sum(len(_cache_targets(p)) if "sha_cache_aliases" in p else 1 for p in batch)
 
 
 def annotate_programs(
@@ -476,6 +673,7 @@ def annotate_programs(
     max_model_len: int = ANNOTATION_VLLM_MAX_MODEL_LEN,
     reserved_output_tokens: Optional[int] = None,
     safety_margin_tokens: int = ANNOTATION_SAFETY_MARGIN_TOKENS,
+    sha_label_cache: bool = False,
 ) -> Dict[str, Any]:
     schema_mod = _schema_mod(schema_version)
     if max_tokens is None:
@@ -488,11 +686,32 @@ def annotate_programs(
     if reserved_output_tokens is None:
         reserved_output_tokens = int(max_tokens)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    done = _load_completed(out_jsonl, schema_version=schema_mod.SCHEMA_VERSION)
-    todo = [p for p in programs if p["resume_key"] not in done]
+    done_rows = _load_completed_records(out_jsonl, schema_version=schema_mod.SCHEMA_VERSION)
+    done = set(done_rows)
+    n_copied_from_cache = 0
+    if sha_label_cache:
+        stamped = stamp_annotation_prompt_sha(programs, schema_mod, REPO)
+        llm_programs, n_copied_from_cache = _resume_sha_label_cache(
+            stamped,
+            done_rows,
+            schema_mod=schema_mod,
+            out_jsonl=out_jsonl,
+        )
+        todo = llm_programs
+        n_unique = len({p["annotation_prompt_sha256"] for p in stamped})
+    else:
+        todo = [p for p in programs if p["resume_key"] not in done]
+        n_unique = len(programs)
+    call_estimate = expected_population_llm_calls(len(programs), n_unique, batch_size)
     print(
         f"[pop-annotate] schema={schema_mod.SCHEMA_VERSION}/{schema_mod.PROMPT_VERSION} "
-        f"total={len(programs)} done={len(done)} todo={len(todo)} "
+        f"total={len(programs)} done={len(done)} todo_rows={len(todo)} "
+        f"sha_label_cache={sha_label_cache} "
+        f"llm_items_before={call_estimate['llm_items_before']} "
+        f"llm_calls_before={call_estimate['llm_calls_before']} "
+        f"llm_items_after={call_estimate['llm_items_after']} "
+        f"llm_calls_after={call_estimate['llm_calls_after']} "
+        f"copied_from_existing={n_copied_from_cache} "
         f"max_tokens={max_tokens} max_model_len={max_model_len} "
         f"reserved_output={reserved_output_tokens} margin={safety_margin_tokens}",
         flush=True,
@@ -544,7 +763,18 @@ def annotate_programs(
         reserved_output_tokens=int(reserved_output_tokens),
         safety_margin_tokens=int(safety_margin_tokens),
     )
+    print(
+        f"[pop-annotate] packed {len(loaded_all)} items into {len(batches)} batch(es); "
+        f"oversized_singletons={len(oversized)} "
+        f"token_counter={'qwen' if token_counter else 'char4'}",
+        flush=True,
+    )
+
+    n_ok = n_copied_from_cache
+    n_fail = 0
     for item, solo_tok in oversized:
+        targets = _cache_targets(item) if "sha_cache_aliases" in item else [item]
+        n_fail += len(targets)
         cid = item.get("candidate_id") or item.get("program_id")
         msg = (
             f"singleton exceeds annotation budget: chat_tokens={solo_tok} "
@@ -554,31 +784,22 @@ def annotate_programs(
         print(f"[pop-annotate] FAIL oversized singleton id={cid}: {msg}", flush=True)
         with _IO_LOCK:
             with failures_path.open("a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "resume_key": item.get("resume_key"),
-                            "candidate_id": cid,
-                            "error": msg,
-                            "solo_chat_tokens": solo_tok,
-                            "max_model_len": int(max_model_len),
-                            "reserved_output_tokens": int(reserved_output_tokens),
-                            "safety_margin_tokens": int(safety_margin_tokens),
-                        },
-                        ensure_ascii=False,
+                for target in targets:
+                    f.write(
+                        json.dumps(
+                            {
+                                "resume_key": target.get("resume_key"),
+                                "candidate_id": target.get("candidate_id") or cid,
+                                "error": msg,
+                                "solo_chat_tokens": solo_tok,
+                                "max_model_len": int(max_model_len),
+                                "reserved_output_tokens": int(reserved_output_tokens),
+                                "safety_margin_tokens": int(safety_margin_tokens),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
-
-    print(
-        f"[pop-annotate] packed {len(loaded_all)} items into {len(batches)} batch(es); "
-        f"oversized_singletons={len(oversized)} "
-        f"token_counter={'qwen' if token_counter else 'char4'}",
-        flush=True,
-    )
-
-    n_ok = 0
-    n_fail = len(oversized)
 
     def _one(bi: int, batch: List[Dict[str, Any]]) -> Tuple[int, int]:
         return _annotate_one_unit(
@@ -650,8 +871,68 @@ def annotate_programs(
         "safety_margin_tokens": int(safety_margin_tokens),
         "batch_size": int(batch_size),
         "server_retries": int(server_retries),
+        "sha_label_cache": bool(sha_label_cache),
+        "n_copied_from_cache": int(n_copied_from_cache),
+        **call_estimate,
     }
     return summary
+
+
+def _resume_sha_label_cache(
+    programs: Sequence[Dict[str, Any]],
+    done_rows: Dict[str, Dict[str, Any]],
+    *,
+    schema_mod: Any,
+    out_jsonl: Path,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Copy a finished rendered-prompt label onto pending rows with that same prompt."""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    order: List[str] = []
+    for program in programs:
+        key = str(program.get("annotation_prompt_sha256") or "")
+        if not key:
+            raise ValueError(
+                "annotation_prompt_sha256 is required "
+                f"(resume_key={program.get('resume_key')!r})"
+            )
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(program)
+    llm_programs: List[Dict[str, Any]] = []
+    n_copied = 0
+    for key in order:
+        members = grouped[key]
+        pending = [row for row in members if str(row["resume_key"]) not in done_rows]
+        finished = [row for row in members if str(row["resume_key"]) in done_rows]
+        if not pending:
+            continue
+        if finished:
+            source_program = finished[0]
+            source_row = done_rows[str(source_program["resume_key"])]
+            if str(source_row.get("annotation_prompt_sha256") or "") != key:
+                finished = []
+        if finished:
+            source_program = finished[0]
+            source_row = done_rows[str(source_program["resume_key"])]
+            source_key = str(
+                source_row.get("sha_label_source_resume_key") or source_program["resume_key"]
+            )
+            for target in pending:
+                _append_jsonl(
+                    out_jsonl,
+                    _row_from_cached_annotation(
+                        source_row,
+                        target,
+                        schema_mod=schema_mod,
+                        source_resume_key=source_key,
+                    ),
+                )
+                n_copied += 1
+            continue
+        planned = plan_sha_label_representatives(pending)
+        llm_programs.extend(planned)
+    return llm_programs, n_copied
 
 
 def _demo_v4_payload(candidate_id: str = "demo") -> List[Dict[str, Any]]:
@@ -763,6 +1044,14 @@ def main() -> None:
         default=None,
         help="Optional comma-separated dataset filter.",
     )
+    parser.add_argument(
+        "--sha_label_cache",
+        action="store_true",
+        help=(
+            "Annotate one row per distinct rendered prompt, then copy that label "
+            "only onto rows with the same system and user prompt."
+        ),
+    )
     args = parser.parse_args()
 
     schema_mod = _schema_mod(args.schema_version)
@@ -864,6 +1153,13 @@ def main() -> None:
                 programs[0]["resume_key"] if programs else None
             ),
         }
+        if args.sha_label_cache:
+            stamped = stamp_annotation_prompt_sha(programs, schema_mod, REPO)
+            unique = len({p["annotation_prompt_sha256"] for p in stamped})
+            summary.update(expected_population_llm_calls(len(programs), unique, args.batch_size))
+            summary["sha_label_cache"] = True
+            summary["cache_key"] = "rendered_annotation_prompt_sha256"
+            summary["output_rows"] = len(programs)
         (out_dir / "dry_run_summary.json").write_text(
             json.dumps(summary, indent=2), encoding="utf-8"
         )
@@ -894,6 +1190,7 @@ def main() -> None:
             max_model_len=int(args.max_model_len),
             reserved_output_tokens=args.reserved_output_tokens,
             safety_margin_tokens=int(args.safety_margin_tokens),
+            sha_label_cache=bool(args.sha_label_cache),
         )
     except VLLMServerDeadError as exc:
         print(f"[pop-annotate] FATAL vLLM dead: {exc}", flush=True)
