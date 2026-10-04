@@ -294,6 +294,7 @@ class TestBuildAndFitExclusion(unittest.TestCase):
                 "raw_llm_annotation": {"no_meaningful_change": True},
             }
             rows, excl = build_rows_v5(
+                reference_policy="historical_schema_v5",
                 run_dir=run_dir,
                 annotations={key: ann},
                 phase="evolution",

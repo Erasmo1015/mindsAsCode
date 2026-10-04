@@ -15,6 +15,7 @@ from utils.mem.schema_participant_transition_v5 import verify_delta_f_consistenc
 from utils.mem.trace import record_contains_test_metrics
 
 REFERENCE_POLICY = "pics_v4_uniform_v8"
+TRANSITION_IDENTITY_POLICY = "pics_v4_uniform_v8_transition_sha256_v1"
 POPULATION_PROGRAM = "population_program"
 SEED_BASELINE = "seed_baseline"
 PROMPTED_PARENT = "best_prompted_parent"
@@ -70,7 +71,34 @@ def uniform_v8_resume_key(
     )
     if any(part == "" or "|" in part for part in parts):
         raise PicsV4ReferenceError(f"resume key part is empty or contains '|': {parts}")
+    for sha in (parts[8], parts[11]):
+        if re.fullmatch(r"[0-9a-f]{64}", sha) is None:
+            raise PicsV4ReferenceError("transition SHA must be a lowercase SHA-256 digest")
     return parts
+
+
+def uniform_v8_annotation_key(row: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Consume the stored canonical key; verify all redundant provenance fields.
+
+    No legacy key or inferred reference is accepted in this policy.
+    """
+    stored = row.get("uniform_v8_resume_key")
+    if not isinstance(stored, (list, tuple)) or len(stored) != 12:
+        raise PicsV4ReferenceError("annotation lacks the stored uniform_v8_resume_key")
+    expected = uniform_v8_resume_key(
+        dataset=row.get("dataset"), job_id=row.get("job_id"),
+        run_id=row.get("run_id"), participant_id=row.get("participant_id"),
+        phase=row.get("phase"), source=row.get("source"), iteration=row.get("iteration"),
+        candidate_id=row.get("candidate_id"),
+        candidate_sha256=row.get("candidate_code_sha256"),
+        reference_id=row.get("reference_id"), reference_type=row.get("reference_type"),
+        reference_sha256=row.get("reference_code_sha256"),
+    )
+    if tuple(stored) != expected:
+        raise PicsV4ReferenceError("stored transition key disagrees with annotation identity/SHA fields")
+    if row.get("reference_policy") != REFERENCE_POLICY or row.get("transition_identity_policy") != TRANSITION_IDENTITY_POLICY:
+        raise PicsV4ReferenceError("annotation reference/transition identity policy marker is missing or mismatched")
+    return tuple(stored)
 
 
 def find_job_dir(start: Path) -> Path:
@@ -184,6 +212,14 @@ def resolve_uniform_v8_reference(
 
     participant_dir = Path(participant_dir)
     job_dir = Path(job_dir) if job_dir is not None else find_job_dir(participant_dir)
+    if job_dir.parent.name == "pics_v4_target_only":
+        from analysis.mem.pics_v4_population_annotation import AUTHORITATIVE_JOBS
+        dataset = job_dir.parent.parent.name
+        official = {f"job_{job}": set(names) for job, names in AUTHORITATIVE_JOBS}
+        if dataset not in official.get(job_dir.name, set()) or rec.get("dataset") != dataset:
+            raise PicsV4ReferenceError("trace dataset/job does not match the official artifact path")
+    if participant_dir.name != f"participant_{rec.get('participant_id')}":
+        raise PicsV4ReferenceError("trace participant identity disagrees with its artifact directory")
     code_rel = str(rec.get("code_path") or "")
     if not code_rel:
         raise PicsV4ReferenceError("candidate code_path is missing")
@@ -194,6 +230,10 @@ def resolve_uniform_v8_reference(
         raise PicsV4ReferenceError(f"candidate artifact missing: {candidate_path}")
     candidate_text = candidate_path.read_text(encoding="utf-8")
     candidate_sha = source_sha256(candidate_text)
+    if rec.get("code") and source_sha256(str(rec["code"])) != candidate_sha:
+        raise PicsV4ReferenceError("candidate trace code SHA disagrees with its artifact")
+    if rec.get("candidate_code_sha256") and rec["candidate_code_sha256"] != candidate_sha:
+        raise PicsV4ReferenceError("candidate trace SHA disagrees with its artifact")
 
     if mode == "uniform_v8_stored_seed_baseline":
         reference_path = job_dir / "prompts" / "seed_program.py"
@@ -211,6 +251,8 @@ def resolve_uniform_v8_reference(
         reference_path = _participant_candidate_path(participant_dir, reference_id)
         reference_text = _read_under(job_dir, reference_path)
     reference_sha = source_sha256(reference_text)
+    if rec.get("reference_code_sha256") and rec["reference_code_sha256"] != reference_sha:
+        raise PicsV4ReferenceError("reference trace SHA disagrees with its artifact")
 
     job_token = job_dir.name
     if not job_token.startswith("job_"):

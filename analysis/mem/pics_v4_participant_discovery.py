@@ -19,6 +19,8 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from utils.mem.pics_v4_uniform_v8_reference import TRANSITION_IDENTITY_POLICY  # noqa: E402
+
 from analysis.mem.pics_v4_population_annotation import (  # noqa: E402
     AUTHORITATIVE_JOBS,
     OUTPUT_REL,
@@ -178,8 +180,9 @@ def participant_launch_plan(repo: Path) -> Dict[str, Any]:
             ),
             "build_csv": (
                 "python analysis/mem/build_dataset.py "
-                f"--run_dir <selected-dir> --annotations {ann}/annotations_v5.jsonl "
+                f"--run_dir . --official_all --annotations {ann}/annotations_v5.jsonl "
                 f"--output_csv {csv} --schema_version 5 "
+                "--reference_policy pics_v4_uniform_v8 "
                 f"--phase {filt['phase']} --source {filt['source']}"
             ),
             "coverage": (
@@ -190,6 +193,7 @@ def participant_launch_plan(repo: Path) -> Dict[str, Any]:
     return {
         **ledger,
         "reference_policy": REFERENCE_POLICY,
+        "transition_identity_policy": TRANSITION_IDENTITY_POLICY,
         "grouping_key": GROUPING_KEY,
         "n_traces": len(traces),
         "traces": traces,

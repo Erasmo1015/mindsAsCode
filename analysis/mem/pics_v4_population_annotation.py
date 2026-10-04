@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
@@ -838,6 +840,69 @@ def write_inventory(repo: Path, jobs: Sequence[Tuple[str, Sequence[str]]] = AUTH
     )
     (out_dir / "INVENTORY.md").write_text(_markdown_report(payload, gaps), encoding="utf-8")
     return payload
+
+
+def extend_population_manifest(
+    repo: Path, *, dataset: str, job_id: str, expected_old: int, expected_new: int,
+    write: bool = False,
+) -> Dict[str, Any]:
+    """Review or atomically apply one explicitly scoped official population addition.
+
+    Existing rows remain byte-equivalent as JSON values and in their original
+    order. The source inventory always checks the full official mapping and v8
+    markers. Other newly completed populations are outside this operation.
+    """
+    repo = Path(repo)
+    path = repo / OUTPUT_REL / "program_manifest.json"
+    before = path.read_bytes()
+    manifest = json.loads(before)
+    assert_manifest_is_final_payload(manifest)
+    old = manifest["programs"]
+    old_index = {row["resume_key"]: row for row in old}
+    if len(old) != expected_old or len(old_index) != len(old) or manifest["n_programs"] != len(old):
+        raise PicsV4AnnotationError("unexpected original manifest size or duplicate keys")
+    live = inventory_populations(repo)
+    live_index = {row["resume_key"]: row for row in live["programs"]}
+    stale = sorted(set(old_index) - set(live_index))
+    changed = [key for key in old_index if key in live_index and old_index[key] != live_index[key]]
+    if stale or changed:
+        raise PicsV4AnnotationError(f"existing manifest rows stale={len(stale)} changed={len(changed)}")
+    additions = [row for row in live["programs"]
+                 if row["resume_key"] not in old_index and row["dataset"] == dataset
+                 and str(row["source_job_id"]) == str(job_id)]
+    if len(additions) != 100 or len(old) + len(additions) != expected_new:
+        raise PicsV4AnnotationError("scoped extension is not exactly one 100-row completed population")
+    manifest["programs"] = old + additions
+    manifest["n_programs"] = len(manifest["programs"])
+    assert_manifest_is_final_payload(manifest)
+    summary = {"old_rows": len(old), "new_rows": manifest["n_programs"],
+               "added_rows": len(additions), "dataset": dataset, "job_id": str(job_id),
+               "stale_keys": stale, "changed_existing_keys": changed, "written": False}
+    if not write:
+        return summary
+    data = (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".program_manifest.", delete=False) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, path.stat().st_mode & 0o777)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.read_bytes() != before:
+            raise PicsV4AnnotationError("manifest changed during scoped extension")
+        os.replace(temporary, path)
+        temporary = None
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    summary["written"] = True
+    return summary
 
 
 def main() -> None:

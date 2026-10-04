@@ -90,6 +90,9 @@ from utils.mem.pics_v4_uniform_v8_reference import (  # noqa: E402
     PicsV4ReferenceError,
     resolve_uniform_v8_reference,
     uniform_v8_resume_key,
+    uniform_v8_annotation_key,
+    REFERENCE_POLICY,
+    TRANSITION_IDENTITY_POLICY,
 )
 from utils.mem.qwen_tokenizer import make_qwen_token_counter  # noqa: E402
 from utils.mem.reference_types import REF_POPULATION_PROGRAM  # noqa: E402
@@ -753,8 +756,20 @@ def _load_completed_keys(
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                if reference_policy == REFERENCE_POLICY:
+                    raise PicsV4ReferenceError("invalid JSON in v8 resume annotations")
                 continue
             if not isinstance(obj, dict):
+                if reference_policy == REFERENCE_POLICY:
+                    raise PicsV4ReferenceError("v8 resume annotation is not an object")
+                continue
+            if reference_policy == REFERENCE_POLICY:
+                if schema_version != 5 or not is_schema_v5_row(obj):
+                    raise PicsV4ReferenceError("v8 resume requires schema-v5 rows")
+                key = uniform_v8_annotation_key(obj)
+                if key in done:
+                    raise PicsV4ReferenceError(f"duplicate v8 annotation key: {key}")
+                done.add(key)
                 continue
             if schema_version == 5:
                 if not is_schema_v5_row(obj):
@@ -775,25 +790,6 @@ def _load_completed_keys(
             if not ref_type and ref_id and reference_policy != "pics_v4_uniform_v8":
                 ref_type = "pool_best_proxy"
             phase = obj.get("phase")
-            if reference_policy == "pics_v4_uniform_v8":
-                if obj.get("candidate_code_sha256") and obj.get("reference_code_sha256") and obj.get("job_id"):
-                    done.add(
-                        uniform_v8_resume_key(
-                            dataset=obj.get("dataset"),
-                            job_id=obj.get("job_id"),
-                            run_id=obj.get("run_id"),
-                            participant_id=obj.get("participant_id"),
-                            phase=phase,
-                            source=obj.get("source"),
-                            iteration=obj.get("iteration"),
-                            candidate_id=cid,
-                            candidate_sha256=obj.get("candidate_code_sha256"),
-                            reference_id=ref_id,
-                            reference_type=ref_type,
-                            reference_sha256=obj.get("reference_code_sha256"),
-                        )
-                    )
-                continue
             done.add(
                 _resume_key_from_parts(
                     schema_version=schema_version,
@@ -1176,6 +1172,9 @@ def _enrich_annotation_row(
             enriched["job_id"] = src.get("_job_id")
         if src.get("_resume_key"):
             enriched["uniform_v8_resume_key"] = list(src.get("_resume_key") or [])
+            enriched["reference_policy"] = REFERENCE_POLICY
+            enriched["transition_identity_policy"] = TRANSITION_IDENTITY_POLICY
+            uniform_v8_annotation_key(enriched)
         if src.get("reference_is_exact") is not None:
             enriched["reference_is_exact"] = src.get("reference_is_exact")
         if src.get("reference_is_proxy") is not None:
@@ -1551,6 +1550,9 @@ def main() -> None:
         }
 
     run_dir = Path(args.run_dir)
+    if "pics_v4_target_only" in run_dir.resolve().parts:
+        from analysis.mem.build_dataset import _guard_official_participant_build
+        _guard_official_participant_build(run_dir, _discover_trace_files(run_dir), str(args.reference_policy))
     run_id_override = str(args.run_id_override or "").strip() or None
     track_mode = str(args.track_mode or "").strip()
     track_meta = None
@@ -1643,7 +1645,10 @@ def main() -> None:
     )
     if args.resume_annotations:
         resume_path = Path(args.resume_annotations)
-        extra = _load_completed_keys(resume_path, schema_version=schema_version)
+        extra = _load_completed_keys(resume_path, schema_version=schema_version,
+                                     reference_policy=reference_policy)
+        if reference_policy == REFERENCE_POLICY and completed.intersection(extra):
+            raise PicsV4ReferenceError("duplicate v8 identities across output and resume annotations")
         before = len(completed)
         completed |= extra
         print(
@@ -2172,6 +2177,8 @@ def main() -> None:
 
     summary = {
         "schema_version": schema_version,
+        "reference_policy": reference_policy,
+        "transition_identity_policy": TRANSITION_IDENTITY_POLICY if reference_policy == REFERENCE_POLICY else None,
         "prompt_version": prompt_version if schema_version >= 3 else None,
         "strict_reference": strict_reference,
         "require_delta_f_consistency": require_delta_f_consistency,

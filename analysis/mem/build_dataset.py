@@ -73,6 +73,8 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     verify_delta_f_consistency,
 )
 from utils.mem.trace import iter_jsonl_records, record_contains_test_metrics  # noqa: E402
+from utils.mem.pics_v4_uniform_v8_reference import REFERENCE_POLICY, TRANSITION_IDENTITY_POLICY
+from utils.mem.pics_v4_participant_join import V8AnnotationIndex, V8JoinError, validate_v8_join
 
 # Backward-compat alias for older imports/tests.
 SCHEMA_VERSION = SCHEMA_VERSION_V2
@@ -89,11 +91,16 @@ def _load_annotations(
     path: Path,
     *,
     schema_version: int,
+    reference_policy: str = "historical_schema_v5",
 ) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
     """Index annotations by the schema-appropriate resume key."""
     by_key: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     if not path.is_file():
         raise FileNotFoundError(f"annotations file not found: {path}")
+    if reference_policy == REFERENCE_POLICY:
+        if schema_version != 5:
+            raise ValueError("uniform-v8 requires schema_version=5")
+        return V8AnnotationIndex(iter_jsonl_records([path]))
     n_skipped = 0
     for rec in iter_jsonl_records([path]):
         if record_contains_test_metrics(rec):
@@ -177,15 +184,36 @@ def _discover_trace_files(run_dir: Path) -> List[Path]:
     return sorted(found)
 
 
-def _iter_candidate_traces(run_dir: Path) -> Iterable[Dict[str, Any]]:
-    for path in _discover_trace_files(run_dir):
+def _iter_candidate_traces(run_dir: Path, trace_files=None) -> Iterable[Dict[str, Any]]:
+    for path in (trace_files if trace_files is not None else _discover_trace_files(run_dir)):
         for rec in iter_jsonl_records([path]):
             if rec.get("record_type") == "candidate":
                 if record_contains_test_metrics(rec):
                     raise ValueError(
                         "Test metric keys must not appear in mem_trace candidate records"
                     )
-                yield rec
+                yield {**rec, "_participant_dir": str(path.parent)}
+
+
+def _guard_official_participant_build(run_dir: Path, trace_files, reference_policy: str) -> None:
+    """Every real official build, including a single selected directory, gates on all 15."""
+    paths = [Path(run_dir), *trace_files]
+    for path in paths:
+        resolved = path.resolve()
+        if "pics_v4_target_only" not in resolved.parts:
+            continue
+        if reference_policy != REFERENCE_POLICY:
+            raise ValueError("official PICS v4 refuses historical join mode")
+        # Find the repository from the official generated_outputs topology.
+        root = next((p.parent for p in resolved.parents if p.name == "generated_outputs"), None)
+        if root is None:
+            raise ValueError("official participant path has no generated_outputs repository root")
+        from analysis.mem.pics_v4_participant_discovery import participant_launch_plan
+        plan = participant_launch_plan(root)
+        allowed = {(root / row["trace"]).resolve() for row in plan["traces"]}
+        if not {Path(p).resolve() for p in trace_files} <= allowed:
+            raise ValueError("trace list contains a non-official participant path")
+        return
 
 
 def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
@@ -443,6 +471,7 @@ def build_rows_v5(
     *,
     run_dir: Path,
     annotations: Dict[Tuple[Any, ...], Dict[str, Any]],
+    reference_policy: str,
     phase: str = "evolution",
     source: str = "normal",
     require_runtime_valid: bool = True,
@@ -450,6 +479,8 @@ def build_rows_v5(
     require_annotation: bool = True,
     exclusions_path: Optional[Path] = None,
     run_id_override: Optional[str] = None,
+    trace_files: Optional[List[Path]] = None,
+    join_audit: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Counter]:
     """Build schema-v5 rows with five constructs + state + eligibility + transition_*."""
     rows: List[Dict[str, Any]] = []
@@ -460,8 +491,43 @@ def build_rows_v5(
     state_cols = all_state_columns_v5()
     elig_cols = all_eligibility_columns_v5()
     transition_cols = all_transition_type_columns_v5()
+    files = trace_files if trace_files is not None else _discover_trace_files(run_dir)
+    _guard_official_participant_build(run_dir, files, reference_policy)
+    records = list(_iter_candidate_traces(run_dir, files))
+    if reference_policy == REFERENCE_POLICY:
+        if not isinstance(annotations, V8AnnotationIndex):
+            raise ValueError("v8 annotations must use the canonical V8AnnotationIndex")
+        if run_id_override or not (require_runtime_valid and require_finite_delta_f and require_annotation):
+            raise ValueError("v8 refuses identity overrides and relaxed eligibility/join guards")
+        if (phase, source) not in (("explore", "explore"), ("evolution", "normal"), ("evolution", "fresh")):
+            raise ValueError("v8 requires one explicit participant slice")
+        eligible = []
+        excluded = []
+        for rec in records:
+            def skip(reason):
+                excl[reason] += 1
+                excluded.append({k: v for k, v in {**rec, "reason": reason}.items()
+                                 if k in ("dataset", "run_id", "participant_id", "phase", "source",
+                                          "iteration", "candidate_id", "reference_id", "reason")})
+            if rec.get("phase") != phase or rec.get("source") != source:
+                skip("excl_slice")
+                continue
+            if not rec.get("runtime_valid"):
+                skip("excl_not_runtime_valid")
+                continue
+            if not _is_finite(rec.get("delta_f")):
+                skip("excl_delta_f_nonfinite_or_none")
+                continue
+            eligible.append(rec)
+        records, audit = validate_v8_join(eligible, annotations)
+        audit["excluded_trace_rows"] = dict(excl)
+        audit["excluded_traces"] = excluded
+        if join_audit is not None:
+            join_audit.update(audit)
+    elif reference_policy != "historical_schema_v5":
+        raise ValueError(f"unknown participant reference policy: {reference_policy}")
 
-    for rec in _iter_candidate_traces(run_dir):
+    for rec in records:
         if run_id_override:
             rec = dict(rec)
             rec["run_id"] = str(run_id_override)
@@ -479,6 +545,8 @@ def build_rows_v5(
             reference_type=ref_type,
             phase=rec.get("phase"),
         )
+        if reference_policy == REFERENCE_POLICY:
+            key = rec["_uniform_v8_key"]
         base_excl = {
             "dataset": rec.get("dataset"),
             "run_id": rec.get("run_id"),
@@ -535,7 +603,7 @@ def build_rows_v5(
             _exclude(f"excl_{err_df.split(':')[0]}")
             continue
         ann = annotations.get(key)
-        if ann is None:
+        if ann is None and reference_policy == "historical_schema_v5":
             legacy = annotation_resume_key_legacy_no_phase(
                 rec.get("dataset"),
                 rec.get("run_id"),
@@ -566,6 +634,15 @@ def build_rows_v5(
             schema_version=SCHEMA_VERSION_V5,
         )
         row["global_candidate_id"] = base_excl["global_candidate_id"]
+        if reference_policy == REFERENCE_POLICY:
+            row.update({
+                "reference_policy": REFERENCE_POLICY,
+                "transition_identity_policy": TRANSITION_IDENTITY_POLICY,
+                "uniform_v8_resume_key": json.dumps(list(key)),
+                "job_id": key[1], "candidate_code_sha256": key[8],
+                "reference_code_sha256": key[11],
+                "reference_score": rec["_v8_reference"]["reference_score"],
+            })
         if ann is not None:
             if "reference_motif_state" not in ann or "candidate_motif_state" not in ann:
                 raise ValueError(
@@ -743,6 +820,12 @@ def _fieldnames_for_schema(schema_version: int) -> List[str]:
             "prompt_version",
             "global_candidate_id",
             "reference_resolution",
+            "reference_policy",
+            "transition_identity_policy",
+            "uniform_v8_resume_key",
+            "job_id",
+            "candidate_code_sha256",
+            "reference_code_sha256",
             *base[1:],
             "reference_motif_state",
             "candidate_motif_state",
@@ -782,7 +865,12 @@ def main() -> None:
         required=True,
         help="annotations_v2.jsonl, annotations_v3.jsonl, or annotations_v5.jsonl path",
     )
-    parser.add_argument("--output_csv", type=str, required=True)
+    parser.add_argument("--output_csv", type=str)
+    parser.add_argument("--reference_policy", required=True,
+                        choices=[REFERENCE_POLICY, "historical_schema_v5"])
+    parser.add_argument("--official_all", action="store_true",
+                        help="Use only the complete all-15 official participant ledger; run_dir is the repo.")
+    parser.add_argument("--dry_run", action="store_true", help="Validate in memory; write no files.")
     parser.add_argument(
         "--schema_version",
         type=int,
@@ -800,30 +888,43 @@ def main() -> None:
     args = parser.parse_args()
 
     schema_version = int(args.schema_version)
-    out = Path(args.output_csv)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    excl_path = out.with_name(out.stem + "_exclusions.jsonl")
-    summary_path = out.with_name(out.stem + "_build_summary.json")
-    if excl_path.exists():
-        excl_path.unlink()
-
-    annotations = _load_annotations(Path(args.annotations), schema_version=schema_version)
+    if not args.dry_run and not args.output_csv:
+        parser.error("--output_csv is required unless --dry_run")
+    files = None
+    if args.official_all:
+        if args.reference_policy != REFERENCE_POLICY:
+            parser.error("--official_all requires pics_v4_uniform_v8")
+        from analysis.mem.pics_v4_participant_discovery import participant_launch_plan
+        repo = Path(args.run_dir).resolve()
+        plan = participant_launch_plan(repo)
+        files = [repo / row["trace"] for row in plan["traces"]]
+    if args.reference_policy == REFERENCE_POLICY and schema_version != 5:
+        parser.error("pics_v4_uniform_v8 requires schema_version=5")
+    _guard_official_participant_build(
+        Path(args.run_dir), files if files is not None else _discover_trace_files(Path(args.run_dir)),
+        args.reference_policy,
+    )
+    annotations = _load_annotations(Path(args.annotations), schema_version=schema_version,
+                                    reference_policy=args.reference_policy)
     source = args.source if args.source != "" else ""
+    audit = {}
     if schema_version == 5:
-        rows, excl = build_rows_v5(
-            run_dir=Path(args.run_dir),
-            annotations=annotations,
-            phase=args.phase,
-            source=source,
-            exclusions_path=excl_path,
-        )
+        try:
+            rows, excl = build_rows_v5(
+                run_dir=Path(args.run_dir), annotations=annotations,
+                reference_policy=args.reference_policy,
+                phase=args.phase, source=source, trace_files=files, join_audit=audit,
+            )
+        except V8JoinError as exc:
+            print(json.dumps(exc.audit, indent=2), file=sys.stderr)
+            raise SystemExit(1) from exc
     elif schema_version >= 3:
         rows, excl = build_rows_v3(
             run_dir=Path(args.run_dir),
             annotations=annotations,
             phase=args.phase,
             source=source,
-            exclusions_path=excl_path,
+            exclusions_path=None,
         )
     else:
         rows, excl = build_rows_v2(
@@ -831,8 +932,28 @@ def main() -> None:
             annotations=annotations,
             phase=args.phase,
             source=source,
-            exclusions_path=excl_path,
+            exclusions_path=None,
         )
+
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "n_rows": len(rows),
+                          "exclusions": dict(excl), "join_audit": audit}, indent=2))
+        return
+    out = Path(args.output_csv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    excl_path = out.with_name(out.stem + "_exclusions.jsonl")
+    summary_path = out.with_name(out.stem + "_build_summary.json")
+    # Legacy mode retains detailed exclusions through its historical second pass.
+    if args.reference_policy == "historical_schema_v5":
+        if excl_path.exists():
+            excl_path.unlink()
+        builder = build_rows_v5 if schema_version == 5 else build_rows_v3 if schema_version >= 3 else build_rows_v2
+        kwargs = {"reference_policy": args.reference_policy} if schema_version == 5 else {}
+        rows, excl = builder(run_dir=Path(args.run_dir), annotations=annotations,
+                             phase=args.phase, source=source, exclusions_path=excl_path, **kwargs)
+    else:
+        excl_path.write_text("".join(json.dumps(rec) + "\n" for rec in audit["excluded_traces"]),
+                             encoding="utf-8")
 
     fieldnames = _fieldnames_for_schema(schema_version)
     with out.open("w", encoding="utf-8", newline="") as f:
@@ -842,6 +963,9 @@ def main() -> None:
 
     summary = {
         "schema_version": schema_version,
+        "reference_policy": args.reference_policy,
+        "transition_identity_policy": TRANSITION_IDENTITY_POLICY if audit else None,
+        "join_audit": audit,
         "n_rows": len(rows),
         f"n_annotations_v{schema_version}_indexed": len(annotations),
         "exclusions_by_reason": dict(sorted(excl.items())),
