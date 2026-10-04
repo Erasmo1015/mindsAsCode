@@ -9,6 +9,7 @@ separate. Grouping is ``dataset::run_id::participant_id``.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -31,6 +32,12 @@ from analysis.mem.pics_v4_population_annotation import (  # noqa: E402
 PARTICIPANT_LEDGER_REL = "analysis_2026Sep/Sep30_pics_v4/mem/participant_final"
 PARTICIPANT_SOURCES = ("exploration", "evolution_normal", "evolution_fresh")
 GROUPING_KEY = "dataset::run_id::participant_id"
+SLICE_FILTERS = {
+    "exploration": {"phase": "explore", "source": "explore"},
+    "evolution_normal": {"phase": "evolution", "source": "normal"},
+    "evolution_fresh": {"phase": "evolution", "source": "fresh"},
+}
+REFERENCE_POLICY = "pics_v4_uniform_v8"
 
 
 class PicsV4ParticipantIncomplete(PicsV4AnnotationError):
@@ -108,3 +115,124 @@ def discover_participant_ledger(
         "grouping_key": GROUPING_KEY,
         "datasets": ready,
     }
+
+
+def _selected_dir(repo: Path, dataset: str, job_id: str) -> Path:
+    return _job_dir(repo, dataset, job_id) / "selected"
+
+
+def participant_launch_plan(repo: Path) -> Dict[str, Any]:
+    """Trace lists and commands for the three slices. Raises until all 15 are complete.
+
+    This does not annotate, build a CSV, or fit. ``discover_participant_ledger``
+    is the fail-closed gate. Historical jobs never enter the lists.
+    """
+    repo = Path(repo)
+    ledger = discover_participant_ledger(repo)
+    traces: List[Dict[str, str]] = []
+    for row in ledger["datasets"]:
+        selected = _selected_dir(repo, row["dataset"], row["job_id"])
+        marker = json.loads((selected / "STAGE_COMPLETE.json").read_text(encoding="utf-8"))
+        for participant_id in marker.get("participant_ids") or []:
+            trace = selected / f"participant_{participant_id}" / "mem_trace.jsonl"
+            if not trace.is_file():
+                raise PicsV4ParticipantIncomplete(
+                    f"participant trace missing: {trace}"
+                )
+            text = str(trace)
+            if "/mem/population/" in text or "gated_job_paths_g5e50p30" in text:
+                raise PicsV4AnnotationError(f"refusing historical participant path: {trace}")
+            traces.append(
+                {
+                    "dataset": row["dataset"],
+                    "job_id": str(row["job_id"]),
+                    "participant_id": str(participant_id),
+                    "trace": trace.relative_to(repo).as_posix(),
+                    "run_dir": selected.relative_to(repo).as_posix(),
+                }
+            )
+    commands = {}
+    for source in PARTICIPANT_SOURCES:
+        filt = SLICE_FILTERS[source]
+        ann = f"{PARTICIPANT_LEDGER_REL}/annotations/{source}"
+        csv = f"{PARTICIPANT_LEDGER_REL}/csv/{source}.csv"
+        coverage = f"{PARTICIPANT_LEDGER_REL}/coverage/{source}"
+        commands[source] = {
+            "phase": filt["phase"],
+            "source": filt["source"],
+            "annotations": ann,
+            "csv": csv,
+            "coverage": coverage,
+            "annotate": (
+                "python analysis/mem/annotate_edits.py "
+                f"--run_dir <selected-dir> --output_dir {ann} "
+                "--schema_version 5 --reference_policy pics_v4_uniform_v8 "
+                f"--phases {filt['phase']} "
+                + (
+                    "--include_explore --no-include_fresh"
+                    if source == "exploration"
+                    else "--no-include_explore --include_fresh"
+                    if source == "evolution_fresh"
+                    else "--no-include_explore --no-include_fresh"
+                )
+            ),
+            "build_csv": (
+                "python analysis/mem/build_dataset.py "
+                f"--run_dir <selected-dir> --annotations {ann}/annotations_v5.jsonl "
+                f"--output_csv {csv} --schema_version 5 "
+                f"--phase {filt['phase']} --source {filt['source']}"
+            ),
+            "coverage": (
+                "python analysis/mem/coverage_eligibility_v5.py "
+                f"--input_csv {csv} --output_json {coverage}/coverage.json"
+            ),
+        }
+    return {
+        **ledger,
+        "reference_policy": REFERENCE_POLICY,
+        "grouping_key": GROUPING_KEY,
+        "n_traces": len(traces),
+        "traces": traces,
+        "commands": commands,
+        "built": False,
+    }
+
+
+def write_participant_launch_plan(repo: Path) -> Dict[str, Any]:
+    """Write trace lists and command text after every participant stage is complete."""
+    repo = Path(repo)
+    plan = participant_launch_plan(repo)
+    root = repo / PARTICIPANT_LEDGER_REL
+    trace_dir = root / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    for source in PARTICIPANT_SOURCES:
+        filt = SLICE_FILTERS[source]
+        lines = [f"# phase={filt['phase']} source={filt['source']} reference_policy={REFERENCE_POLICY}"]
+        lines.extend(row["trace"] for row in plan["traces"])
+        (trace_dir / f"{source}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (root / "launch_plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    plan["written"] = str(root.relative_to(repo))
+    return plan
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=_REPO)
+    parser.add_argument(
+        "--write-launch",
+        action="store_true",
+        help="Write trace lists only when all 15 participant stages are complete.",
+    )
+    args = parser.parse_args()
+    if args.write_launch:
+        plan = write_participant_launch_plan(args.repo)
+    else:
+        plan = discover_participant_ledger(args.repo)
+    print(
+        f"datasets={plan['n_datasets']} built={plan['built']} "
+        f"sources={','.join(plan['sources'])}"
+    )
+
+
+if __name__ == "__main__":
+    main()

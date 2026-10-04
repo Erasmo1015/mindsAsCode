@@ -501,6 +501,33 @@ def _annotate_batch(
     return rows, raw, ""
 
 
+def _finalize_population_write(rec: Dict[str, Any], schema_mod: Any, out_jsonl: Path) -> None:
+    """Deterministic seed and unused-history finalization for schema v5 writes."""
+    if int(getattr(schema_mod, "SCHEMA_VERSION", 0)) != 5:
+        return
+    from utils.mem.population_transition_finalize_v5 import finalize_population_row
+
+    repo = Path(__file__).resolve().parents[2]
+
+    def _read(rel: Any) -> str:
+        if not rel:
+            return ""
+        path = repo / str(rel)
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    records = finalize_population_row(
+        rec,
+        _read(rec.get("parent_code_path")),
+        _read(rec.get("code_path")),
+    )
+    if not records:
+        return
+    log_path = out_jsonl.with_name("semantic_corrections.jsonl")
+    with log_path.open("a", encoding="utf-8") as handle:
+        for item in records:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
 def _write_success_rows(
     *,
     batch: List[Dict[str, Any]],
@@ -544,8 +571,10 @@ def _write_success_rows(
                     "resume_key": p["resume_key"],
                     "lineage_reconstructed": p.get("lineage_reconstructed"),
                     "has_motifs": {m: (m in present) for m in schema_mod.BEHAVIORAL_MOTIFS},
+                    "source_job_id": p.get("source_job_id"),
                 }
             )
+            _finalize_population_write(motif, schema_mod, out_jsonl)
             _append_jsonl(out_jsonl, motif)
             n_ok += 1
             continue
@@ -559,6 +588,8 @@ def _write_success_rows(
                 schema_mod=schema_mod,
                 source_resume_key=str(p["resume_key"]),
             )
+            rec["source_job_id"] = target.get("source_job_id") or p.get("source_job_id")
+            _finalize_population_write(rec, schema_mod, out_jsonl)
             _append_jsonl(out_jsonl, rec)
             n_ok += 1
     return n_ok

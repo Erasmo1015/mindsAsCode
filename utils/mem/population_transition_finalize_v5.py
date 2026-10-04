@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from utils.mem.participant_semantic_postprocess_v5 import (
     RULE_SEED_BASELINE_REF_ABSENT,
+    RULE_UNUSED_HISTORY_ABSENT,
+    history_runtime_used,
     is_seed_baseline_constant_program,
 )
 from utils.mem.schema_participant_transition_v5 import transition_type_for_construct
@@ -130,6 +132,152 @@ def finalize_constant_seed_reference(
     return correction
 
 
+def _labels_now(row: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "reference_motif_state": list(row.get("reference_motif_state") or []),
+        "candidate_motif_state": list(
+            row.get("candidate_motif_state") or row.get("program_motif_state") or []
+        ),
+        "added_motifs": list(row.get("added_motifs") or []),
+        "removed_motifs": list(row.get("removed_motifs") or []),
+        "modified_motifs": list(row.get("modified_motifs") or []),
+        "unchanged_motifs": list(row.get("unchanged_motifs") or []),
+    }
+
+
+def _drop_history_detail(details: Any) -> Any:
+    if not isinstance(details, list):
+        return details
+    updated = []
+    for item in details:
+        if not isinstance(item, dict) or item.get("motif") != "history":
+            updated.append(item)
+            continue
+        copied = dict(item)
+        copied["presence"] = False
+        updated.append(copied)
+    return updated
+
+
+def _correction_record(
+    row: Mapping[str, Any],
+    *,
+    rule_id: str,
+    original: Mapping[str, Any],
+    corrected: Mapping[str, Any],
+    evidence: str,
+) -> Dict[str, Any]:
+    return {
+        "rule_id": rule_id,
+        "dataset": row.get("dataset"),
+        "job": row.get("source_job_id") or row.get("run_id"),
+        "iteration": row.get("iteration"),
+        "candidate": row.get("candidate_id") or row.get("program_id"),
+        "resume_key": row.get("resume_key"),
+        "original_labels": dict(original),
+        "corrected_labels": dict(corrected),
+        "evidence": evidence,
+    }
+
+
+def finalize_population_row(
+    row: Dict[str, Any],
+    parent_code: str,
+    candidate_code: str,
+) -> List[Dict[str, Any]]:
+    """Apply seed-baseline and unused-history rules, then rederive transitions.
+
+    Raw validated labels are preserved. A second call on the same row is a no-op.
+    """
+    if "raw_llm_annotation" not in row:
+        row["raw_llm_annotation"] = _snapshot(row)
+    raw = _snapshot(row["raw_llm_annotation"])
+    reference = [str(m) for m in (raw.get("reference_motif_state") or [])]
+    candidate = [
+        str(m)
+        for m in (raw.get("candidate_motif_state") or raw.get("program_motif_state") or [])
+    ]
+    modified_in = [str(m) for m in (raw.get("modified_motifs") or [])]
+    pending: List[Tuple[str, str]] = []
+    if is_verified_canonical_constant_seed(row, parent_code):
+        if reference:
+            pending.append(
+                (
+                    RULE_SEED_BASELINE_REF_ABSENT,
+                    "Canonical return 0.5 seed; history in the signature is not History.",
+                )
+            )
+        reference = []
+    if parent_code.strip() and "history" in reference and not history_runtime_used(parent_code):
+        reference = [motif for motif in reference if motif != "history"]
+        pending.append(
+            (
+                RULE_UNUSED_HISTORY_ABSENT,
+                "Reference history argument is unused.",
+            )
+        )
+    dropped_candidate_history = False
+    if candidate_code.strip() and "history" in candidate and not history_runtime_used(candidate_code):
+        candidate = [motif for motif in candidate if motif != "history"]
+        dropped_candidate_history = True
+        pending.append(
+            (
+                RULE_UNUSED_HISTORY_ABSENT,
+                "Candidate history argument is unused.",
+            )
+        )
+    added, removed, modified = derive_directional_motifs(reference, candidate, modified_in)
+    unchanged = [
+        motif
+        for motif in BEHAVIORAL_MOTIFS
+        if motif in reference and motif in candidate and motif not in modified
+    ]
+    corrected = {
+        "reference_motif_state": reference,
+        "candidate_motif_state": candidate,
+        "added_motifs": list(added),
+        "removed_motifs": list(removed),
+        "modified_motifs": list(modified),
+        "unchanged_motifs": unchanged,
+    }
+    current = _labels_now(row)
+    if all(current.get(key) == corrected[key] for key in corrected):
+        return []
+    original = _snapshot(row["raw_llm_annotation"])
+    row["reference_motif_state"] = reference
+    row["candidate_motif_state"] = candidate
+    row["program_motif_state"] = list(candidate)
+    row["added_motifs"] = list(added)
+    row["removed_motifs"] = list(removed)
+    row["modified_motifs"] = list(modified)
+    row["unchanged_motifs"] = unchanged
+    if dropped_candidate_history:
+        row["motif_details"] = _drop_history_detail(row.get("motif_details"))
+    row["transition_by_construct"] = {
+        motif: transition_type_for_construct(
+            motif,
+            reference_has=motif in reference,
+            candidate_has=motif in candidate,
+            modified=motif in modified,
+        )
+        for motif in BEHAVIORAL_MOTIFS
+    }
+    records = [
+        _correction_record(
+            row,
+            rule_id=rule_id,
+            original=original,
+            corrected=corrected,
+            evidence=evidence,
+        )
+        for rule_id, evidence in pending
+    ]
+    logged = list(row.get("semantic_corrections") or [])
+    logged.extend(records)
+    row["semantic_corrections"] = logged
+    return records
+
+
 def annotation_row_valid(row: Mapping[str, Any]) -> Tuple[bool, str]:
     """Re-validate one stored population row against schema v5."""
     candidate_id = str(row.get("candidate_id") or "")
@@ -152,13 +300,23 @@ def annotation_row_valid(row: Mapping[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
+def _read_repo_text(repo: Path, cache: Dict[str, str], rel: str) -> str:
+    if rel not in cache:
+        path = repo / rel if rel else None
+        cache[rel] = path.read_text(encoding="utf-8") if path is not None and path.is_file() else ""
+    return cache[rel]
+
+
 def finalize_annotation_jsonl(
     annotation_path: Path,
     repo: Path,
     *,
     log_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Normalize one annotation JSONL. Experiment outputs are not read for writing."""
+    """Normalize one annotation JSONL. A second call does not rewrite or re-log.
+
+    Raw responses on disk are not touched. Raw labels stay on each row.
+    """
     annotation_path = Path(annotation_path)
     repo = Path(repo)
     original_lines = [
@@ -168,24 +326,25 @@ def finalize_annotation_jsonl(
     corrections: List[Dict[str, Any]] = []
     cache: Dict[str, str] = {}
     written: List[str] = []
+    changed = False
     for line, row in zip(original_lines, rows):
-        rel = str(row.get("parent_code_path") or "")
-        if rel not in cache:
-            cache[rel] = (repo / rel).read_text(encoding="utf-8") if rel else ""
-        correction = finalize_constant_seed_reference(row, cache[rel])
-        if correction is None:
+        parent_code = _read_repo_text(repo, cache, str(row.get("parent_code_path") or ""))
+        candidate_code = _read_repo_text(repo, cache, str(row.get("code_path") or ""))
+        records = finalize_population_row(row, parent_code, candidate_code)
+        if not records:
             written.append(line)
             continue
-        corrections.append(correction)
+        changed = True
+        corrections.extend(records)
         written.append(json.dumps(row, ensure_ascii=False))
-    annotation_path.write_text("".join(line + "\n" for line in written), encoding="utf-8")
     destination = Path(log_path) if log_path is not None else annotation_path.with_name(
         "semantic_corrections.jsonl"
     )
-    destination.write_text(
-        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in corrections),
-        encoding="utf-8",
-    )
+    if changed:
+        annotation_path.write_text("".join(line + "\n" for line in written), encoding="utf-8")
+        with destination.open("a", encoding="utf-8") as handle:
+            for item in corrections:
+                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
     fresh = [
         row
         for row in rows
@@ -203,4 +362,25 @@ def finalize_annotation_jsonl(
         "schema_ok": not invalid,
         "schema_errors": invalid[:5],
         "log_path": str(destination),
+        "rewritten": changed,
     }
+
+
+def main() -> None:
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--annotations", type=Path, required=True)
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--log_path", type=Path, default=None)
+    args = parser.parse_args()
+    summary = finalize_annotation_jsonl(args.annotations, args.repo, log_path=args.log_path)
+    print(json.dumps({k: v for k, v in summary.items() if k != "schema_errors"}))
+    if not summary["schema_ok"]:
+        print(summary["schema_errors"], file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

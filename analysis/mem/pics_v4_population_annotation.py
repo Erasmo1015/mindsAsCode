@@ -63,40 +63,19 @@ REQUIRED_POLICY_MARKERS = {
     "panel_policy": "shuffled_block_slot_stable_v4",
     "continuation_policy": "within_block_carry_forward_wrap_fill_v2",
 }
+OFFICIAL_UNIFORM_SHA256 = "9663c810440fcb295bcf046afea31ca3f527e310c5afe61d66264943afb1470b"
 
-# Former pack plus latter pack. A group is submitted only for datasets that are ready.
-ANNOTATION_GROUPS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
-    (
-        "pics_v4_popann_a100",
-        "gpu:a100:4",
-        (
-            "guan_2020_stopping",
-            "11enkavi2019recentprobes",
-            "4wulff2018description",
-            "7hilbig2014generalized",
-            "12badham2017deficits",
-        ),
-    ),
-    (
-        "pics_v4_popann_3090",
-        "gpu:3090:4",
-        (
-            "bergert_nosofsky_2007",
-            "5speekenbrink2008learning",
-            "14kool2016when",
-            "steyvers_2009_bandit",
-        ),
-    ),
-    (
-        "pics_v4_popann_a5000",
-        "gpu:a5000:4",
-        ("3frey2017cct", "10frey2017risk", "1peterson2021using"),
-    ),
-    (
-        "pics_v4_popann_a100b",
-        "gpu:a100:4",
-        ("2plonsky2018when", "mixed_gambles", "13schulz2020finding"),
-    ),
+# Official packs. A group lists only datasets whose population stage is ready.
+# GPU type and tensor-parallel size are supplied later; they are not chosen here.
+ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("pics_v4_popann_pack1", ("guan_2020_stopping", "11enkavi2019recentprobes")),
+    ("pics_v4_popann_pack2", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
+    ("pics_v4_popann_pack3", ("3frey2017cct",)),
+    ("pics_v4_popann_pack4", ("2plonsky2018when",)),
+    ("pics_v4_popann_pack5", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
+    ("pics_v4_popann_pack6", ("14kool2016when", "steyvers_2009_bandit")),
+    ("pics_v4_popann_pack7", ("10frey2017risk", "1peterson2021using")),
+    ("pics_v4_popann_pack8", ("mixed_gambles", "13schulz2020finding")),
 )
 
 # Official uniform-v8 jobs.
@@ -291,6 +270,11 @@ def expected_policy_fields() -> Dict[str, Any]:
             raise PicsV4AnnotationError(
                 f"live policy {key} is {fields.get(key)!r}, not {required!r}"
             )
+    if fields.get("additional_prompt_sha256") != OFFICIAL_UNIFORM_SHA256:
+        raise PicsV4AnnotationError(
+            "live uniform prompt sha256 is "
+            f"{fields.get('additional_prompt_sha256')!r}, not {OFFICIAL_UNIFORM_SHA256}"
+        )
     return fields
 
 
@@ -436,6 +420,13 @@ def _load_candidates(arm: Path, dataset: str, job_id: str, repo: Path) -> Tuple[
             raise PicsV4AnnotationError("trace dataset mismatch")
         if str(rec.get("evolution_selection_score") or "") != "train_val":
             raise PicsV4AnnotationError("trace selection score is not train_val")
+        runtime_valid = rec.get("runtime_valid") is True
+        has_score = rec.get("selection_score") is not None
+        if runtime_valid != has_score:
+            raise PicsV4AnnotationError(
+                f"{rec.get('candidate_id')}: runtime_valid={rec.get('runtime_valid')!r} "
+                f"is inconsistent with selection_score={rec.get('selection_score')!r}"
+            )
         cid = str(rec.get("candidate_id") or "")
         if not cid or cid in by_id:
             raise PicsV4AnnotationError(f"missing or duplicate candidate id {cid!r}")
@@ -727,8 +718,13 @@ def _markdown_report(payload: Mapping[str, Any], doc_gaps: Sequence[str]) -> str
             "",
             "## Future submit",
             "",
+            "Groups follow the official packs. GPU type and tensor-parallel size are not assigned.",
+            "A later allocation supplies `JOB_NAME`, `GRES`, and `VLLM_TP` for one group.",
+            "",
             "```bash",
-            "DRY_RUN=0 CONFIRM_SUBMIT=1 bash cluster/v0/ours/main/pics_v4/annotation/submit_pop_annot.sh",
+            "DRY_RUN=1 bash cluster/v0/ours/main/pics_v4/annotation/submit_pop_annot.sh",
+            "DRY_RUN=0 CONFIRM_SUBMIT=1 JOB_NAME=pics_v4_popann_pack3 GRES=<gpu> VLLM_TP=<n> \\",
+            "  bash cluster/v0/ours/main/pics_v4/annotation/submit_pop_annot.sh",
             "```",
             "",
         ]
@@ -798,14 +794,14 @@ def sha_label_cache_summary(
 
 
 def submit_plans(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """GPU jobs for ready datasets only. Incomplete datasets are omitted."""
+    """Ready datasets grouped by official pack. No GPU is chosen."""
     ready = {row["dataset"] for row in payload["datasets"] if row.get("ready")}
     plans: List[Dict[str, Any]] = []
-    for name, gres, datasets in ANNOTATION_GROUPS:
+    for name, datasets in ANNOTATION_GROUPS:
         chosen = [dataset for dataset in datasets if dataset in ready]
         if not chosen:
             continue
-        plans.append({"job_name": name, "gres": gres, "datasets": chosen, "vllm_tp": 4})
+        plans.append({"job_name": name, "datasets": chosen})
     return plans
 
 

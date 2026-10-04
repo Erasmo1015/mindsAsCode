@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """Fit joint multi-motif MixedLM with participant random slopes.
 
-Shared fixed-effect design is **not** auto-selected for Schema v5. Pass an
-explicit formula / fixed list after running coverage_eligibility_v5.py.
-The legacy default below is schema-v3 era (includes risk_*) and must not be
-assumed for participant_transition_v5:
-
-  delta_f ~ history_added + value_added + risk_added + learning_added
-          + history_modified + value_modified + risk_modified + learning_modified
-          + iteration
+Primary schema-v5 fits require explicit ``--effects``. There is no ``risk_*``
+default. Addition and modification of the same construct are refused unless
+``--allow_same_construct_add_and_modify`` is set for a non-primary diagnostic.
+The historical schema-v3 formula that included ``risk_added`` and
+``risk_modified`` is not a default and is not a probability-use result.
 
 Random effects are a subset of those motif columns (plus intercept), chosen via
 ``--random_slopes``, grouped by **``dataset::run_id::participant_id``** (raw
@@ -64,17 +61,8 @@ from analysis.mem.mem_grouping import (  # noqa: E402
 )
 
 
-DEFAULT_FIXED_EFFECTS = [
-    "history_added",
-    "value_added",
-    "risk_added",
-    "learning_added",
-    "history_modified",
-    "value_modified",
-    "risk_modified",
-    "learning_modified",
-    "iteration",
-]
+# Empty on purpose. Primary fits pass --effects. risk_* is not a default.
+DEFAULT_FIXED_EFFECTS: List[str] = []
 
 
 def _require_statsmodels():
@@ -810,9 +798,19 @@ def main() -> None:
         help="Comma-separated motif columns in the RE formula (after intercept).",
     )
     parser.add_argument(
+        "--effects",
+        default="",
+        help="Required comma-separated construct effects. Five constructs only; no risk_*.",
+    )
+    parser.add_argument(
         "--fixed_effects",
-        default=",".join(DEFAULT_FIXED_EFFECTS),
-        help="Comma-separated FE terms (must include all random slopes + iteration).",
+        default="",
+        help="Alias of --effects. Empty is refused.",
+    )
+    parser.add_argument(
+        "--allow_same_construct_add_and_modify",
+        action="store_true",
+        help="Non-primary override. Primary blocks keep addition and modification apart.",
     )
     parser.add_argument("--methods", default="lbfgs,cg,powell")
     parser.add_argument("--primary_method", default="lbfgs")
@@ -829,16 +827,30 @@ def main() -> None:
     parser.add_argument(
         "--eligibility_mode",
         choices=["off", "fe_adjust", "restrict"],
-        default="off",
-        help="off: all rows. fe_adjust: exploratory eligible_* FE covariates "
-        "(insufficient alone). restrict: intersect appropriate risk sets for "
-        "every included motif effect; report construction in summary.",
+        default="restrict",
+        help="Primary default is restrict. off is a legacy diagnostic only.",
     )
     args = parser.parse_args()
 
+    from analysis.mem.mem_effect_policy import (
+        MemEffectPolicyError,
+        joint_support_failures,
+        reject_same_construct_add_and_modify,
+        require_explicit_effects,
+    )
+    from analysis.mem.mem_grouping import MEM_GROUP_COL
+
     reml = False if args.no_reml else True
     random_slopes = _parse_csv_list(args.random_slopes)
-    fixed_effects = _parse_csv_list(args.fixed_effects)
+    requested = _parse_csv_list(args.effects) or _parse_csv_list(args.fixed_effects)
+    try:
+        fixed_effects = require_explicit_effects(requested)
+        reject_same_construct_add_and_modify(
+            fixed_effects,
+            allow_same_construct_add_and_modify=bool(args.allow_same_construct_add_and_modify),
+        )
+    except MemEffectPolicyError as exc:
+        raise SystemExit(str(exc)) from exc
     methods = _parse_csv_list(args.methods)
     eligibility_mode = str(args.eligibility_mode)
 
@@ -965,6 +977,15 @@ def main() -> None:
             f"[fit_joint] fe_adjust fixed_effects={fixed_effects}",
             flush=True,
         )
+
+    grouped, _group_meta = attach_validated_mem_group(df.copy())
+    support_failures = joint_support_failures(
+        grouped,
+        [effect for effect in fixed_effects if effect != "iteration"],
+        group_col=MEM_GROUP_COL,
+    )
+    if support_failures:
+        raise SystemExit("joint support check failed: " + "; ".join(support_failures))
 
     fit = fit_joint_random_slopes(
         df,

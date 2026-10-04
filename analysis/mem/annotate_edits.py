@@ -86,6 +86,11 @@ from utils.mem.schema_participant_transition_v5 import (  # noqa: E402
     BEHAVIORAL_MOTIFS as BEHAVIORAL_MOTIFS_V5,
 )
 from utils.mem.explore_reference import resolve_explore_shared_reference  # noqa: E402
+from utils.mem.pics_v4_uniform_v8_reference import (  # noqa: E402
+    PicsV4ReferenceError,
+    resolve_uniform_v8_reference,
+    uniform_v8_resume_key,
+)
 from utils.mem.qwen_tokenizer import make_qwen_token_counter  # noqa: E402
 from utils.mem.reference_types import REF_POPULATION_PROGRAM  # noqa: E402
 from utils.mem.participant_semantic_postprocess_v5 import (  # noqa: E402
@@ -690,7 +695,27 @@ def _resume_key_from_parts(
     reference_id: Any,
     reference_type: Any,
     phase: Any = None,
+    reference_policy: str = "",
+    source: Any = None,
+    job_id: Any = None,
+    candidate_sha256: Any = None,
+    reference_sha256: Any = None,
 ) -> Tuple[Any, ...]:
+    if reference_policy == "pics_v4_uniform_v8":
+        return uniform_v8_resume_key(
+            dataset=dataset,
+            job_id=job_id,
+            run_id=run_id,
+            participant_id=participant_id,
+            phase=phase,
+            source=source,
+            iteration=iteration,
+            candidate_id=candidate_id,
+            candidate_sha256=candidate_sha256,
+            reference_id=reference_id,
+            reference_type=reference_type,
+            reference_sha256=reference_sha256,
+        )
     if schema_version == 5:
         return annotation_resume_key_v5(
             dataset,
@@ -710,7 +735,12 @@ def _resume_key_from_parts(
     )
 
 
-def _load_completed_keys(out_jsonl: Path, *, schema_version: int) -> Set[Tuple[Any, ...]]:
+def _load_completed_keys(
+    out_jsonl: Path,
+    *,
+    schema_version: int,
+    reference_policy: str = "",
+) -> Set[Tuple[Any, ...]]:
     """Only matching schema_version rows count as completed."""
     done: Set[Tuple[Any, ...]] = set()
     if not out_jsonl.is_file():
@@ -742,9 +772,28 @@ def _load_completed_keys(out_jsonl: Path, *, schema_version: int) -> Set[Tuple[A
                 continue
             ref_id = obj.get("reference_id") or obj.get("reference_parent_id")
             ref_type = obj.get("reference_type") or obj.get("reference_kind") or ""
-            if not ref_type and ref_id:
+            if not ref_type and ref_id and reference_policy != "pics_v4_uniform_v8":
                 ref_type = "pool_best_proxy"
             phase = obj.get("phase")
+            if reference_policy == "pics_v4_uniform_v8":
+                if obj.get("candidate_code_sha256") and obj.get("reference_code_sha256") and obj.get("job_id"):
+                    done.add(
+                        uniform_v8_resume_key(
+                            dataset=obj.get("dataset"),
+                            job_id=obj.get("job_id"),
+                            run_id=obj.get("run_id"),
+                            participant_id=obj.get("participant_id"),
+                            phase=phase,
+                            source=obj.get("source"),
+                            iteration=obj.get("iteration"),
+                            candidate_id=cid,
+                            candidate_sha256=obj.get("candidate_code_sha256"),
+                            reference_id=ref_id,
+                            reference_type=ref_type,
+                            reference_sha256=obj.get("reference_code_sha256"),
+                        )
+                    )
+                continue
             done.add(
                 _resume_key_from_parts(
                     schema_version=schema_version,
@@ -1119,6 +1168,14 @@ def _enrich_annotation_row(
             enriched["val_loglik"] = src.get("val_loglik")
         if src.get("source") is not None:
             enriched["source"] = src.get("source")
+        if src.get("_candidate_sha256"):
+            enriched["candidate_code_sha256"] = src.get("_candidate_sha256")
+        if src.get("_reference_sha256"):
+            enriched["reference_code_sha256"] = src.get("_reference_sha256")
+        if src.get("_job_id"):
+            enriched["job_id"] = src.get("_job_id")
+        if src.get("_resume_key"):
+            enriched["uniform_v8_resume_key"] = list(src.get("_resume_key") or [])
         if src.get("reference_is_exact") is not None:
             enriched["reference_is_exact"] = src.get("reference_is_exact")
         if src.get("reference_is_proxy") is not None:
@@ -1155,6 +1212,7 @@ def _write_annotation_rows(
     with _IO_LOCK:
         with out_jsonl.open("a", encoding="utf-8") as f:
             for row in rows:
+                src = None
                 enriched = _enrich_annotation_row(
                     row,
                     batch=batch,
@@ -1244,19 +1302,24 @@ def _write_annotation_rows(
                                 + "\n"
                             )
                 f.write(json.dumps(enriched, ensure_ascii=False) + "\n")
-                completed.add(
-                    _resume_key_from_parts(
-                        schema_version=schema_version,
-                        dataset=dataset,
-                        run_id=run_id,
-                        participant_id=pid,
-                        iteration=iteration,
-                        candidate_id=str(row["candidate_id"]),
-                        reference_id=enriched.get("reference_id", ref_id),
-                        reference_type=enriched.get("reference_type", ref_type),
-                        phase=phase,
+                resume_stored = (src or {}).get("_resume_key") if src is not None else None
+                if resume_stored:
+                    completed.add(tuple(resume_stored))
+                else:
+                    completed.add(
+                        _resume_key_from_parts(
+                            schema_version=schema_version,
+                            dataset=dataset,
+                            run_id=run_id,
+                            participant_id=pid,
+                            iteration=iteration,
+                            candidate_id=str(row["candidate_id"]),
+                            reference_id=enriched.get("reference_id", ref_id),
+                            reference_type=enriched.get("reference_type", ref_type),
+                            phase=phase,
+                            source=enriched.get("source"),
+                        )
                     )
-                )
                 n += 1
     return n
 
@@ -1391,6 +1454,13 @@ def main() -> None:
         default=None,
         help="Optional extra annotations jsonl used only for resume keys "
         "(must match --schema_version). Writes still go to --output_dir.",
+    )
+    parser.add_argument(
+        "--reference_policy",
+        choices=["schema_v5_strict", "pics_v4_uniform_v8"],
+        default="schema_v5_strict",
+        help="pics_v4_uniform_v8 uses the reference stored on each mem_trace "
+        "candidate and refuses gate inference and best-parent fallback.",
     )
     parser.add_argument(
         "--strict_reference",
@@ -1565,7 +1635,12 @@ def main() -> None:
             flush=True,
         )
 
-    completed = _load_completed_keys(out_jsonl, schema_version=schema_version)
+    reference_policy = str(args.reference_policy)
+    completed = _load_completed_keys(
+        out_jsonl,
+        schema_version=schema_version,
+        reference_policy=reference_policy,
+    )
     if args.resume_annotations:
         resume_path = Path(args.resume_annotations)
         extra = _load_completed_keys(resume_path, schema_version=schema_version)
@@ -1671,9 +1746,30 @@ def main() -> None:
                     delta_f_excl_by_phase[str(phase)] += 1
                 continue
 
-            ref, ref_id, ref_resolution = _resolve_reference_for_candidate(
-                rec, ctx, strict_reference=strict_reference, run_dir=run_dir
-            )
+            v8_resolved = None
+            if reference_policy == "pics_v4_uniform_v8":
+                participant_dir = Path(
+                    str(rec.get("_participant_dir") or (ctx or {}).get("_participant_dir") or ".")
+                )
+                try:
+                    v8_resolved = resolve_uniform_v8_reference(
+                        rec, participant_dir=participant_dir
+                    )
+                except PicsV4ReferenceError as exc:
+                    ref, ref_id, ref_resolution = None, None, f"uniform_v8_{exc}"
+                else:
+                    ref = {
+                        "program_id": v8_resolved["reference_id"],
+                        "code": v8_resolved["reference_code"],
+                        "selection_score": v8_resolved["reference_score"],
+                        "reference_type": v8_resolved["reference_type"],
+                    }
+                    ref_id = v8_resolved["reference_id"]
+                    ref_resolution = v8_resolved["resolution_mode"]
+            else:
+                ref, ref_id, ref_resolution = _resolve_reference_for_candidate(
+                    rec, ctx, strict_reference=strict_reference, run_dir=run_dir
+                )
             ref_resolution_counts[str(ref_resolution)] += 1
             ref_resolution_by_phase[str(phase)][str(ref_resolution)] += 1
             # If parent still lacks code (slim + unresolved), try again with participant dir.
@@ -1700,27 +1796,31 @@ def main() -> None:
                     or ""
                 )
             run_id, dataset, pid, phase, iteration = key
-            rkey = _resume_key_from_parts(
-                schema_version=schema_version,
-                dataset=dataset,
-                run_id=run_id,
-                participant_id=pid,
-                iteration=iteration,
-                candidate_id=cid,
-                reference_id=ref_id,
-                reference_type=ref_type,
-                phase=phase,
-            )
-            legacy_key = annotation_resume_key_legacy_no_phase(
-                dataset,
-                run_id,
-                pid,
-                iteration,
-                cid,
-                reference_id=ref_id,
-                reference_type=ref_type,
-            )
-            if rkey in completed or legacy_key in completed:
+            if v8_resolved is not None:
+                rkey = tuple(v8_resolved["resume_key"])
+                legacy_key = None
+            else:
+                rkey = _resume_key_from_parts(
+                    schema_version=schema_version,
+                    dataset=dataset,
+                    run_id=run_id,
+                    participant_id=pid,
+                    iteration=iteration,
+                    candidate_id=cid,
+                    reference_id=ref_id,
+                    reference_type=ref_type,
+                    phase=phase,
+                )
+                legacy_key = annotation_resume_key_legacy_no_phase(
+                    dataset,
+                    run_id,
+                    pid,
+                    iteration,
+                    cid,
+                    reference_id=ref_id,
+                    reference_type=ref_type,
+                )
+            if rkey in completed or (legacy_key is not None and legacy_key in completed):
                 continue
 
             if ref is None:
@@ -1796,6 +1896,11 @@ def main() -> None:
             enriched_rec["_resolved_reference_type"] = ref_type
             enriched_rec["_resolved_reference_code"] = reference_code
             enriched_rec["_reference_resolution"] = ref_resolution
+            if v8_resolved is not None:
+                enriched_rec["_candidate_sha256"] = v8_resolved["candidate_sha256"]
+                enriched_rec["_reference_sha256"] = v8_resolved["reference_sha256"]
+                enriched_rec["_job_id"] = v8_resolved["job_id"]
+                enriched_rec["_resume_key"] = list(v8_resolved["resume_key"])
             bucket.append(enriched_rec)
 
         for (ref_id, ref_type), todo in sorted(by_ref.items(), key=lambda kv: kv[0]):

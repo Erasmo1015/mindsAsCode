@@ -16,9 +16,8 @@ participant-specific slopes, convergence / singularity diagnostics, and BH-FDR
 across planned motif tests.
 
 Eligibility (schema_v3/v5 CSV):
-  --eligibility_mode off      (default) use all rows; legacy v2 CSVs OK
-  --eligibility_mode restrict require eligible_<focal> column; subset to
-                      eligible==1. Refuses legacy / missing-state CSVs.
+  --eligibility_mode restrict (default) require eligible_<focal>==1
+  --eligibility_mode off      legacy diagnostic only
   Focal restrict ≠ joint FE-adjust (see fit_mem_joint_random_slopes.py).
 
 For ``*_modified`` focals under restrict, ``eligible_c_modified`` is the
@@ -50,6 +49,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from analysis.mem.bh_fdr import bh_fdr  # noqa: E402
+from analysis.mem.mem_effect_policy import holm_adjust  # noqa: E402
 from analysis.mem.predictor_support import motif_support_report  # noqa: E402
 from utils.mem.schema_v2 import (  # noqa: E402
     DIRECTIONAL_SUFFIXES,
@@ -484,9 +484,8 @@ def main() -> None:
     parser.add_argument(
         "--eligibility_mode",
         choices=["off", "restrict"],
-        default="off",
-        help="off: all rows. restrict: subset each focal to eligible_<focal>==1 "
-        "(requires schema_v3 eligibility columns; refuses legacy).",
+        default="restrict",
+        help="Primary default is restrict. off is a legacy diagnostic only.",
     )
     args = parser.parse_args()
 
@@ -623,13 +622,20 @@ def main() -> None:
         for r in results
     ]
     qvals = bh_fdr(raw_p)
-    for r, q in zip(results, qvals):
+    holm_vals = holm_adjust(raw_p)
+    for r, q, holm_p in zip(results, qvals, holm_vals):
         if r.get("fixed_effect") is not None:
             r["fixed_effect"]["qvalue_bh"] = q
+            r["fixed_effect"]["qvalue_bh_role"] = "diagnostic_not_primary"
+            r["fixed_effect"]["pvalue_holm"] = holm_p
+            r["fixed_effect"]["primary_correction"] = "holm"
             r["fixed_effect"]["pvalue_raw"] = r["fixed_effect"].get("pvalue")
 
     summary = {
         "n_models": len(results),
+        "primary_correction": "holm",
+        "multiplicity_family": "invocation_focals",
+        "bh_role": "diagnostic_not_primary",
         "eligibility_mode": eligibility_mode,
         "phase_filter": None if args.combine_phases else args.phase,
         "combine_phases": bool(args.combine_phases),
@@ -659,7 +665,10 @@ def main() -> None:
                 "coef": fe.get("coef"),
                 "se": fe.get("se"),
                 "pvalue_raw": fe.get("pvalue_raw", fe.get("pvalue")),
+                "pvalue_holm": fe.get("pvalue_holm"),
+                "primary_correction": fe.get("primary_correction"),
                 "qvalue_bh": fe.get("qvalue_bh"),
+                "qvalue_bh_role": fe.get("qvalue_bh_role"),
                 "ci_low": fe.get("ci_low"),
                 "ci_high": fe.get("ci_high"),
                 "random_intercept_variance": r.get("random_intercept_variance"),
