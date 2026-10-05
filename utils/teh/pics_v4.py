@@ -446,7 +446,8 @@ def assert_pics_v4_resume(output_dir: Any, *, expected_identity=None) -> None:
             saved_suffix = source_suffix()
             configure_identity(expected, saved_suffix)
         try:
-            for participant_path in (root / 'selected').glob('participant_*'):
+            from utils.teh.pics_v4_recovery import participant_directories
+            for participant_path in participant_directories(root / 'selected'):
                 assert_participant_resume(participant_path, int(participant_path.name.split('_')[-1]))
         finally:
             if expected_identity is not None:

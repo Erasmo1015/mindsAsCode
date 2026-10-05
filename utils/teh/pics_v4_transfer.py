@@ -238,6 +238,8 @@ def prepare_identity(args, *, suffix: str, observed_trials=None) -> dict:
         'schedule': {'population_iters': 10, 'candidates': 10, 'exploration': 50, 'participant_iters': 10, 'sample_size': 8, 'elite_pool_cap': 50, 'n_eval_seeds': 1, 'mdl_lambda': 0, 'refinement': False, 'early_stop': False, 'failover': False, 'input_tokens': 15360, 'output_tokens': 1024, 'context_tokens': 16384, 'parent_chars': 5000},
         'method_code_sha256': {p: sha(REPO / p) for p in ('teh.py', 'utils/teh/pics_v4_transfer.py', 'utils/teh/pics_v4.py', 'utils/teh/pics_v4_panels.py', 'utils/teh/pics_aamas_v0.py', 'utils/teh/explore_source_prompt.py', 'utils/teh/prompt_sanitize.py', 'utils/teh/prompt_snapshots.py', 'utils/teh/aamas_v0_lossless_trials.py', 'utils/teh/elite_sha.py', 'utils/teh/t_pics_gated_transfer.py', 'utils/teh/teh_runtime.py', 'utils/teh/pics_v4_dry_run.py', 'utils/teh_transfer/prompts.py', 'utils/teh/limited_data_protocol.py', 'utils/teh/limited_data_registry.py', 'analysis/config/teh_datasets.yaml', 'prompts/teh/additional_prompt/pics_v4_uniform_additional_prompt_v8.txt', 'cluster/v0/ours/main/aamas_v0/_fill.sh', 'cluster/v0/ours/main/aamas_v0/job_track_h100.sh')},
     }
+    from utils.teh.pics_v4_recovery import method_identity_hashes
+    identity['method_code_sha256'] = method_identity_hashes(identity['method_code_sha256'], mode=mode)
     configure_identity(identity, suffix)
     return identity
 

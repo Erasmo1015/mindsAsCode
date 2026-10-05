@@ -18072,6 +18072,9 @@ def main():
                 assert_pics_v4_resume(args.output_dir)
                 for role in ('control', 'transfer'):
                     assert_arm_resume(Path(args.output_dir) / 'target_population' / role, role=role)
+                if aamas_v0_mode == 'transfer_based_only':
+                    from utils.teh.pics_v4_recovery import activate
+                    activate(sys.modules[__name__], args.output_dir, target=str(args.dataset), mode=aamas_v0_mode)
                 if mat_target and mat_transfer:
                     validate_materialization(Path(mat_target) / 'target_population/control', Path(mat_transfer) / 'target_population/transfer', str(args.dataset), Path(args.output_dir))
             try:

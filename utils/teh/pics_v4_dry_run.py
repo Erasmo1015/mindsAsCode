@@ -175,9 +175,10 @@ def verify_report(path, *, mode, target=None, transfer_run=None, output_root=Non
         if bound['source'] != transfer.resolve_source(name):
             raise RuntimeError('CPU preflight evaluated source identity changed')
         transfer.target_run(name)
-        for rel, expected_hash in bound['method_code_sha256'].items():
-            if transfer.sha(transfer.REPO / rel) != expected_hash:
-                raise RuntimeError('method code changed after CPU preflight')
+        from utils.teh.pics_v4_recovery import approved_code_hashes, assert_recovery_scope
+        approved_code_hashes(bound['method_code_sha256'], mode=mode)
+        if output_root and mode == 'transfer_based_only':
+            assert_recovery_scope(output_root, target=name, mode=mode)
         if row['maximum_input_tokens'] > 15360:
             raise RuntimeError('CPU preflight token limit mismatch')
         if transfer_run:
@@ -231,6 +232,11 @@ def main():
     configure_pics_aamas_v0_prompt(True)
     set_pics_run_seeds(run_seed=0, split_seed=0)
     targets = [args.target] if args.target else sorted(transfer.official_inputs()[0])
+    # Keep the scientific identity frozen while detecting any executable-code
+    # change during rendering. Recovery compatibility is an exact version map.
+    certificate = transfer.REPO / 'analysis_2026Sep/Codex/Oct5/others/three_mode_implementation/validation_v1' / args.mode / 'PREFLIGHT.json'
+    method_paths = transfer.read(certificate)['rows'][0]['run_identity']['method_code_sha256']
+    execution_hashes = {p: transfer.sha(transfer.REPO / p) for p in method_paths}
     rows = []
     render_hashes = {}
     with tempfile.TemporaryDirectory(prefix='pics_v4_read_only_data_') as temporary:
@@ -252,8 +258,10 @@ def main():
     versions = {p: importlib.metadata.version(p) for p in ('numpy', 'datasets', 'transformers', 'tokenizers', 'huggingface_hub')}
     versions['python'] = sys.version
     code_hashes = rows[0]['run_identity']['method_code_sha256']
-    if any(r['run_identity']['method_code_sha256'] != code_hashes for r in rows) or any(transfer.sha(transfer.REPO / p) != h for p, h in code_hashes.items()):
+    if any(r['run_identity']['method_code_sha256'] != code_hashes for r in rows) or any(transfer.sha(transfer.REPO / p) != h for p, h in execution_hashes.items()):
         raise RuntimeError('method code changed during preflight; repeat on a fixed code version')
+    from utils.teh.pics_v4_recovery import approved_code_hashes
+    approved_code_hashes(code_hashes, mode=args.mode)
     report = {'package_versions': versions, 'render_sha256': render_hashes, 'tokenizer_input_sha256': {str(p): transfer.sha(p) for p in Path(snapshot).glob('*') if p.is_file()}, 'schema': 'pics_v4_three_mode_preflight_v1', 'jobs_submitted': 0, 'model_calls': 0, 'source_map_sha256': transfer.MAP_SHA, 'rows': rows, 'input_hashes': input_hashes, 'maximum_input_tokens': max(r['maximum_input_tokens'] for r in rows)}
     if args.report_dir:
         out = Path(args.report_dir)

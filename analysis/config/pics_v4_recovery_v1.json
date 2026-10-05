@@ -1,0 +1,83 @@
+{
+  "schema": "pics_v4_scoped_recovery_v1",
+  "original_certificate": "analysis_2026Sep/Codex/Oct5/others/three_mode_implementation/validation_v1/transfer_based_only/PREFLIGHT.json",
+  "original_certificate_sha256": "3e15ab603144f6c82909421962f37d5fce429800d78cdd13efbd1a27feb3bda5",
+  "original_method_code_sha256": {
+    "teh.py": "8c4eac3cdd97091930197d537c673bd44a5b753b938f50d88da67ff44ed16272",
+    "utils/teh/pics_v4_transfer.py": "a1e8f83c36efe9f9fef50e7c847f1e4f4538edc7a990c28bd7a3be047c7fdee1",
+    "utils/teh/pics_v4.py": "a6aa9a026651be8ae42bf50fa1fa1b92bb628583d974a088cc0b0aaeb97a9e8c",
+    "utils/teh/pics_v4_panels.py": "ceb1da3c22404f781486677a8ff98799894d70b376be7c69b4602065e616b1c4",
+    "utils/teh/pics_aamas_v0.py": "569da1d7ee4898d9527492adaa5a5e6e52b6e7d9f1b86157e1387d85933a8370",
+    "utils/teh/explore_source_prompt.py": "6c6d0726f2423a2926561ba13d9983194517732339c71bace40ad249889702eb",
+    "utils/teh/prompt_sanitize.py": "05319f73dd6fb7aae557bc7c3c62532c03cf31e9e85ca0412ae71f5ade2106f6",
+    "utils/teh/prompt_snapshots.py": "6cae93fbb2d00280b8275994428fe8f20c4787f7005d3a845e4002698f58a880",
+    "utils/teh/aamas_v0_lossless_trials.py": "c6701460366b713d529e88756e2f754ab37f41f2a46e1d165c45c3893e3e0c88",
+    "utils/teh/elite_sha.py": "3904ddd375525709d7b93d01c03bbb6795a5898bdfabd870f93fc8991d580253",
+    "utils/teh/t_pics_gated_transfer.py": "d65db73429a49ddf2bab061ff8e2ebf4d58f032824bed9b1dd6a16ffce3f4b9b",
+    "utils/teh/teh_runtime.py": "e823a3aa6c3a7cd8306a6e51e1df2be6216093b9770c37ad6361dc40bd25fcd5",
+    "utils/teh/pics_v4_dry_run.py": "f65e38dc0bab9dae6b36fc251a98bb191c6c5f20cc79986cf87f5afb80b31a06",
+    "utils/teh_transfer/prompts.py": "e93fad84bff04580c87a890e933946112faacc0fde65549da4e84c252d479d3c",
+    "utils/teh/limited_data_protocol.py": "139ded42edc76716c03364ec5f848981a054e7b3c96e9dae63358b9ed1941a16",
+    "utils/teh/limited_data_registry.py": "1317f35efc7d44cb26d5b46a0b01a75aae9fa1284d897c37ad8e146acb4117ae",
+    "analysis/config/teh_datasets.yaml": "00b585f904b4b24278717909efdd85b93aaaa6cfec0c6e4ab89b8249610ab694",
+    "prompts/teh/additional_prompt/pics_v4_uniform_additional_prompt_v8.txt": "8854d702c1cf12d34a673b600e8867bfc1d346787a3a480ae816aae82471b101",
+    "cluster/v0/ours/main/aamas_v0/_fill.sh": "9b708d4e31dfde8bc7c02bfa9fdba2fc08caa9330d23f00c8507c0bf9f70022f",
+    "cluster/v0/ours/main/aamas_v0/job_track_h100.sh": "836b2163775149f8f22264389a554eef4a8ccc3e726c5495bcdcb310e61ea048"
+  },
+  "recovery_changes": {
+    "teh.py": {
+      "before": "8c4eac3cdd97091930197d537c673bd44a5b753b938f50d88da67ff44ed16272",
+      "after": "9bbe82e6a2cc5c645032aeebd369ad54a8fa19215033ec744a7a189eb8582cac"
+    },
+    "utils/teh/pics_v4_transfer.py": {
+      "before": "a1e8f83c36efe9f9fef50e7c847f1e4f4538edc7a990c28bd7a3be047c7fdee1",
+      "after": "c36196b9ec103f4555d0d968b565c0a9ce2f972108c33b7cf18b2b0a52a9fac2"
+    },
+    "utils/teh/pics_v4.py": {
+      "before": "a6aa9a026651be8ae42bf50fa1fa1b92bb628583d974a088cc0b0aaeb97a9e8c",
+      "after": "ac191a16275db9c78363c5c5431fd8a65c04262bae97dcdcddc87996d71b8eef"
+    },
+    "utils/teh/pics_v4_dry_run.py": {
+      "before": "f65e38dc0bab9dae6b36fc251a98bb191c6c5f20cc79986cf87f5afb80b31a06",
+      "after": "7d24d3cea556cb18535c68ff5a4c94e8f48fb96259a253c0fa482752de57927e"
+    }
+  },
+  "recovery_support_sha256": {
+    "resume_pics_v4.py": "e1405bbca46dba90eb858cf8002601a1e54b551033a26d9c5bf0447e781f5dd7",
+    "utils/teh/pics_v4_recovery.py": "1da7c77e8bbf763aa584d9e40fb635a9e32553d245d3aa4ae341dba154687a7d"
+  },
+  "job_targets": {
+    "job_313158": [
+      "guan_2020_stopping",
+      "11enkavi2019recentprobes"
+    ],
+    "job_313159": [
+      "bergert_nosofsky_2007",
+      "5speekenbrink2008learning"
+    ],
+    "job_313160": [
+      "3frey2017cct"
+    ],
+    "job_313161": [
+      "2plonsky2018when"
+    ],
+    "job_313162": [
+      "4wulff2018description",
+      "7hilbig2014generalized",
+      "12badham2017deficits"
+    ],
+    "job_313163": [
+      "14kool2016when",
+      "steyvers_2009_bandit"
+    ],
+    "job_313164": [
+      "10frey2017risk",
+      "1peterson2021using"
+    ],
+    "job_313165": [
+      "mixed_gambles",
+      "13schulz2020finding"
+    ]
+  },
+  "interpretation": "Only exact approved recovery code is compatible; original scientific identity and all source/cohort/prompt/policy hashes remain enforced."
+}
