@@ -236,6 +236,10 @@ class GateDecision:
 def load_frozen_transfer_config(
     config_path: Optional[Path] = None,
 ) -> FrozenTransferConfig:
+    from utils.teh.pics_v4 import using_pics_v4
+    if using_pics_v4():
+        from utils.teh.pics_v4_transfer import load_config
+        return load_config(config_path)
     path = resolve_frozen_config_path(config_path)
     if not path.is_file():
         raise FileNotFoundError(f"Frozen T-PICS transfer source config not found: {path}")
@@ -584,6 +588,11 @@ def selected_stage_is_complete(
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
+    from utils.teh.pics_v4_transfer import current_identity, assert_identity
+    if current_identity() is not None:
+        assert_identity(payload.get('run_identity'))
+        if int(payload.get('n_iterations') or 0) != int(expected_n_iterations) or int(payload.get('explore_candidates') or 0) != int(expected_explore_candidates):
+            raise RuntimeError('selected completion method schedule mismatch')
     done = {int(x) for x in payload.get("participant_ids") or []}
     expected = {int(p) for p in participant_ids}
     return expected.issubset(done) and bool(expected)
@@ -698,6 +707,9 @@ def gate_record_payload(
 
 
 def write_gate_record(path: Path, payload: Mapping[str, Any]) -> Path:
+    from utils.teh.pics_v4_transfer import current_identity
+    if current_identity() is not None:
+        payload = dict(payload, run_identity=current_identity(), prompt_exposures_matched=False)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(dict(payload), indent=2) + "\n", encoding="utf-8")

@@ -437,6 +437,27 @@ def write_population_completion(
         provenance["search_rng"] = SEARCH_RNG_POLICY
         provenance["pics_run_seed_scope"] = PICS_RUN_SEED_SCOPE
         provenance.update(elite_policy_provenance())
+    from utils.teh.pics_v4_transfer import current_identity, assert_arm_resume
+    identity = current_identity() if using_pics_v4() else None
+    if identity is not None:
+        role = 'transfer' if source_dataset else 'control'
+        if role == 'transfer' and (source_dataset != identity['source']['source_dataset'] or source_rank1_sha256 != identity['source']['source_program_sha256']):
+            raise RuntimeError('population completion source identity mismatch')
+        assert_arm_resume(run_dir, role=role)
+        if prompt_meta.get('infer_prompt_sha256') != identity['base_prompt_sha256']:
+            raise RuntimeError('PICS v4 registered prompt SHA changed')
+        for field, meta_field in (('sa40_fingerprint', 'observed_subset_fingerprint'), ('observed_train_fingerprint', 'observed_train_fingerprint'), ('observed_val_fingerprint', 'observed_val_fingerprint')):
+            if prompt_meta.get(meta_field) != identity['cohort'][field]:
+                raise RuntimeError(f'PICS v4 target observed cohort changed: {field}')
+        if sorted(results.get('participant_ids') or []) != sorted(identity['cohort']['participant_ids']):
+            raise RuntimeError('PICS v4 participant cohort changed')
+        if not valid:
+            raise RuntimeError('PICS v4 completion rank-1 is not runtime-valid')
+        provenance['rank1_program_id'] = results['pool_best_program_id']
+        provenance['run_identity'] = identity
+        provenance['arm_role'] = role
+        provenance['panel_bank_sha256'] = {str(p.relative_to(run_dir)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((run_dir / 'global_phase/pics_v4_panel_banks').glob('*.json'))}
+        provenance.update(identity['policies'])
     prov_path = run_dir / "POPULATION_PROVENANCE.json"
     prov_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
     if not valid:
@@ -482,6 +503,11 @@ def write_population_completion(
         ]
         marker["elite_pool_size_is_upper_bound"] = provenance["elite_pool_size_is_upper_bound"]
         marker["duplicate_backfill"] = provenance["duplicate_backfill"]
+    if identity is not None:
+        marker['rank1_program_id'] = provenance['rank1_program_id']
+        marker['run_identity'] = identity
+        marker['arm_role'] = provenance['arm_role']
+        marker['panel_bank_sha256'] = provenance['panel_bank_sha256']
     complete = run_dir / "STAGE_COMPLETE.json"
     complete.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     return complete
@@ -497,7 +523,8 @@ def source_identity_for_target(
     from utils.teh.t_pics_sources import normalize_t_pics_dataset
 
     cfg = load_frozen_transfer_config(config_path)
-    allowed_selectors = {SOURCE_SELECTOR, "pics_aamas_v0_source_map"}
+    from utils.teh.pics_v4 import using_pics_v4
+    allowed_selectors = {'occurrence_eb_uniform_v8_primary'} if using_pics_v4() else {SOURCE_SELECTOR, "pics_aamas_v0_source_map"}
     if str(cfg.selector_name) not in allowed_selectors:
         raise RuntimeError(
             f"AAMAS v0 source map selector {cfg.selector_name!r} "
@@ -568,6 +595,15 @@ def resolve_aamas_v0_source_program(
     ``source_dataset`` must match the source-map identity. The program path is
     taken only from a completed ``pics_aamas_v0_target_only`` population arm.
     """
+    from utils.teh.pics_v4 import using_pics_v4
+    if using_pics_v4():
+        from utils.teh.pics_v4_transfer import resolve_source
+        if psych_split != 'train' or job_id or job_manifest:
+            raise RuntimeError('PICS v4 source-bank overrides are forbidden')
+        record = resolve_source(target_dataset, config_path=config_path)
+        if source_dataset != record['source_dataset']:
+            raise RuntimeError('PICS v4 selected source mismatch')
+        return Path(record['source_program_path'])
     from utils.teh.t_pics_sources import normalize_t_pics_dataset
 
     expected = source_identity_for_target(target_dataset, config_path=config_path)
@@ -880,19 +916,24 @@ def materialize_official_gate(
     transfer_arm = _population_arm_from_run(Path(transfer_run), "transfer")
     target_prov = _read_json(target_arm / "POPULATION_PROVENANCE.json")
     transfer_prov = _read_json(transfer_arm / "POPULATION_PROVENANCE.json")
-    if str(target_prov.get("dataset") or "") != str(target_dataset):
-        raise RuntimeError("target-only run dataset does not match the official target")
-    if str(target_prov.get("kind") or "") != KIND_TARGET_ONLY or str(target_prov.get("track_mode") or "") != TRACK_TARGET_ONLY:
-        raise RuntimeError("materialize target arm is not a target_only population")
-    if str(transfer_prov.get("kind") or "") != KIND_TRANSFER_BASED_ONLY or str(
-        transfer_prov.get("track_mode") or ""
-    ) != TRACK_TRANSFER_BASED_ONLY:
-        raise RuntimeError("materialize transfer arm is not a transfer_based_only population")
-    if str(transfer_prov.get("arm_role") or "") != "transfer":
-        raise RuntimeError("materialize transfer provenance is not a transfer arm")
-    _require_matching_provenance(target_prov, transfer_prov)
-    if not transfer_prov.get("source_dataset") or not transfer_prov.get("source_rank1_sha256"):
-        raise RuntimeError("transfer population is missing source identity provenance")
+    v4 = str(target_prov.get('kind')) == 'pics_v4_target_only'
+    if v4:
+        from utils.teh.pics_v4_transfer import validate_materialization
+        target_prov, transfer_prov = validate_materialization(target_arm, transfer_arm, target_dataset, output_dir)
+    else:
+        if str(target_prov.get("dataset") or "") != str(target_dataset):
+            raise RuntimeError("target-only run dataset does not match the official target")
+        if str(target_prov.get("kind") or "") != KIND_TARGET_ONLY or str(target_prov.get("track_mode") or "") != TRACK_TARGET_ONLY:
+            raise RuntimeError("materialize target arm is not a target_only population")
+        if str(transfer_prov.get("kind") or "") != KIND_TRANSFER_BASED_ONLY or str(
+            transfer_prov.get("track_mode") or ""
+        ) != TRACK_TRANSFER_BASED_ONLY:
+            raise RuntimeError("materialize transfer arm is not a transfer_based_only population")
+        if str(transfer_prov.get("arm_role") or "") != "transfer":
+            raise RuntimeError("materialize transfer provenance is not a transfer arm")
+        _require_matching_provenance(target_prov, transfer_prov)
+        if not transfer_prov.get("source_dataset") or not transfer_prov.get("source_rank1_sha256"):
+            raise RuntimeError("transfer population is missing source identity provenance")
     target_rank1 = Path(str(target_prov["rank1_program"]))
     transfer_rank1 = Path(str(transfer_prov["rank1_program"]))
     target_score = float(evaluate_score(target_rank1, target_prov))
@@ -906,7 +947,7 @@ def materialize_official_gate(
     if not retained_pool.is_dir():
         raise FileNotFoundError(f"winning elite pool missing: {retained_pool}")
     out = Path(output_dir)
-    assert_aamas_track_output(out, KIND_OFFICIAL_GATE)
+    assert_aamas_track_output(out, 'pics_v4_official_gate' if v4 else KIND_OFFICIAL_GATE)
     gate_dir = out / "gate"
     gate_dir.mkdir(parents=True, exist_ok=True)
     selected = out / "selected"
@@ -925,6 +966,13 @@ def materialize_official_gate(
         "prompt_policy": PROMPT_POLICY_ID,
         "sa40_fingerprint": target_prov.get("sa40_fingerprint"),
     }
+    if v4:
+        from utils.teh.pics_v4_transfer import current_identity
+        record['run_identity'] = current_identity()
+        record['prompt_policy'] = target_prov['prompt_policy']
+        record['target_only_rank1_sha256'] = target_prov['rank1_sha256']
+        record['transfer_rank1_sha256'] = transfer_prov['rank1_sha256']
+        record['prompt_exposures_matched'] = False
     gate_path = gate_dir / "gate_record.json"
     gate_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     link = selected / "retained_global_elite_pool"

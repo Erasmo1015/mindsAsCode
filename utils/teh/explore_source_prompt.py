@@ -32,6 +32,7 @@ def _load_source_example_trials(
         from utils.teh.teh_datasets import emnlp_ordinal_range
 
         repo = Path(__file__).resolve().parents[2]
+        from utils.teh.pics_v4 import using_pics_v4
         pids = load_valid_participant_ids(
             source_dataset,
             repo,
@@ -41,7 +42,7 @@ def _load_source_example_trials(
             psych_dataset_split=psych_dataset_split,
             local_dataset=local_dataset,
             mixed_gambles_csv=mixed_gambles_csv or DEFAULT_CSV_PATH,
-            auto_prepare=True,
+            auto_prepare=not using_pics_v4(),
         )
         if not pids:
             raise ValueError(f"No valid participants for source dataset {source_dataset!r}")
@@ -73,6 +74,9 @@ def _load_source_example_trials(
                 f"Source {source_dataset!r} participant {pid} has no train+val examples "
                 "(test is never used)."
             )
+        if using_pics_v4():
+            from utils.teh.prompt_snapshots import stamp_prompt_participant_id
+            return [stamp_prompt_participant_id(t, pid) for t in trials[:8]]
         return trials[:8]
 
     if require:

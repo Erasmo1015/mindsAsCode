@@ -104,6 +104,8 @@ REFUSED_UNIFORM_PROMPT_SHA256 = frozenset(
 # 15360 + llm_max_tokens 1024 = 16384, the real Qwen context limit.
 HARD_PROMPT_TOKEN_CAP = 15_360
 KIND_TARGET_ONLY = "pics_v4_target_only"
+KIND_TRANSFER_BASED_ONLY = "pics_v4_transfer_based_only"
+KIND_OFFICIAL_GATE = "pics_v4_official_gate"
 UNIFORM_MARKER = "PICS_V4_UNIFORM_ADDITIONAL_PROMPT"
 TEXT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -321,10 +323,15 @@ def dataset_names_in_uniform_block() -> list[str]:
 
 def assert_pics_v4_output(path: Path) -> None:
     text = str(Path(path))
-    if f"/{KIND_TARGET_ONLY}/" not in text and not text.rstrip("/").endswith(
-        f"/{KIND_TARGET_ONLY}"
-    ):
-        raise RuntimeError(f"PICS v4 output is not under {KIND_TARGET_ONLY}: {text}")
+    from utils.teh.pics_v4_transfer import KINDS, current_identity
+    identity = current_identity()
+    expected_kind = identity['kind'] if identity else KIND_TARGET_ONLY
+    if identity:
+        text = str(Path(path).resolve())
+    if identity and f"/{identity['target']}/{expected_kind}/" not in text:
+        raise RuntimeError('PICS v4 output target/mode mismatch')
+    if f"/{expected_kind}/" not in text and not text.rstrip('/').endswith(f"/{expected_kind}"):
+        raise RuntimeError(f"PICS v4 output is not under {expected_kind}: {text}")
     for marker in (
         "/pics_v3/",
         "/pics_v3_g1/",
@@ -392,29 +399,63 @@ def pics_v4_marker_payload() -> dict[str, Any]:
 def write_pics_v4_marker(output_dir: Any) -> None:
     root = Path(output_dir)
     assert_pics_v4_output(root)
+    assert_pics_v4_resume(root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "TRIAL_PROMPT_POLICY.json"
     if path.is_file():
         assert_pics_v4_resume(root)
         return
-    path.write_text(json.dumps(pics_v4_marker_payload(), indent=2) + "\n", encoding="utf-8")
+    from utils.teh.pics_v4_transfer import current_identity
+    payload = pics_v4_marker_payload()
+    if current_identity() is not None:
+        payload['run_identity'] = current_identity()
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def assert_pics_v4_resume(output_dir: Any) -> None:
+def assert_pics_v4_resume(output_dir: Any, *, expected_identity=None) -> None:
     """Fail closed unless the directory is this pics_v4 prompt and seed."""
     root = Path(output_dir)
-    assert_pics_v4_output(root)
+    from utils.teh.pics_v4_transfer import current_identity, assert_identity
+    expected = expected_identity or current_identity()
+    if expected_identity is not None:
+        if f"/{expected_identity['kind']}/" not in str(root):
+            raise RuntimeError('PICS v4 materialization KIND mismatch')
+    else:
+        assert_pics_v4_output(root)
     path = root / "TRIAL_PROMPT_POLICY.json"
     if not path.is_file():
         from utils.teh.aamas_v0_lossless_trials import assert_legacy_output_not_resumed
 
         assert_legacy_output_not_resumed(root)
+        if expected is not None and root.exists() and any(p.name not in {'OUTPUT_DIR.txt', 'TRACK_STATUS.txt', 'INTENDED_ARGV.txt'} for p in root.iterdir()):
+            raise RuntimeError('refusing unbound partial transfer/gate output')
         if any(root.rglob("STAGE_COMPLETE.json")) or any(root.rglob("prompt_stats.json")):
             raise RuntimeError(
                 f"Refusing to resume {root} as {METHOD_VERSION}: no PICS v4 policy marker."
             )
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if expected is not None:
+        from utils.teh.pics_v3 import G2_PAIRED_PACK_FILENAME
+        if (root / G2_PAIRED_PACK_FILENAME).exists() or (root / 'gate' / G2_PAIRED_PACK_FILENAME).exists():
+            raise RuntimeError('v4 transfer refuses historical paired-pack freezes')
+        assert_identity(payload.get('run_identity'), expected)
+        from utils.teh.pics_v4_transfer import assert_participant_resume, configure_identity, source_suffix
+        saved_identity = current_identity()
+        if expected_identity is not None:
+            saved_suffix = source_suffix()
+            configure_identity(expected, saved_suffix)
+        try:
+            for participant_path in (root / 'selected').glob('participant_*'):
+                assert_participant_resume(participant_path, int(participant_path.name.split('_')[-1]))
+        finally:
+            if expected_identity is not None:
+                configure_identity(saved_identity, saved_suffix)
+        for record_path in (root / 'selected/STAGE_COMPLETE.json' , root / 'gate/gate_record.json'):
+            if record_path.is_file():
+                assert_identity(json.loads(record_path.read_text()).get('run_identity'), expected)
+    elif payload.get('run_identity') or any(payload.get(k) for k in ('source_dataset', 'source_program_sha256', 'source_map_sha256')):
+        raise RuntimeError('target-only marker contains transfer provenance')
     if str(payload.get("method_version") or "") != METHOD_VERSION:
         raise RuntimeError(
             f"Refusing to resume {root} as {METHOD_VERSION}; "

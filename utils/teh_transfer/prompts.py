@@ -57,6 +57,10 @@ def one_example_trial_text(
         return "(no trials available)"
     rng = np.random.default_rng(int(seed))
     trial = trials[int(rng.integers(len(trials)))]
+    from utils.teh.pics_v4 import using_pics_v4
+    if using_pics_v4():
+        from utils.teh.prompt_snapshots import format_sparse_history_examples
+        return format_sparse_history_examples([trial])
     return format_trials_for_prompt([trial], max_trials=1)
 
 

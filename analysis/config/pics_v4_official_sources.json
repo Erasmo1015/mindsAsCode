@@ -1,0 +1,413 @@
+{
+  "schema": "pics_v4_official_evaluated_sources_v1",
+  "sources": {
+    "10frey2017risk": {
+      "source_program_id": "global_iteration_2_candidate_1",
+      "source_program_path": "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "ddbfca4b7909c6a377b73ee77310c9cab2c7d1ded6ba3252abeeb5bd86ce3ae3",
+      "candidate_path": "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/iteration_2/candidates/candidate_1.py",
+      "canonical_candidate_or_seed_sha256": "ddbfca4b7909c6a377b73ee77310c9cab2c7d1ded6ba3252abeeb5bd86ce3ae3",
+      "candidate_identity": "10frey2017risk::job_311672::global_iteration_2_candidate_1",
+      "candidate_resume_key": "10frey2017risk|job_311672|global_evolution|2|global_iteration_2_candidate_1|ddbfca4b7909c6a377b73ee77310c9cab2c7d1ded6ba3252abeeb5bd86ce3ae3",
+      "lineage": {
+        "canonical_population_job_id": "311672",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "311672"
+      },
+      "selection_score": -0.05577920186426482,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/STAGE_COMPLETE.json": "edf3ee31b3cd2336ffb380b2b62a0177805d1b80c04b67181ab5035bc0f8ae41",
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/POPULATION_PROVENANCE.json": "4c1f9c16f0e7d0ae1a04a827c07ef3d9e330ed266833e86fc4a0cd8731fdeb18",
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/results.json": "6b5d832a37a91fe161e6ebf00fec0c5b2eba42f8e1cbd49f54ecfceba0105466",
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "1b92f8a4bd4f3b7fb94840f7165361b705f333736b68f0fca8f03c10ef51fc53",
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/prompts/infer_single_choice.txt": "7a6ff3ec8552e93e76454ff237690ad5bb695f4c475ed59f2d1733bc2cb5c998",
+        "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/prompts/prompt_meta.json": "e61400bed08c560919eddc6734d59a98755dc9dfd264f20820a5fb860056e475"
+      }
+    },
+    "12badham2017deficits": {
+      "source_program_id": "global_iteration_2_candidate_8",
+      "source_program_path": "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "c52d0ebb4db48c30d7736374d3ad3c88dba58254728894f5a11576e7f6986033",
+      "candidate_path": "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/iteration_2/candidates/candidate_8.py",
+      "canonical_candidate_or_seed_sha256": "c52d0ebb4db48c30d7736374d3ad3c88dba58254728894f5a11576e7f6986033",
+      "candidate_identity": "12badham2017deficits::job_312024::global_iteration_2_candidate_8",
+      "candidate_resume_key": "12badham2017deficits|job_312024|global_evolution|2|global_iteration_2_candidate_8|c52d0ebb4db48c30d7736374d3ad3c88dba58254728894f5a11576e7f6986033",
+      "lineage": {
+        "canonical_population_job_id": "312024",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "312024",
+        "replaced_cancelled_job_id": "311670",
+        "replacement_receipt_path": "analysis_2026Sep/Codex/Oct5/others/run_receipts/pics_v4/20261004/pics_v4_h100nvl_resubmission_20261004.json",
+        "replacement_receipt_sha256": "2225056ca573bbc69562a7ea8bac539c201dbbbf1ffe086545e5be178590303d"
+      },
+      "selection_score": -0.6672813991912094,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/STAGE_COMPLETE.json": "5eee584e894df28953da51f82106442a5e76b9df9375f0f17fa30912d1e26293",
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/POPULATION_PROVENANCE.json": "f4aa15d491f10c294cdee330f9245bbe60cca6b8c52024ddb74e903289314836",
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/results.json": "c78dd9347a9a650a2ad92010007c07686dafd7e03d195f96323f24495a4085ac",
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "76c5d9466c7493fd098e0d949fbd422309e9d426de97df6bd711e3dedaeff854",
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/prompts/infer_single_choice.txt": "8b09be32efee056f8917eb5d9990c803eaf09a1cac33b59683e029362a81b343",
+        "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/prompts/prompt_meta.json": "9896fd54b5e9990134971a8be2f6fe8f691d76923f055c77d8125cc3eeac661f"
+      }
+    },
+    "13schulz2020finding": {
+      "source_program_id": "global_iteration_1_candidate_8",
+      "source_program_path": "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "5548043ee98829020947394db762824820d528b52580b36cdbc5912bb7795bf2",
+      "candidate_path": "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/iteration_1/candidates/candidate_8.py",
+      "canonical_candidate_or_seed_sha256": "5548043ee98829020947394db762824820d528b52580b36cdbc5912bb7795bf2",
+      "candidate_identity": "13schulz2020finding::job_311673::global_iteration_1_candidate_8",
+      "candidate_resume_key": "13schulz2020finding|job_311673|global_evolution|1|global_iteration_1_candidate_8|5548043ee98829020947394db762824820d528b52580b36cdbc5912bb7795bf2",
+      "lineage": {
+        "canonical_population_job_id": "311673",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "311673"
+      },
+      "selection_score": -1.6241580749321871,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/STAGE_COMPLETE.json": "2ea207ba203d099db06b7ab16712d086270ce08e8d1f47cb6bc02681706e8c78",
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/POPULATION_PROVENANCE.json": "a526e665c77f76287a67a9bf3197f35736d5c777aef771799647d850e6ec3b43",
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/results.json": "9ee119e6057f8cb83d8e6591240511ac22ed30af38b4fcd8592970c1cf918418",
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "f826cef8031d456a0a24e7c82d3d1e6e4bd2142af7347468e37cede011c1f428",
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/prompts/infer_single_choice.txt": "f936ff45b879a067523c256006c3e0165278e110d4a785e2cbb297617475352b",
+        "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/prompts/prompt_meta.json": "d0526c8e862ca24b4e29e3ab2a095db54a59fb9cfe7a69f1ea309c268d18750e"
+      }
+    },
+    "2plonsky2018when": {
+      "source_program_id": "global_iteration_1_candidate_1",
+      "source_program_path": "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "abd1a1875918ccfdc1e983e7afbed69bf339ca39b83059e5aeb4f3fded48f764",
+      "candidate_path": "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/iteration_1/candidates/candidate_1.py",
+      "canonical_candidate_or_seed_sha256": "c73a3a4878a516b4069c3b8c87e7c205bd4cc35cd7aacef1aef2e6d22179957a",
+      "candidate_identity": "2plonsky2018when::job_311669::global_iteration_1_candidate_1",
+      "candidate_resume_key": "2plonsky2018when|job_311669|global_evolution|1|global_iteration_1_candidate_1|c73a3a4878a516b4069c3b8c87e7c205bd4cc35cd7aacef1aef2e6d22179957a",
+      "lineage": {
+        "canonical_population_job_id": "311669",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "311669"
+      },
+      "selection_score": -0.5691490624443726,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/STAGE_COMPLETE.json": "b31f842d510952201050555b82fd6e31c8883bda4b1544e2128e3050201719fe",
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/POPULATION_PROVENANCE.json": "75a679c5f4f8df79104cfc05782876255921357b0ea1e614eb2c8341c727a5a9",
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/results.json": "8324dc05eb4e63562ce83ef3030adbd3c739c7fc09d747e57410ddee5691a6b1",
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "e23223b331fbe19a7fea4afe94a77fc8ee90cad4c627c147967a17dd3e817236",
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/prompts/infer_single_choice.txt": "a5cbe853d9c5360df001222261b43e0472a8c5f5f3eff6d0c1e989699201688c",
+        "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/prompts/prompt_meta.json": "cca4cdf62b00a21bedda7123629b01619258701c9c64b1027ff3b64f91c89e74"
+      }
+    },
+    "3frey2017cct": {
+      "source_program_id": "global_iteration_1_candidate_3",
+      "source_program_path": "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "c5446c5509114bec02b444cac1be2d436edab1eabdd657030b16648e81f6db2e",
+      "candidate_path": "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/iteration_1/candidates/candidate_3.py",
+      "canonical_candidate_or_seed_sha256": "c5446c5509114bec02b444cac1be2d436edab1eabdd657030b16648e81f6db2e",
+      "candidate_identity": "3frey2017cct::job_311668::global_iteration_1_candidate_3",
+      "candidate_resume_key": "3frey2017cct|job_311668|global_evolution|1|global_iteration_1_candidate_3|c5446c5509114bec02b444cac1be2d436edab1eabdd657030b16648e81f6db2e",
+      "lineage": {
+        "canonical_population_job_id": "311668",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "311668"
+      },
+      "selection_score": -0.415566987062318,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/STAGE_COMPLETE.json": "e61914d9aeb2cb04fd21fcd548d22c90e0a80faf30f9ba7a7a5feb5cd9cb20d4",
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/POPULATION_PROVENANCE.json": "4eb72771d3878dc54762a8463e561e5b504df5b75a730cb9706f84404bf744a0",
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/results.json": "785cec875b966ea4e140ed00e9af7bad2e2f5b943adeba4487e7c282d3c369c9",
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "a157435bbb59d89e257cdcb971a6084def49bb8d724b9922773638ee42222152",
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/prompts/infer_single_choice.txt": "14d42863d1de716e167225927b9e52a16c05165102328c8cdc397cccd798f6dc",
+        "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/prompts/prompt_meta.json": "60fd5b191aaf748733711f38fec264ff915fc3f832e2f2bf2f050a5a5cec2d75"
+      }
+    },
+    "4wulff2018description": {
+      "source_program_id": "global_iteration_4_candidate_4",
+      "source_program_path": "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "1a0c711c49c3422e3b19fdf183b67ce1161eab079ad308cb4b124300238a8319",
+      "candidate_path": "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/iteration_4/candidates/candidate_4.py",
+      "canonical_candidate_or_seed_sha256": "2e8ddfe71ee80ef83a4165c049ec009a10a9cf9077ecf1b2e298cd274e4486ac",
+      "candidate_identity": "4wulff2018description::job_312024::global_iteration_4_candidate_4",
+      "candidate_resume_key": "4wulff2018description|job_312024|global_evolution|4|global_iteration_4_candidate_4|2e8ddfe71ee80ef83a4165c049ec009a10a9cf9077ecf1b2e298cd274e4486ac",
+      "lineage": {
+        "canonical_population_job_id": "312024",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "312024",
+        "replaced_cancelled_job_id": "311670",
+        "replacement_receipt_path": "analysis_2026Sep/Codex/Oct5/others/run_receipts/pics_v4/20261004/pics_v4_h100nvl_resubmission_20261004.json",
+        "replacement_receipt_sha256": "2225056ca573bbc69562a7ea8bac539c201dbbbf1ffe086545e5be178590303d"
+      },
+      "selection_score": -0.5819247613186674,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/STAGE_COMPLETE.json": "92a41967bd3a576d824e94043f69f85dde0e0146e219e33725332e47f04463a1",
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/POPULATION_PROVENANCE.json": "b0deabd0f3d4c97c55486af87969aca08324e22830428cc0a59653511f4f6c40",
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/results.json": "2342646a2467a02337930a2e0fbb359f6a39e3e849c0b181d5e7a12214d858ab",
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "66225a58956f791aa3ea4dfb54b8e55917cfdf3ebb3df09bcc12bb169d7f4eb8",
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/prompts/infer_single_choice.txt": "769156ba06c950c51b14e9bc58cee2956439633f19f386f2c36fec2590fee457",
+        "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/prompts/prompt_meta.json": "1a29f0c2a75021698c816bbc05fd952a82ffc25f14f43b89d28d900daf7cd792"
+      }
+    },
+    "7hilbig2014generalized": {
+      "source_program_id": "global_iteration_2_candidate_2",
+      "source_program_path": "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "79a4743a30544e747fe5f6b942592b33a6cf86dcb76e8fb823e248069792e9da",
+      "candidate_path": "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/iteration_2/candidates/candidate_2.py",
+      "canonical_candidate_or_seed_sha256": "79a4743a30544e747fe5f6b942592b33a6cf86dcb76e8fb823e248069792e9da",
+      "candidate_identity": "7hilbig2014generalized::job_312024::global_iteration_2_candidate_2",
+      "candidate_resume_key": "7hilbig2014generalized|job_312024|global_evolution|2|global_iteration_2_candidate_2|79a4743a30544e747fe5f6b942592b33a6cf86dcb76e8fb823e248069792e9da",
+      "lineage": {
+        "canonical_population_job_id": "312024",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "312024",
+        "replaced_cancelled_job_id": "311670",
+        "replacement_receipt_path": "analysis_2026Sep/Codex/Oct5/others/run_receipts/pics_v4/20261004/pics_v4_h100nvl_resubmission_20261004.json",
+        "replacement_receipt_sha256": "2225056ca573bbc69562a7ea8bac539c201dbbbf1ffe086545e5be178590303d"
+      },
+      "selection_score": -0.45707227712136195,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/STAGE_COMPLETE.json": "61b624b43fad467a051e2f10e35744eec8abd3e6e67205a8ddbc9f5dccf63db8",
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/POPULATION_PROVENANCE.json": "b062a373b054b04e3fd70990df61769c390ac3493633c938d663d14af3f6c17b",
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/results.json": "028aac092c31505c98d7363900ee96b5fd789ae31204fe4c51470ba77d07bf23",
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "53d1b34a7143e3dc5c0bea8d485bb86c9284eff8c2b61acb38fdb0832334212b",
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/prompts/infer_single_choice.txt": "38226ad8f4ae6af458373791a97e2ed5f77a4f08c2786ea4cef6fca6d0467d3c",
+        "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/prompts/prompt_meta.json": "3a36f9be6bbb33316ffe2a40698e72fea0798e904a69279b869fba0e96941d6b"
+      }
+    },
+    "bergert_nosofsky_2007": {
+      "source_program_id": "global_baseline",
+      "source_program_path": "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "302d90884ed6c7e7a5dbf726f0ed4507327629b1cf71102cf8da26400af4c1c7",
+      "candidate_path": "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/prompts/seed_program.py",
+      "canonical_candidate_or_seed_sha256": "373d5845314ba0c89fc48a6e11df778691f39cb408d51b7ff0cb46aea680e292",
+      "candidate_identity": "bergert_nosofsky_2007::job_312023::global_baseline",
+      "candidate_resume_key": null,
+      "lineage": {
+        "canonical_population_job_id": "312023",
+        "later_downstream_resume_execution_job_id": null,
+        "population_selection_execution_job_id": "312023",
+        "replaced_cancelled_job_id": "311667",
+        "replacement_receipt_path": "analysis_2026Sep/Codex/Oct5/others/run_receipts/pics_v4/20261004/pics_v4_h100nvl_resubmission_20261004.json",
+        "replacement_receipt_sha256": "2225056ca573bbc69562a7ea8bac539c201dbbbf1ffe086545e5be178590303d"
+      },
+      "selection_score": -0.6931471805599468,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/STAGE_COMPLETE.json": "065166a0acc2b5035e1424c1570adc4d4256e8c7787509584e013a4310a60d49",
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/POPULATION_PROVENANCE.json": "ced79c5e5f09cc927482b1d8d2881ecc5354c7b46caa38b36d550350b1088542",
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/global_phase/results.json": "39356aead83b692a126825232df2bacfcac404ba607f1eb9f26d434e59f43a48",
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "566fa077be7260ee9d13e0aced5eaab088b62153adcfdb7c44a3419b9e84844f",
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/prompts/infer_single_choice.txt": "12405b1959caf2a7a63270c4d408186dd86a63651295241c9a990606d9327e5f",
+        "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/prompts/prompt_meta.json": "1a38e6fdd9528c71fef7aaa77c1d03ebfc8e68204fecf1fa999b7d0fb80626d8"
+      }
+    },
+    "steyvers_2009_bandit": {
+      "source_program_id": "global_iteration_6_candidate_3",
+      "source_program_path": "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/best_program.py",
+      "source_program_sha256": "6da387328cb7363533b840ca54b8e235f76a593cecaadfad6b16a9c983d39349",
+      "candidate_path": "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/iteration_6/candidates/candidate_3.py",
+      "canonical_candidate_or_seed_sha256": "6da387328cb7363533b840ca54b8e235f76a593cecaadfad6b16a9c983d39349",
+      "candidate_identity": "steyvers_2009_bandit::job_311671::global_iteration_6_candidate_3",
+      "candidate_resume_key": "steyvers_2009_bandit|job_311671|global_evolution|6|global_iteration_6_candidate_3|6da387328cb7363533b840ca54b8e235f76a593cecaadfad6b16a9c983d39349",
+      "lineage": {
+        "archived_dataset": "14kool2016when",
+        "canonical_population_job_id": "311671",
+        "excluded_cancelled_fresh_job_id": "312210",
+        "execution_log_path": "/careAIDrive/zichang/logs/x_log/zichangge.312213.out",
+        "execution_log_sha256": "d09277ce9bbbad55af1dc599ad097cec319ec2b6c4456e1744a29d2f9887fbbc",
+        "later_downstream_resume_execution_job_id": null,
+        "population_generated_by_resumed_pack_execution": true,
+        "population_preserved_during_resume": false,
+        "population_selection_execution_job_id": "312213",
+        "receipt_path": "analysis_2026Sep/Codex/Oct5/others/run_receipts/pics_v4/20261004/pics_v4_pack6_resume_311671_20261004.json",
+        "receipt_population_skipped_applies_to": "14kool2016when",
+        "receipt_sha256": "2f0ee98f446b4f7f4ba602e9d9f792076cc949312c210b2aeeddd55976201bfd",
+        "resume_execution_job_id": "312213"
+      },
+      "selection_score": -1.0927781684219446,
+      "input_sha256": {
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/STAGE_COMPLETE.json": "a03d7da1c24a464786002722dd6e5861e75ccc6eb0769f467dbc18f31f3ceb23",
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/POPULATION_PROVENANCE.json": "82314482af271f34a943f5140823dc7c6889933a81ab402f8bd4f231ce1c63c1",
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/results.json": "4e09edaf3eb334fbbb9ed1b24f3475556d9c598971389d94690948dedbc244aa",
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "295366d9078aac302f03c3e8d813c73197b07a8c537cb765b46022d6786d13e4",
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/prompts/infer_single_choice.txt": "428a7c20252b1563c695c2a881a65932ee30e8c622d087166360a7c5257ae665",
+        "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/prompts/prompt_meta.json": "080508cb41f707e197d241281861ebc7a8db2ebbca5e9c26105f5b37ee4b0715"
+      }
+    }
+  },
+  "target_jobs": {
+    "guan_2020_stopping": "311666",
+    "11enkavi2019recentprobes": "311666",
+    "bergert_nosofsky_2007": "312023",
+    "5speekenbrink2008learning": "312023",
+    "3frey2017cct": "311668",
+    "2plonsky2018when": "311669",
+    "4wulff2018description": "312024",
+    "7hilbig2014generalized": "312024",
+    "12badham2017deficits": "312024",
+    "14kool2016when": "311671",
+    "steyvers_2009_bandit": "311671",
+    "10frey2017risk": "311672",
+    "1peterson2021using": "311672",
+    "mixed_gambles": "311673",
+    "13schulz2020finding": "311673"
+  },
+  "sanitizer_sha256": "05319f73dd6fb7aae557bc7c3c62532c03cf31e9e85ca0412ae71f5ade2106f6",
+  "target_inputs_sha256": {
+    "guan_2020_stopping": {
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/prompts/infer_single_choice.txt": "d7ce8e3b2d56e591e304c258eb715719c304b25b0ffdb86b98bb97a647c37c8f",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/prompts/prompt_meta.json": "242bc19687b7fba75a2baf5b9c27c2182bf84bb85436718c22c3937dc21df3ab",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/target_population/control/STAGE_COMPLETE.json": "a821d30310a084a5773c43d57a50f12152a037d3cf0ff663cb459e3de873d971",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/target_population/control/POPULATION_PROVENANCE.json": "f0225db1ef155820ad1ed098c5288cf9dd63a1e0c4094dd8b0fda8c8a5fc4f5c",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/target_population/control/global_phase/results.json": "9e95bede64440277c5caac3b09a31b1cfd0d4b7139acd98d241d479b1e4f91c6",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/target_population/control/global_phase/best_program.py": "f04cd77f3db9712f78868278f189e9c7880935b16b076547680c02f2cbe8b22c",
+      "generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_target_only/job_311666/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "aadf7aa83281075343fe81d870a0dfbb949e57748ae729e96e387cedb7462597"
+    },
+    "11enkavi2019recentprobes": {
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/prompts/infer_single_choice.txt": "fcb8aaba728d4b4f4e9f9a254a31bbf102bb158b8015eccd435517d4759d7291",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/prompts/prompt_meta.json": "fd214ab9aa7f612ce6478279eae29f8d67badac92669084e15702a4f7ecbcb23",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/target_population/control/STAGE_COMPLETE.json": "dc03dd1be3ad077368a4aebd3ede6740a60e66a343617589ce454403528c9913",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/target_population/control/POPULATION_PROVENANCE.json": "0040073ee7e994e8d9e8330b6ec4be2adb9f372c2ae34102a67be5d577515edf",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/target_population/control/global_phase/results.json": "4e80955c7baac5501353d8e08b406c3adf7fa07e648f4ae75ba414848391dd0d",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/target_population/control/global_phase/best_program.py": "46a51b94266c2736f20ae62019ad2cd3a6c6cd3cf2433e9e4cab0b2c611fe886",
+      "generated_outputs/psych101_train/teh/11enkavi2019recentprobes/pics_v4_target_only/job_311666/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "4ed6c8dfab9e3d1f13359b5b845624cb038becdb6e33e6e2337e2c507bc81307"
+    },
+    "bergert_nosofsky_2007": {
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/prompts/infer_single_choice.txt": "12405b1959caf2a7a63270c4d408186dd86a63651295241c9a990606d9327e5f",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/prompts/prompt_meta.json": "1a38e6fdd9528c71fef7aaa77c1d03ebfc8e68204fecf1fa999b7d0fb80626d8",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/STAGE_COMPLETE.json": "065166a0acc2b5035e1424c1570adc4d4256e8c7787509584e013a4310a60d49",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/POPULATION_PROVENANCE.json": "ced79c5e5f09cc927482b1d8d2881ecc5354c7b46caa38b36d550350b1088542",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/global_phase/results.json": "39356aead83b692a126825232df2bacfcac404ba607f1eb9f26d434e59f43a48",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/global_phase/best_program.py": "302d90884ed6c7e7a5dbf726f0ed4507327629b1cf71102cf8da26400af4c1c7",
+      "generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_target_only/job_312023/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "566fa077be7260ee9d13e0aced5eaab088b62153adcfdb7c44a3419b9e84844f"
+    },
+    "5speekenbrink2008learning": {
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/prompts/infer_single_choice.txt": "275f5d51cf8a2db639cf526d58a259cadee3a0c3c909c21020cec17cb802f7b6",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/prompts/prompt_meta.json": "28952e201258f51eb1c21bb9d6a5825718f75c37cb1837cfe938b0f2d7c9fb77",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/target_population/control/STAGE_COMPLETE.json": "47b35b5abf9e3db0a03c21cb2c241cc968916dfbb4e4393d3447ff592ffd02f3",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/target_population/control/POPULATION_PROVENANCE.json": "697abc5f03e8b76e09203cf5c0ba12b53c91d0bbe963ee4054213310bf772c4b",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/target_population/control/global_phase/results.json": "7a4d017f49531018b3510e518f0392146a59a9ee76bbef29eea355e4e13e5ef1",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/target_population/control/global_phase/best_program.py": "8524eb1c87c6f7c16c4d1c99181d9924199d313755754580e903fcb892393bec",
+      "generated_outputs/psych101_train/teh/5speekenbrink2008learning/pics_v4_target_only/job_312023/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "b7a5e79f3bd276f67da8a2c0afc6f2f71f642c7e24ee163775ad51c01b67433b"
+    },
+    "3frey2017cct": {
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/prompts/infer_single_choice.txt": "14d42863d1de716e167225927b9e52a16c05165102328c8cdc397cccd798f6dc",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/prompts/prompt_meta.json": "60fd5b191aaf748733711f38fec264ff915fc3f832e2f2bf2f050a5a5cec2d75",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/STAGE_COMPLETE.json": "e61914d9aeb2cb04fd21fcd548d22c90e0a80faf30f9ba7a7a5feb5cd9cb20d4",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/POPULATION_PROVENANCE.json": "4eb72771d3878dc54762a8463e561e5b504df5b75a730cb9706f84404bf744a0",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/results.json": "785cec875b966ea4e140ed00e9af7bad2e2f5b943adeba4487e7c282d3c369c9",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/best_program.py": "c5446c5509114bec02b444cac1be2d436edab1eabdd657030b16648e81f6db2e",
+      "generated_outputs/psych101_train/teh/3frey2017cct/pics_v4_target_only/job_311668/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "a157435bbb59d89e257cdcb971a6084def49bb8d724b9922773638ee42222152"
+    },
+    "2plonsky2018when": {
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/prompts/infer_single_choice.txt": "a5cbe853d9c5360df001222261b43e0472a8c5f5f3eff6d0c1e989699201688c",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/prompts/prompt_meta.json": "cca4cdf62b00a21bedda7123629b01619258701c9c64b1027ff3b64f91c89e74",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/STAGE_COMPLETE.json": "b31f842d510952201050555b82fd6e31c8883bda4b1544e2128e3050201719fe",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/POPULATION_PROVENANCE.json": "75a679c5f4f8df79104cfc05782876255921357b0ea1e614eb2c8341c727a5a9",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/results.json": "8324dc05eb4e63562ce83ef3030adbd3c739c7fc09d747e57410ddee5691a6b1",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/best_program.py": "abd1a1875918ccfdc1e983e7afbed69bf339ca39b83059e5aeb4f3fded48f764",
+      "generated_outputs/psych101_train/teh/2plonsky2018when/pics_v4_target_only/job_311669/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "e23223b331fbe19a7fea4afe94a77fc8ee90cad4c627c147967a17dd3e817236"
+    },
+    "4wulff2018description": {
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/prompts/infer_single_choice.txt": "769156ba06c950c51b14e9bc58cee2956439633f19f386f2c36fec2590fee457",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/prompts/prompt_meta.json": "1a29f0c2a75021698c816bbc05fd952a82ffc25f14f43b89d28d900daf7cd792",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/STAGE_COMPLETE.json": "92a41967bd3a576d824e94043f69f85dde0e0146e219e33725332e47f04463a1",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/POPULATION_PROVENANCE.json": "b0deabd0f3d4c97c55486af87969aca08324e22830428cc0a59653511f4f6c40",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/results.json": "2342646a2467a02337930a2e0fbb359f6a39e3e849c0b181d5e7a12214d858ab",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/best_program.py": "1a0c711c49c3422e3b19fdf183b67ce1161eab079ad308cb4b124300238a8319",
+      "generated_outputs/psych101_train/teh/4wulff2018description/pics_v4_target_only/job_312024/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "66225a58956f791aa3ea4dfb54b8e55917cfdf3ebb3df09bcc12bb169d7f4eb8"
+    },
+    "7hilbig2014generalized": {
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/prompts/infer_single_choice.txt": "38226ad8f4ae6af458373791a97e2ed5f77a4f08c2786ea4cef6fca6d0467d3c",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/prompts/prompt_meta.json": "3a36f9be6bbb33316ffe2a40698e72fea0798e904a69279b869fba0e96941d6b",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/STAGE_COMPLETE.json": "61b624b43fad467a051e2f10e35744eec8abd3e6e67205a8ddbc9f5dccf63db8",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/POPULATION_PROVENANCE.json": "b062a373b054b04e3fd70990df61769c390ac3493633c938d663d14af3f6c17b",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/results.json": "028aac092c31505c98d7363900ee96b5fd789ae31204fe4c51470ba77d07bf23",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/best_program.py": "79a4743a30544e747fe5f6b942592b33a6cf86dcb76e8fb823e248069792e9da",
+      "generated_outputs/psych101_train/teh/7hilbig2014generalized/pics_v4_target_only/job_312024/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "53d1b34a7143e3dc5c0bea8d485bb86c9284eff8c2b61acb38fdb0832334212b"
+    },
+    "12badham2017deficits": {
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/prompts/infer_single_choice.txt": "8b09be32efee056f8917eb5d9990c803eaf09a1cac33b59683e029362a81b343",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/prompts/prompt_meta.json": "9896fd54b5e9990134971a8be2f6fe8f691d76923f055c77d8125cc3eeac661f",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/STAGE_COMPLETE.json": "5eee584e894df28953da51f82106442a5e76b9df9375f0f17fa30912d1e26293",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/POPULATION_PROVENANCE.json": "f4aa15d491f10c294cdee330f9245bbe60cca6b8c52024ddb74e903289314836",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/results.json": "c78dd9347a9a650a2ad92010007c07686dafd7e03d195f96323f24495a4085ac",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/best_program.py": "c52d0ebb4db48c30d7736374d3ad3c88dba58254728894f5a11576e7f6986033",
+      "generated_outputs/psych101_train/teh/12badham2017deficits/pics_v4_target_only/job_312024/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "76c5d9466c7493fd098e0d949fbd422309e9d426de97df6bd711e3dedaeff854"
+    },
+    "14kool2016when": {
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/prompts/infer_single_choice.txt": "4d63743485f2a86010fb67af68b578da12798465bb587a526a3a51291e520314",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/prompts/prompt_meta.json": "f97081c373d6346943f238fbc0320ef2c18af963c2021adf1e8ad77d75c8e24a",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/target_population/control/STAGE_COMPLETE.json": "f9f98327aa097fab458366d87aa350ef536a24043a04a9c43941807261653ff9",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/target_population/control/POPULATION_PROVENANCE.json": "77dff71e04779fd3c246cf69565379faa36e7e1598ce808443551dec2d96ba43",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/target_population/control/global_phase/results.json": "ed4113520791472b9e39de0918c4df6473f059473f483e34c6c39a4f03c6b2c3",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/target_population/control/global_phase/best_program.py": "45516d7132b65dd7394d8f54da99cdfc540e3994c8895aa0083a97314958d44e",
+      "generated_outputs/psych101_train/teh/14kool2016when/pics_v4_target_only/job_311671/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "01bdd4751c6f01137ce9edde8622edb96f0325659b28aae119aed24815f2eb7d"
+    },
+    "steyvers_2009_bandit": {
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/prompts/infer_single_choice.txt": "428a7c20252b1563c695c2a881a65932ee30e8c622d087166360a7c5257ae665",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/prompts/prompt_meta.json": "080508cb41f707e197d241281861ebc7a8db2ebbca5e9c26105f5b37ee4b0715",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/STAGE_COMPLETE.json": "a03d7da1c24a464786002722dd6e5861e75ccc6eb0769f467dbc18f31f3ceb23",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/POPULATION_PROVENANCE.json": "82314482af271f34a943f5140823dc7c6889933a81ab402f8bd4f231ce1c63c1",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/results.json": "4e09edaf3eb334fbbb9ed1b24f3475556d9c598971389d94690948dedbc244aa",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/best_program.py": "6da387328cb7363533b840ca54b8e235f76a593cecaadfad6b16a9c983d39349",
+      "generated_outputs/psych101_train/teh/steyvers_2009_bandit/pics_v4_target_only/job_311671/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "295366d9078aac302f03c3e8d813c73197b07a8c537cb765b46022d6786d13e4"
+    },
+    "10frey2017risk": {
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/prompts/infer_single_choice.txt": "7a6ff3ec8552e93e76454ff237690ad5bb695f4c475ed59f2d1733bc2cb5c998",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/prompts/prompt_meta.json": "e61400bed08c560919eddc6734d59a98755dc9dfd264f20820a5fb860056e475",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/STAGE_COMPLETE.json": "edf3ee31b3cd2336ffb380b2b62a0177805d1b80c04b67181ab5035bc0f8ae41",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/POPULATION_PROVENANCE.json": "4c1f9c16f0e7d0ae1a04a827c07ef3d9e330ed266833e86fc4a0cd8731fdeb18",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/results.json": "6b5d832a37a91fe161e6ebf00fec0c5b2eba42f8e1cbd49f54ecfceba0105466",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/best_program.py": "ddbfca4b7909c6a377b73ee77310c9cab2c7d1ded6ba3252abeeb5bd86ce3ae3",
+      "generated_outputs/psych101_train/teh/10frey2017risk/pics_v4_target_only/job_311672/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "1b92f8a4bd4f3b7fb94840f7165361b705f333736b68f0fca8f03c10ef51fc53"
+    },
+    "1peterson2021using": {
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/prompts/infer_single_choice.txt": "ff448ff4cb14b57dec1099a37109dffb9ff7d00506eda9bf985d76dc6827e4a7",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/prompts/prompt_meta.json": "7aa89225d1e299c4e397c1914a0d92e6459177edf9bd9cb01a23f807eb4e9b87",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/target_population/control/STAGE_COMPLETE.json": "ce9cf43ff6a1287162b2ff0372d707bca249b00656beb016dbe65b4976fe0f1f",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/target_population/control/POPULATION_PROVENANCE.json": "fed9cc1375540ed434596fc6bfe5a1cedf0f1b27a9ad95431e77bb26d2e25ae2",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/target_population/control/global_phase/results.json": "e9c749aca6fa86dc3b72bec008ab7d9f8f1405a00a7194af5869b9ebcda5cb89",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/target_population/control/global_phase/best_program.py": "e62b4af66dfb3bbdc7e1963f092a253ab6df839c12dcae49c7cce14ba8dbbaa8",
+      "generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_target_only/job_311672/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "208b76e6319a5df9f96251993766eec69bbfa5c379ce8943c294555e2c5c6d88"
+    },
+    "mixed_gambles": {
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/prompts/infer_single_choice.txt": "d29f5d173fdb485105e33155f3203719ad4e926cb2a42eeb96ccf652f1a0c707",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/prompts/prompt_meta.json": "40789a2d25070bcbd17ba7daaede243080ccafa134e70405337f9c7e62231ca7",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/target_population/control/STAGE_COMPLETE.json": "ce289092ed0efef861cde2391eb7d08af44de91c15e5114f7bb47c0840a1a9a9",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/target_population/control/POPULATION_PROVENANCE.json": "07eed7b3c1facdae65ded54955496dd5e3f0d51122776139c3e1d0408638aba1",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/target_population/control/global_phase/results.json": "c1e5bd10f34b766f70b2688395b7edef0db774cfe152c471165ad370bd6334b5",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/target_population/control/global_phase/best_program.py": "917db0dc0ed2f4514b9d194f71dd2e0a3bfcc7b62de2ccf2187b2b0528655f5e",
+      "generated_outputs/psych101_train/teh/mixed_gambles/pics_v4_target_only/job_311673/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "4b4e570a69c066f1014ef70dc016858cf737ff5688f517749835c31ff5c64887"
+    },
+    "13schulz2020finding": {
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/TRIAL_PROMPT_POLICY.json": "d74fe52fdb20fff8d13f3d1a9aa9c844522ecb70982b0dac4bded40e5b34891e",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/prompts/infer_single_choice.txt": "f936ff45b879a067523c256006c3e0165278e110d4a785e2cbb297617475352b",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/prompts/prompt_meta.json": "d0526c8e862ca24b4e29e3ab2a095db54a59fb9cfe7a69f1ea309c268d18750e",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/STAGE_COMPLETE.json": "2ea207ba203d099db06b7ab16712d086270ce08e8d1f47cb6bc02681706e8c78",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/POPULATION_PROVENANCE.json": "a526e665c77f76287a67a9bf3197f35736d5c777aef771799647d850e6ec3b43",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/results.json": "9ee119e6057f8cb83d8e6591240511ac22ed30af38b4fcd8592970c1cf918418",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/best_program.py": "5548043ee98829020947394db762824820d528b52580b36cdbc5912bb7795bf2",
+      "generated_outputs/psych101_train/teh/13schulz2020finding/pics_v4_target_only/job_311673/target_population/control/global_phase/global_elite_pool/pool_manifest.json": "f826cef8031d456a0a24e7c82d3d1e6e4bd2142af7347468e37cede011c1f428"
+    }
+  }
+}

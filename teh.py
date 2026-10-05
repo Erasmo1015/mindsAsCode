@@ -172,6 +172,7 @@ from utils.teh.explore_handoff import (
     split_explore_budget_seed_and_parents,
 )
 from utils.teh.explore_source_prompt import build_rank1_explore_prompt_suffix
+from utils.teh.pics_v4_transfer import identity_fields as pics_v4_run_identity_fields
 from utils.teh.t_pics_sources import (
     DEFAULT_T_PICS_SOURCE_CONFIG,
     official_t_pics_source,
@@ -3272,6 +3273,11 @@ def run_global_evolution_phase(
     pics_v3_prompt_robustness_scope(
         strict_observed_union, dataset=dataset
     ).__enter__()
+    from utils.teh.pics_v4_transfer import current_identity, assert_arm_resume
+    if current_identity() is not None:
+        assert_arm_resume(Path(output_dir), role=g2_arm)
+        from utils.teh.pics_v4_panels import clear_pics_v4_panel_state
+        clear_pics_v4_panel_state()
     participant_ids = [int(p) for p in participants]
     sparse_audits: List[SparseObservationAudit] = []
     pooled_train = _collect_pooled_train_trials_for_participants(
@@ -3306,6 +3312,11 @@ def run_global_evolution_phase(
         limited_train_val=limited_train_val,
         speekenbrink_split=speekenbrink_split,
     )
+    if current_identity() is not None:
+        from utils.teh.pics_v4_transfer import digest
+        identity = current_identity()
+        if sorted(participant_ids) != sorted(identity['cohort']['participant_ids']) or digest(pooled_train) != identity['target_train_cohort_sha256'] or digest(pooled_val) != identity['target_val_cohort_sha256']:
+            raise RuntimeError('PICS v4 population observed scoring cohort mismatch')
     pooled_test = _collect_pooled_test_trials_for_participants_diagnostic(
         dataset,
         participant_ids,
@@ -3451,6 +3462,7 @@ def run_global_evolution_phase(
             fitness_metric="loglik",
             master_seed=int(run_seed),
             cap=int(HARD_PROMPT_TOKEN_CAP),
+            prompt_suffix=prompt_suffix,
         )
         parent_bank_path = evolution_bank_dir(global_dir) / bank_filename("population", "parent_conditioned")
         if save_artifacts and parent_bank_path.is_file():
@@ -3466,6 +3478,7 @@ def run_global_evolution_phase(
                 fitness_metric="loglik",
                 master_seed=int(run_seed),
                 cap=int(HARD_PROMPT_TOKEN_CAP),
+                prompt_suffix=prompt_suffix,
             )
 
     for iteration in range(n_iterations):
@@ -3953,6 +3966,7 @@ def run_global_evolution_phase(
                 fitness_metric="loglik",
                 master_seed=int(_population_run_seed()),
                 cap=int(HARD_PROMPT_TOKEN_CAP),
+                prompt_suffix=prompt_suffix,
             )
         pool_best_test_record = _passive_diagnostic_test_of_program(
             dataset=dataset,
@@ -4240,6 +4254,12 @@ def _cross_task_source_suffix(
     require_source_examples: bool = False,
 ) -> str:
     """Build the G/E source-program suffix using the same obs protocol as this run."""
+    from utils.teh.pics_v4_transfer import current_identity, source_suffix
+    if current_identity() is not None:
+        identity = current_identity()
+        if source_dataset != identity['source']['source_dataset'] or Path(program_path).resolve() != Path(identity['source']['source_program_path']):
+            raise RuntimeError('source suffix identity mismatch')
+        return source_suffix()
     return build_rank1_explore_prompt_suffix(
         source_dataset=source_dataset,
         program_path=program_path,
@@ -4598,6 +4618,12 @@ def _ensure_g2_paired_pack_freeze(
     source_rank1: Path,
 ) -> Dict[str, Any]:
     """Freeze shared G.2 target-example IDs under the transfer token condition."""
+    from utils.teh.pics_v4_transfer import current_identity
+    if current_identity() is not None:
+        identity = current_identity()
+        if hashlib.sha256(source_suffix.encode()).hexdigest() != identity['source_suffix_sha256']:
+            raise RuntimeError('PICS v4 source-conditioning suffix changed')
+        return {'version': 'pics_v4_source_conditioning_v1', 'source_suffix_sha256': identity['source_suffix_sha256'], 'run_identity': identity, 'shared_by_g2_arms': False}
     freeze_path = Path(freeze_path)
     if freeze_path.is_file():
         payload = load_paired_pack_freeze(freeze_path)
@@ -4714,7 +4740,7 @@ def _write_aamas_population_marker(
 ) -> None:
     from utils.teh.pics_aamas_v0 import write_population_completion
 
-    from utils.teh.pics_v4 import KIND_TARGET_ONLY as PICS_V4_KIND
+    from utils.teh.pics_v4_transfer import KINDS as PICS_V4_KINDS
     from utils.teh.pics_v4 import using_pics_v4
 
     write_population_completion(
@@ -4726,7 +4752,7 @@ def _write_aamas_population_marker(
         range_start_ordinal=getattr(args, "range_start_ordinal", None),
         range_end_ordinal=getattr(args, "range_end_ordinal", None),
         track_mode=track_mode,
-        kind=PICS_V4_KIND if using_pics_v4() else None,
+        kind=PICS_V4_KINDS[track_mode] if using_pics_v4() else None,
         model_name=str(args.model_name),
         hard_prompt_token_cap=int(args.hard_prompt_token_cap),
         llm_max_tokens=int(args.llm_max_tokens),
@@ -4925,6 +4951,13 @@ def _run_t_pics_gated_population_arms(
         cfg_path = cfg.path
         selector_name = cfg.selector_name
     layout = run_layout(Path(run_root))
+    from utils.teh.pics_v4_transfer import current_identity, initialize_arm, assert_arm_resume
+    if current_identity() is not None:
+        roles = ('transfer',) if transfer_only else ('control', 'transfer')
+        for role in roles:
+            assert_arm_resume(layout[role], role=role)
+        for role in roles:
+            initialize_arm(layout[role], role=role)
     for key in ("control", "transfer", "gate", "selected"):
         layout[key].mkdir(parents=True, exist_ok=True)
 
@@ -5006,9 +5039,9 @@ def _run_t_pics_gated_population_arms(
             source_rank1=Path(seed_program_path),
         )
         gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
-        if not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve():
+        if current_identity() is None and (not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve()):
             write_paired_pack_freeze(gate_freeze, freeze_payload)
-        freeze_path_str = str(freeze_path)
+        freeze_path_str = None if current_identity() is not None else str(freeze_path)
         expected_iters = int(args.global_iters)
         if hasattr(wandb_module, "set_g2_arm"):
             wandb_module.set_g2_arm("control")
@@ -5098,9 +5131,9 @@ def _run_t_pics_gated_population_arms(
                 "gate_reason": "control_only_ablation",
                 "selected_arm": "control",
                 "retained_pool_path": str(retained_pool),
-                "g2_arms_shared_target_prompt": True,
+                "g2_arms_shared_target_prompt": current_identity() is None,
                 "g2_paired_pack_path": str(freeze_path),
-                "g2_paired_pack_version": G2_PAIRED_PACK_VERSION,
+                "g2_paired_pack_version": G2_PAIRED_PACK_VERSION if current_identity() is None else "pics_v4_source_conditioning_v1",
                 "g2_paired_n_examples_included": freeze_payload.get("n_examples_included"),
                 "control_only_ablation": True,
             },
@@ -5193,9 +5226,9 @@ def _run_t_pics_gated_population_arms(
             source_rank1=source_rank1,
         )
         gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
-        if not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve():
+        if current_identity() is None and (not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve()):
             write_paired_pack_freeze(gate_freeze, freeze_payload)
-        freeze_path_str = str(freeze_path)
+        freeze_path_str = None if current_identity() is not None else str(freeze_path)
         expected_iters = int(args.global_iters)
         if hasattr(wandb_module, "set_g2_arm"):
             wandb_module.set_g2_arm("transfer")
@@ -5332,9 +5365,9 @@ def _run_t_pics_gated_population_arms(
                 "gate_reason": "transfer_only_allocation_f",
                 "selected_arm": "transfer",
                 "retained_pool_path": str(retained_pool),
-                "g2_arms_shared_target_prompt": True,
+                "g2_arms_shared_target_prompt": current_identity() is None,
                 "g2_paired_pack_path": str(freeze_path),
-                "g2_paired_pack_version": G2_PAIRED_PACK_VERSION,
+                "g2_paired_pack_version": G2_PAIRED_PACK_VERSION if current_identity() is None else "pics_v4_source_conditioning_v1",
                 "g2_paired_n_examples_included": freeze_payload.get(
                     "n_examples_included"
                 ),
@@ -5451,9 +5484,9 @@ def _run_t_pics_gated_population_arms(
         source_rank1=source_rank1,
     )
     gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
-    if not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve():
+    if current_identity() is None and (not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve()):
         write_paired_pack_freeze(gate_freeze, freeze_payload)
-    freeze_path_str = str(freeze_path)
+    freeze_path_str = None if current_identity() is not None else str(freeze_path)
 
     expected_iters = int(args.global_iters)
     if hasattr(wandb_module, "set_g2_arm"):
@@ -5677,9 +5710,9 @@ def _run_t_pics_gated_population_arms(
             "gate_reason": decision.reason,
             "selected_arm": decision.selected_arm,
             "retained_pool_path": str(retained_pool),
-            "g2_arms_shared_target_prompt": True,
+            "g2_arms_shared_target_prompt": current_identity() is None,
             "g2_paired_pack_path": str(freeze_path),
-            "g2_paired_pack_version": G2_PAIRED_PACK_VERSION,
+            "g2_paired_pack_version": G2_PAIRED_PACK_VERSION if current_identity() is None else "pics_v4_source_conditioning_v1",
             "g2_paired_n_examples_included": freeze_payload.get("n_examples_included"),
             "g2_paired_example_ids": freeze_payload.get("example_ids"),
         },
@@ -10962,7 +10995,7 @@ def _ensure_pics_v4_evolution_panel_banks(
     )
 
 
-def _pics_v4_prompt_pieces(run_prompts_dir: str):
+def _pics_v4_prompt_pieces(run_prompts_dir: str, prompt_suffix: Optional[str] = None):
     from utils.prompt_flags import load_single_code_template, single_code_template_prompt_suffix
     from utils.teh.prompt_context import RUNTIME_CONTRACT_HEADER
     from utils.teh.prompt_sanitize import CANDIDATE_OUTPUT_RULES
@@ -10988,6 +11021,8 @@ def _pics_v4_prompt_pieces(run_prompts_dir: str):
         raise RuntimeError(
             f"PICS v4 infer prompt contains a runtime contract with no runtime_contract.txt: {prompt_dir}"
         )
+    if prompt_suffix:
+        base_prompt = f"{base_prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
     return base_prompt, suffix, "", f"\n{CANDIDATE_OUTPUT_RULES}\n"
 
 
@@ -11065,6 +11100,13 @@ def _pics_v4_install_constructed_bank(
         bank=str(bank_name),
         require_full_coverage=bool(require_full_coverage),
     )
+    from utils.teh.pics_v4_transfer import current_identity, digest
+    if current_identity() is not None:
+        conditioning = {'run_identity': current_identity(), 'empty_panel_prompt_sha256': hashlib.sha256(use_wrap('').encode()).hexdigest()}
+        bank.fingerprint = digest({'panel_fingerprint': bank.fingerprint, 'conditioning': conditioning})
+        if existing is not None and existing.get('conditioning') != conditioning:
+            raise RuntimeError('PICS v4 bank source/prompt identity mismatch')
+        extra = dict(extra or {}, conditioning=conditioning)
     if existing is not None and expected_from_payload is not None:
         bank.expected_parent_tokens = int(expected_from_payload(existing))
     else:
@@ -11088,6 +11130,12 @@ def _pics_v4_install_constructed_bank(
                 name=bank_name,
                 extra=extra,
             )
+    if current_identity() is not None and output_dir is not None:
+        from utils.teh.pics_v4_transfer import sha
+        bank_dir = evolution_bank_dir(output_dir)
+        attestation = bank_dir / 'ATTESTATION.json'
+        hashes = {p.name: sha(p) for p in bank_dir.glob('*.json') if p.name != 'ATTESTATION.json'}
+        attestation.write_text(json.dumps(hashes, indent=2) + '\n')
     register_panel_bank(
         dataset=str(dataset),
         phase=str(phase),
@@ -11108,6 +11156,7 @@ def _ensure_pics_v4_population_fresh_bank(
     fitness_metric: str,
     master_seed: int,
     cap: int,
+    prompt_suffix: Optional[str] = None,
 ) -> None:
     from utils.teh.pics_v4_panels import registered_panel_bank
 
@@ -11123,7 +11172,7 @@ def _ensure_pics_v4_population_fresh_bank(
         pass
     if not run_prompts_dir:
         raise RuntimeError("PICS v4 population panels require the registered prompt directory.")
-    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir)
+    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir, prompt_suffix)
 
     def _section_tokens(program: str) -> int:
         return _pics_v4_parent_section_tokens(
@@ -11186,6 +11235,7 @@ def _ensure_pics_v4_population_parent_bank(
     fitness_metric: str,
     master_seed: int,
     cap: int,
+    prompt_suffix: Optional[str] = None,
 ) -> None:
     from utils.teh.pics_v4_panels import registered_panel_bank
 
@@ -11201,7 +11251,7 @@ def _ensure_pics_v4_population_parent_bank(
         pass
     if not run_prompts_dir:
         raise RuntimeError("PICS v4 population panels require the registered prompt directory.")
-    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir)
+    base_prompt, suffix, runtime_contract, rules = _pics_v4_prompt_pieces(run_prompts_dir, prompt_suffix)
 
     def _wrap_for(reservation: str):
         return _pics_v4_fixed_parent_wrap(
@@ -12005,6 +12055,11 @@ Provide only the code for choose(...) as a complete function body.
     freeze_n_available = int((freeze_payload or {}).get("n_selected_available") or 0)
     freeze_n_included = int((freeze_payload or {}).get("n_examples_included") or 0)
     suffix_tokens = int((freeze_payload or {}).get("source_suffix_tokens") or 0)
+    from utils.teh.pics_v4_transfer import current_identity
+    if current_identity() is not None and prompt_suffix:
+        from utils.teh.prompt_units import qwen_user_prompt_token_count
+        source_free_base = Path(run_prompts_dir, 'infer_single_choice.txt').read_text()
+        suffix_tokens = qwen_user_prompt_token_count(f"{source_free_base.rstrip()}\n\n{prompt_suffix.strip()}\n") - qwen_user_prompt_token_count(source_free_base)
     if freeze_examples and g2_arm == "control":
         suffix_tokens = 0
 
@@ -12171,6 +12226,9 @@ Provide only the code for choose(...) as a complete function body.
             "candidate_index": cand_idx,
             "llm_decoding_seed": request_seed,
         }
+        if current_identity() is not None:
+            from utils.teh.pics_v4_transfer import digest
+            call_diag.update(prompt_sha256=hashlib.sha256(prompt_text.encode()).hexdigest(), source_suffix_sha256=hashlib.sha256((prompt_suffix or '').encode()).hexdigest(), run_identity_sha256=digest(current_identity()))
         tokens = estimate_tokens(prompt_text, estimator=prompt_token_estimator)
         if tokens > hard_prompt_token_cap:
             try:
@@ -17649,7 +17707,7 @@ def main():
 
     pics_v4_on = bool(getattr(args, "pics_v4", False))
     configure_pics_v4(pics_v4_on)
-    if pics_v4_on and aamas_v0_mode != "target_only":
+    if pics_v4_on and aamas_v0_mode not in ("target_only", "transfer_based_only", "official_gate"):
         print(
             "Error: --pics_v4 requires --pics_aamas_v0_track_mode target_only."
         )
@@ -18000,6 +18058,22 @@ def main():
                 for err in errors:
                     print(f"  - {err}")
                 return
+            if pics_v4_on:
+                from utils.teh.pics_v4_dry_run import verify_report
+                certificate = _REPO_ROOT / 'analysis_2026Sep/Codex/Oct5/others/three_mode_implementation/validation_v1' / aamas_v0_mode / 'PREFLIGHT.json'
+                verify_report(certificate, mode=aamas_v0_mode, target=str(args.dataset))
+                from utils.teh.pics_v4_transfer import prepare_identity, resolve_source, assert_arm_resume, validate_materialization, target_run
+                if not args.output_dir or args.t_pics_gated_independent or getattr(args, 't_pics_reuse_gate_pool', None):
+                    raise RuntimeError('PICS v4 transfer requires an explicit isolated output and forbids source/pool overrides')
+                record = resolve_source(str(args.dataset), config_path=cfg_path)
+                suffix = _cross_task_source_suffix(source_dataset=record['source_dataset'], program_path=record['source_program_path'], args=args, psych_dataset_split='train', filter_mixed_gambles=record['source_dataset'] == 'mixed_gambles', best_loglik=None, require_source_examples=True)
+                prepare_identity(args, suffix=suffix)
+                from utils.teh.pics_v4 import assert_pics_v4_resume
+                assert_pics_v4_resume(args.output_dir)
+                for role in ('control', 'transfer'):
+                    assert_arm_resume(Path(args.output_dir) / 'target_population' / role, role=role)
+                if mat_target and mat_transfer:
+                    validate_materialization(Path(mat_target) / 'target_population/control', Path(mat_transfer) / 'target_population/transfer', str(args.dataset), Path(args.output_dir))
             try:
                 selected_source_for_target(str(args.dataset), config=cfg)
             except (ValueError, KeyError) as exc:
@@ -18714,7 +18788,11 @@ def main():
             _gated_cfg = load_frozen_transfer_config(cfg_path)
             _gated_entry = selected_source_for_target(str(args.dataset), config=_gated_cfg)
             if aamas_v0_mode in ("transfer_based_only", "official_gate"):
-                _gated_rank1 = Path("FRESH_AAMAS_V0_TARGET_ONLY_BANK")
+                if pics_v4_on:
+                    from utils.teh.pics_v4_transfer import resolve_source
+                    _gated_rank1 = Path(resolve_source(str(args.dataset))['source_program_path'])
+                else:
+                    _gated_rank1 = Path("FRESH_AAMAS_V0_TARGET_ONLY_BANK")
             else:
                 _gated_rank1 = resolve_gated_transfer_source_rank1(
                     independent=t_pics_gated_independent,
@@ -18887,7 +18965,7 @@ def main():
                 "wandb_project": getattr(wandb, "project", None),
                 "wandb_group": (
                     (
-                        "pics_v4_target_only"
+                        "pics_v4_" + str(args.pics_aamas_v0_track_mode)
                         if bool(getattr(args, "pics_v4", False))
                         else kind_for_track(
                             str(getattr(args, "pics_aamas_v0_track_mode", "") or "")
@@ -20132,6 +20210,9 @@ def main():
             print(f"Processing participant {participant_id}")
             print(f"{'='*80}")
             participant_output_dir = _participant_output_dir(participant_id)
+            if participant_output_dir is not None:
+                from utils.teh.pics_v4_transfer import initialize_participant
+                initialize_participant(Path(participant_output_dir), int(participant_id))
             if not parallel_participants:
                 _ensure_summary_paths_from_participant_dir(participant_output_dir)
             if t_pics_gated and participant_output_dir is not None:
@@ -20336,6 +20417,7 @@ def main():
                 marker.write_text(
                     json.dumps(
                         {
+                            **pics_v4_run_identity_fields(),
                             "stage": "selected",
                             "n_iterations": int(args.n_iterations),
                             "explore_candidates": int(args.explore_candidates),
