@@ -80,19 +80,22 @@ ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("pics_v4_popann_pack8", ("mixed_gambles", "13schulz2020finding")),
 )
 
-# Official uniform-v8 jobs.
+# Official uniform-v8 output/source jobs. Pack6 execution 312213 continues output job_311671.
 AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("311666", ("guan_2020_stopping", "11enkavi2019recentprobes")),
-    ("311667", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
+    ("312023", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
     ("311668", ("3frey2017cct",)),
     ("311669", ("2plonsky2018when",)),
-    ("311670", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
+    ("312024", ("4wulff2018description", "7hilbig2014generalized", "12badham2017deficits")),
     ("311671", ("14kool2016when", "steyvers_2009_bandit")),
     ("311672", ("10frey2017risk", "1peterson2021using")),
     ("311673", ("mixed_gambles", "13schulz2020finding")),
 )
 HISTORICAL_JOB_IDS = frozenset(
     {
+        "312210",  # Cancelled fresh attempt; continuation retains source job 311671.
+        "311667",  # Pending pack2 replaced by 312023 on H100 NVL.
+        "311670",  # Pending pack5 replaced by 312024 on H100 NVL.
         "310886",
         "310887",
         "310888",
