@@ -1,0 +1,84 @@
+{
+  "code_hashes": {
+    "analysis/mem/pics_v4_comparator_selectors.py": "f48dd350f85f6a2ef0dd652af3b9f6f902ecd539dffa8a1145311c70fedb7489",
+    "analysis/mem/pop_v4_source_selection/run_source_selection_v4.py": "73ed7d4f5ff8a4f4002091b60e184a787c7e625c6b4fcca9e47e063b8f1e2427",
+    "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/extensions/scripts/plot_preferred_heatmap.py": "754d2e3d154e46dc69a1bdbb9b1c6a33003d7c85b1e0f40fb887ca0f6c59b5e5",
+    "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/extensions/scripts/preferred_heatmap_style.json": "abd797f197d7631a502821e60f903ac16922c1fc45a22b0c7e8b7a2acbfa31c9",
+    "analysis_2026Sep/Sep20_V3/mem/annotation_population/source_selection_final/scripts/plot_paper_source_selection_figures.py": "8f597212e0b74d4f9ab077b2e0ff811a444d73f71a2622ef9d74e453a247b0b5",
+    "analysis_2026Sep/Sep20_V3/others/source_selection_schema_v5/selector_robustness/run_selector_robustness.py": "cbe5e6a714f6f20dff2e0ffc9cd658b0c600c5188a623efae4a2ec5fb087d305"
+  },
+  "comparator": {
+    "LOIO": "exclude_each_iteration_globally_refit_all_parameters_keep_baseline_supported_dimensions",
+    "bootstrap_B": 200,
+    "bootstrap_unit": "within_dataset_iteration_parent_id_clusters",
+    "combined_representation": "column_zscores_across_15_datasets_ddof0_then_each_block_times_sqrt_half_concat; no_extra_L2_or_dimension_normalization",
+    "fit_status_policy": "historical_ok_and_not_converged_retained_finite_mu; missing_bootstrap_dimensions_zero",
+    "fitness_cohort": "exact_train_val_delta_runtime_valid_resolved_1383_events",
+    "fitness_model": "delta_f ~ transition + centered_iteration + (1 + transition | dataset); REML lbfgs maxiter=200",
+    "fitness_normalization": "none_for_standalone_selector",
+    "fitness_representation": "per_transition_dataset_random_slopes_fixed_mu_plus_BLUP",
+    "historical_implementation": "analysis_2026Sep/Sep20_V3/others/source_selection_schema_v5/selector_robustness/run_selector_robustness.py",
+    "iterations": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "occurrence_block_cohort": "all_1493_resolved_generated_events",
+    "replicate_seeds": "seed+b*9973",
+    "seed": 20260920,
+    "selection": "historical_cosine_norm_threshold_1e-15_self_excluded_exact_tie_lex_ID",
+    "source_allowlist": [
+      "1peterson2021using",
+      "3frey2017cct",
+      "4wulff2018description",
+      "7hilbig2014generalized",
+      "11enkavi2019recentprobes",
+      "mixed_gambles"
+    ],
+    "support_thresholds": [
+      20,
+      3,
+      2
+    ],
+    "unstable": "winner_frequency<.70 OR margin<.02 OR any_LOIO_flip"
+  },
+  "extension": "uniform_v8_secondary_selectors_and_preferred_heatmap_20261005",
+  "input_hashes": {
+    "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/population_master.csv": "14ff5ac5eb24d1c771d6f52a961326e9a0dc50789fc30ab01012fa316e1a557a",
+    "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/primary_runtime_valid/profiles.csv": "f631ebfd77d64adc5a08aca621ca7a88ca1e30e155591046f6cf8f7bd9b14c42",
+    "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/primary_runtime_valid/stability.csv": "2e5b813df47fa612d630ac8b8e4091b1025958c4fdeb379113675e16510d619d"
+  },
+  "plot": {
+    "caption_embedded": false,
+    "colorbar": "Shrunk construct occurrence",
+    "constructs": [
+      "history",
+      "value",
+      "probability_used",
+      "feedback",
+      "learning"
+    ],
+    "historical_implementation": "analysis_2026Sep/Sep20_V3/mem/annotation_population/source_selection_final/scripts/plot_paper_source_selection_figures.py",
+    "input_profile": "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/primary_runtime_valid/profiles.csv",
+    "labels": [
+      "History",
+      "Value",
+      "Probability",
+      "Feedback",
+      "Learning"
+    ],
+    "png_dpi": 300,
+    "scale": [
+      0,
+      1
+    ]
+  },
+  "primary_run_unchanged": true
+}

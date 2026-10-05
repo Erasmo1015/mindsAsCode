@@ -70,6 +70,8 @@ def discover_participant_ledger(
 
     Incomplete datasets raise. This function does not write a MEM dataset.
     """
+    from utils.mem.pics_v4_frozen import check_frozen
+    check_frozen()
     assert_final_job_mapping(jobs)
     if list(jobs) != list(AUTHORITATIVE_JOBS):
         raise PicsV4ParticipantIncomplete(

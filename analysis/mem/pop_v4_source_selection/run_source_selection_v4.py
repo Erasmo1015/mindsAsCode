@@ -411,8 +411,11 @@ def build_analysis_panel(
 
 def fit_occurrence_eb(
     panel: pd.DataFrame,
+    *,
+    motifs: Optional[Sequence[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """Jeffreys-smoothed MoM EB shrink; signature = invlogit(α + b_d)."""
+    motifs = tuple(MOTIFS if motifs is None else motifs)
     datasets = sorted(panel["dataset"].unique().tolist())
     model_rows: List[Dict[str, Any]] = []
     eb_rows: List[Dict[str, Any]] = []
@@ -422,7 +425,7 @@ def fit_occurrence_eb(
     by_ds = {ds: panel[panel["dataset"] == ds] for ds in datasets}
     n_by_ds = {ds: int(len(g)) for ds, g in by_ds.items()}
 
-    for motif in MOTIFS:
+    for motif in motifs:
         k_total = 0
         n_total = 0
         ds_stats: List[Dict[str, Any]] = []
@@ -522,10 +525,10 @@ def fit_occurrence_eb(
 
     # Signature matrix: datasets × motifs = eb_prob
     sig_pivot = eb_df.pivot(index="dataset", columns="motif", values="eb_prob")
-    sig_pivot = sig_pivot.reindex(index=datasets, columns=list(MOTIFS))
+    sig_pivot = sig_pivot.reindex(index=datasets, columns=list(motifs))
     for ds in datasets:
         row = {"dataset": ds, "dataset_label": DATASET_LABELS.get(ds, ds), "n_programs": n_by_ds[ds]}
-        for m in MOTIFS:
+        for m in motifs:
             row[m] = float(sig_pivot.loc[ds, m])
         sig_rows.append(row)
     sig_df = pd.DataFrame(sig_rows)
@@ -536,7 +539,7 @@ def fit_occurrence_eb(
         "smoothing": "Jeffreys p=(k+0.5)/(n+1); alpha=logit(overall Jeffreys)",
         "tau2": "MoM max(0, Var_d(logit_d) - mean sampling_var); sampling_var=1/(n p (1-p))",
         "signature": "invlogit(alpha + b_hat) per motif",
-        "motifs": list(MOTIFS),
+        "motifs": list(motifs),
         "n_datasets": len(datasets),
         "peeked_transfer": False,
     }

@@ -1,0 +1,21 @@
+{
+  "input_hashes": {
+    "analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/population_master.csv": "14ff5ac5eb24d1c771d6f52a961326e9a0dc50789fc30ab01012fa316e1a557a",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_badham_312024_20261005/annotations_population_v5.jsonl": "9d47044888786c47b81f2d2e83760a82eec8b8e4c4a69d407c920df006e63952",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_enkavi_311666_20261005/annotations_population_v5.jsonl": "07b612235a16064224129e813a863488ea92e38f15db41f65fff5f3c0539128b",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_kool_retry_311935_20261004/annotations_population_v5.jsonl": "37f6f62d12e2333956417b5ed1dc894622e0855a57c5c3e4de008cb2c887a9d9",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack1/annotations_population_v5.jsonl": "2c1d1f91fae649c7e92a252a9aed9c5bf4ee5f834e61fb50f637e1af3cd053cc",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack2_312023_20261004/annotations_population_v5.jsonl": "de25c74006a53c66ee7ab347aaa7b8f2dabf09c59dd7c23039cb9dee199ed8a3",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack3/annotations_population_v5.jsonl": "192559caf1a9a26e84e730bf5e4a725d05c0b0de87fa8c996876d621ea165c7a",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack4/annotation_failures.jsonl": "a764d8bf6e93f4518422371355bb170dda1a4389242b0edb9daf1adc85ca816b",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack4/annotations_population_v5.jsonl": "67735d68f0af9da38474ad76a496c9604eb4df6407f9909dafb1bce4e072ebb6",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack5_312024_20261004/annotations_population_v5.jsonl": "2cbe7e2589db2f8750623ec0963e1dd385b9ac702303bba6f32064035afcc96b",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack7/annotations_population_v5.jsonl": "99e2c046c05ff55ccbc83dc42fc522c5d29925deb0f37a8daa5385e24e31dacc",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_pack8/annotations_population_v5.jsonl": "61cf9e4f11962568506e91405692a20d0b1388f834189238d183fb1ff8835eb0",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_peterson_311672_20261004/annotations_population_v5.jsonl": "fb294cc9658fdfc63f78181896b37acca5ed49042e350fedbdc351ed39834b14",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_schulz_311673_20261004/annotations_population_v5.jsonl": "9fbe6f7dcfbd3f1387250668e07efc0d512c990344d8ecccf9fcb4bafe46955f",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/annotations/pics_v4_popann_steyvers_311671_20261005/annotations_population_v5.jsonl": "3f636321445bdf8608c436327e69f528f19478f71420f8523dab259b2c47730c",
+    "analysis_2026Sep/Sep30_pics_v4/mem/population_final/program_manifest.json": "d5f230dd1a226dbf7b0122b6fbe26e3a9c4d99c008a2b6a35b2cbd347d11f56f"
+  },
+  "specification": "pics_v4_uniform_v8_mem_frozen_20261005"
+}

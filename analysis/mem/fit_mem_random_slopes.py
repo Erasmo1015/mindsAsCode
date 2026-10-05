@@ -490,6 +490,8 @@ def main() -> None:
     args = parser.parse_args()
 
     df = pd.read_csv(args.input_csv)
+    from utils.mem.pics_v4_frozen import guard_participant_frame
+    guard_participant_frame(df, fitting=True)
     if "reference_type" not in df.columns and "reference_kind" in df.columns:
         df["reference_type"] = df["reference_kind"]
 

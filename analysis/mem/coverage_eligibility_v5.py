@@ -119,6 +119,8 @@ def main() -> None:
     args = parser.parse_args()
 
     df = pd.read_csv(args.input_csv)
+    from utils.mem.pics_v4_frozen import guard_participant_frame
+    guard_participant_frame(df, fitting=False)
     if args.phase:
         if "phase" not in df.columns:
             raise SystemExit("--phase set but CSV has no phase column")

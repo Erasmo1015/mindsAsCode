@@ -1,0 +1,174 @@
+{
+  "additional_prompt_policy": "uniform_additional_prompt_v8",
+  "additional_prompt_sha256": "9663c810440fcb295bcf046afea31ca3f527e310c5afe61d66264943afb1470b",
+  "code_hashes": {
+    "analysis/mem/annotate_edits.py": "0df96008df447bac29956a344c1cdc6007faf1e1338fd9c8e5867d53dccc0a6c",
+    "analysis/mem/annotate_population_programs.py": "6a8502df059f1780006817e184ffc46f64b98d9c3a2d73b4ad2636aa78908b74",
+    "analysis/mem/build_dataset.py": "15a93b21291de68be0ba4a197a4b886d0bf1eea91de5303e9ffc3ef65e5e2ed6",
+    "analysis/mem/coverage_eligibility_v5.py": "dc4ae3ef63c6544f5964ec8b28e2cc2aaa80bb2d401999a703776e3d735f40b7",
+    "analysis/mem/fit_mem_joint_random_slopes.py": "8096c0e90d17affdc5933670020fe3d3f74d42fc893eecb4ea701c6b44339beb",
+    "analysis/mem/fit_mem_random_slopes.py": "76f4db148e8b8142957fa5d4a5799bc517dbd11c8901f1e921968f2df70fc77a",
+    "analysis/mem/mem_grouping.py": "7d8e4f8d3400270a99bd38b2873860221bda1eb6dba32c4234cecd2f02be6cea",
+    "analysis/mem/pics_v4_participant_discovery.py": "495798b12a18448e68ab0cbfbd3907af8fb0c0be0cdd94a13dfcc11eb427efaa",
+    "analysis/mem/pics_v4_population_annotation.py": "6f169226fa1f9c2ed85c374c2ad18d185f309d05c6fbd963512641b658c66799",
+    "analysis/mem/pics_v4_population_table.py": "dfc80c3db1fbfd9f09df5caed30a9aaf6ab66df054773cca6a82659c202d26c7",
+    "analysis/mem/pics_v4_source_profiles.py": "79d95a800a2583d21a9d3ed0f16b0e2395b4d8e95d7de5ce52e55d28990925a3",
+    "analysis/mem/pop_v4_source_selection/run_source_selection_v4.py": "73ed7d4f5ff8a4f4002091b60e184a787c7e625c6b4fcca9e47e063b8f1e2427",
+    "utils/mem/participant_semantic_postprocess_v5.py": "483aedcf554398feecdccf8d2362502419d35f3bb763210387f2d75c40388be4",
+    "utils/mem/pics_v4_participant_join.py": "3e0bbaa3c03cdd9e3539b8f19ed64b05dd3ca6cb852014c8419450a4150194a5",
+    "utils/mem/pics_v4_uniform_v8_reference.py": "6b7bdc569a6cc70b3e9a2c999669600fdac3c44ba0d39e4d7f9ae2c48a5221fc",
+    "utils/mem/population_transition_finalize_v5.py": "f065984299e6d86188a227a268c2081e5e68cdc9f2d6d6c52f98b471e7b7f295",
+    "utils/mem/schema_participant_transition_v5.py": "a192049eb30913f67c82fd125d958aa8757c25e9279267e5c4b6b24fa692571c",
+    "utils/mem/schema_population_motif_v5.py": "a70cd5efc36963d88887973b3ef4a4090664d7518df8831244563bc5aacc7a17"
+  },
+  "constructs": [
+    "history",
+    "value",
+    "probability_used",
+    "feedback",
+    "learning"
+  ],
+  "official_jobs": {
+    "311666": [
+      "guan_2020_stopping",
+      "11enkavi2019recentprobes"
+    ],
+    "311668": [
+      "3frey2017cct"
+    ],
+    "311669": [
+      "2plonsky2018when"
+    ],
+    "311671": [
+      "14kool2016when",
+      "steyvers_2009_bandit"
+    ],
+    "311672": [
+      "10frey2017risk",
+      "1peterson2021using"
+    ],
+    "311673": [
+      "mixed_gambles",
+      "13schulz2020finding"
+    ],
+    "312023": [
+      "bergert_nosofsky_2007",
+      "5speekenbrink2008learning"
+    ],
+    "312024": [
+      "4wulff2018description",
+      "7hilbig2014generalized",
+      "12badham2017deficits"
+    ]
+  },
+  "paper_labels": [
+    "History",
+    "Value",
+    "Probability",
+    "Feedback",
+    "Learning"
+  ],
+  "participant": {
+    "BH": "diagnostic_only",
+    "delta_tolerance": {
+      "atol": 1e-06,
+      "rtol": 1e-06
+    },
+    "focal_eligibility": "restrict",
+    "focal_estimator": "statsmodels MixedLM REML lbfgs maxiter=200",
+    "focal_family": null,
+    "focal_formula": "delta_f ~ focal [+ iteration if variable] + (1 + focal | group)",
+    "gate": "all_15_selected_stages_and_traces_complete",
+    "group": "dataset::run_id::participant_id",
+    "historical_focal_list": "refused",
+    "identity_policy": "pics_v4_uniform_v8_transition_sha256_v1",
+    "invalid_runtime_and_nonfinite_delta": "eligibility_exclusions",
+    "join_policy": "one_to_one_full_canonical_SHA_identity_fail_closed",
+    "joint_audit": {
+      "event_rate_max": 0.99,
+      "event_rate_min": 0.01,
+      "full_rank": true,
+      "minimum_datasets": 3,
+      "minimum_rows": 100
+    },
+    "joint_policy": "explicit_effects_intersection_eligibility_restrict_same_construct_add_modify_refused_by_default",
+    "primary_correction": "Holm_once_across_final_coverage_supported_three_slice_family",
+    "reference_policy": "pics_v4_uniform_v8",
+    "slices": [
+      [
+        "explore",
+        "explore"
+      ],
+      [
+        "evolution",
+        "normal"
+      ],
+      [
+        "evolution",
+        "fresh"
+      ]
+    ],
+    "support": {
+      "minimum_positive_groups": 2,
+      "minimum_positive_rows": 5,
+      "within_participant_variation": true
+    },
+    "unresolved_semantic": "exclude_from_construct_fits_keep_coverage"
+  },
+  "population": {
+    "annotation_shards": [
+      "pics_v4_popann_pack1",
+      "pics_v4_popann_enkavi_311666_20261005",
+      "pics_v4_popann_pack2_312023_20261004",
+      "pics_v4_popann_pack3",
+      "pics_v4_popann_pack4",
+      "pics_v4_popann_pack5_312024_20261004",
+      "pics_v4_popann_badham_312024_20261005",
+      "pics_v4_popann_kool_retry_311935_20261004",
+      "pics_v4_popann_steyvers_311671_20261005",
+      "pics_v4_popann_pack7",
+      "pics_v4_popann_peterson_311672_20261004",
+      "pics_v4_popann_pack8",
+      "pics_v4_popann_schulz_311673_20261004"
+    ],
+    "bootstrap": {
+      "B": 1000,
+      "historical_definition": "Sep20_V3/others/source_selection_schema_v5/run_occurrence_bootstrap.py",
+      "replicate_seed": "seed + b * 9973 (b=0..999)",
+      "resampling": "within_dataset_iteration_parent_id_clusters",
+      "seed": 20260920
+    },
+    "canonical_events": 1500,
+    "estimator": "existing_fit_occurrence_eb_explicit_five_constructs",
+    "events_per_dataset": 100,
+    "failures": "retain_master_exclude_profiles_explicit_reason",
+    "historical_loio": "drop_each_iteration_globally_then_refit_all_profiles",
+    "interpretation": "post_hoc_not_input_to_target_only_experiments",
+    "iterations": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "join_sha_duplicate_policy": "fail_closed",
+    "leave_one_dataset_out": "blocked_no_existing_held_out_dataset_profile_definition",
+    "primary_denominator": "runtime_valid_successfully_annotated_semantically_resolved",
+    "repeated_source_sha": "separate_events",
+    "selection": "maximum_cosine_self_excluded_exact_tie_lex_canonical_dataset_id",
+    "sensitivity_denominator": "all_generated_successfully_annotated_semantically_resolved",
+    "source_allowlist": "all_15_complete_profiles",
+    "test_and_fitness_scores": "never_used",
+    "unstable": "bootstrap_original_frequency < .70 OR margin < .02 OR historical_iteration_LOIO_flip"
+  },
+  "resume_executions": {
+    "311666": "312215",
+    "311671": "312213"
+  },
+  "specification": "pics_v4_uniform_v8_mem_frozen_20261005"
+}

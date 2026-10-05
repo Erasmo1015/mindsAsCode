@@ -855,6 +855,8 @@ def main() -> None:
     eligibility_mode = str(args.eligibility_mode)
 
     df = pd.read_csv(args.input_csv)
+    from utils.mem.pics_v4_frozen import guard_participant_frame
+    guard_participant_frame(df, fitting=True)
     eligibility_report: Optional[Dict[str, Any]] = None
 
     # Apply phase filter before eligibility so risk-set counts match the analysis frame.
