@@ -597,7 +597,17 @@ def resolve_aamas_v0_source_program(
     """
     from utils.teh.pics_v4 import using_pics_v4
     if using_pics_v4():
-        from utils.teh.pics_v4_transfer import resolve_source
+        from utils.teh.pics_v4_transfer import official_inputs, resolve_source
+        import os
+        override = os.environ.get("PICS_V4_ABLATION_SOURCE_RANK1", "").strip()
+        if override:
+            sources, _artifacts = official_inputs(config_path)
+            if sources[target_dataset] != source_dataset:
+                raise RuntimeError("PICS v4 selected source mismatch")
+            path = Path(override)
+            if not path.is_file():
+                raise FileNotFoundError(f"ablation source rank-1 missing: {path}")
+            return path
         if psych_split != 'train' or job_id or job_manifest:
             raise RuntimeError('PICS v4 source-bank overrides are forbidden')
         record = resolve_source(target_dataset, config_path=config_path)

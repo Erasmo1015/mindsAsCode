@@ -1,3 +1,5 @@
+- Oct7 rest5 annotation ledger: `analysis_2026Sep/Codex/Oct6/others/selected_participant_provenance/selected_track_ledger_rest5.json` SHA `d51410e144ab479110ad83ff469396d54d1b57497db8ef98b1c77309699bebe2` (Choice13k transfer job_314222; Hilbig/Badham target job_312024; Steyvers target job_311671; Schulz target job_311673). 14:02 ten-dataset ledger unchanged.
+
 Local vLLM mode
 
 - Sep25 generalization audit (CPU-only): `analysis_2026Sep/Sep20_V3/others/ablation_result_Sep25/main_ablation/generalization_audit/` (plan+CSVs+FINAL_SYNTHESIS; no method/GPU changes).
@@ -785,6 +787,7 @@ Jobs 303832/833/834 complete (6/6×3). Results: `analysis_2026Sep/Sep20_V3/other
 - Oct2 Badham participant v2-prefix vs matched one-line (jobs 310785/310805 v2, 310786/310806 one-line; participants 0–2, vs 306103): `analysis_2026Sep/Sep30_pics_v4/participant_v2_long_trial_ablation/REPORT.md`.
 - Oct1 deterministic root-cause audit (310098 vs 305709, 310097 vs 305708): `analysis_2026Sep/Sep30_pics_v4/live_result_audit/deterministic_root_cause/REPORT.md`.
 - Oct1 read-only uniform-prompt duplication and coverage audit: `analysis_2026Sep/Sep30_pics_v4/REMINDER_DUPLICATION_AUDIT.md`.
+- Oct6 PICS-v4 A–E ablation adapter (KINDs `pics_v4_ablation_{no_transfer,no_population,no_explore,no_fresh,no_uniform_prompt}`; dry-run only): `cluster/v0/ours/main/pics_v4/ablation/submit_ablations.sh`.
 
 ---
 

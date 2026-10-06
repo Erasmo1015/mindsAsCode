@@ -273,7 +273,7 @@ def _rewrite_pics_v4_probability_instructions(text: str) -> str:
 
 
 def apply_pics_v4_prompt_body(text: str) -> str:
-    """Append the unchanged objective and the uniform block. Dataset is ignored."""
+    """Append the unchanged objective and, unless ablation E is bound, the uniform block."""
     body = text or ""
     for marker in (
         HISTORY_ROBUSTNESS_MARKER,
@@ -287,15 +287,12 @@ def apply_pics_v4_prompt_body(text: str) -> str:
     ):
         body = _strip_tagged_block(body, marker)
     body = _rewrite_pics_v4_probability_instructions(body)
-    block = uniform_additional_prompt_text()
-    return (
-        body.rstrip()
-        + "\n\n"
-        + BEHAVIOR_OBJECTIVE_BLOCK
-        + "\n\n"
-        + block
-        + "\n"
-    )
+    from utils.teh.pics_v4_ablation import omit_uniform_block
+
+    parts = [body.rstrip(), "", "", BEHAVIOR_OBJECTIVE_BLOCK]
+    if not omit_uniform_block():
+        parts.extend(["", "", uniform_additional_prompt_text()])
+    return "\n".join(parts) + "\n"
 
 
 def dataset_names_in_uniform_block() -> list[str]:
@@ -325,7 +322,10 @@ def assert_pics_v4_output(path: Path) -> None:
     text = str(Path(path))
     from utils.teh.pics_v4_transfer import KINDS, current_identity
     identity = current_identity()
-    expected_kind = identity['kind'] if identity else KIND_TARGET_ONLY
+    from utils.teh.pics_v4_ablation import current_ablation
+
+    ablation = current_ablation()
+    expected_kind = ablation["kind"] if ablation else (identity["kind"] if identity else KIND_TARGET_ONLY)
     if identity:
         text = str(Path(path).resolve())
     if identity and f"/{identity['target']}/{expected_kind}/" not in text:
@@ -370,12 +370,15 @@ def pics_v4_marker_payload() -> dict[str, Any]:
         SLOT_ASSIGNMENT_POLICY_ID,
     )
 
+    from utils.teh.pics_v4_ablation import OMITTED_UNIFORM_POLICY, current_ablation, omit_uniform_block
+
+    omitted = omit_uniform_block()
     payload: dict[str, Any] = {
         "method_version": METHOD_VERSION,
         "trial_prompt_policy": PICS_V4_TRIAL_POLICY,
         "prompt_policy": PICS_V4_TRIAL_POLICY,
-        "additional_prompt_policy": ADDITIONAL_PROMPT_POLICY_ID,
-        "additional_prompt_sha256": uniform_additional_prompt_sha256(),
+        "additional_prompt_policy": OMITTED_UNIFORM_POLICY if omitted else ADDITIONAL_PROMPT_POLICY_ID,
+        "additional_prompt_sha256": hashlib.sha256(b"").hexdigest() if omitted else uniform_additional_prompt_sha256(),
         "hard_prompt_token_cap": HARD_PROMPT_TOKEN_CAP,
         "packing_implementation": PACKING_IMPLEMENTATION_ID,
         "panel_policy": PANEL_POLICY_ID,
@@ -387,6 +390,10 @@ def pics_v4_marker_payload() -> dict[str, Any]:
         "pics_run_seed_scope": PICS_RUN_SEED_SCOPE,
         **_elite_policy_fields(),
     }
+    ablation = current_ablation()
+    if ablation is not None:
+        payload["ablation_id"] = ablation["id"]
+        payload["ablation_kind"] = ablation["kind"]
     run_seed = pics_run_seed()
     split_seed = pics_recorded_split_seed()
     if run_seed is not None:
@@ -470,7 +477,16 @@ def assert_pics_v4_resume(output_dir: Any, *, expected_identity=None) -> None:
         )
     found_policy = str(payload.get("additional_prompt_policy") or "")
     found = str(payload.get("additional_prompt_sha256") or "")
-    if (
+    from utils.teh.pics_v4_ablation import OMITTED_UNIFORM_POLICY
+
+    if found_policy == OMITTED_UNIFORM_POLICY:
+        if str(payload.get("ablation_id") or "") != "E":
+            raise RuntimeError(
+                f"Refusing to resume {root}: omitted uniform block requires ablation_id E."
+            )
+        if found != hashlib.sha256(b"").hexdigest():
+            raise RuntimeError(f"Refusing to resume {root}: omitted-uniform hash {found}.")
+    elif (
         found_policy in REFUSED_ADDITIONAL_PROMPT_POLICY_IDS
         or found in REFUSED_UNIFORM_PROMPT_SHA256
     ):
@@ -478,16 +494,17 @@ def assert_pics_v4_resume(output_dir: Any, *, expected_identity=None) -> None:
             f"Refusing to resume {root}: previous uniform prompt "
             f"{found_policy} {found}."
         )
-    if found_policy != ADDITIONAL_PROMPT_POLICY_ID:
-        raise RuntimeError(
-            f"Refusing to resume {root}: additional prompt policy is "
-            f"{found_policy!r}, not {ADDITIONAL_PROMPT_POLICY_ID}."
-        )
-    expected = uniform_additional_prompt_sha256()
-    if found != expected:
-        raise RuntimeError(
-            f"Refusing to resume {root}: uniform prompt hash {found} != {expected}."
-        )
+    if found_policy != OMITTED_UNIFORM_POLICY:
+        if found_policy != ADDITIONAL_PROMPT_POLICY_ID:
+            raise RuntimeError(
+                f"Refusing to resume {root}: additional prompt policy is "
+                f"{found_policy!r}, not {ADDITIONAL_PROMPT_POLICY_ID}."
+            )
+        expected = uniform_additional_prompt_sha256()
+        if found != expected:
+            raise RuntimeError(
+                f"Refusing to resume {root}: uniform prompt hash {found} != {expected}."
+            )
     found_cap = payload.get("hard_prompt_token_cap")
     if int(found_cap or 0) != HARD_PROMPT_TOKEN_CAP:
         raise RuntimeError(

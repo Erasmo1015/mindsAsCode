@@ -3511,7 +3511,12 @@ def run_global_evolution_phase(
         pool_size = len(elite_parents)
         sampled_parent_ids: List[str] = []
         sampled_parent_shas: List[str] = []
-        if sample_parents and pool_size > 0:
+        from utils.teh.pics_v4_ablation import iteration_controls
+
+        _use_sample_parents, _ = iteration_controls(
+            iteration_step, sample_parents=sample_parents, fresh_n=0
+        )
+        if _use_sample_parents and pool_size > 0:
             rng = np.random.default_rng(
                 _aamas_or_legacy_seed(
                     int(split_seed) + 50_000 + int(iteration_step) * 1_000_003,
@@ -3615,6 +3620,13 @@ def run_global_evolution_phase(
         gen_debug: Dict[str, Any] = {}
         fresh_n = _decayed_fresh_n_for_iteration(
             fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
+        )
+        _, fresh_n = iteration_controls(
+            iteration_step,
+            sample_parents=sample_parents,
+            fresh_n=fresh_n,
+            fresh_n_max=fresh_n_candidates,
+            n_candidates=n_candidates_per_iteration,
         )
         n_normal = n_candidates_per_iteration - fresh_n
         print(
@@ -13812,9 +13824,19 @@ def run_evolution(
             f"(trial-weighted train+val loglik for pool ranking)"
         )
 
+    from utils.teh.pics_v4_ablation import evolution_resume_index as _ablation_resume_index
+
+    _resume_at = _ablation_resume_index(output_path, n_iterations) if output_path is not None else 0
+    if _resume_at:
+        elite_parents, elite_val_logliks = _load_evolution_elite_pool(
+            Path(output_path) / "evolution_elite_pool",
+            split_ratio=split_ratio,
+            evolution_selection_score=evolution_selection_score,
+        )
     participant_pinned_ids: List[str] = []
     if (
-        int(explore_candidates) > 0
+        _resume_at == 0
+        and int(explore_candidates) > 0
         and run_phase in ("all", "evolution")
     ):
         initial_pool_size_before_explore = len(elite_parents)
@@ -13934,7 +13956,7 @@ def run_evolution(
     if choice13k_simple_logging and is_binary_loglik_dataset(dataset) and save_artifacts:
         simple_iterations_dir = output_path / "iterations"
         simple_iterations_dir.mkdir(parents=True, exist_ok=True)
-    for iteration in range(n_iterations):
+    for iteration in range(_resume_at, n_iterations):
         iteration_step = iteration + 1  # 1-indexed to match wandb (0 = baseline)
         iter_best_selection_score: Optional[float] = None
         elite_dedup_stats: Optional[Dict[str, Any]] = None
@@ -13955,7 +13977,12 @@ def run_evolution(
         # Select sample_size parents: uniform sample from elite pool, or top by fitness
         # (from the trimmed elite pool; see _elite_pool_capacity / elite_pool_size).
         pool_size = len(elite_parents)
-        if sample_parents and pool_size > 0:
+        from utils.teh.pics_v4_ablation import iteration_controls as _person_controls
+
+        _use_sample_parents, _ = _person_controls(
+            iteration_step, sample_parents=sample_parents, fresh_n=0
+        )
+        if _use_sample_parents and pool_size > 0:
             pid_key = int(participant_id) if participant_id is not None else 0
             rng = np.random.default_rng(
                 _aamas_or_legacy_seed(
@@ -14120,6 +14147,13 @@ def run_evolution(
         gen_debug: Dict[str, Any] = {}
         fresh_n = _decayed_fresh_n_for_iteration(
             fresh_n_candidates, iteration, n_iterations, n_candidates_per_iteration
+        )
+        _, fresh_n = _person_controls(
+            iteration_step,
+            sample_parents=sample_parents,
+            fresh_n=fresh_n,
+            fresh_n_max=fresh_n_candidates,
+            n_candidates=n_candidates_per_iteration,
         )
         n_normal = n_candidates_per_iteration - fresh_n
         print(
@@ -17037,6 +17071,32 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pics_v4_ablation",
+        choices=["A", "B", "C", "D", "E"],
+        default=None,
+        help=(
+            "Frozen PICS v4 ablation. A no-transfer, B no-population, C no-explore, "
+            "D no-fresh, E no uniform block. Default off; main jobs omit this flag."
+        ),
+    )
+    parser.add_argument(
+        "--pics_v4_compensation_from_iteration",
+        type=int,
+        default=None,
+        help="1-based iteration at which fresh candidates and random parent sampling stop.",
+    )
+    parser.add_argument(
+        "--pics_v4_ablation_source_rank1",
+        default=None,
+        help="Ablation D/E: rank-1 from the rerun source population. Does not change source selection.",
+    )
+    parser.add_argument(
+        "--pics_v4_omit_uniform_block",
+        action="store_true",
+        default=False,
+        help="Ablation E: drop only the uniform additional-prompt block.",
+    )
+    parser.add_argument(
         "--pics_v4",
         action="store_true",
         default=False,
@@ -17671,6 +17731,11 @@ def main():
         configure_pics_v3_legacy_generic_reminder,
     )
 
+    from utils.teh.pics_v4_ablation import bind as bind_pics_v4_ablation
+
+    bind_pics_v4_ablation(args)
+    if getattr(args, "pics_v4_ablation_source_rank1", None):
+        os.environ["PICS_V4_ABLATION_SOURCE_RANK1"] = str(args.pics_v4_ablation_source_rank1)
     configure_pics_v3_legacy_generic_reminder(
         bool(getattr(args, "pics_v3_legacy_generic_reminder", False))
     )
@@ -17717,7 +17782,7 @@ def main():
 
         set_pics_run_seeds(run_seed=int(args.pics_run_seed), split_seed=int(args.split_seed))
     bank_only = bool(getattr(args, "pics_aamas_v0_population_bank_only", False))
-    if pics_v4_on and bank_only:
+    if pics_v4_on and bank_only and getattr(args, "pics_v4_ablation", None) not in {"D", "E"}:
         print(
             "Error: --pics_v4 runs the complete target-only pipeline and refuses "
             "--pics_aamas_v0_population_bank_only."
@@ -17819,12 +17884,13 @@ def main():
         )
         return
     expected_person_iters = int(os.environ.get("AAMAS_PERSON_ITERS") or 10)
+    ablation_schedule = bool(getattr(args, "pics_v4_ablation", None))
     if aamas_v0_mode and (
         int(args.global_iters) != 10
         or int(args.n_candidates) != 10
-        or int(args.fresh_n_candidates) != 10
+        or (not ablation_schedule and int(args.fresh_n_candidates) != 10)
         or (not bank_only and int(args.n_iterations) != expected_person_iters)
-        or (not bank_only and int(args.explore_candidates) != 50)
+        or (not bank_only and not ablation_schedule and int(args.explore_candidates) != 50)
         or int(args.max_error_prompt_chars) != 0
         or args.refinement_phase
         or str(args.evolution_selection_score) != "train_val"
@@ -18058,7 +18124,7 @@ def main():
                 for err in errors:
                     print(f"  - {err}")
                 return
-            if pics_v4_on:
+            if pics_v4_on and not getattr(args, "pics_v4_ablation", None):
                 from utils.teh.pics_v4_dry_run import verify_report
                 certificate = _REPO_ROOT / 'analysis_2026Sep/Codex/Oct5/others/three_mode_implementation/validation_v1' / aamas_v0_mode / 'PREFLIGHT.json'
                 verify_report(certificate, mode=aamas_v0_mode, target=str(args.dataset))
