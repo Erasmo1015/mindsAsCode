@@ -221,7 +221,8 @@ def prepare_identity(args, *, suffix: str, observed_trials=None) -> dict:
         if getattr(args, field, prov[field]) != prov[field]:
             raise RuntimeError(f'PICS v4 frozen target participant range mismatch: {field}')
     train, val = observed_trials if observed_trials is not None else observed_cohort(target, prov['participant_ids'], local_dataset=getattr(args, 'local_dataset', None))
-    seed_path = REPO / 'persona_code_example/te_vanilla/choices13k.py'
+    from utils.teh.t_pics_gated_transfer import default_seed_path
+    seed_path = REPO / default_seed_path(target)
     if getattr(args, 'seed_path', None) and sha(Path(args.seed_path)) != sha(seed_path):
         raise RuntimeError('PICS v4 neutral seed override forbidden')
     identity = {

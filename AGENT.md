@@ -819,3 +819,5 @@ AAMAS v0 MEM discovery/provenance adapter: `analysis/mem/aamas_v0_mem.py`. Audit
 - Sep30 Centaur multi-action audit (read-only): `analysis_2026Sep/Sep27_aamas_v0/others/centaur_multiaction_audit/REPORT.md`.
 - Sep30 optional Centaur `one_call` readout (not official token NLL): `analysis_2026Sep/Sep27_aamas_v0/others/centaur_multiaction_audit/one_call/REPORT.md`.
 - Oct4 AAMAS method finalized: target-only `pics_v4` / `uniform_additional_prompt_v8`, jobs 311666–311673. `analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md`.
+- Oct6 per-dataset transfer map: Kool 314252 reuses `job_313163`; Choice13k 314222 reuses `job_313164`; Hilbig/Badham 314253 and Schulz 314254 are new. `analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md`.
+- Oct6 records: population job 312849 completed Bergert and Speekenbrink 100/100. Ten-dataset participant certificate is unchanged. `analysis_2026Sep/Sep30_pics_v4/mem/population_final/ANNOTATION_JOBS.md`.
