@@ -20543,6 +20543,26 @@ def main():
                 )
                 if hasattr(wandb, "publish_final"):
                     wandb.publish_final()
+            elif getattr(args, "pics_v4_ablation", None) == "B":
+                # No-population B stores participants directly in base_run_dir.
+                # Keep gated/main-method completion behavior unchanged.
+                ids = [int(p) for p in participants_to_process]
+                if not selected_stage_is_complete(
+                    Path(base_run_dir), ids,
+                    expected_n_iterations=int(args.n_iterations),
+                    expected_explore_candidates=int(args.explore_candidates),
+                ):
+                    raise RuntimeError("ablation B participant stage is incomplete")
+                (Path(base_run_dir) / "STAGE_COMPLETE.json").write_text(
+                    json.dumps({
+                        "ablation": "B",
+                        "stage": "participants",
+                        "n_iterations": int(args.n_iterations),
+                        "explore_candidates": int(args.explore_candidates),
+                        "participant_ids": ids,
+                    }, indent=2) + "\n",
+                    encoding="utf-8",
+                )
         finally:
             if wandb is not None:
                 if t_pics_gated:
