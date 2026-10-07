@@ -52,12 +52,13 @@ def target_run(target: str) -> Path:
     return REPO / f'generated_outputs/psych101_train/teh/{target}/pics_v4_target_only/job_{artifacts["target_jobs"][target]}'
 
 
-def verify_completed(arm: Path, *, target: str, kind: str) -> dict:
+def verify_completed(arm: Path, *, target: str, kind: str, allow_kind_relocation: bool = False) -> dict:
     """Require completion, live evaluated bytes and rank-0 agreement before use."""
     from utils.teh.pics_v4 import assert_pics_v4_resume
     root = arm.parent.parent
     if f'/{target}/{kind}/' not in str(root):
-        raise RuntimeError('population target/KIND path mismatch')
+        if not (allow_kind_relocation and f'/{target}/' in str(root)):
+            raise RuntimeError('population target/KIND path mismatch')
     expected = current_identity()
     if kind == KINDS['target_only']:
         # Frozen target-only records predate transfer identity. Validate their
@@ -69,16 +70,21 @@ def verify_completed(arm: Path, *, target: str, kind: str) -> dict:
         finally:
             configure_identity(saved, saved_suffix)
     else:
-        if expected is None:
+        if expected is None and not allow_kind_relocation:
             raise RuntimeError('missing expected transfer identity')
-        mode = next(m for m, k in KINDS.items() if k == kind)
-        assert_pics_v4_resume(root, expected_identity=dict(expected, mode=mode, kind=kind))
+        if expected is not None:
+            mode = next(m for m, k in KINDS.items() if k == kind)
+            assert_pics_v4_resume(root, expected_identity=dict(expected, mode=mode, kind=kind))
     prov, complete = read(arm / 'POPULATION_PROVENANCE.json'), read(arm / 'STAGE_COMPLETE.json')
     for field, expected in (('dataset', target), ('kind', kind), ('runtime_valid', True), ('global_iters', 10), ('n_candidates', 10)):
         if prov.get(field) != expected or complete.get(field) != expected:
             raise RuntimeError(f'population completion mismatch: {field}')
     best = arm / 'global_phase/best_program.py'
-    if Path(prov['rank1_program']).resolve() != best.resolve() or Path(complete['rank1_program']).resolve() != best.resolve():
+    recorded_rank1 = Path(prov['rank1_program']).resolve()
+    if allow_kind_relocation:
+        if recorded_rank1 != Path(complete['rank1_program']).resolve() or sha(recorded_rank1) != prov['rank1_sha256']:
+            raise RuntimeError('population rank-1 path mismatch')
+    elif recorded_rank1 != best.resolve() or Path(complete['rank1_program']).resolve() != best.resolve():
         raise RuntimeError('population rank-1 path mismatch')
     if sha(best) != prov['rank1_sha256'] or sha(best) != complete['rank1_sha256']:
         raise RuntimeError('population live rank-1 SHA mismatch')
@@ -98,9 +104,14 @@ def verify_completed(arm: Path, *, target: str, kind: str) -> dict:
     if kind != KINDS['target_only']:
         expected = current_identity()
         mode = next(m for m, k in KINDS.items() if k == kind)
-        expected = dict(expected, mode=mode, kind=kind)
-        assert_identity(prov.get('run_identity'), expected)
-        assert_identity(complete.get('run_identity'), expected)
+        if expected is None:
+            if prov.get('run_identity') != complete.get('run_identity') or not prov.get('run_identity'):
+                raise RuntimeError('missing expected transfer identity')
+            expected = prov['run_identity']
+        else:
+            expected = dict(expected, mode=mode, kind=kind)
+            assert_identity(prov.get('run_identity'), expected)
+            assert_identity(complete.get('run_identity'), expected)
         for field, value in expected['policies'].items():
             if prov.get(field) != value:
                 raise RuntimeError(f'completed population method-policy mismatch: {field}')

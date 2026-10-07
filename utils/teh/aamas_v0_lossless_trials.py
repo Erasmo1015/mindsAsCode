@@ -909,7 +909,7 @@ def map_generation_phase(phase: str) -> str:
     return name
 
 
-def assert_legacy_output_not_resumed(output_dir: Any) -> None:
+def assert_legacy_output_not_resumed(output_dir: Any, *, ignore_dir: Any = None) -> None:
     """Fail closed when a directory already contains the legacy AAMAS prompt policy."""
     from pathlib import Path
 
@@ -939,8 +939,11 @@ def assert_legacy_output_not_resumed(output_dir: Any) -> None:
         _assert_recorded_seeds_match(root, payload)
         return
     legacy_names = ("STAGE_COMPLETE.json", "POPULATION_PROVENANCE.json", "prompt_stats.json")
+    ignored = Path(ignore_dir).resolve() if ignore_dir is not None else None
     for path in root.rglob("*"):
         if path.name not in legacy_names or not path.is_file():
+            continue
+        if ignored is not None and (path.resolve() == ignored or ignored in path.resolve().parents):
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

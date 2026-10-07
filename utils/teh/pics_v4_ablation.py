@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -283,6 +284,7 @@ def stage_dataset(dataset: str, ablation: str, dest: Path) -> dict:
             "fresh_n_candidates": SPECS[ablation]["fresh"],
             "omit_uniform": bool(SPECS[ablation].get("omit_uniform")),
             "reused": [],
+            "predecessor_job": os.environ.get("PICS_V4_PREDECESSOR_JOB") or None,
         }
         provenance_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         return record
@@ -304,6 +306,7 @@ def stage_dataset(dataset: str, ablation: str, dest: Path) -> dict:
         "compensation_from": spec["compensation_from"],
         "sample_size": 8,
         "reused": [],
+        "predecessor_job": os.environ.get("PICS_V4_PREDECESSOR_JOB") or None,
     }
     dest.mkdir(parents=True, exist_ok=True)
     if ablation == "A":

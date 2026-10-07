@@ -325,7 +325,14 @@ def assert_pics_v4_output(path: Path) -> None:
     from utils.teh.pics_v4_ablation import current_ablation
 
     ablation = current_ablation()
-    expected_kind = ablation["kind"] if ablation else (identity["kind"] if identity else KIND_TARGET_ONLY)
+    # Official reused populations stay under their original KIND. The ablation
+    # KIND applies only when this path is the ablation run being written.
+    ablation_output = bool(ablation and f"/{ablation['kind']}/" in f"{text}/")
+    expected_kind = (
+        ablation["kind"]
+        if ablation_output
+        else (identity["kind"] if identity else KIND_TARGET_ONLY)
+    )
     if identity:
         text = str(Path(path).resolve())
     if identity and f"/{identity['target']}/{expected_kind}/" not in text:
@@ -432,7 +439,27 @@ def assert_pics_v4_resume(output_dir: Any, *, expected_identity=None) -> None:
     path = root / "TRIAL_PROMPT_POLICY.json"
     if not path.is_file():
         from utils.teh.aamas_v0_lossless_trials import assert_legacy_output_not_resumed
+        from utils.teh.pics_v4_ablation import current_ablation
 
+        ablation = current_ablation()
+        reused = root / "target_population" / "transfer"
+        if (
+            ablation
+            and ablation.get("id") == "C"
+            and (reused / "STAGE_COMPLETE.json").is_file()
+            and (reused / "POPULATION_PROVENANCE.json").is_file()
+        ):
+            from utils.teh.pics_v4_transfer import verify_completed
+
+            prov = json.loads((reused / "POPULATION_PROVENANCE.json").read_text(encoding="utf-8"))
+            verify_completed(
+                reused,
+                target=str(prov["dataset"]),
+                kind=str(prov["kind"]),
+                allow_kind_relocation=True,
+            )
+            assert_legacy_output_not_resumed(root, ignore_dir=reused)
+            return
         assert_legacy_output_not_resumed(root)
         if expected is not None and root.exists() and any(p.name not in {'OUTPUT_DIR.txt', 'TRACK_STATUS.txt', 'INTENDED_ARGV.txt'} for p in root.iterdir()):
             raise RuntimeError('refusing unbound partial transfer/gate output')

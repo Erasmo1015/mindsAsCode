@@ -1,7 +1,7 @@
 """Focused checks for frozen PICS v4 A–E controls."""
 from types import SimpleNamespace
 
-from utils.teh.pics_v4 import BEHAVIOR_OBJECTIVE_BLOCK, apply_pics_v4_prompt_body
+from utils.teh.pics_v4 import BEHAVIOR_OBJECTIVE_BLOCK, apply_pics_v4_prompt_body, assert_pics_v4_output
 from utils.teh.pics_v4_ablation import SPECS, bind, iteration_controls, launch_readiness, packed_commands, plan_dataset
 
 
@@ -41,6 +41,15 @@ def test_unresolved_gate_is_reported():
     }
     assert "official_gate_unresolved" in plan_dataset(row, "D")["missing"]
     assert plan_dataset(row, "A")["track"] == "target_only"
+
+
+def test_c_kind_check_does_not_apply_to_official_inputs():
+    from pathlib import Path
+    bind(SimpleNamespace(pics_v4_ablation="C", pics_v4_omit_uniform_block=False,
+                         pics_v4_compensation_from_iteration=None))
+    assert_pics_v4_output(Path("/tmp/teh/3frey2017cct/pics_v4_target_only/job_311668"))
+    ablation_root = Path("/tmp/teh/guan_2020_stopping/pics_v4_ablation_no_explore/job_new")
+    assert_pics_v4_output(ablation_root)
 
 
 def test_launch_pack_is_three_transfer_datasets():

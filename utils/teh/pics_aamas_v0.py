@@ -318,7 +318,13 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def assert_aamas_track_output(path: Path, kind: str) -> None:
     text = str(Path(path).resolve())
-    if f"/{kind}/" not in text and not text.rstrip("/").endswith(f"/{kind}"):
+    from utils.teh.pics_v4_ablation import current_ablation
+
+    ablation = current_ablation()
+    output_kind = kind
+    if ablation and f"/{ablation['kind']}/" in text:
+        output_kind = ablation["kind"]
+    if f"/{output_kind}/" not in text and not text.rstrip("/").endswith(f"/{output_kind}"):
         raise RuntimeError(f"AAMAS v0 path is not under {kind}: {text}")
     for marker in _FORBIDDEN_PATH_MARKERS:
         if marker in text:

@@ -3464,6 +3464,24 @@ def run_global_evolution_phase(
             cap=int(HARD_PROMPT_TOKEN_CAP),
             prompt_suffix=prompt_suffix,
         )
+        if int(fresh_n_candidates) == 0:
+            # No-fresh iteration 1 has only the neutral-seed elite. Build the
+            # parent bank in memory before the first request; iteration 1 then
+            # writes the normal on-disk bank from the updated elite.
+            _ensure_pics_v4_population_parent_bank(
+                dataset=str(dataset),
+                trials=population_trials,
+                elite_parents=elite_parents,
+                sample_size=int(sample_size),
+                max_parent_chars=int(max_parent_chars),
+                n_slots=int(n_candidates_per_iteration),
+                run_prompts_dir=run_prompts_dir,
+                output_dir=None,
+                fitness_metric="loglik",
+                master_seed=int(run_seed),
+                cap=int(HARD_PROMPT_TOKEN_CAP),
+                prompt_suffix=prompt_suffix,
+            )
         parent_bank_path = evolution_bank_dir(global_dir) / bank_filename("population", "parent_conditioned")
         if save_artifacts and parent_bank_path.is_file():
             _ensure_pics_v4_population_parent_bank(
@@ -3966,6 +3984,12 @@ def run_global_evolution_phase(
             )
         )
         if _population_v4() and int(iteration_step) == 1:
+            if int(fresh_n_candidates) == 0:
+                from utils.teh.pics_v4_panels import _BANKS, panel_registry_key
+
+                _BANKS.get(panel_registry_key(str(dataset), "population", None), {}).pop(
+                    "parent_conditioned", None
+                )
             _ensure_pics_v4_population_parent_bank(
                 dataset=str(dataset),
                 trials=population_trials,
@@ -5053,7 +5077,8 @@ def _run_t_pics_gated_population_arms(
         gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
         if current_identity() is None and (not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve()):
             write_paired_pack_freeze(gate_freeze, freeze_payload)
-        freeze_path_str = None if current_identity() is not None else str(freeze_path)
+        from utils.teh.pics_v4_ablation import current_ablation as _pics_v4_ablation
+        freeze_path_str = None if current_identity() is not None or _pics_v4_ablation() else str(freeze_path)
         expected_iters = int(args.global_iters)
         if hasattr(wandb_module, "set_g2_arm"):
             wandb_module.set_g2_arm("control")
@@ -5240,7 +5265,8 @@ def _run_t_pics_gated_population_arms(
         gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
         if current_identity() is None and (not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve()):
             write_paired_pack_freeze(gate_freeze, freeze_payload)
-        freeze_path_str = None if current_identity() is not None else str(freeze_path)
+        from utils.teh.pics_v4_ablation import current_ablation as _pics_v4_ablation
+        freeze_path_str = None if current_identity() is not None or _pics_v4_ablation() else str(freeze_path)
         expected_iters = int(args.global_iters)
         if hasattr(wandb_module, "set_g2_arm"):
             wandb_module.set_g2_arm("transfer")
@@ -5498,7 +5524,8 @@ def _run_t_pics_gated_population_arms(
     gate_freeze = layout["gate"] / G2_PAIRED_PACK_FILENAME
     if current_identity() is None and (not gate_freeze.is_file() or gate_freeze.resolve() != freeze_path.resolve()):
         write_paired_pack_freeze(gate_freeze, freeze_payload)
-    freeze_path_str = None if current_identity() is not None else str(freeze_path)
+    from utils.teh.pics_v4_ablation import current_ablation as _pics_v4_ablation
+    freeze_path_str = None if current_identity() is not None or _pics_v4_ablation() else str(freeze_path)
 
     expected_iters = int(args.global_iters)
     if hasattr(wandb_module, "set_g2_arm"):
@@ -14281,9 +14308,20 @@ def run_evolution(
             else:
                 code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
 
-            # Save candidate code
+            # Save candidate code. Ablation replay already stored the raw model
+            # text; keep that file and write the sanitized program beside it.
             if save_artifacts and candidates_dir is not None:
-                (candidates_dir / f"candidate_{idx}.py").write_text(code or "")
+                raw_path = candidates_dir / f"candidate_{idx}.py"
+                payload = code or ""
+                from utils.teh.pics_v4_ablation import current_ablation
+                if (
+                    current_ablation()
+                    and raw_path.is_file()
+                    and raw_path.read_text(encoding="utf-8") != payload
+                ):
+                    (candidates_dir / f"candidate_{idx}.evaluated.py").write_text(payload, encoding="utf-8")
+                else:
+                    raw_path.write_text(payload, encoding="utf-8")
             
             if not code:
                 empty_row: Dict[str, Any] = {
@@ -17846,6 +17884,10 @@ def main():
             "ablation, hybrid, I/J, budget-allocation, or reminder-v3/v4 flags."
         )
         return
+    no_population_ablation = (
+        str(getattr(args, "pics_v4_ablation", "") or "") == "B"
+        and bool(getattr(args, "t_pics_ablate_population", False))
+    )
     if aamas_v0_mode == "target_only" and (
         t_pics_transfer_only
         or t_pics_control_only
@@ -17854,7 +17896,7 @@ def main():
         or getattr(args, "t_pics_source", None)
         or getattr(args, "global_prompt_source_program", None)
         or getattr(args, "global_prompt_source_dataset", None)
-        or not t_pics_gated
+        or not (t_pics_gated or no_population_ablation)
     ):
         print(
             "Error: --pics_aamas_v0_track_mode target_only requires "
@@ -17986,6 +18028,8 @@ def main():
             "Error: --t_pics_ablate_population cannot be combined with "
             "--t_pics_gated_transfer (use the non-gated seed→explore→person path)."
         )
+        if getattr(args, "pics_v4_ablation", None):
+            sys.exit(1)
         return
     if t_pics_ablate_population and t_pics_control_only:
         print(
