@@ -242,6 +242,52 @@ LAUNCH_LINEAGE = {
         "transfer_population": GENERATED / "guan_2020_stopping/pics_v4_transfer_based_only/job_313158",
     },
 }
+SECOND_BATCH_DATASETS = ("3frey2017cct", "11enkavi2019recentprobes", "steyvers_2009_bandit")
+LAUNCH_LINEAGE.update({
+    "3frey2017cct": {"chosen_track": "transfer_based_only",
+        "target_only": GENERATED / "3frey2017cct/pics_v4_target_only/job_311668",
+        "transfer_population": GENERATED / "3frey2017cct/pics_v4_transfer_based_only/job_313160"},
+    "11enkavi2019recentprobes": {"chosen_track": "target_only",
+        "target_only": GENERATED / "11enkavi2019recentprobes/pics_v4_target_only/job_311666"},
+    "steyvers_2009_bandit": {"chosen_track": "target_only",
+        "target_only": GENERATED / "steyvers_2009_bandit/pics_v4_target_only/job_311671"},
+})
+
+
+def launch_datasets() -> tuple[str, ...]:
+    batch = os.environ.get("PICS_V4_ABLATION_BATCH", "1")
+    if batch not in {"1", "2"}:
+        raise ValueError("PICS_V4_ABLATION_BATCH must be 1 or 2")
+    return SECOND_BATCH_DATASETS if batch == "2" else LAUNCH_DATASETS
+
+
+def first_batch_completion() -> dict:
+    """Small read-only completion inventory; B Bergert has a certified sidecar."""
+    rows = []
+    for ablation, spec in SPECS.items():
+        for dataset in LAUNCH_DATASETS:
+            parent = REPO / "generated_outputs/psych101_train/teh" / dataset / spec["kind"]
+            marker = "STAGE_COMPLETE.json" if ablation == "B" else "selected/STAGE_COMPLETE.json"
+            complete = [str(p) for p in sorted(parent.glob("job_*")) if (p / marker).is_file()]
+            evidence = None
+            if ablation == "B" and dataset == "bergert_nosofsky_2007":
+                sidecar = REPO / "cluster/v0/ours/main/pics_v4/ablation/continuation_B_314726/bergert_completion.json"
+                record = json.loads(sidecar.read_text())
+                root = parent / "job_314726"
+                # Check the already-certified coverage artifacts still exist.
+                if record.get("complete") and len(record["coverage"]) == 30 and all(
+                    (root / f"participant_{pid}" / "iteration_30").is_dir() and
+                    (root / f"participant_{pid}" / "results.json").is_file()
+                    for pid in record["participant_ids"]
+                ):
+                    complete.append(str(root))
+                    evidence = str(sidecar)
+            rows.append({"ablation": ablation, "dataset": dataset,
+                         "complete": bool(complete), "complete_roots": complete, "sidecar": evidence})
+    count = sum(r["complete"] for r in rows)
+    return {"complete": count == 15, "completed_combinations": count, "total": 15, "rows": rows}
+
+
 MAIN_KIND_NAMES = ("pics_v4_target_only", "pics_v4_transfer_based_only", "pics_v4_official_gate")
 
 
@@ -267,7 +313,7 @@ def _copy_tree(src: Path, dest: Path) -> None:
 def stage_dataset(dataset: str, ablation: str, dest: Path) -> dict:
     """Copy reusable inputs into a new ablation root. Originals are only read."""
     dest = Path(dest)
-    if dataset not in LAUNCH_LINEAGE:
+    if dataset not in LAUNCH_LINEAGE or os.environ.get("PICS_V4_SOURCE_POPULATION") == "1":
         if ablation not in {"D", "E"}:
             raise KeyError(dataset)
         _refuse_main_write(dest)
@@ -321,10 +367,11 @@ def stage_dataset(dataset: str, ablation: str, dest: Path) -> dict:
             marker.unlink()
         record["reused"].append(str(src))
     elif ablation == "C":
-        src = lineage["transfer_population"]
+        arm = "control" if lineage["chosen_track"] == "target_only" else "transfer"
+        src = lineage["target_only"] if arm == "control" else lineage["transfer_population"]
         (dest / "target_population").mkdir(parents=True, exist_ok=True)
-        _copy_tree(src / "target_population" / "transfer", dest / "target_population" / "transfer")
-        record["reused"].append(str(src / "target_population" / "transfer"))
+        _copy_tree(src / "target_population" / arm, dest / "target_population" / arm)
+        record["reused"].append(str(src / "target_population" / arm))
     provenance_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record
 
@@ -332,16 +379,17 @@ def stage_dataset(dataset: str, ablation: str, dest: Path) -> dict:
 def launch_readiness() -> dict:
     rows = []
     ready = True
-    for dataset in LAUNCH_DATASETS:
+    for dataset in launch_datasets():
         lineage = LAUNCH_LINEAGE[dataset]
         missing = []
         target = lineage["target_only"]
-        transfer = lineage["transfer_population"]
+        arm = "control" if lineage["chosen_track"] == "target_only" else "transfer"
+        transfer = target if arm == "control" else lineage["transfer_population"]
         if not (target / "selected" / "STAGE_COMPLETE.json").is_file():
             missing.append("target_only_participants")
         if not (target / "selected" / "participant_0" / "iteration_10").is_dir() and not (target / "selected" / "participant_1" / "iteration_10").is_dir():
             missing.append("target_iteration_10")
-        if not (transfer / "target_population" / "transfer" / "STAGE_COMPLETE.json").is_file():
+        if not (transfer / "target_population" / arm / "STAGE_COMPLETE.json").is_file():
             missing.append("transfer_population")
         if missing:
             ready = False
@@ -352,7 +400,10 @@ def launch_readiness() -> dict:
             "transfer_population": str(transfer),
             "missing": missing,
         })
-    return {"ready": ready, "jobs": 5, "datasets": rows, "jobs_submitted": 0}
+    first = first_batch_completion() if launch_datasets() == SECOND_BATCH_DATASETS else None
+    return {"ready": ready, "input_ready": ready,
+            "jobs": 5, "datasets": rows, "first_batch": first,
+            "first_batch_completion_required": False, "jobs_submitted": 0}
 
 
 def packed_commands() -> list[str]:
@@ -367,7 +418,7 @@ def packed_commands() -> list[str]:
             "sbatch --job-name=pics_v4_ablation_{ab} --export=ALL,"
             "PICS_V4=1,TRACK_MODE={track},PICS_V4_ABLATION={ab},"
             "PICS_V4_ABLATION_KIND={kind},AAMAS_PERSON_ITERS={iters},"
-            "AAMAS_EXPLORE_CANDIDATES={explore},AAMAS_FRESH_N={fresh}{extra},VLLM_TP=1 "
+            "AAMAS_EXPLORE_CANDIDATES={explore},AAMAS_FRESH_N={fresh}{extra},VLLM_TP=1,PICS_V4_ABLATION_BATCH={batch} "
             "{script}".format(
                 ab=ablation,
                 track=track,
@@ -377,6 +428,7 @@ def packed_commands() -> list[str]:
                 fresh=spec["fresh"],
                 extra=extra,
                 script=script,
+                batch=os.environ.get("PICS_V4_ABLATION_BATCH", "1"),
             )
         )
     return commands

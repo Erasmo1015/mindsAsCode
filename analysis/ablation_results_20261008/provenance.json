@@ -1,0 +1,126 @@
+{
+  "snapshot_time": "2026-10-08T10:37:38.731245+08:00",
+  "metric": "overall_best_train.test_loglik",
+  "evidence": [
+    {
+      "ablation": "A",
+      "dataset": "bergert_nosofsky_2007",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_ablation_no_transfer/job_314677/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5460489660278869
+    },
+    {
+      "ablation": "A",
+      "dataset": "1peterson2021using",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_ablation_no_transfer/job_314677/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5357559973430844
+    },
+    {
+      "ablation": "A",
+      "dataset": "guan_2020_stopping",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_ablation_no_transfer/job_314677/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5685940970974415
+    },
+    {
+      "ablation": "B",
+      "dataset": "bergert_nosofsky_2007",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_ablation_no_population/job_314726",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5365923119613487
+    },
+    {
+      "ablation": "B",
+      "dataset": "1peterson2021using",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_ablation_no_population/job_315011",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5321662393909928
+    },
+    {
+      "ablation": "B",
+      "dataset": "guan_2020_stopping",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_ablation_no_population/job_315011",
+      "completed_participants": 0,
+      "expected_participants": 30,
+      "score": null
+    },
+    {
+      "ablation": "C",
+      "dataset": "bergert_nosofsky_2007",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_ablation_no_explore/job_314993/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.4130414255022119
+    },
+    {
+      "ablation": "C",
+      "dataset": "1peterson2021using",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_ablation_no_explore/job_314993/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.42464213636413906
+    },
+    {
+      "ablation": "C",
+      "dataset": "guan_2020_stopping",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_ablation_no_explore/job_314993/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5406432982044308
+    },
+    {
+      "ablation": "D",
+      "dataset": "bergert_nosofsky_2007",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_ablation_no_fresh/job_314994/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.6475181300427498
+    },
+    {
+      "ablation": "D",
+      "dataset": "1peterson2021using",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_ablation_no_fresh/job_314994/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.4567091658664392
+    },
+    {
+      "ablation": "D",
+      "dataset": "guan_2020_stopping",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_ablation_no_fresh/job_314994/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.4664560927444946
+    },
+    {
+      "ablation": "E",
+      "dataset": "bergert_nosofsky_2007",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/bergert_nosofsky_2007/pics_v4_ablation_no_uniform_prompt/job_314995/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.2891874873090437
+    },
+    {
+      "ablation": "E",
+      "dataset": "1peterson2021using",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/1peterson2021using/pics_v4_ablation_no_uniform_prompt/job_314995/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.4799061259009829
+    },
+    {
+      "ablation": "E",
+      "dataset": "guan_2020_stopping",
+      "root": "/careAIDrive/zichang/misc/mindAsCode/generated_outputs/psych101_train/teh/guan_2020_stopping/pics_v4_ablation_no_uniform_prompt/job_314995/selected",
+      "completed_participants": 30,
+      "expected_participants": 30,
+      "score": -0.5770584708729044
+    }
+  ]
+}
