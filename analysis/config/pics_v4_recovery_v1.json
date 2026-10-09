@@ -43,7 +43,7 @@
     }
   },
   "recovery_support_sha256": {
-    "resume_pics_v4.py": "e1405bbca46dba90eb858cf8002601a1e54b551033a26d9c5bf0447e781f5dd7",
+    "resume_pics_v4.py": "b33929dfb8880cdba5f942452cdcdd8129dc60620371dc31298f954f4e1595b7",
     "utils/teh/pics_v4_recovery.py": "1da7c77e8bbf763aa584d9e40fb635a9e32553d245d3aa4ae341dba154687a7d"
   },
   "job_targets": {

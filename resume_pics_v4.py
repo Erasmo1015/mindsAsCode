@@ -44,6 +44,10 @@ class CandidateReplay:
                          Path.write_text, Path.unlink, shutil.rmtree)
         roots = [p / 'global_phase' for p in (self.root / 'target_population').glob('*') if p.is_dir()]
         roots += list(participant_directories(self.root / 'selected'))
+        provenance = self.root / 'ABLATION_PROVENANCE.json'
+        direct_b = provenance.is_file() and json.loads(provenance.read_text()).get('ablation') == 'B'
+        if direct_b:
+            roots += list(participant_directories(self.root))
         for owner in roots:
             for stage in [owner / 'explore_phase', *owner.glob('iteration_*')]:
                 if not stage.is_dir():
@@ -74,6 +78,11 @@ class CandidateReplay:
                     row = json.loads(line)  # Corrupt/truncated committed records fail closed.
                     k = key(row)
                     if k in rows:
+                        # Older B requeues replayed root-level participants without
+                        # trace discovery. Accept only byte-equivalent JSON events;
+                        # retain the historical file and still reject conflicts.
+                        if direct_b and equivalent(rows[k], row):
+                            continue
                         raise RuntimeError(f'Duplicate saved event: {trace} {k}')
                     rows[k] = row
                 self.records[trace.resolve()] = rows

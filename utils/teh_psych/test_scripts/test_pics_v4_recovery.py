@@ -52,6 +52,36 @@ def test_discovery_skips_csv_files_and_bad_directory_ids(tmp_path):
     assert {p.name for p in participant_directories(tmp_path)}=={'participant_0','participant_12'}
 
 
+def test_b_direct_participants_replay_and_identical_historical_duplicates(tmp_path):
+    (tmp_path/'ABLATION_PROVENANCE.json').write_text(json.dumps({'ablation':'B'}))
+    owner=tmp_path/'participant_1';stage=owner/'iteration_1'
+    (stage/'candidates').mkdir(parents=True)
+    saved=stage/'candidates/candidate_0.py';saved.write_text('saved exact bytes\n')
+    metrics=stage/'metrics.json'
+    metrics.write_text(json.dumps({'n_candidates':1,'candidate_sources':['normal'],'candidate_results':[{}]}))
+    row={'record_type':'candidate','phase':'evolution','iteration':1,'candidate_id':'candidate_0','selection_score':-0.5}
+    trace=owner/'mem_trace.jsonl';trace.write_text((json.dumps(row)+'\n')*2)
+    before={p:p.read_bytes() for p in [saved,metrics,trace]}
+    calls=[];e=fixture_engine(calls);r=CandidateReplay(e,tmp_path);r.install()
+    try:
+        assert stage.resolve() in r.stages
+        assert e.generate_program_variants(n_variants=1,prompt_stats_path=stage/'prompt_stats.json')==['saved exact bytes\n']
+        e.append_mem_trace_record(trace,row)
+        assert not calls
+        assert before=={p:p.read_bytes() for p in before}
+        with pytest.raises(RuntimeError,match='mismatch'):metrics.write_text('{}')
+    finally:r.restore()
+    trace.write_text(json.dumps(row)+'\n'+json.dumps(dict(row,selection_score=-0.4))+'\n')
+    with pytest.raises(RuntimeError,match='Duplicate'):CandidateReplay(e,tmp_path)
+
+
+def test_non_b_duplicate_trace_remains_rejected(tmp_path):
+    owner=tmp_path/'selected/participant_1';owner.mkdir(parents=True)
+    row={'record_type':'candidate','candidate_id':'candidate_0'}
+    (owner/'mem_trace.jsonl').write_text((json.dumps(row)+'\n')*2)
+    with pytest.raises(RuntimeError,match='Duplicate'):CandidateReplay(fixture_engine([]),tmp_path)
+
+
 def test_committed_metrics_candidates_and_banks_are_not_overwritten(tmp_path):
     s=tmp_path/'selected/participant_0/iteration_1';(s/'candidates').mkdir(parents=True)
     c=s/'candidates/candidate_0.py';c.write_text('saved')
