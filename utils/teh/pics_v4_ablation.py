@@ -369,8 +369,24 @@ def stage_dataset(dataset: str, ablation: str, dest: Path) -> dict:
     elif ablation == "C":
         arm = "control" if lineage["chosen_track"] == "target_only" else "transfer"
         src = lineage["target_only"] if arm == "control" else lineage["transfer_population"]
+        # A reused control population needs its authoritative v4 root marker.
+        # Without it the first resume check falls into the legacy policy guard.
+        # Validate before copying; never stamp a historical population as v4.
+        if arm == "control":
+            from utils.teh.pics_v4 import assert_pics_v4_resume
+            import hashlib
+
+            marker_path = src / "TRIAL_PROMPT_POLICY.json"
+            marker_bytes = marker_path.read_bytes()
+            assert_pics_v4_resume(src)
+            marker = json.loads(marker_bytes)
+            marker["ablation_id"] = "C"
+            marker["ablation_kind"] = spec["kind"]
+            record["reused_policy_marker_sha256"] = hashlib.sha256(marker_bytes).hexdigest()
         (dest / "target_population").mkdir(parents=True, exist_ok=True)
         _copy_tree(src / "target_population" / arm, dest / "target_population" / arm)
+        if arm == "control":
+            (dest / "TRIAL_PROMPT_POLICY.json").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
         record["reused"].append(str(src / "target_population" / arm))
     provenance_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record
