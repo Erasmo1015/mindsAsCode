@@ -253,12 +253,19 @@ LAUNCH_LINEAGE.update({
         "target_only": GENERATED / "steyvers_2009_bandit/pics_v4_target_only/job_311671"},
 })
 
+SPEEKENBRINK_DATASETS = ("5speekenbrink2008learning",)
+LAUNCH_LINEAGE["5speekenbrink2008learning"] = {
+    "chosen_track": "target_only",
+    "target_only": GENERATED / "5speekenbrink2008learning/pics_v4_target_only/job_312023",
+}
+
 
 def launch_datasets() -> tuple[str, ...]:
     batch = os.environ.get("PICS_V4_ABLATION_BATCH", "1")
-    if batch not in {"1", "2"}:
-        raise ValueError("PICS_V4_ABLATION_BATCH must be 1 or 2")
-    return SECOND_BATCH_DATASETS if batch == "2" else LAUNCH_DATASETS
+    batches = {"1": LAUNCH_DATASETS, "2": SECOND_BATCH_DATASETS, "3": SPEEKENBRINK_DATASETS}
+    if batch not in batches:
+        raise ValueError("PICS_V4_ABLATION_BATCH must be 1, 2 or 3 (Speekenbrink)")
+    return batches[batch]
 
 
 def first_batch_completion() -> dict:
@@ -427,6 +434,8 @@ def packed_commands() -> list[str]:
     commands = []
     for ablation, spec in SPECS.items():
         track = "target_only" if spec["track"] == "target_only" else "transfer_based_only"
+        if launch_datasets() == SPEEKENBRINK_DATASETS:
+            track = "target_only"
         extra = ""
         if spec.get("compensation_from"):
             extra = f",PICS_V4_COMPENSATION_FROM={spec['compensation_from']}"

@@ -1607,16 +1607,17 @@ def _phase_llm_decoding_seed_base(
     iteration_step: int,
     participant_id: Optional[int] = None,
     batch_offset: int = 0,
+    llm_seed: Optional[int] = None,
 ) -> int:
     """Historical per-request seed base used by the AAMAS-v0 target-only jobs.
 
     ``pics_run_seed`` does not enter this formula. It only seeds the trial
     schedule. Candidate index and the fresh-candidate offset are added by
-    the caller.
+    the caller. An explicit ``llm_seed`` replaces only the split-seed term.
     """
     pid_key = int(participant_id) if participant_id is not None else 0
     return (
-        int(split_seed)
+        int(split_seed if llm_seed is None else llm_seed)
         + 80_000
         + int(iteration_step) * 1_000_003
         + pid_key * 17_179
@@ -3250,6 +3251,7 @@ def run_global_evolution_phase(
     prompt_suffix: Optional[str] = None,
     g2_arm: Optional[str] = None,
     g2_paired_pack_path: Optional[str] = None,
+    llm_seed: Optional[int] = None,
 ) -> List[Tuple[Any, ...]]:
     """
     Cross-participant evolution on pooled train trials (loglik fitness).
@@ -3718,6 +3720,7 @@ def run_global_evolution_phase(
             "llm_decoding_seed_base": _aamas_or_legacy_seed(
                 _phase_llm_decoding_seed_base(
                     split_seed=int(split_seed),
+                    llm_seed=llm_seed,
                     iteration_step=int(iteration_step),
                 ),
                 "llm_request_base",
@@ -4410,6 +4413,7 @@ def _run_t_pics_source_population(
         client=client,
         split_ratio=args.split_ratio,
         split_seed=args.split_seed,
+        llm_seed=getattr(args, "llm_seed", None),
         data_path=args.data_path,
         filter_mixed_gambles=filter_mixed_gambles,
         max_prompt_train_trials=args.max_prompt_train_trials,
@@ -4506,6 +4510,7 @@ def _gated_global_phase_kwargs(
         "client": client,
         "split_ratio": args.split_ratio,
         "split_seed": args.split_seed,
+        "llm_seed": getattr(args, "llm_seed", None),
         "data_path": args.data_path,
         "filter_mixed_gambles": filter_mixed_gambles,
         "max_prompt_train_trials": args.max_prompt_train_trials,
@@ -12493,6 +12498,7 @@ def _run_pre_evolution_explore_phase(
     baseline_val_loglik: Optional[float] = None,
     mdl_lambda: float = 0.0,
     strict_observed_union: bool = False,
+    llm_seed: Optional[int] = None,
 ) -> None:
     """
     One-shot candidate generation before the evolution loop.
@@ -12668,6 +12674,7 @@ def _run_pre_evolution_explore_phase(
             llm_decoding_seed_base=_aamas_or_legacy_seed(
                 _phase_llm_decoding_seed_base(
                     split_seed=int(split_seed),
+                    llm_seed=llm_seed,
                     iteration_step=0,
                     participant_id=int(participant_id),
                     batch_offset=int(parent_i) * 10_007,
@@ -13157,6 +13164,7 @@ def run_evolution(
     pics_v3_elite_failover: bool = False,
     reuse_recorded_elite: bool = False,
     recorded_elite_val_logliks: Optional[List[Optional[float]]] = None,
+    llm_seed: Optional[int] = None,
 ):
     """
     Run iterative evolution loop over programs (Choice13k, Gridworld, or CPC18 Track II, non-strict mode).
@@ -13908,6 +13916,7 @@ def run_evolution(
             llm_max_tokens=llm_max_tokens,
             max_workers=max_workers,
             split_seed=int(split_seed),
+            llm_seed=llm_seed,
             run_prompts_dir=run_prompts_dir,
             max_parent_chars=max_parent_chars,
             warn_parent_truncation_ratio=warn_parent_truncation_ratio,
@@ -14261,6 +14270,7 @@ def run_evolution(
             "llm_decoding_seed_base": _aamas_or_legacy_seed(
                 _phase_llm_decoding_seed_base(
                     split_seed=int(split_seed),
+                    llm_seed=llm_seed,
                     iteration_step=int(iteration_step),
                     participant_id=int(participant_id) if participant_id is not None else None,
                 ),
@@ -17468,6 +17478,17 @@ def main():
         help="Global train ratio for splitting (default: 0.6).",
     )
     parser.add_argument(
+        "--llm_seed",
+        type=int,
+        default=None,
+        help=(
+            "Override only the split-seed term in PICS LLM request seeds; "
+            "iteration, participant and candidate offsets are retained. "
+            "Omit to preserve legacy request seeds. Does not change splitting, "
+            "observed trials, panels, parent sampling or evaluation seeds."
+        ),
+    )
+    parser.add_argument(
         "--split_seed",
         type=int,
         default=0,
@@ -19340,6 +19361,7 @@ def main():
             client=global_client,
             split_ratio=args.split_ratio,
             split_seed=args.split_seed,
+            llm_seed=getattr(args, "llm_seed", None),
             data_path=args.data_path,
             filter_mixed_gambles=mixed_gambles_gain_loss_only,
             max_prompt_train_trials=args.max_prompt_train_trials,
@@ -19586,6 +19608,7 @@ def main():
                 fitness_metric=args.fitness_metric,
                 split_ratio=args.split_ratio,
                 split_seed=args.split_seed,
+                llm_seed=getattr(args, "llm_seed", None),
                 choice13k_train_trials_override=train_trials,
                 choice13k_test_trials_override=test_trials,
                 choice13k_simple_logging=True,
@@ -19688,6 +19711,7 @@ def main():
                 fitness_metric=args.fitness_metric,
                 split_ratio=args.split_ratio,
                 split_seed=args.split_seed,
+                llm_seed=getattr(args, "llm_seed", None),
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
@@ -20117,6 +20141,7 @@ def main():
                         fitness_metric=args.fitness_metric,
                         split_ratio=args.split_ratio,
                         split_seed=args.split_seed,
+                        llm_seed=getattr(args, "llm_seed", None),
                         max_prompt_train_trials=args.max_prompt_train_trials,
                         max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                         llm_max_tokens=args.llm_max_tokens,
@@ -20438,6 +20463,7 @@ def main():
                 fitness_metric=args.fitness_metric,
                 split_ratio=args.split_ratio,
                 split_seed=args.split_seed,
+                llm_seed=getattr(args, "llm_seed", None),
                 max_prompt_train_trials=args.max_prompt_train_trials,
                 max_prompt_trials_per_problem=args.max_prompt_trials_per_problem,
                 llm_max_tokens=args.llm_max_tokens,
