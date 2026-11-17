@@ -14318,15 +14318,13 @@ def run_evolution(
             else:
                 code = _sanitize_llm_python_candidate(code, required_markers=("def choose(",))
 
-            # Save candidate code. Ablation replay already stored the raw model
-            # text; keep that file and write the sanitized program beside it.
+            # Save candidate code. Resume/ablation replay already stored the raw
+            # model text; keep that file and write the sanitized program beside it.
             if save_artifacts and candidates_dir is not None:
                 raw_path = candidates_dir / f"candidate_{idx}.py"
                 payload = code or ""
-                from utils.teh.pics_v4_ablation import current_ablation
                 if (
-                    current_ablation()
-                    and raw_path.is_file()
+                    raw_path.is_file()
                     and raw_path.read_text(encoding="utf-8") != payload
                 ):
                     (candidates_dir / f"candidate_{idx}.evaluated.py").write_text(payload, encoding="utf-8")
