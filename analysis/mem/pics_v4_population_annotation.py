@@ -57,7 +57,12 @@ POPULATION_PHASE = "global_evolution"
 POPULATION_PARTICIPANT = "global"
 DOC_REL = "analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md"
 HISTORICAL_OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population"
-OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population_final"
+MAIN_OUTPUT_REL = "analysis_2026Sep/Sep30_pics_v4/mem/population_final"
+# Seed-1 rebuttal annotations stay outside the official main population_final tree.
+SEED1_OUTPUT_REL = (
+    "analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-1/population_final"
+)
+OUTPUT_REL = MAIN_OUTPUT_REL
 ANNOTATION_METHOD = "analysis/mem/annotate_population_programs.py"
 REQUIRED_POLICY_MARKERS = {
     "trial_prompt_policy": "structured_snapshot_sparse_history_v1",
@@ -69,7 +74,7 @@ OFFICIAL_UNIFORM_SHA256 = "9663c810440fcb295bcf046afea31ca3f527e310c5afe61d66264
 
 # Official packs. A group lists only datasets whose population stage is ready.
 # GPU type and tensor-parallel size are supplied later; they are not chosen here.
-ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+MAIN_ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("pics_v4_popann_pack1", ("guan_2020_stopping", "11enkavi2019recentprobes")),
     ("pics_v4_popann_pack2", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
     ("pics_v4_popann_pack3", ("3frey2017cct",)),
@@ -81,7 +86,7 @@ ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 )
 
 # Official uniform-v8 output/source jobs. Pack6 execution 312213 continues output job_311671.
-AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+MAIN_AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("311666", ("guan_2020_stopping", "11enkavi2019recentprobes")),
     ("312023", ("bergert_nosofsky_2007", "5speekenbrink2008learning")),
     ("311668", ("3frey2017cct",)),
@@ -91,6 +96,33 @@ AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("311672", ("10frey2017risk", "1peterson2021using")),
     ("311673", ("mixed_gambles", "13schulz2020finding")),
 )
+
+# LLM-seed=1 rebuttal packs (output dirs job_llmseed1_<id>).
+SEED1_ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("pics_v4_popann_seed1_pack1", ("guan_2020_stopping",)),
+    ("pics_v4_popann_seed1_pack2", ("14kool2016when", "12badham2017deficits")),
+    ("pics_v4_popann_seed1_pack3", ("10frey2017risk", "bergert_nosofsky_2007")),
+    ("pics_v4_popann_seed1_pack4", ("1peterson2021using", "mixed_gambles")),
+    ("pics_v4_popann_seed1_pack5", ("3frey2017cct", "11enkavi2019recentprobes")),
+    ("pics_v4_popann_seed1_pack6", ("2plonsky2018when", "7hilbig2014generalized")),
+    ("pics_v4_popann_seed1_pack7", ("4wulff2018description", "13schulz2020finding")),
+    ("pics_v4_popann_seed1_pack8", ("steyvers_2009_bandit", "5speekenbrink2008learning")),
+)
+SEED1_AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("326337", ("guan_2020_stopping",)),
+    ("326338", ("14kool2016when", "12badham2017deficits")),
+    ("326339", ("10frey2017risk", "bergert_nosofsky_2007")),
+    ("326340", ("1peterson2021using", "mixed_gambles")),
+    ("326341", ("3frey2017cct", "11enkavi2019recentprobes")),
+    ("326342", ("2plonsky2018when", "7hilbig2014generalized")),
+    ("326343", ("4wulff2018description", "13schulz2020finding")),
+    ("326344", ("steyvers_2009_bandit", "5speekenbrink2008learning")),
+)
+
+ANNOTATION_GROUPS = MAIN_ANNOTATION_GROUPS
+AUTHORITATIVE_JOBS = MAIN_AUTHORITATIVE_JOBS
+_JOB_DIR_NAME_FMT = "job_{job_id}"
+POPANN_PROFILE = "main"
 HISTORICAL_JOB_IDS = frozenset(
     {
         "312210",  # Cancelled fresh attempt; continuation retains source job 311671.
@@ -155,6 +187,31 @@ HISTORICAL_JOB_IDS = frozenset(
 )
 FINAL_JOB_IDS = frozenset(job_id for job_id, _names in AUTHORITATIVE_JOBS)
 
+
+def apply_popann_profile(profile: str | None = None) -> str:
+    """Select main or seed-1 inventory/output mapping. Default remains main."""
+    global AUTHORITATIVE_JOBS, ANNOTATION_GROUPS, OUTPUT_REL, FINAL_JOB_IDS
+    global _JOB_DIR_NAME_FMT, POPANN_PROFILE
+    name = (profile if profile is not None else os.environ.get("PICS_V4_POPANN_PROFILE", "main"))
+    name = str(name or "main").strip().lower()
+    if name in {"", "main", "official"}:
+        AUTHORITATIVE_JOBS = MAIN_AUTHORITATIVE_JOBS
+        ANNOTATION_GROUPS = MAIN_ANNOTATION_GROUPS
+        OUTPUT_REL = MAIN_OUTPUT_REL
+        _JOB_DIR_NAME_FMT = "job_{job_id}"
+        POPANN_PROFILE = "main"
+    elif name in {"seed1", "llmseed1", "seed-1"}:
+        AUTHORITATIVE_JOBS = SEED1_AUTHORITATIVE_JOBS
+        ANNOTATION_GROUPS = SEED1_ANNOTATION_GROUPS
+        OUTPUT_REL = SEED1_OUTPUT_REL
+        _JOB_DIR_NAME_FMT = "job_llmseed1_{job_id}"
+        POPANN_PROFILE = "seed1"
+    else:
+        raise PicsV4AnnotationError(f"unknown PICS_V4_POPANN_PROFILE={name!r}")
+    FINAL_JOB_IDS = frozenset(job_id for job_id, _ in AUTHORITATIVE_JOBS)
+    return POPANN_PROFILE
+
+
 _REQUIRED_DOC_TOKENS = (
     "structured_snapshot_sparse_history_v1",
     "uniform_additional_prompt_v5",
@@ -198,6 +255,9 @@ _REQUIRED_DOC_TOKENS = (
 
 class PicsV4AnnotationError(RuntimeError):
     pass
+
+
+apply_popann_profile()
 
 
 def assert_final_job_mapping(jobs: Sequence[Tuple[str, Sequence[str]]]) -> None:
@@ -336,7 +396,7 @@ def _job_dir(repo: Path, dataset: str, job_id: str) -> Path:
         / "teh"
         / dataset
         / KIND_TARGET_ONLY
-        / f"job_{job_id}"
+        / _JOB_DIR_NAME_FMT.format(job_id=job_id)
     )
 
 
@@ -912,7 +972,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=_REPO)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="main (default) or seed1; overrides PICS_V4_POPANN_PROFILE",
+    )
     args = parser.parse_args()
+    apply_popann_profile(args.profile)
     doc_path = args.repo / DOC_REL
     gaps = documentation_gaps(doc_path.read_text(encoding="utf-8"))
     if gaps:
