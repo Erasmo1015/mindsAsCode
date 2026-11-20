@@ -18189,9 +18189,38 @@ def main():
                 return
             if pics_v4_on and not getattr(args, "pics_v4_ablation", None):
                 from utils.teh.pics_v4_dry_run import verify_report
-                certificate = _REPO_ROOT / 'analysis_2026Sep/Codex/Oct5/others/three_mode_implementation/validation_v1' / aamas_v0_mode / 'PREFLIGHT.json'
+                from utils.teh.pics_v4_transfer import (
+                    apply_transfer_profile,
+                    prepare_identity,
+                    resolve_source,
+                    assert_arm_resume,
+                    validate_materialization,
+                    target_run,
+                    TRANSFER_PROFILE,
+                )
+                profile = apply_transfer_profile()
+                if profile == 'seed1':
+                    certificate = (
+                        _REPO_ROOT
+                        / 'analysis_2026Sep/Codex/Oct5/others/seed1_ablation'
+                        / aamas_v0_mode
+                        / 'PREFLIGHT.json'
+                    )
+                elif profile == 'seed2':
+                    certificate = (
+                        _REPO_ROOT
+                        / 'analysis_2026Sep/Codex/Oct5/others/seed2_ablation'
+                        / aamas_v0_mode
+                        / 'PREFLIGHT.json'
+                    )
+                else:
+                    certificate = (
+                        _REPO_ROOT
+                        / 'analysis_2026Sep/Codex/Oct5/others/three_mode_implementation/validation_v1'
+                        / aamas_v0_mode
+                        / 'PREFLIGHT.json'
+                    )
                 verify_report(certificate, mode=aamas_v0_mode, target=str(args.dataset))
-                from utils.teh.pics_v4_transfer import prepare_identity, resolve_source, assert_arm_resume, validate_materialization, target_run
                 if not args.output_dir or args.t_pics_gated_independent or getattr(args, 't_pics_reuse_gate_pool', None):
                     raise RuntimeError('PICS v4 transfer requires an explicit isolated output and forbids source/pool overrides')
                 record = resolve_source(str(args.dataset), config_path=cfg_path)
@@ -18201,7 +18230,8 @@ def main():
                 assert_pics_v4_resume(args.output_dir)
                 for role in ('control', 'transfer'):
                     assert_arm_resume(Path(args.output_dir) / 'target_population' / role, role=role)
-                if aamas_v0_mode == 'transfer_based_only':
+                # Main recovery replay is scoped to the eight official job_* ids only.
+                if aamas_v0_mode == 'transfer_based_only' and TRANSFER_PROFILE not in {'seed1', 'seed2'}:
                     from utils.teh.pics_v4_recovery import activate
                     activate(sys.modules[__name__], args.output_dir, target=str(args.dataset), mode=aamas_v0_mode)
                 if mat_target and mat_transfer:

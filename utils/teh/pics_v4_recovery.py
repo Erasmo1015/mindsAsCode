@@ -26,6 +26,11 @@ def participant_directories(root):
 def approved_code_hashes(found, *, mode):
     if all(sha(REPO / p) == h for p, h in found.items()):
         return dict(found)
+    import os
+    profile = os.environ.get('PICS_V4_TRANSFER_PROFILE', 'main').strip().lower()
+    # Seed-1/seed-2 ablations are not under the main recovery attestation map.
+    if profile in {'seed1', 'llmseed1', 'seed-1', 'seed2', 'llmseed2', 'seed-2'}:
+        raise RuntimeError('method code changed after CPU preflight')
     if mode != 'transfer_based_only' or not CONFIG.is_file():
         raise RuntimeError('method code changed after CPU preflight')
     config = json.loads(CONFIG.read_text())
@@ -48,7 +53,11 @@ def approved_code_hashes(found, *, mode):
 
 
 def method_identity_hashes(current, *, mode):
-    if mode == 'transfer_based_only' and CONFIG.is_file():
+    # Recovery attestation is only for the eight main transfer recoveries.
+    # Seed-1/seed-2 ablations use live method hashes (same procedure, separate outputs).
+    import os
+    profile = os.environ.get('PICS_V4_TRANSFER_PROFILE', 'main').strip().lower()
+    if mode == 'transfer_based_only' and CONFIG.is_file() and profile in {'', 'main', 'official'}:
         original = json.loads(CONFIG.read_text())['original_method_code_sha256']
         # Require the complete old/new attestation, including untouched files.
         approved_code_hashes(original, mode=mode)

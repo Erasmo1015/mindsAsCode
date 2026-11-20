@@ -119,6 +119,32 @@ SEED1_AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("326344", ("steyvers_2009_bandit", "5speekenbrink2008learning")),
 )
 
+# LLM-seed=2 rebuttal packs (output dirs job_llmseed2_<id>).
+# AUTHORITATIVE_JOBS stay empty until target-only llmseed2 populations finish.
+SEED2_OUTPUT_REL = (
+    "analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-2/population_final"
+)
+SEED2_ANNOTATION_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("pics_v4_popann_seed2_pack1", ("guan_2020_stopping",)),
+    ("pics_v4_popann_seed2_pack2", ("14kool2016when", "12badham2017deficits")),
+    ("pics_v4_popann_seed2_pack3", ("10frey2017risk", "bergert_nosofsky_2007")),
+    ("pics_v4_popann_seed2_pack4", ("1peterson2021using", "mixed_gambles")),
+    ("pics_v4_popann_seed2_pack5", ("3frey2017cct", "11enkavi2019recentprobes")),
+    ("pics_v4_popann_seed2_pack6", ("2plonsky2018when", "7hilbig2014generalized")),
+    ("pics_v4_popann_seed2_pack7", ("4wulff2018description", "13schulz2020finding")),
+    ("pics_v4_popann_seed2_pack8", ("steyvers_2009_bandit", "5speekenbrink2008learning")),
+)
+SEED2_AUTHORITATIVE_JOBS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("370476", ("guan_2020_stopping",)),
+    ("370477", ("14kool2016when", "12badham2017deficits")),
+    ("370478", ("10frey2017risk", "bergert_nosofsky_2007")),
+    ("370479", ("1peterson2021using", "mixed_gambles")),
+    ("370480", ("3frey2017cct", "11enkavi2019recentprobes")),
+    ("370481", ("2plonsky2018when", "7hilbig2014generalized")),
+    ("370482", ("4wulff2018description", "13schulz2020finding")),
+    ("370483", ("steyvers_2009_bandit", "5speekenbrink2008learning")),
+)
+
 ANNOTATION_GROUPS = MAIN_ANNOTATION_GROUPS
 AUTHORITATIVE_JOBS = MAIN_AUTHORITATIVE_JOBS
 _JOB_DIR_NAME_FMT = "job_{job_id}"
@@ -189,7 +215,7 @@ FINAL_JOB_IDS = frozenset(job_id for job_id, _names in AUTHORITATIVE_JOBS)
 
 
 def apply_popann_profile(profile: str | None = None) -> str:
-    """Select main or seed-1 inventory/output mapping. Default remains main."""
+    """Select main / seed-1 / seed-2 inventory/output mapping. Default remains main."""
     global AUTHORITATIVE_JOBS, ANNOTATION_GROUPS, OUTPUT_REL, FINAL_JOB_IDS
     global _JOB_DIR_NAME_FMT, POPANN_PROFILE
     name = (profile if profile is not None else os.environ.get("PICS_V4_POPANN_PROFILE", "main"))
@@ -206,6 +232,14 @@ def apply_popann_profile(profile: str | None = None) -> str:
         OUTPUT_REL = SEED1_OUTPUT_REL
         _JOB_DIR_NAME_FMT = "job_llmseed1_{job_id}"
         POPANN_PROFILE = "seed1"
+    elif name in {"seed2", "llmseed2", "seed-2"}:
+        # SEED2_AUTHORITATIVE_JOBS stays empty until llmseed2 target-only finishes;
+        # inventory/source-selection then fail closed on zero ready datasets.
+        AUTHORITATIVE_JOBS = SEED2_AUTHORITATIVE_JOBS
+        ANNOTATION_GROUPS = SEED2_ANNOTATION_GROUPS
+        OUTPUT_REL = SEED2_OUTPUT_REL
+        _JOB_DIR_NAME_FMT = "job_llmseed2_{job_id}"
+        POPANN_PROFILE = "seed2"
     else:
         raise PicsV4AnnotationError(f"unknown PICS_V4_POPANN_PROFILE={name!r}")
     FINAL_JOB_IDS = frozenset(job_id for job_id, _ in AUTHORITATIVE_JOBS)
@@ -975,7 +1009,7 @@ def main() -> None:
     parser.add_argument(
         "--profile",
         default=None,
-        help="main (default) or seed1; overrides PICS_V4_POPANN_PROFILE",
+        help="main (default), seed1, or seed2; overrides PICS_V4_POPANN_PROFILE",
     )
     args = parser.parse_args()
     apply_popann_profile(args.profile)

@@ -823,5 +823,9 @@ AAMAS v0 MEM discovery/provenance adapter: `analysis/mem/aamas_v0_mem.py`. Audit
 - Sep30 optional Centaur `one_call` readout (not official token NLL): `analysis_2026Sep/Sep27_aamas_v0/others/centaur_multiaction_audit/one_call/REPORT.md`.
 - Oct4 AAMAS method finalized: target-only `pics_v4` / `uniform_additional_prompt_v8`, jobs 311666–311673. `analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md`.
 - Oct6 per-dataset transfer map: Kool 314252 reuses `job_313163`; Choice13k 314222 reuses `job_313164`; Hilbig/Badham 314253 and Schulz 314254 are new. `analysis_2026Sep/Sep30_pics_v4/docs/Documentation_v4.md`.
+- Nov18 llm-seed=1 transfer wiring: `submit_transfer_based_only_seed1.sh` + `pics_v4_seed1_sources.json` under `.../seed-1/transfer_launch/` (profile swap only; main freeze untouched).
 - Nov18 llm-seed=1 popann complete (1500/1500); isolated source-selection runner `analysis/mem/pics_v4_source_profiles_seed1.py` → `.../rebuttal/diff_seed/seed-1/population_source_profiles/run_v1` (official Codex/Oct5 freeze untouched).
+- Nov19 llm-seed=2 transfer wiring: `submit_transfer_based_only_seed2.sh` + profile `seed2`; blocked on missing `job_llmseed2_*` / Occ-EB map / sources / PREFLIGHT — see `.../seed-2/others/transfer/STATUS.md`.
+- Nov19 llm-seed=2 target-only launch clone: `analysis_2026Sep/Codex/Oct14/llm_request_seed/submit_seed2.sh` (`--llm_seed 2`, `job_llmseed2_*`); see `.../seed-2/others/target_only/STATUS.md`.
+- Nov20 llm-seed=2 popann: `SEED2_AUTHORITATIVE_JOBS` pinned to 370476–370483; submitted ready packs under `.../seed-2/population_final/` (Speekenbrink deferred until pop completes).
 - Oct6 records: population job 312849 completed Bergert and Speekenbrink 100/100. Ten-dataset participant certificate is unchanged. `analysis_2026Sep/Sep30_pics_v4/mem/population_final/ANNOTATION_JOBS.md`.

@@ -10,14 +10,77 @@ import json
 from pathlib import Path
 from typing import Any
 
+import os
+
 REPO = Path(__file__).resolve().parents[2]
-MAP = REPO / 'analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/primary_runtime_valid/source_map.json'
-MAP_SHA = 'f3b043f6a82c1fc89bb52b476903afe9f48b66c2f51809c57c818a9b0a7dcef6'
-ARTIFACTS = REPO / 'analysis/config/pics_v4_official_sources.json'
-ARTIFACTS_SHA = '741d26f21bcdb0b71920e9633f49b1a8f28933c16cada1e2e1facefdbff7068f'
+# Official uniform-v8 freeze (unchanged).
+MAIN_MAP = REPO / 'analysis_2026Sep/Codex/Oct5/others/population_source_profiles/run_v1/primary_runtime_valid/source_map.json'
+MAIN_MAP_SHA = 'f3b043f6a82c1fc89bb52b476903afe9f48b66c2f51809c57c818a9b0a7dcef6'
+MAIN_ARTIFACTS = REPO / 'analysis/config/pics_v4_official_sources.json'
+MAIN_ARTIFACTS_SHA = '741d26f21bcdb0b71920e9633f49b1a8f28933c16cada1e2e1facefdbff7068f'
+# LLM-seed=1 ablation inputs (separate tree; same selection/transfer procedure).
+SEED1_MAP = REPO / (
+    'analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-1/'
+    'population_source_profiles/run_v1/primary_runtime_valid/source_map.json'
+)
+SEED1_MAP_SHA = 'e2c4b0f07951a1459b7b2c137b600ec965330760b5da00044c3eb242fbd7c518'
+SEED1_ARTIFACTS = REPO / (
+    'analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-1/'
+    'transfer_launch/pics_v4_seed1_sources.json'
+)
+SEED1_ARTIFACTS_SHA = '36845ac633fdfa43a918852f4ed768618e0766a450784b2bee62d5fdf18579d3'
+# LLM-seed=2 ablation inputs (separate tree; same selection/transfer procedure).
+# SHAs stay empty until Occ-EB map + sources artifact exist; profile refuses unset pins.
+SEED2_MAP = REPO / (
+    'analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-2/'
+    'population_source_profiles/run_v1/primary_runtime_valid/source_map.json'
+)
+SEED2_MAP_SHA = ''
+SEED2_ARTIFACTS = REPO / (
+    'analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-2/'
+    'transfer_launch/pics_v4_seed2_sources.json'
+)
+SEED2_ARTIFACTS_SHA = ''
 KINDS = {m: 'pics_v4_' + m for m in ('target_only', 'transfer_based_only', 'official_gate')}
 _identity: dict[str, Any] | None = None
 _suffix = ''
+MAP = MAIN_MAP
+MAP_SHA = MAIN_MAP_SHA
+ARTIFACTS = MAIN_ARTIFACTS
+ARTIFACTS_SHA = MAIN_ARTIFACTS_SHA
+TRANSFER_PROFILE = 'main'
+
+
+def apply_transfer_profile(profile: str | None = None) -> str:
+    """Swap only map/artifact paths+SHAs. Does not change transfer procedure."""
+    global MAP, MAP_SHA, ARTIFACTS, ARTIFACTS_SHA, TRANSFER_PROFILE
+    name = (profile if profile is not None else os.environ.get('PICS_V4_TRANSFER_PROFILE', 'main')).strip().lower()
+    if name in {'', 'main', 'official'}:
+        MAP, MAP_SHA, ARTIFACTS, ARTIFACTS_SHA, TRANSFER_PROFILE = (
+            MAIN_MAP, MAIN_MAP_SHA, MAIN_ARTIFACTS, MAIN_ARTIFACTS_SHA, 'main'
+        )
+    elif name in {'seed1', 'llmseed1', 'seed-1'}:
+        MAP, MAP_SHA, ARTIFACTS, ARTIFACTS_SHA, TRANSFER_PROFILE = (
+            SEED1_MAP, SEED1_MAP_SHA, SEED1_ARTIFACTS, SEED1_ARTIFACTS_SHA, 'seed1'
+        )
+    elif name in {'seed2', 'llmseed2', 'seed-2'}:
+        missing = [str(p) for p in (SEED2_MAP, SEED2_ARTIFACTS) if not p.is_file()]
+        if missing or not SEED2_MAP_SHA or not SEED2_ARTIFACTS_SHA:
+            raise RuntimeError(
+                'seed2 transfer prerequisites incomplete: need llmseed2 target-only '
+                'populations, Occ-EB source_map.json, pics_v4_seed2_sources.json, and '
+                'pinned SEED2_MAP_SHA/SEED2_ARTIFACTS_SHA. Missing/unpinned: '
+                + ', '.join(missing or ['SEED2_MAP_SHA/SEED2_ARTIFACTS_SHA'])
+            )
+        MAP, MAP_SHA, ARTIFACTS, ARTIFACTS_SHA, TRANSFER_PROFILE = (
+            SEED2_MAP, SEED2_MAP_SHA, SEED2_ARTIFACTS, SEED2_ARTIFACTS_SHA, 'seed2'
+        )
+    else:
+        raise RuntimeError(f'unknown PICS_V4_TRANSFER_PROFILE={name}')
+    return TRANSFER_PROFILE
+
+
+apply_transfer_profile()
 
 
 def sha(path: Path) -> str:
@@ -34,8 +97,9 @@ def read(path: Path) -> dict:
 
 def official_inputs(config_path=None):
     from utils.teh.pics_aamas_v0 import CANONICAL_DATASETS
+    apply_transfer_profile()
     if config_path is not None and Path(config_path).resolve() != MAP.resolve():
-        raise RuntimeError('PICS v4 accepts only the approved primary source map')
+        raise RuntimeError('PICS v4 accepts only the approved primary source map for the active transfer profile')
     if sha(MAP) != MAP_SHA or sha(ARTIFACTS) != ARTIFACTS_SHA:
         raise RuntimeError('PICS v4 approved source map/artifact manifest SHA mismatch')
     sources = read(MAP)['sources']

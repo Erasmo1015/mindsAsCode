@@ -461,7 +461,16 @@ def assert_pics_v4_resume(output_dir: Any, *, expected_identity=None) -> None:
             assert_legacy_output_not_resumed(root, ignore_dir=reused)
             return
         assert_legacy_output_not_resumed(root)
-        if expected is not None and root.exists() and any(p.name not in {'OUTPUT_DIR.txt', 'TRACK_STATUS.txt', 'INTENDED_ARGV.txt'} for p in root.iterdir()):
+        # Seed-1/seed-2 transfer runners may leave LLM_SEEDn_TRANSFER_EFFECTIVE_ARGV.json
+        # before teh.py binds the run identity; treat them as launcher markers only.
+        allowed_unbound = {
+            'OUTPUT_DIR.txt',
+            'TRACK_STATUS.txt',
+            'INTENDED_ARGV.txt',
+            'LLM_SEED1_TRANSFER_EFFECTIVE_ARGV.json',
+            'LLM_SEED2_TRANSFER_EFFECTIVE_ARGV.json',
+        }
+        if expected is not None and root.exists() and any(p.name not in allowed_unbound for p in root.iterdir()):
             raise RuntimeError('refusing unbound partial transfer/gate output')
         if any(root.rglob("STAGE_COMPLETE.json")) or any(root.rglob("prompt_stats.json")):
             raise RuntimeError(
