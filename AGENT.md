@@ -828,4 +828,6 @@ AAMAS v0 MEM discovery/provenance adapter: `analysis/mem/aamas_v0_mem.py`. Audit
 - Nov19 llm-seed=2 transfer wiring: `submit_transfer_based_only_seed2.sh` + profile `seed2`; blocked on missing `job_llmseed2_*` / Occ-EB map / sources / PREFLIGHT — see `.../seed-2/others/transfer/STATUS.md`.
 - Nov19 llm-seed=2 target-only launch clone: `analysis_2026Sep/Codex/Oct14/llm_request_seed/submit_seed2.sh` (`--llm_seed 2`, `job_llmseed2_*`); see `.../seed-2/others/target_only/STATUS.md`.
 - Nov20 llm-seed=2 popann: `SEED2_AUTHORITATIVE_JOBS` pinned to 370476–370483; submitted ready packs under `.../seed-2/population_final/` (Speekenbrink deferred until pop completes).
+- Nov21 llm-seed=2 Occ-EB source selection: CPU job **372758** (`job_seed2_source_profiles.sh`) → `.../seed-2/population_source_profiles/run_v1/` (official Codex/Oct5 freeze untouched).
+- Nov21 llm-seed=2 transfer_based_only submitted: jobs **372770–372777** (`job_llmseed2_*`); map/sources/PREFLIGHT under seed-2 trees only (main freeze untouched).
 - Oct6 records: population job 312849 completed Bergert and Speekenbrink 100/100. Ten-dataset participant certificate is unchanged. `analysis_2026Sep/Sep30_pics_v4/mem/population_final/ANNOTATION_JOBS.md`.

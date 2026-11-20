@@ -35,12 +35,12 @@ SEED2_MAP = REPO / (
     'analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-2/'
     'population_source_profiles/run_v1/primary_runtime_valid/source_map.json'
 )
-SEED2_MAP_SHA = ''
+SEED2_MAP_SHA = '078c2ee6cd03c147ff8f99b2b0600d58c858f13951f18f5092847b2b6954cb44'
 SEED2_ARTIFACTS = REPO / (
     'analysis_2026Sep/Sep30_pics_v4/mem/rebuttal/diff_seed/seed-2/'
     'transfer_launch/pics_v4_seed2_sources.json'
 )
-SEED2_ARTIFACTS_SHA = ''
+SEED2_ARTIFACTS_SHA = '24cbdfdee676d03d2e09e5cc2edd419cbe34a2026522bfc8097473c8b9928c2c'
 KINDS = {m: 'pics_v4_' + m for m in ('target_only', 'transfer_based_only', 'official_gate')}
 _identity: dict[str, Any] | None = None
 _suffix = ''
