@@ -41,6 +41,23 @@ SEED2_ARTIFACTS = REPO / (
     'transfer_launch/pics_v4_seed2_sources.json'
 )
 SEED2_ARTIFACTS_SHA = '24cbdfdee676d03d2e09e5cc2edd419cbe34a2026522bfc8097473c8b9928c2c'
+# Description-based source-selection ablation (optional profile; main freeze untouched).
+# SHAs stay empty until prepare_transfer.py seals run_v1/profile_pins.json.
+DESC_MAP = REPO / (
+    'analysis_2026Sep/2026Nov/Nov21_rebuttal/additional_exps/'
+    'description_based_source_selection/run_v1/source_map.json'
+)
+DESC_MAP_SHA = ''
+DESC_ARTIFACTS = REPO / (
+    'analysis_2026Sep/2026Nov/Nov21_rebuttal/additional_exps/'
+    'description_based_source_selection/run_v1/pics_v4_desc_sources.json'
+)
+DESC_ARTIFACTS_SHA = ''
+DESC_PINS = REPO / (
+    'analysis_2026Sep/2026Nov/Nov21_rebuttal/additional_exps/'
+    'description_based_source_selection/run_v1/profile_pins.json'
+)
+DESC_SELECTOR = 'description_based_v1'
 KINDS = {m: 'pics_v4_' + m for m in ('target_only', 'transfer_based_only', 'official_gate')}
 _identity: dict[str, Any] | None = None
 _suffix = ''
@@ -49,6 +66,16 @@ MAP_SHA = MAIN_MAP_SHA
 ARTIFACTS = MAIN_ARTIFACTS
 ARTIFACTS_SHA = MAIN_ARTIFACTS_SHA
 TRANSFER_PROFILE = 'main'
+
+
+def _load_desc_pins() -> tuple[str, str]:
+    """Optional sealed pins; empty until selection+prepare finishes."""
+    if not DESC_PINS.is_file():
+        return DESC_MAP_SHA, DESC_ARTIFACTS_SHA
+    pins = json.loads(DESC_PINS.read_text(encoding='utf-8'))
+    map_sha = str(pins.get('map_sha256') or DESC_MAP_SHA)
+    art_sha = str(pins.get('artifacts_sha256') or DESC_ARTIFACTS_SHA)
+    return map_sha, art_sha
 
 
 def apply_transfer_profile(profile: str | None = None) -> str:
@@ -74,6 +101,18 @@ def apply_transfer_profile(profile: str | None = None) -> str:
             )
         MAP, MAP_SHA, ARTIFACTS, ARTIFACTS_SHA, TRANSFER_PROFILE = (
             SEED2_MAP, SEED2_MAP_SHA, SEED2_ARTIFACTS, SEED2_ARTIFACTS_SHA, 'seed2'
+        )
+    elif name in {'desc', 'description', 'description_based', 'desc-source'}:
+        map_sha, art_sha = _load_desc_pins()
+        missing = [str(p) for p in (DESC_MAP, DESC_ARTIFACTS) if not p.is_file()]
+        if missing or not map_sha or not art_sha:
+            raise RuntimeError(
+                'desc transfer prerequisites incomplete: need description-based '
+                'source_map.json, pics_v4_desc_sources.json, and sealed profile_pins.json. '
+                'Missing/unpinned: ' + ', '.join(missing or ['DESC map/artifacts SHA pins'])
+            )
+        MAP, MAP_SHA, ARTIFACTS, ARTIFACTS_SHA, TRANSFER_PROFILE = (
+            DESC_MAP, map_sha, DESC_ARTIFACTS, art_sha, 'desc'
         )
     else:
         raise RuntimeError(f'unknown PICS_V4_TRANSFER_PROFILE={name}')
@@ -231,11 +270,13 @@ def resolve_source(target: str, *, config_path=None) -> dict:
 
 def load_config(config_path=None):
     from utils.teh.t_pics_gated_transfer import FrozenTransferConfig, SelectedSourceEntry, SourcePopulationRun
+    apply_transfer_profile()
     sources, _ = official_inputs(config_path)
     records = {s: resolve_source(t, config_path=config_path) for t, s in sources.items()}
     runs = {s: SourcePopulationRun(s, str(r['lineage']['canonical_population_job_id']), Path(r['source_program_path']).parents[3], Path(r['source_program_path'])) for s, r in records.items()}
     entries = {t: SelectedSourceEntry(t, s, s, runs[s].run_dir, runs[s].job_id, runs[s].rank1_program) for t, s in sources.items()}
-    return FrozenTransferConfig(MAP, 'occurrence_eb_uniform_v8_primary', sources, entries, runs)
+    selector = DESC_SELECTOR if TRANSFER_PROFILE == 'desc' else 'occurrence_eb_uniform_v8_primary'
+    return FrozenTransferConfig(MAP, selector, sources, entries, runs)
 
 
 def configure_identity(identity=None, suffix=''):

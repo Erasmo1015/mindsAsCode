@@ -530,7 +530,14 @@ def source_identity_for_target(
 
     cfg = load_frozen_transfer_config(config_path)
     from utils.teh.pics_v4 import using_pics_v4
-    allowed_selectors = {'occurrence_eb_uniform_v8_primary'} if using_pics_v4() else {SOURCE_SELECTOR, "pics_aamas_v0_source_map"}
+    if using_pics_v4():
+        from utils.teh.pics_v4_transfer import DESC_SELECTOR, TRANSFER_PROFILE
+        if TRANSFER_PROFILE == "desc":
+            allowed_selectors = {DESC_SELECTOR}
+        else:
+            allowed_selectors = {"occurrence_eb_uniform_v8_primary"}
+    else:
+        allowed_selectors = {SOURCE_SELECTOR, "pics_aamas_v0_source_map"}
     if str(cfg.selector_name) not in allowed_selectors:
         raise RuntimeError(
             f"AAMAS v0 source map selector {cfg.selector_name!r} "

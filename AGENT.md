@@ -832,4 +832,5 @@ AAMAS v0 MEM discovery/provenance adapter: `analysis/mem/aamas_v0_mem.py`. Audit
 - Nov21 llm-seed=2 transfer_based_only submitted: jobs **372770–372777** (`job_llmseed2_*`); map/sources/PREFLIGHT under seed-2 trees only (main freeze untouched).
 - Nov21 AAMAS rebuttal compute/feasibility collect (read-only): CPU job **373367** → `analysis_2026Sep/Sep30_pics_v4/others/rebuttal_compute_feasibility/` (from official_gate `dataset_results.csv`; method untouched).
 - Nov21 feasibility v2 (unique SHA + gate-selected only): `…/2026Nov/Nov21_rebuttal/others/compute_feasibility/` via `job_rebuttal_compute_feasibility_v2.sh` (read-only; corrects invalid over-count).
+- Nov21 gate-selected test-trial counts (per-task median/range): `…/2026Nov/Nov21_rebuttal/others/test_trial_counts/` from `limited_data_manifest.jsonl` (read-only; matches official_gate ledger).
 - Oct6 records: population job 312849 completed Bergert and Speekenbrink 100/100. Ten-dataset participant certificate is unchanged. `analysis_2026Sep/Sep30_pics_v4/mem/population_final/ANNOTATION_JOBS.md`.
